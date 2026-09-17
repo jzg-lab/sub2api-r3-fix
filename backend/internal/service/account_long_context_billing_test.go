@@ -118,7 +118,7 @@ func (r *longContextBillingRepoStub) BulkUpdate(_ context.Context, _ []int64, _ 
 
 func TestAdminServiceCreateAccountDefaultsOpenAILongContextBillingDisabled(t *testing.T) {
 	repo := &longContextBillingRepoStub{}
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 
 	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "openai-account",
@@ -135,7 +135,7 @@ func TestAdminServiceCreateAccountDefaultsOpenAILongContextBillingDisabled(t *te
 
 func TestAdminServiceCreateAccountRejectsMalformedOpenAILongContextBillingValue(t *testing.T) {
 	repo := &longContextBillingRepoStub{}
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 
 	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
 		Platform: PlatformOpenAI,

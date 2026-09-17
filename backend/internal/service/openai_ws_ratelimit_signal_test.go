@@ -492,6 +492,7 @@ func ptrIntWS(v int) *int             { return &v }
 func TestOpenAIGatewayService_GetSchedulableAccount_ExhaustedCodexExtraDoesNotSetRateLimit(t *testing.T) {
 	resetAt := time.Now().Add(6 * 24 * time.Hour)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          701,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -559,6 +560,7 @@ func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing
 	body := []byte(`{"error":{"type":"rate_limit_error","message":"limited"}}`)
 
 	oauthErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       904,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -571,6 +573,7 @@ func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing
 	require.Equal(t, "1", oauthErr.ResponseHeaders.Get("Retry-After"))
 
 	longRetryErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       906,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,

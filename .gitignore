@@ -1,6 +1,7 @@
 # 本地杂项文档、测试数据和外部项目副本
 /docs-local/
 .codex
+.codex-validation/
 
 # ===================
 # Go 后端
@@ -96,12 +97,10 @@ build/
 release/
 
 # 后端嵌入的前端构建产物
-# Keep a placeholder file so `//go:embed all:dist` always has a match in CI/lint,
-# while still ignoring generated frontend build outputs.
-backend/internal/web/dist/
+# Deliver the complete embedded UI, including newly hashed build assets.
+# The separate frontend/dist output remains ignored.
 !backend/internal/web/dist/
-backend/internal/web/dist/*
-!backend/internal/web/dist/.keep
+!backend/internal/web/dist/**
 
 # 后端运行时缓存数据
 backend/data/

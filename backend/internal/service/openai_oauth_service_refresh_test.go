@@ -34,7 +34,12 @@ func (s *openaiOAuthClientRefreshStub) RefreshTokenWithClientID(ctx context.Cont
 
 func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccessToken(t *testing.T) {
 	client := &openaiOAuthClientRefreshStub{}
-	svc := NewOpenAIOAuthService(nil, client)
+	proxyID := int64(7)
+	svc := NewOpenAIOAuthService(&mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
+	}, client)
 	var privacyClientCalls int32
 	svc.SetPrivacyClientFactory(func(proxyURL string) (*req.Client, error) {
 		atomic.AddInt32(&privacyClientCalls, 1)
@@ -53,6 +58,7 @@ func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccess
 		},
 	}
 
+	account.ProxyID = &proxyID
 	info, err := svc.RefreshAccountToken(context.Background(), account)
 	require.NoError(t, err)
 	require.NotNil(t, info)

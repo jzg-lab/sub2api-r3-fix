@@ -308,6 +308,46 @@ func httpClientForUpstreamRequest(client *http.Client, req *http.Request) *http.
 	return &clone
 }
 
+// DoProbeWithTLS 执行探针请求的一次性专用传输：不进入按账号缓存的共享连接池，
+// 响应体读尽/关闭后立即回收。真实 codex exec 单轮 turn 本就是每进程一条新连接，
+// 探针独占新连接与真实形态一致；而共享池中探针会与真实 turn 同连接复用，
+// 2026-09-18 生产实证该形态被服务端按连接降级（200 全长流但缺 response.completed
+// usage，生产 0/N；同 body/同代理/同 TLS 档案的进程外冷连接复现 12/12 通过，
+// 同传输连发两针亦通过），故探针必须与共享池隔离。
+//
+// profile 为 nil 时走原生传输（协议模式按 OpenAI profile 解析），非 nil 时用
+// 指定档案构建 uTLS 传输；池参数解析与共享路径同源，仅不落缓存。
+func (s *httpUpstreamService) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	settings := s.applyProfilePoolSettings(s.resolvePoolSettings(s.getIsolationMode(), accountConcurrency), service.HTTPUpstreamProfileOpenAI)
+	var transport *http.Transport
+	if profile == nil {
+		transport, err = buildUpstreamTransport(settings, parsedProxy, s.resolveProtocolMode(service.HTTPUpstreamProfileOpenAI, proxyKey, parsedProxy))
+	} else {
+		transport, err = buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	}
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Transport: transport}
+	resp, err := servertiming.Do(client, req)
+	if err != nil {
+		transport.CloseIdleConnections()
+		return nil, err
+	}
+	decompressResponseBody(resp)
+	resp.Body = wrapTrackedBody(resp.Body, func() {
+		transport.CloseIdleConnections()
+	})
+	return resp, nil
+}
+
 // grokAccessDeniedFallbackTransport preserves the subscription CLI proxy as
 // the primary OAuth route, but retries a replayable request against api.x.ai
 // when the proxy returns its compatibility-specific 403 "Access denied".
@@ -1391,6 +1431,13 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
 		// 禁用默认的 TLS，我们使用自定义的 DialTLSContext
 		ForceAttemptHTTP2: false,
+		// 真实 Codex CLI（reqwest，未启用压缩 feature）出站不带 Accept-Encoding；
+		// Go Transport 默认自动补 `Accept-Encoding: gzip`，会让同账号的网关流量
+		// 在头部层面区别于真实客户端（2026-09-15 本机 codex 0.151 抓包地面真值：
+		// /responses 请求无 accept-encoding/version/openai-beta 头）。TLS 指纹
+		// transport 只服务 Codex OAuth 面，禁用自动压缩不影响其他平台；若上游
+		// 仍返回压缩体，decompressResponseBody 仍会兜底解压。
+		DisableCompression: true,
 	}
 
 	// 根据代理类型选择合适的 TLS 指纹 Dialer

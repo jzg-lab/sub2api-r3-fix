@@ -265,9 +265,10 @@ func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 		}
 		assert.False(t, gjson.GetBytes(up.lastBody, "client_metadata").Exists())
 		assert.False(t, gjson.GetBytes(up.lastBody, "prompt_cache_key").Exists(), "messages 桥 OAuth 路径不带 body pck（既有行为），machine 不补")
-		// 桥 post-build 恢复的 Codex 身份头仍在
+		// 桥 post-build 恢复的 Cod 身份头仍在；OpenAI-Beta 不再合成
+		// （真实 codex 0.151 抓包：/responses 请求不带该头）。
 		assert.NotEmpty(t, up.lastReq.Header.Get("originator"))
-		assert.Equal(t, "responses=experimental", up.lastReq.Header.Get("OpenAI-Beta"))
+		assert.Empty(t, up.lastReq.Header.Get("OpenAI-Beta"))
 	})
 }
 

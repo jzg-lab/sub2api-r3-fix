@@ -113,6 +113,7 @@ func TestOpenAIGatewayService_Forward_FailoverReparsesCachedBodyForNextAccount(t
 func TestOpenAIGatewayService_HandleFailoverSideEffects_DoesNotRereadResponseBody(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       88,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -150,6 +151,7 @@ func openAIFailoverCachedBodyTestAccount(id int64, name string, mapping map[stri
 		credentials["model_mapping"] = mapping
 	}
 	return &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             id,
 		Name:           name,
 		Platform:       PlatformOpenAI,

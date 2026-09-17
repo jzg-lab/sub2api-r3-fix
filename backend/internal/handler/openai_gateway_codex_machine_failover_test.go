@@ -120,10 +120,15 @@ func newCodexMachineFailoverHandler(t *testing.T) (*machineFailoverUpstream, *gi
 	t.Helper()
 	groupID := int64(911)
 	expires := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	proxyID := int64(55)
+	proxySnapshot := &service.Proxy{
+		ID: proxyID, Protocol: "http", Host: "127.0.0.1", Port: 18080, Status: service.StatusActive,
+	}
 	accounts := []service.Account{
 		{
 			ID: 811, Name: "codex-machine", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 			Status: service.StatusActive, Schedulable: true, Concurrency: 1, Priority: 1,
+			ProxyID: &proxyID, Proxy: proxySnapshot,
 			Credentials: map[string]any{"access_token": "machine-access", "chatgpt_account_id": "chatgpt-machine", "expires_at": expires},
 			Extra: map[string]any{
 				"codex_fingerprint_mode": "machine",
@@ -133,6 +138,7 @@ func newCodexMachineFailoverHandler(t *testing.T) (*machineFailoverUpstream, *gi
 		{
 			ID: 812, Name: "codex-off", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 			Status: service.StatusActive, Schedulable: true, Concurrency: 1, Priority: 2,
+			ProxyID: &proxyID, Proxy: proxySnapshot,
 			Credentials: map[string]any{"access_token": "off-access", "chatgpt_account_id": "chatgpt-off", "expires_at": expires},
 			Extra:       map[string]any{"codex_fingerprint_mode": "off"},
 		},
@@ -279,4 +285,8 @@ func TestResponsesFailover_CodexMachineToOff_NoResidualIDs(t *testing.T) {
 			require.NotContains(t, v, "real-install")
 		}
 	}
+}
+
+func (u *machineFailoverUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

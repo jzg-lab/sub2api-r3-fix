@@ -225,3 +225,7 @@ func TestRealResponsesWSDrainKeepsFirstTurnAndTerminalWrite(t *testing.T) {
 		})
 	}
 }
+
+func (u *drainHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

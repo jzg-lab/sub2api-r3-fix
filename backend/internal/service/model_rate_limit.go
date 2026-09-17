@@ -18,6 +18,37 @@ const (
 	anthropicFableRateLimitKey = "claude-fable-5"
 )
 
+// PreserveModelRateLimitsForAccountEdit keeps runtime limits authoritative.
+// Antigravity overages transitions retain their explicit reset semantics.
+func PreserveModelRateLimitsForAccountEdit(platform string, current, incoming map[string]any) map[string]any {
+	extra := make(map[string]any, len(incoming)+1)
+	for key, value := range incoming {
+		extra[key] = value
+	}
+	delete(extra, modelRateLimitsKey)
+	if limits, ok := current[modelRateLimitsKey]; ok {
+		extra[modelRateLimitsKey] = limits
+	}
+
+	previous := &Account{Platform: platform, Extra: current}
+	next := &Account{Platform: platform, Extra: extra}
+	if previous.IsOveragesEnabled() != next.IsOveragesEnabled() {
+		delete(extra, "antigravity_credits_overages")
+		if next.IsOveragesEnabled() {
+			delete(extra, modelRateLimitsKey)
+		} else if limits, ok := extra[modelRateLimitsKey].(map[string]any); ok {
+			retained := make(map[string]any, len(limits))
+			for key, value := range limits {
+				if key != creditsExhaustedKey {
+					retained[key] = value
+				}
+			}
+			extra[modelRateLimitsKey] = retained
+		}
+	}
+	return extra
+}
+
 // isRateLimitActiveForKey 检查指定 key 的限流是否生效
 func (a *Account) isRateLimitActiveForKey(key string) bool {
 	resetAt := a.modelRateLimitResetAt(key)

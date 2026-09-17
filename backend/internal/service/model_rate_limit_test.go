@@ -9,6 +9,99 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPreserveModelRateLimitsForAccountEdit(t *testing.T) {
+	currentLimits := map[string]any{"current-model": map[string]any{"reason": "current"}}
+	staleLimits := map[string]any{"stale-model": map[string]any{"reason": "stale"}}
+	for _, tc := range []struct {
+		name     string
+		current  map[string]any
+		incoming map[string]any
+		want     map[string]any
+	}{
+		{
+			name:     "cleared limit cannot be resurrected",
+			incoming: map[string]any{modelRateLimitsKey: staleLimits, "custom": "edited"},
+			want:     map[string]any{"custom": "edited"},
+		},
+		{
+			name:     "current limit wins over stale form",
+			current:  map[string]any{modelRateLimitsKey: currentLimits},
+			incoming: map[string]any{modelRateLimitsKey: staleLimits, "custom": "edited"},
+			want:     map[string]any{modelRateLimitsKey: currentLimits, "custom": "edited"},
+		},
+		{
+			name:     "omitted limit cannot clear runtime limit",
+			current:  map[string]any{modelRateLimitsKey: currentLimits},
+			incoming: map[string]any{"custom": "edited"},
+			want:     map[string]any{modelRateLimitsKey: currentLimits, "custom": "edited"},
+		},
+		{
+			name:     "explicit null cannot clear runtime limit",
+			current:  map[string]any{modelRateLimitsKey: currentLimits},
+			incoming: map[string]any{modelRateLimitsKey: nil},
+			want:     map[string]any{modelRateLimitsKey: currentLimits},
+		},
+		{name: "nil maps", want: map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beforeCurrent, err := cloneAccountJSONMap(tc.current)
+			require.NoError(t, err)
+			beforeIncoming, err := cloneAccountJSONMap(tc.incoming)
+			require.NoError(t, err)
+
+			got := PreserveModelRateLimitsForAccountEdit(PlatformOpenAI, tc.current, tc.incoming)
+
+			require.Equal(t, tc.want, got)
+			got["result-only"] = true
+			require.Equal(t, beforeCurrent, tc.current)
+			require.Equal(t, beforeIncoming, tc.incoming)
+		})
+	}
+}
+
+func TestPreserveModelRateLimitsForAccountEditOveragesTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		platform     string
+		previous     bool
+		next         bool
+		wantLimits   bool
+		wantCredits  bool
+		wantOverages bool
+	}{
+		{"enable clears limits", PlatformAntigravity, false, true, false, false, false},
+		{"disable clears only credit exhaustion", PlatformAntigravity, true, false, true, false, false},
+		{"unchanged preserves limits", PlatformAntigravity, true, true, true, true, true},
+		{"other platform cannot clear limits", PlatformOpenAI, false, true, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := map[string]any{
+				creditsExhaustedKey: map[string]any{"reason": "credits"},
+				"ordinary-model":    map[string]any{"reason": "rate-limit"},
+			}
+			current := map[string]any{"allow_overages": tc.previous, modelRateLimitsKey: limits}
+			incoming := map[string]any{"allow_overages": tc.next, "antigravity_credits_overages": true}
+
+			got := PreserveModelRateLimitsForAccountEdit(tc.platform, current, incoming)
+
+			_, hasLimits := got[modelRateLimitsKey]
+			require.Equal(t, tc.wantLimits, hasLimits)
+			if tc.wantLimits {
+				retained := got[modelRateLimitsKey].(map[string]any)
+				require.Contains(t, retained, "ordinary-model")
+				_, hasCredits := retained[creditsExhaustedKey]
+				require.Equal(t, tc.wantCredits, hasCredits)
+			}
+			_, hasOverages := got["antigravity_credits_overages"]
+			require.Equal(t, tc.wantOverages, hasOverages)
+			require.Equal(t, tc.next, got["allow_overages"])
+			require.Len(t, limits, 2, "filtering must not mutate the original nested map")
+			require.Equal(t, tc.previous, current["allow_overages"])
+			require.Equal(t, true, incoming["antigravity_credits_overages"])
+		})
+	}
+}
+
 func TestIsModelRateLimited(t *testing.T) {
 	now := time.Now()
 	future := now.Add(10 * time.Minute).Format(time.RFC3339)

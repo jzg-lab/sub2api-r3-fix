@@ -689,6 +689,7 @@ func newOpenAIRejectedFieldTestAccount() *Account {
 
 func newOpenAIOAuthNamespaceTestAccount() *Account {
 	return &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          5108,
 		Name:        "openai-oauth-namespace",
 		Platform:    PlatformOpenAI,

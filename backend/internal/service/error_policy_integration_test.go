@@ -471,3 +471,7 @@ func TestCustomErrorCode599_SkippedErrors_Return500_NoRateLimit(t *testing.T) {
 		})
 	}
 }
+
+func (u *epFixedUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

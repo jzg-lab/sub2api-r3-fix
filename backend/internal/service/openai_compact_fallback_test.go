@@ -89,6 +89,7 @@ func TestOpenAIGatewayForwardUsesGlobalCompactModelOnInitialLegacyRequest(t *tes
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,
@@ -202,6 +203,7 @@ func TestOpenAIGatewayForwardRetriesExplicitNativeCompactHTTPFailureOnce(t *test
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,
@@ -253,6 +255,7 @@ func TestOpenAIGatewayForwardRetriesExplicitNativeCompactSSEFailureBeforeOutput(
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,
@@ -292,6 +295,7 @@ func TestOpenAIGatewayForwardRetriesStreamingCompactFailureBeforeOutput(t *testi
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,
@@ -331,6 +335,7 @@ func TestOpenAIGatewayForwardDoesNotRecurseWhenCompactFallbackAlsoFails(t *testi
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,
@@ -377,6 +382,7 @@ func TestOpenAIPassthroughCompactFallbackSecondStreamFailureUsesStandardErrorPat
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
 		Status:      StatusActive, Schedulable: true,

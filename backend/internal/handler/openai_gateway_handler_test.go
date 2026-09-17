@@ -3286,3 +3286,15 @@ data: {"type":"response.failed","error":{"message":"This content was flagged"}}
 		require.False(t, openAIForwardErrorAlreadyCommunicated(c, c.Writer.Size(), errors.New("openai cyber_policy: blocked")))
 	})
 }
+
+func (u *openAIHTTPPassthroughAuthFailoverUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
+func (u *openAIHTTPPassthroughFailoverUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
+func (u *openAIHTTPPassthroughSSERateLimitUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

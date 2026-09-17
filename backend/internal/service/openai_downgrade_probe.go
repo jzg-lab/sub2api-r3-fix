@@ -1,0 +1,2257 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"math/rand/v2"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
+)
+
+const (
+	openAIDowngradeProbeMaxBodyBytes         = 4 << 20
+	OpenAIDowngradeStateOnDuty               = "on_duty"
+	OpenAIDowngradeStateCircuitOpen          = "circuit_open"
+	OpenAIDowngradeStateReprobe              = "reprobe"
+	OpenAIDowngradeStatePendingReplace       = "pending_replace"
+	OpenAIDowngradeEventCircuitOpen          = "circuit_open"
+	OpenAIDowngradeEventRecovered            = "recovered"
+	OpenAIDowngradeEventReplaceRequired      = "replace_required"
+	OpenAIDowngradeEventBucketReprobe        = "bucket_reprobe"
+	OpenAIDowngradeEventBucketRescue         = "bucket_rescue"
+	OpenAIDowngradeEventQualificationBlocked = "qualification_blocked"
+	OpenAIDowngradeEventSolFallback          = "sol_fallback"
+	OpenAIDowngradeEventRateLimitDeferred    = "rate_limit_deferred"
+	// 稀疏复查期间收到上游真实接受（传输 OK 且 2xx）→ CAS 清除观察到的持有，
+	// 账号回到调度。这是「官方到点重置 / 供应商提前手动重置」的检测回路终点。
+	OpenAIDowngradeEventRateLimitRecheckRecovered = "rate_limit_recheck_recovered"
+)
+
+const (
+	OpenAIDowngradeFailureReasoningThreshold = 800
+	OpenAIDowngradeRecoveryReasoningMinimum  = 1400
+	openAIDowngradeQualificationExtraKey     = "openai_downgrade_qualification"
+	openAIDowngradeSolFallbackExtraKey       = "openai_downgrade_sol_fallback"
+	openAIDowngradeProbeProxyMinInterval     = 10 * time.Minute
+	openAIDowngradeSolFallbackInterval       = 2 * time.Hour
+	// 429 是「现在判不了」而非健康信号：被限流的账号若按常规 15-45 分钟排期，
+	// 整个忙时段都可能拿不到一针结论性探测，真实降智窗口被无限拉长。
+	// 限流后按短周期重探（经 jitter 后 2.5-7.5 分钟），尽快拿回结论。
+	openAIDowngradeRateLimitedRetryInterval = 5 * time.Minute
+	// 资格认证节奏：新号的认证针按分钟级间隔排（jitter 后 2.5-7.5 分钟），
+	// 分钟级完成认证上岗（r15h 起 1 针通过即结业）；若沿用常规 nextDelay
+	// （15-75 分钟）认证会拖到小时级。
+	openAIDowngradeQualificationInterval = 5 * time.Minute
+	// 429 长退避（2026-09-15 用户裁定「额度耗尽还一直探 探个屁啊」）：真实流量
+	// 路径的 429 会解析 body 记账，探针路径此前只当「现在判不了」一律 2.5-7.5min
+	// 短重试——耗尽号（1029 实测 3 小时 20 针）全程空打，每针都是从账号出口 IP
+	// 发出的可聚类请求。两级退避：①429 体带显式重置时间（usage_limit_reached
+	// 的 resets_at/resets_in_seconds，复用 parseOpenAIRateLimitResetTime）→ 按
+	// 重置点+错峰或稀疏复查回来；②不带时间的 429 连打达阈值 → 退到小时级。
+	openAIDowngradeRateLimitResetFloor   = 30 * time.Minute   // 重置点已过/过近时的排期下限
+	openAIDowngradeRateLimitResetCap     = 8 * 24 * time.Hour // 重置点离谱远时的排期上钳
+	openAIDowngradeRateLimitResetStagger = 30 * time.Minute   // 重置点后的错峰窗（jitter 15-45min）
+	// 稀疏复查（2026-09-16 用户裁定「重置不是固定的，有时候可以手动重置」）：
+	// 长持有不能死等重置点。每天最多一针的随机复查（spread 后 22-27.5h），
+	// 每次重新抽签无可聚类周期；重置点更近时仍取重置点一侧（min 规则）。
+	openAIDowngradeRateLimitRecheckInterval = 22 * time.Hour
+	openAIDowngrade429StreakThreshold       = 6 // 无时间信息的连续 429 达此数即风暴退避
+	openAIDowngrade429StreakBackoff         = time.Hour
+	// 真实流量顺延：活跃账号的降智会直接体现在真实流量里，探针紧跟着真实请求
+	// 发出反而制造可聚类的合成流量。近窗有真实推理流量时顺延常规探针；连续
+	// 顺延有上限，保证 canary 覆盖不出现永久盲区。仅作用于 on_duty/normal。
+	openAIDowngradeRecentTrafficWindow = 15 * time.Minute
+	openAIDowngradeTrafficDeferral     = 45 * time.Minute
+	openAIDowngradeMaxTrafficDeferrals = 3
+)
+
+var openAIDowngradeTruncationFingerprints = [...]int{516, 1034, 1552}
+
+// OpenAIDowngradeSolFallbackExtraKey is exported for the repository adapter;
+// the value remains an implementation detail of the account Extra contract.
+const OpenAIDowngradeSolFallbackExtraKey = openAIDowngradeSolFallbackExtraKey
+
+// OpenAIDowngradeQualificationExtraKey is exported for the repository adapter;
+// the value remains an implementation detail of the account Extra contract.
+const OpenAIDowngradeQualificationExtraKey = openAIDowngradeQualificationExtraKey
+
+func isOpenAIDowngradeSolFallbackAccount(account *Account) bool {
+	if account == nil || len(account.Extra) == 0 {
+		return false
+	}
+	value, ok := account.Extra[openAIDowngradeSolFallbackExtraKey]
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func isOpenAIDowngradeSolModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "gpt-5.6-sol" || strings.HasPrefix(model, "gpt-5.6-sol-")
+}
+
+func isOpenAIDowngradeTruncationFingerprint(tokens int) bool {
+	for _, fingerprint := range openAIDowngradeTruncationFingerprints {
+		if tokens >= fingerprint-8 && tokens <= fingerprint+8 {
+			return true
+		}
+	}
+	return false
+}
+
+// OpenAIDowngradeProbeResult is the redacted, bill-free result of one probe.
+// It intentionally contains no response text or credential material.
+type OpenAIDowngradeProbeResult struct {
+	AccountID       int64
+	ProxyID         *int64
+	Mode            string
+	TransportOK     bool
+	AnswerCorrect   bool
+	ReasoningTokens *int
+	Juice           *int
+	Latency         time.Duration
+	HTTPStatus      int
+	ErrorMessage    string
+	// RateLimitResetAt 非 nil 表示 429 带显式重置时间（x-codex-* 窗口头或
+	// usage_limit_reached 体），调度层据此长退避，不再短周期空打。
+	RateLimitResetAt *time.Time
+	// Window identity is evidence, not the distance to the next reset.
+	RateLimitWindow string
+}
+
+func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
+	if !r.TransportOK || (r.HTTPStatus != 0 && r.HTTPStatus != http.StatusOK) {
+		return false
+	}
+	if !r.AnswerCorrect {
+		return true
+	}
+	// 2026-09-15 用户裁定：截断指纹叠加「答对」判中性——新号(1034/1035 实测
+	// rt 恒落 1552±8 且答案正确)偶发被上游按推理预算截断，答案仍对说明推理
+	// 没伤到结论；指纹只有在叠加答错(上方 !AnswerCorrect)时才构成降智证据。
+	// 真截断伤害(1029 校准针03: 1552+答错)照走降智路径。IsRecovered 仍排除
+	// 指纹——恢复连胜必须来自干净 ≥1400 针，1552+答对只保底不惩罚。
+	return r.ReasoningTokens != nil &&
+		*r.ReasoningTokens < OpenAIDowngradeFailureReasoningThreshold
+}
+
+// IsQualificationPass 认证档的答对主义判定（2026-09-15 用户裁定「他只要答对
+// 就行」+「一次检测合格就上岗」）：答对 + rt≥800 即算通过针，不排除截断指纹
+// ——1035 实测 rt 恒落 1552 且连续答对，若认证仍要求干净 ≥1400，中性针永远
+// 凑不齐连胜，账号被钉死在资格节奏上。仅认证档使用；正常档判定不变。
+func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
+	return r.TransportOK &&
+		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
+		r.AnswerCorrect &&
+		r.ReasoningTokens != nil &&
+		*r.ReasoningTokens >= OpenAIDowngradeFailureReasoningThreshold
+}
+
+func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
+	return r.TransportOK &&
+		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
+		r.AnswerCorrect &&
+		r.ReasoningTokens != nil &&
+		*r.ReasoningTokens >= OpenAIDowngradeRecoveryReasoningMinimum &&
+		!isOpenAIDowngradeTruncationFingerprint(*r.ReasoningTokens)
+}
+
+type OpenAIDowngradeProbeState struct {
+	AccountID                 int64
+	State                     string
+	ProbeMode                 string
+	OriginalProxyID           *int64
+	CurrentProxyID            *int64
+	ConsecutiveFailures       int
+	ConsecutiveSuccesses      int
+	Consecutive429s           int
+	FirstFailureAt            *time.Time
+	CircuitOpenedAt           *time.Time
+	RecoveryDeadline          *time.Time
+	NextProbeAt               time.Time
+	SwapCount7d               int
+	LastSwapAt                *time.Time
+	LastProbeAt               *time.Time
+	AstraConsecutiveFailures  int
+	AstraConsecutiveSuccesses int
+	AstraNextProbeAt          *time.Time
+	UpdatedAt                 time.Time
+}
+
+type OpenAIDowngradeTransition struct {
+	State            OpenAIDowngradeProbeState
+	NextState        string
+	Circuit          bool
+	Recovered        bool
+	NeedsReplacement bool
+	EventType        string
+}
+
+// ApplyOpenAIDowngradeProbeResult is pure state-machine logic. Inconclusive
+// results neither punish nor heal an account; only the documented thresholds
+// advance counters.
+func ApplyOpenAIDowngradeProbeResult(
+	state OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) OpenAIDowngradeTransition {
+	if state.State == "" {
+		state.State = OpenAIDowngradeStateOnDuty
+	}
+	if state.ProbeMode == "" {
+		state.ProbeMode = "normal"
+	}
+
+	if result.IsRecovered() ||
+		(state.ProbeMode == "qualification" && result.IsQualificationPass()) {
+		state.ConsecutiveFailures = 0
+		state.ConsecutiveSuccesses++
+		if (state.State == OpenAIDowngradeStateCircuitOpen ||
+			state.State == OpenAIDowngradeStateReprobe) &&
+			state.ConsecutiveSuccesses >= 2 {
+			return OpenAIDowngradeTransition{
+				State:     state,
+				NextState: state.State,
+				Recovered: true,
+				EventType: OpenAIDowngradeEventRecovered,
+			}
+		}
+		return OpenAIDowngradeTransition{State: state, NextState: state.State}
+	}
+
+	if !result.IsDegraded() {
+		if result.TransportOK && (result.HTTPStatus == 0 || result.HTTPStatus == http.StatusOK) {
+			state.ConsecutiveFailures = 0
+			// 指纹+答对=中性且保留连胜(2026-09-15 用户裁定):若像普通中带
+			// (800≤rt<1400)那样清零,穿插的 1552 会让认证的 2 连胜永远凑不齐,
+			// 账号被钉死在 qualification 5min 节奏上,反而制造规律性探针流量。
+			if !(result.AnswerCorrect && result.ReasoningTokens != nil &&
+				isOpenAIDowngradeTruncationFingerprint(*result.ReasoningTokens)) {
+				state.ConsecutiveSuccesses = 0
+			}
+		}
+		return OpenAIDowngradeTransition{State: state, NextState: state.State}
+	}
+
+	state.ConsecutiveSuccesses = 0
+	state.ConsecutiveFailures++
+	if state.State == OpenAIDowngradeStateOnDuty &&
+		state.ConsecutiveFailures >= 2 {
+		return OpenAIDowngradeTransition{
+			State:     state,
+			NextState: OpenAIDowngradeStateCircuitOpen,
+			Circuit:   true,
+			EventType: OpenAIDowngradeEventCircuitOpen,
+		}
+	}
+	if (state.State == OpenAIDowngradeStateCircuitOpen ||
+		state.State == OpenAIDowngradeStateReprobe) &&
+		state.ConsecutiveFailures >= 2 {
+		return OpenAIDowngradeTransition{
+			State:            state,
+			NextState:        OpenAIDowngradeStatePendingReplace,
+			NeedsReplacement: true,
+			EventType:        OpenAIDowngradeEventReplaceRequired,
+		}
+	}
+
+	_ = now
+	return OpenAIDowngradeTransition{State: state, NextState: state.State}
+}
+
+type OpenAIDowngradeProbeStore interface {
+	EnsureOpenAIDowngradeState(context.Context, int64, *int64, time.Time) (*OpenAIDowngradeProbeState, error)
+	GetOpenAIDowngradeState(context.Context, int64) (*OpenAIDowngradeProbeState, error)
+	ReconcileOpenAIRateLimitProbeSchedules(context.Context, time.Time, time.Duration) (int64, error)
+	ListDueOpenAIDowngradeStates(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error)
+	SaveOpenAIDowngradeState(context.Context, *OpenAIDowngradeProbeState) error
+	RecordOpenAIDowngradeProbe(context.Context, *OpenAIDowngradeProbeResult) error
+	AppendOpenAIDowngradeEvent(context.Context, int64, *int64, string, map[string]any) error
+	SetOpenAIAccountProxy(context.Context, int64, *int64) error
+	FindOpenAIDowngradeMainProxy(context.Context, int64) (*int64, error)
+	FindOpenAIDowngradeEscapeProxy(context.Context, int64, *int64) (*int64, error)
+	ListOpenAIDowngradeBuckets(context.Context) ([]OpenAIDowngradeBucket, error)
+	ListOpenAIDowngradeEvents(context.Context, time.Time, int) ([]OpenAIDowngradeEvent, error)
+	ListOpenAIDowngradeAccountStats(context.Context, time.Time, int) ([]OpenAIDowngradeAccountStat, error)
+	ListOpenAIDowngradeDashboard(context.Context, time.Time) (*OpenAIDowngradeDashboard, error)
+}
+
+// OpenAIDowngradeProbeHistoryCleaner is a narrow optional capability for
+// retention cleanup (P2-10). Only the real repository implements it, so
+// existing OpenAIDowngradeProbeStore test doubles stay unchanged.
+type OpenAIDowngradeProbeHistoryCleaner interface {
+	PurgeOpenAIDowngradeProbeHistory(ctx context.Context, resultsBefore, eventsBefore time.Time) (purgedResults, purgedEvents int64, err error)
+}
+
+// OpenAIDowngradeGoneAccountStateCleaner 清理已删除账号残留的探针状态。软删只置
+// accounts.deleted_at，不触发 states 的 FK 级联；残留 state 会以陈旧的 next_probe_at
+// 永久占据 ListDue 同 IP 分区的 rank-1，把同桶的活账号饿死在 rank-2。同样是窄可选
+// 能力，只有真实 repository 实现，测试桩不受影响。
+type OpenAIDowngradeGoneAccountStateCleaner interface {
+	DeleteOpenAIDowngradeStatesForGoneAccounts(ctx context.Context) (int64, error)
+}
+
+// OpenAIDowngradeStateDeleter 就地删除单个账号的探针状态。processState 在账号
+// 已被软删（GetByID → ErrAccountNotFound 哨兵）时调用：每日清理器要等 24h 周期，
+// 期间僵尸 state 钉死 ListDue 每 IP 分区的 rank-1，同桶活账号零探针
+// （2026-09-17 根因：1054 钉死 p5 → 1055 降智 5.5h 未检出，15 僵尸钉死全部
+// 5 个在用桶）。窄可选能力，同上模式；未实现或删除失败时 processState 退化为
+// 让位重排，绝不留在队首。
+type OpenAIDowngradeStateDeleter interface {
+	DeleteOpenAIDowngradeState(ctx context.Context, accountID int64) error
+}
+
+// OpenAIDowngradeFallbackModeStore persists the model-family restriction used
+// while an account is healthy only on the sol track. It is deliberately a
+// narrow optional capability so existing AccountRepository test doubles and
+// non-OpenAI implementations do not need to grow unrelated methods.
+type OpenAIDowngradeFallbackModeStore interface {
+	SetOpenAIDowngradeFallbackMode(context.Context, int64, bool) error
+}
+
+type OpenAIDowngradeRateLimitStore interface {
+	SetRateLimitedIfLater(context.Context, int64, time.Time) error
+}
+
+// OpenAIDowngradeRateLimitReleaser 以 CAS 语义清除一次已观察到的 OpenAI 账号
+// 级限流持有（仅当 (limited_at, reset_at) 与观察值一致时清除）。供探针在持有
+// 期间收到上游真实接受（传输 OK 且 2xx）的结果时回岗：官方到点重置与供应商
+// 提前手动重置都由此回到调度，无需人为 reset。窄可选能力，与上面的 Store 同
+// 模式：探测期间他处延长/改写的持有不会被旧观察值误清，由后续探针自纠。
+// 注意与 Grok 的 ClearRateLimitIfObserved 分开：那条 CAS 钉了 platform=grok。
+type OpenAIDowngradeRateLimitReleaser interface {
+	ClearOpenAIRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error)
+}
+
+// 探针题库已迁移至 openai_downgrade_probe_questions.go：四个语义互不相交的
+// 题域（糖果组合 / 数字谜题 / 星期推算 / 网格路径）按针均匀抽取，期望答案
+// 由生成器本地真值现场算出，判分正则按题动态构造。
+
+const (
+	openAIDowngradeDefaultInterval     = 30 * time.Minute
+	openAIDowngradeHalfOpenInterval    = 30 * time.Minute
+	openAIDowngradeAcceleratedInterval = 5 * time.Minute
+	// P2-10 数据保留：results 是高频遥测留 30 天，events 是审计依据留 90 天，
+	// 每 24 小时清一次，防止两表无限增长。
+	openAIDowngradeResultsRetention  = 30 * 24 * time.Hour
+	openAIDowngradeEventsRetention   = 90 * 24 * time.Hour
+	openAIDowngradePurgeInterval     = 24 * time.Hour
+	openAIDowngradeRecoveryWindow    = 30 * time.Minute
+	openAIDowngradeReplacementWindow = 24 * time.Hour
+	openAIDowngradeSwapWindow        = 7 * 24 * time.Hour
+	// 判死账号永不放弃：pending_replace 后按指数退避复活重试。
+	// 静默 2h 起，每失败一轮翻倍，封顶 24h；重试次数从近 7 天的
+	// replace_required 事件数推导，无需新增表字段。
+	openAIDowngradeReplacementRetryBase   = 2 * time.Hour
+	openAIDowngradeReplacementRetryMax    = 24 * time.Hour
+	openAIDowngradeReplacementCountWindow = 7 * 24 * time.Hour
+)
+
+// OpenAIDowngradeReplaceEventCounter 是用于判死重试退避的窄接口能力。
+// 只有真实 repository 实现它，现有 OpenAIDowngradeProbeStore 测试桩不受影响。
+type OpenAIDowngradeReplaceEventCounter interface {
+	CountOpenAIDowngradeEvents(ctx context.Context, accountID int64, eventType string, since time.Time) (int, error)
+}
+
+// OpenAIDowngradeProbeRunner runs account probes on the account's currently
+// bound proxy. It never writes usage_logs and never changes account priority.
+type OpenAIDowngradeProbeRunner struct {
+	store         OpenAIDowngradeProbeStore
+	accountRepo   AccountRepository
+	proxyRepo     ProxyRepository
+	tokenProvider *OpenAITokenProvider
+	httpUpstream  HTTPUpstream
+	tlsProfiles   *TLSFingerprintProfileService
+	interval      time.Duration
+	now           func() time.Time
+	nextDelay     func() time.Duration
+	probeFn       func(context.Context, *Account, string) OpenAIDowngradeProbeResult
+	runMu         sync.Mutex
+	lastPurgeAt   time.Time
+	// recentTraffic 由装配层注入（usage_logs 近窗查询）；nil 时顺延逻辑关闭。
+	// deferCounts 记录各账号连续顺延次数，仅在 runMu 临界区内访问。
+	recentTraffic func(ctx context.Context, accountID int64, within time.Duration) bool
+	deferCounts   map[int64]int
+
+	startOnce sync.Once
+	stopOnce  sync.Once
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+}
+
+func NewOpenAIDowngradeProbeRunner(
+	store OpenAIDowngradeProbeStore,
+	accountRepo AccountRepository,
+	proxyRepo ProxyRepository,
+	tokenProvider *OpenAITokenProvider,
+	httpUpstream HTTPUpstream,
+	tlsProfiles *TLSFingerprintProfileService,
+) *OpenAIDowngradeProbeRunner {
+	runner := &OpenAIDowngradeProbeRunner{
+		store:         store,
+		accountRepo:   accountRepo,
+		proxyRepo:     proxyRepo,
+		tokenProvider: tokenProvider,
+		httpUpstream:  httpUpstream,
+		tlsProfiles:   tlsProfiles,
+		interval:      openAIDowngradeDefaultInterval,
+		now:           time.Now,
+		deferCounts:   make(map[int64]int),
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+	runner.nextDelay = func() time.Duration {
+		// 15-75 分钟均匀随机（0.5x-2.5x）：探针体已复刻真实 codex 形态（数十 KB
+		// instructions/tools，见 openai_downgrade_probe_template.go），单针输入
+		// 成本不再可忽略，拉长常规节奏把额度成本摊薄；半开/加速/资格/sol 路径
+		// 不走本函数，仍保持各自紧凑节奏。均匀随机也防止池级同步探测。
+		return time.Duration(float64(runner.interval) * (0.5 + 2*probeRandomFloat()))
+	}
+	// 遥测出口兜底：转发链路构造的账号对象可能只带 ProxyID 而未预载 Proxy
+	// 关联，遥测发送期经此函数补齐代理出口；仍解析不出则遥测丢弃，绝不直连
+	// （openai_codex_telemetry.go 的 send 硬闸）。
+	openAICodexTelemetryGlobal.bindProxyLookup(runner.resolveTelemetryProxyURL)
+	return runner
+}
+
+func (r *OpenAIDowngradeProbeRunner) resolveTelemetryProxyURL(ctx context.Context, queued *Account) string {
+	if queued == nil || queued.ProxyID == nil || r.accountRepo == nil || ctx.Err() != nil {
+		return ""
+	}
+	current, err := r.accountRepo.GetByID(ctx, queued.ID)
+	if err != nil || current == nil || current.ID != queued.ID ||
+		current.Status != StatusActive || current.ProxyID == nil || *current.ProxyID != *queued.ProxyID {
+		return ""
+	}
+	route, err := resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, current.ProxyID)
+	if err != nil {
+		return ""
+	}
+	if queued.Proxy != nil && queued.Proxy.URL() != route {
+		return ""
+	}
+	return route
+}
+
+func (r *OpenAIDowngradeProbeRunner) Start() {
+	if r == nil || r.store == nil {
+		return
+	}
+	r.startOnce.Do(func() {
+		go r.loop()
+	})
+}
+
+func (r *OpenAIDowngradeProbeRunner) Stop() {
+	if r == nil {
+		return
+	}
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
+	select {
+	case <-r.doneCh:
+	case <-time.After(5 * time.Second):
+	}
+}
+
+func (r *OpenAIDowngradeProbeRunner) loop() {
+	defer close(r.doneCh)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			// Bounded context: an uncancellable hang (DB/network) must not
+			// wedge every future tick behind runMu.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			if err := r.RunOnce(ctx); err != nil {
+				logger.LegacyPrintf("service.openai_downgrade_probe",
+					"[OpenAIDowngradeProbe] scan failed: %v", err)
+			}
+			cancel()
+		case <-r.stopCh:
+			return
+		}
+	}
+}
+
+// maybePurgeHistory enforces the P2-10 retention policy once per day. It is a
+// no-op when the store does not implement the optional cleaner capability.
+func (r *OpenAIDowngradeProbeRunner) maybePurgeHistory(ctx context.Context, now time.Time) {
+	cleaner, ok := r.store.(OpenAIDowngradeProbeHistoryCleaner)
+	if !ok {
+		return
+	}
+	if !r.lastPurgeAt.IsZero() && now.Sub(r.lastPurgeAt) < openAIDowngradePurgeInterval {
+		return
+	}
+	r.lastPurgeAt = now
+	purgedResults, purgedEvents, err := cleaner.PurgeOpenAIDowngradeProbeHistory(
+		ctx, now.Add(-openAIDowngradeResultsRetention), now.Add(-openAIDowngradeEventsRetention))
+	if err != nil {
+		logger.LegacyPrintf("service.openai_downgrade_probe", "[OpenAIDowngradeProbe] history purge failed: %v", err)
+		return
+	}
+	if purgedResults > 0 || purgedEvents > 0 {
+		logger.LegacyPrintf("service.openai_downgrade_probe", "[OpenAIDowngradeProbe] history purged results=%d events=%d", purgedResults, purgedEvents)
+	}
+	if staleCleaner, ok := r.store.(OpenAIDowngradeGoneAccountStateCleaner); ok {
+		purgedStates, staleErr := staleCleaner.DeleteOpenAIDowngradeStatesForGoneAccounts(ctx)
+		if staleErr != nil {
+			logger.LegacyPrintf("service.openai_downgrade_probe", "[OpenAIDowngradeProbe] stale state cleanup failed: %v", staleErr)
+			return
+		}
+		if purgedStates > 0 {
+			logger.LegacyPrintf("service.openai_downgrade_probe", "[OpenAIDowngradeProbe] stale states purged for gone accounts: %d", purgedStates)
+		}
+	}
+}
+
+// RunOnce performs one bounded scan. It is public to make startup/acceptance
+// checks deterministic without waiting for the background ticker.
+func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
+	if r == nil || r.store == nil || r.accountRepo == nil {
+		return nil
+	}
+	if !r.runMu.TryLock() {
+		return nil
+	}
+	defer r.runMu.Unlock()
+	now := r.now()
+	r.maybePurgeHistory(ctx, now)
+	accounts, err := r.accountRepo.ListByPlatform(ctx, PlatformOpenAI)
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		account := accounts[i]
+		if !isOpenAIDowngradeProbeAccountEligible(&account, now) || account.Status != StatusActive {
+			continue
+		}
+		qualification := isOpenAIDowngradeQualificationCandidate(&account) ||
+			account.ProxyID == nil
+		if !account.Schedulable && !qualification {
+			continue
+		}
+		allowed, err := r.canRunOpenAIProbe(ctx, account.ID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
+		nextProbeAt := now.Add(r.nextDelay())
+		if qualification {
+			nextProbeAt = now
+		}
+		state, err := r.store.EnsureOpenAIDowngradeState(ctx, account.ID, account.ProxyID, nextProbeAt)
+		if err != nil {
+			// One failing account must not abort the whole scan silently.
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] ensure state failed account=%d: %v", account.ID, err)
+			continue
+		}
+		if qualification && state != nil && state.LastProbeAt == nil &&
+			state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode != "qualification" {
+			if err := r.armQualificationAtomic(ctx, &account, state, now); err != nil {
+				logger.LegacyPrintf("service.openai_downgrade_probe",
+					"[OpenAIDowngradeProbe] arm qualification failed account=%d: %v", account.ID, err)
+				continue
+			}
+		}
+	}
+
+	reconciled, err := r.store.ReconcileOpenAIRateLimitProbeSchedules(ctx, now, openAIDowngradeRateLimitRecheckInterval)
+	if err != nil {
+		return err
+	}
+	if reconciled > 0 {
+		logger.LegacyPrintf("service.openai_downgrade_probe",
+			"[OpenAIDowngradeProbe] historical rate limit schedules reconciled=%d", reconciled)
+	}
+	due, err := r.store.ListDueOpenAIDowngradeStates(ctx, now, 100)
+	if err != nil {
+		return err
+	}
+	processed := 0
+	for i := range due {
+		if err := r.processStateAtomic(ctx, &due[i], now); err != nil {
+			// One broken account must not starve the remaining pool — but the
+			// failure must be visible, or a wedged account goes dark for days.
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] process failed account=%d state=%s: %v",
+				due[i].AccountID, due[i].State, err)
+			continue
+		}
+		processed++
+	}
+	if len(due) > 0 {
+		logger.LegacyPrintf("service.openai_downgrade_probe",
+			"[OpenAIDowngradeProbe] scan done: due=%d processed=%d", len(due), processed)
+	}
+	return nil
+}
+
+func isOpenAIDowngradeProbeStatusAllowed(status string, state *OpenAIDowngradeProbeState) bool {
+	if state == nil {
+		return false
+	}
+	if status == StatusActive {
+		return true
+	}
+	if status != StatusError {
+		return false
+	}
+	return state.State == OpenAIDowngradeStateCircuitOpen ||
+		state.State == OpenAIDowngradeStateReprobe ||
+		state.State == OpenAIDowngradeStatePendingReplace ||
+		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "qualification") ||
+		state.ProbeMode == "sol_fallback"
+}
+
+func isOpenAIDowngradeProbeAccountEligible(account *Account, now time.Time) bool {
+	return account != nil && account.Platform == PlatformOpenAI &&
+		account.Type == AccountTypeOAuth && !account.IsCredentialShadow() &&
+		(!account.AutoPauseOnExpired || account.ExpiresAt == nil || now.Before(*account.ExpiresAt))
+}
+
+// dropGoneAccountState 处理账号已消失的 state：优先就地删除（每日清理器的
+// 单账号版，让同桶活账号立刻赢回 rank-1）；删除失败或 store 未实现删除能力
+// 时退化为让位重排——两种出路都保证下一轮扫描不再被该 state 钉死队首。
+func (r *OpenAIDowngradeProbeRunner) dropGoneAccountState(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if deleter, ok := r.store.(OpenAIDowngradeStateDeleter); ok {
+		if err := deleter.DeleteOpenAIDowngradeState(ctx, state.AccountID); err == nil {
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] dropped state for gone account=%d state=%s",
+				state.AccountID, state.State)
+			return nil
+		} else {
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] drop state failed account=%d: %v (yielding queue head instead)",
+				state.AccountID, err)
+		}
+	}
+	state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
+	state.UpdatedAt = now
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) processState(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if state == nil {
+		return nil
+	}
+	account, err := r.accountRepo.GetByID(ctx, state.AccountID)
+	if errors.Is(err, ErrAccountNotFound) || (err == nil && account == nil) {
+		// 面板软删的账号（ent 软删 → GetByID 走 ErrAccountNotFound 哨兵，
+		// translatePersistenceError 保留 Code+Reason，errors.Is 可穿透）：
+		// 残留 state 的 next_probe_at 冻结在过去，ListDue 每 IP 桶只取
+		// rank-1，僵尸会永久钉死队首饿死同桶活号。就地删除；
+		// 瞬时 DB 错误（非 NotFound 哨兵）不走这里，原样上抛下轮重试。
+		return r.dropGoneAccountState(ctx, state, now)
+	}
+	if err != nil {
+		return err
+	}
+	if !isOpenAIDowngradeProbeAccountEligible(account, now) {
+		// 活账号但当前不可探测（改平台/改类型/影子/过期）：不探，但排期
+		// 后移让出队首，否则同桶其它号被永久饿死——与手动暂停分支同语义，
+		// 30 分钟后回看是否改回。
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	// status='error' 的号不参与流量调度，但熔断/重探/判死状态下的号正是
+	// 靠探测换 IP 救回来的，不能因 error 状态被永久跳过。
+	if !isOpenAIDowngradeProbeStatusAllowed(account.Status, state) {
+		// 同上：不探但让位重排（status=disabled/inactive 等），钉死队首
+		// 与账号消失同罪。
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if state.State == OpenAIDowngradeStatePendingReplace {
+		// 判死不停探：静默期满后经 retryReplacement 换 IP 复活重试，
+		// 每失败一轮静默时间翻倍（2h 起，封顶 24h）。
+		return r.retryReplacement(ctx, account, state, now)
+	}
+	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
+		state.ProbeMode != "qualification" {
+		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
+		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
+		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if state.ProbeMode == "qualification" && account.ProxyID == nil &&
+		state.OriginalProxyID != nil &&
+		!account.IsOpenAIPersonalAccessToken() && !account.IsOpenAIAgentIdentity() {
+		// A missing authorization route on an account that HAD one is not
+		// permission to assign a new IP: keep the old state binding as
+		// evidence; never restore it by guessing. Fresh uploads (no binding
+		// ever recorded) fall through to the bucket assignment below.
+		if account.Schedulable {
+			if err := r.accountRepo.SetSchedulable(ctx, account.ID, false); err != nil {
+				return err
+			}
+		}
+		state.ConsecutiveFailures, state.ConsecutiveSuccesses = 0, 0
+		state.NextProbeAt = now.Add(r.nextDelay())
+		state.UpdatedAt = now
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventQualificationBlocked, map[string]any{"reason": "authorization_proxy_missing"}); err != nil {
+			return err
+		}
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if !sameOpenAIProbeProxy(state.CurrentProxyID, account.ProxyID) {
+		// A manual binding change invalidates counters from the old account/IP pair.
+		state.CurrentProxyID = account.ProxyID
+		state.OriginalProxyID = account.ProxyID
+		state.ConsecutiveFailures = 0
+		state.ConsecutiveSuccesses = 0
+	}
+	if account.Proxy != nil && (account.ProxyID == nil || account.Proxy.ID != *account.ProxyID) {
+		account.Proxy = nil
+	}
+	if state.ProbeMode == "qualification" && account.ProxyID == nil {
+		mainProxyID, findErr := r.store.FindOpenAIDowngradeMainProxy(ctx, account.ID)
+		if findErr != nil {
+			return findErr
+		}
+		if mainProxyID == nil {
+			state.NextProbeAt = now.Add(r.nextDelay())
+			state.UpdatedAt = now
+			if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+				OpenAIDowngradeEventQualificationBlocked, map[string]any{"reason": "no_available_main_bucket"}); err != nil {
+				return err
+			}
+			return r.store.SaveOpenAIDowngradeState(ctx, state)
+		}
+		if err := r.store.SetOpenAIAccountProxy(ctx, state.AccountID, mainProxyID); err != nil {
+			return err
+		}
+		account.ProxyID = mainProxyID
+		state.CurrentProxyID = mainProxyID
+		state.OriginalProxyID = mainProxyID
+		state.UpdatedAt = now
+		if err := r.store.SaveOpenAIDowngradeState(ctx, state); err != nil {
+			return err
+		}
+	}
+	if state.ProbeMode == "sol_fallback" && state.State != OpenAIDowngradeStateOnDuty {
+		return r.startSolFallback(ctx, account, state, now)
+	}
+	if state.State == OpenAIDowngradeStateReprobe {
+		return r.processReprobe(ctx, account, state, now)
+	}
+	if state.ProbeMode == "sol_fallback" {
+		return r.processSolFallback(ctx, account, state, now)
+	}
+	if state.State == OpenAIDowngradeStateCircuitOpen &&
+		state.ProbeMode == "half_open" {
+		return r.processHalfOpen(ctx, account, state, now)
+	}
+	if state.State == OpenAIDowngradeStateCircuitOpen {
+		// Circuit opening is a cooling period. Do not probe or move the
+		// account until the 30-minute quiet window has elapsed.
+		if state.CircuitOpenedAt != nil &&
+			now.Before(state.CircuitOpenedAt.Add(openAIDowngradeRecoveryWindow)) {
+			state.NextProbeAt = state.CircuitOpenedAt.Add(r.spread(openAIDowngradeRecoveryWindow))
+			state.UpdatedAt = now
+			return r.store.SaveOpenAIDowngradeState(ctx, state)
+		}
+		return r.beginReprobe(ctx, account, state, now)
+	}
+
+	if state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "normal" &&
+		r.shouldDeferForRealTraffic(ctx, state.AccountID) {
+		// 近窗有真实推理流量：降智会直接体现在真实流量里，此刻插入合成探针
+		// 只会制造紧随真实请求的可聚类流量。顺延（jitter 后 22-67 分钟），
+		// 连续顺延达上限后照常探测，保证 canary 覆盖无永久盲区。
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeTrafficDeferral))
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+
+	result := r.runProbe(ctx, account, state.ProbeMode)
+	if err := r.recordProbeResult(ctx, &result); err != nil {
+		return err
+	}
+	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
+		return err
+	}
+	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
+	*state = transition.State
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	state.NextProbeAt = now.Add(r.nextDelay())
+	if state.ProbeMode == "qualification" && !transition.Circuit {
+		// 资格认证节奏：认证针按分钟级排（429 已在上方走同量级短周期）；
+		// 通过即解锁（r15h 起 1 针结业），此排期仅服务「未通过前的重试」
+		// 与「解锁针后的首针 on-duty 复查」。
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeQualificationInterval))
+	}
+	if state.ProbeMode == "accelerated" && state.RecoveryDeadline != nil &&
+		now.Before(*state.RecoveryDeadline) {
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeAcceleratedInterval))
+	}
+	if state.ProbeMode == "qualification" && result.IsQualificationPass() &&
+		state.ConsecutiveSuccesses >= 1 {
+		// 2026-09-15 用户裁定「新号一次检测合格就可以上岗，不要整那么多次」：
+		// 1 针通过即解锁 schedulable 并回归 normal 档，认证不再凑 2 连胜。
+		state.State = OpenAIDowngradeStateOnDuty
+		state.ProbeMode = "normal"
+		state.ConsecutiveSuccesses = 0
+		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+			return err
+		}
+	}
+	if state.ProbeMode == "qualification" && transition.Circuit {
+		state.State = OpenAIDowngradeStatePendingReplace
+		state.ProbeMode = "normal"
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeReplacementWindow))
+		state.UpdatedAt = now
+		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+			return err
+		}
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventReplaceRequired, map[string]any{"reason": "qualification_failed"}); err != nil {
+			return err
+		}
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if transition.Circuit {
+		state.State = OpenAIDowngradeStateCircuitOpen
+		state.ProbeMode = "normal"
+		state.CircuitOpenedAt = &now
+		state.ConsecutiveFailures = 0
+		state.ConsecutiveSuccesses = 0
+		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+			return err
+		}
+		if err := r.store.SaveOpenAIDowngradeState(ctx, state); err != nil {
+			return err
+		}
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventCircuitOpen, map[string]any{"reason": "downgrade_probe"}); err != nil {
+			return err
+		}
+		// Keep the account fully isolated for the cooling period. The next
+		// due run will select an escape bucket after this deadline.
+		// spread 随机化冷却时长（2026-09-15 用户裁定「监测要随机时间」）：固定
+		// 30 分钟会让同批熔断号在同一秒集体进入换桶，形成可聚类节律。
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeRecoveryWindow))
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if state.RecoveryDeadline != nil && !now.Before(*state.RecoveryDeadline) {
+		state.RecoveryDeadline = nil
+		state.ProbeMode = "normal"
+	}
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) processReprobe(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	result := r.runProbe(ctx, account, "reprobe")
+	if err := r.recordProbeResult(ctx, &result); err != nil {
+		return err
+	}
+	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
+		return err
+	}
+	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
+	*state = transition.State
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if transition.Recovered {
+		return r.finishRescue(ctx, state, now)
+	}
+	if transition.NeedsReplacement {
+		return r.startSolFallback(ctx, account, state, now)
+	}
+	// Reprobe attempts are deliberately serialized. The repository also
+	// filters due states by proxy cooldown so different accounts sharing an IP
+	// cannot be probed back-to-back. spread 保持 10 分钟串行下界不变、只随机化
+	// 上沿（10-12.5 分钟），固定间隔本身是可聚类节律（用户裁定「监测要随机时间」）。
+	state.NextProbeAt = now.Add(r.spread(openAIDowngradeProbeProxyMinInterval))
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func isOpenAIDowngradeQualificationCandidate(account *Account) bool {
+	if account == nil || account.Extra == nil {
+		return false
+	}
+	value, ok := account.Extra[openAIDowngradeQualificationExtraKey]
+	return ok && value == true
+}
+
+func (r *OpenAIDowngradeProbeRunner) processHalfOpen(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	result := r.runProbe(ctx, account, "half_open")
+	if err := r.recordProbeResult(ctx, &result); err != nil {
+		return err
+	}
+	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
+		return err
+	}
+	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
+	*state = transition.State
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if transition.Recovered {
+		return r.finishRescue(ctx, state, now)
+	}
+	if state.RecoveryDeadline != nil && !now.Before(*state.RecoveryDeadline) {
+		return r.startSolFallback(ctx, account, state, now)
+	}
+	state.NextProbeAt = now.Add(r.jitter(openAIDowngradeHalfOpenInterval))
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) beginReprobe(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if account == nil || account.ProxyID == nil || *account.ProxyID <= 0 ||
+		!sameOpenAIProbeProxy(account.ProxyID, state.CurrentProxyID) {
+		return errOpenAIOAuthProxyUnavailable
+	}
+	// Recovery is not authorization to change a browser login's egress.
+	state.State = OpenAIDowngradeStateReprobe
+	state.ProbeMode = "normal"
+	state.ConsecutiveFailures = 0
+	state.ConsecutiveSuccesses = 0
+	state.RecoveryDeadline = nil
+	state.NextProbeAt = now
+	state.UpdatedAt = now
+	if err := r.store.SaveOpenAIDowngradeState(ctx, state); err != nil {
+		return err
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventBucketReprobe, map[string]any{"route_preserved": true}); err != nil {
+		return err
+	}
+	return r.processReprobe(ctx, account, state, now)
+}
+
+func (r *OpenAIDowngradeProbeRunner) startSolFallback(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	result := r.runProbe(ctx, account, "sol_fallback")
+	if err := r.recordProbeResult(ctx, &result); err != nil {
+		return err
+	}
+	// Preserve the pending model track across an inconclusive attempt/restart.
+	state.ProbeMode = "sol_fallback"
+	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
+		return err
+	}
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if result.IsDegraded() {
+		return r.finishReplacement(ctx, state, now)
+	}
+	if !result.IsRecovered() {
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeProbeProxyMinInterval))
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if err := r.setSolFallbackMode(ctx, state.AccountID, true); err != nil {
+		return err
+	}
+	state.State = OpenAIDowngradeStateOnDuty
+	state.ProbeMode = "sol_fallback"
+	state.ConsecutiveFailures = 0
+	state.ConsecutiveSuccesses = 1
+	state.AstraConsecutiveFailures = 0
+	state.AstraConsecutiveSuccesses = 0
+	// astra 复查针随机化（jitter 后 1-3 小时），不落整点 2h 固定节律。
+	state.AstraNextProbeAt = timePtr(now.Add(r.jitter(openAIDowngradeSolFallbackInterval)))
+	state.RecoveryDeadline = nil
+	state.NextProbeAt = now.Add(r.jitter(openAIDowngradeDefaultInterval))
+	if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+		return err
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventSolFallback, map[string]any{"model": "gpt-5.6-sol"}); err != nil {
+		return err
+	}
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) processSolFallback(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	astraDue := state.AstraNextProbeAt != nil && !now.Before(*state.AstraNextProbeAt)
+	mode := "sol_fallback"
+	if astraDue {
+		mode = "sol_fallback_astra"
+	}
+	result := r.runProbe(ctx, account, mode)
+	if err := r.recordProbeResult(ctx, &result); err != nil {
+		return err
+	}
+	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
+		return err
+	}
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if astraDue {
+		if result.IsRecovered() {
+			state.AstraConsecutiveFailures = 0
+			state.AstraConsecutiveSuccesses++
+			if state.AstraConsecutiveSuccesses >= 2 {
+				if err := r.setSolFallbackMode(ctx, state.AccountID, false); err != nil {
+					return err
+				}
+				state.ProbeMode = "normal"
+				state.AstraConsecutiveSuccesses = 0
+				state.AstraNextProbeAt = nil
+				if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+					OpenAIDowngradeEventRecovered, map[string]any{"model": "gpt-6-astra", "return_to_astra": true}); err != nil {
+					return err
+				}
+			}
+		} else if result.IsDegraded() {
+			state.AstraConsecutiveFailures++
+			state.AstraConsecutiveSuccesses = 0
+		}
+		if state.ProbeMode == "sol_fallback" {
+			state.AstraNextProbeAt = timePtr(now.Add(r.jitter(openAIDowngradeSolFallbackInterval)))
+		}
+	} else {
+		if result.IsRecovered() {
+			state.ConsecutiveFailures = 0
+			state.ConsecutiveSuccesses++
+		} else if result.IsDegraded() {
+			// A sol failure means the account is not safe for either model
+			// track. Do not keep serving while waiting for another probe.
+			return r.finishReplacement(ctx, state, now)
+		}
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeDefaultInterval))
+	}
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) setSolFallbackMode(ctx context.Context, accountID int64, active bool) error {
+	store, ok := r.accountRepo.(OpenAIDowngradeFallbackModeStore)
+	if !ok {
+		return errors.New("openai downgrade fallback mode store unavailable")
+	}
+	return store.SetOpenAIDowngradeFallbackMode(ctx, accountID, active)
+}
+
+func (r *OpenAIDowngradeProbeRunner) finishRescue(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if err := r.setSolFallbackMode(ctx, state.AccountID, false); err != nil {
+		return err
+	}
+	state.State = OpenAIDowngradeStateOnDuty
+	state.ProbeMode = "accelerated"
+	state.ConsecutiveFailures = 0
+	state.ConsecutiveSuccesses = 0
+	state.RecoveryDeadline = timePtr(now.Add(openAIDowngradeRecoveryWindow))
+	state.NextProbeAt = now.Add(r.jitter(openAIDowngradeAcceleratedInterval))
+	state.UpdatedAt = now
+	if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+		return err
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventBucketRescue, map[string]any{"swap_count_7d": state.SwapCount7d}); err != nil {
+		return err
+	}
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+func (r *OpenAIDowngradeProbeRunner) finishReplacement(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if err := r.setSolFallbackMode(ctx, state.AccountID, false); err != nil {
+		return err
+	}
+	state.State = OpenAIDowngradeStatePendingReplace
+	state.ProbeMode = "normal"
+	state.ConsecutiveFailures = 0
+	state.ConsecutiveSuccesses = 0
+	state.UpdatedAt = now
+	if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+		return err
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventReplaceRequired, map[string]any{"swap_count_7d": state.SwapCount7d}); err != nil {
+		return err
+	}
+	// 指数退避：近 7 天每多一次判死，静默翻倍（2h/4h/8h/...，封顶 24h）。
+	silence := r.replacementRetrySilence(ctx, state.AccountID, now)
+	state.RecoveryDeadline = timePtr(now.Add(silence))
+	// NextProbeAt 在静默下界之上正向散布：同一轮判死的多个账号若不散布会在
+	// 同一微秒集体复活，形成可聚类的同步换桶突发。
+	state.NextProbeAt = now.Add(r.spread(silence))
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// replacementRetrySilence 计算判死账号本轮的静默时长。
+// 计数包含刚刚写入的 replace_required 事件：第 1 次 2h，第 2 次 4h，依此类推。
+func (r *OpenAIDowngradeProbeRunner) replacementRetrySilence(ctx context.Context, accountID int64, now time.Time) time.Duration {
+	retryCount := 1
+	if counter, ok := r.store.(OpenAIDowngradeReplaceEventCounter); ok {
+		if n, err := counter.CountOpenAIDowngradeEvents(ctx, accountID,
+			OpenAIDowngradeEventReplaceRequired, now.Add(-openAIDowngradeReplacementCountWindow)); err == nil && n > 0 {
+			retryCount = n
+		}
+	}
+	silence := openAIDowngradeReplacementRetryBase
+	for i := 1; i < retryCount; i++ {
+		silence *= 2
+		if silence >= openAIDowngradeReplacementRetryMax {
+			return openAIDowngradeReplacementRetryMax
+		}
+	}
+	return silence
+}
+
+// retryReplacement 让判死账号在静默期满后重新获得救援机会：
+// Retry the current assigned route; historical swap budgets do not authorize a move.
+// 救活则经 finishRescue 重新上岗，失败则由 finishReplacement 安排下一轮翻倍静默。
+func (r *OpenAIDowngradeProbeRunner) retryReplacement(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	return r.beginReprobe(ctx, account, state, now)
+}
+
+func sameOpenAIProbeProxy(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// probeOpenAI429ResetTime 提取探针 429 的显式重置时间：优先 x-codex-* 响应头
+// （primary=周限/secondary=5h 窗口类限流，calculateOpenAI429ResetTime 自带
+// 「已打满的窗口优先」判定），其次响应体的 usage_limit_reached/resets_at
+// （用量耗尽类）。与真实流量路径同款解析器；nil 表示该 429 不带时间信息
+// （走短周期重探或风暴退避）。
+func probeOpenAI429ResetTime(headers http.Header, body []byte) *time.Time {
+	if resetAt := calculateOpenAI429ResetTime(headers); resetAt != nil {
+		return resetAt
+	}
+	if ts := parseOpenAIRateLimitResetTime(body); ts != nil {
+		resetAt := time.Unix(*ts, 0)
+		return &resetAt
+	}
+	return nil
+}
+
+func probeOpenAI429Window(headers http.Header) string {
+	snapshot := ParseCodexRateLimitHeaders(headers)
+	if snapshot == nil {
+		return "unknown_window"
+	}
+	if snapshot.PrimaryWindowMinutes != nil && snapshot.SecondaryWindowMinutes != nil &&
+		*snapshot.PrimaryWindowMinutes == *snapshot.SecondaryWindowMinutes {
+		return "unknown_window"
+	}
+	limits := snapshot.Normalize()
+	if limits == nil {
+		return "unknown_window"
+	}
+	if limits.Used7dPercent != nil && *limits.Used7dPercent >= 100 {
+		if limits.Window7dMinutes != nil && *limits.Window7dMinutes == 7*24*60 &&
+			limits.Reset7dSeconds != nil && *limits.Reset7dSeconds >= 0 {
+			return "7d_window"
+		}
+		// Do not relabel a known or ambiguous exhausted long window as short.
+		return "unknown_window"
+	}
+	if limits.Used5hPercent != nil && *limits.Used5hPercent >= 100 &&
+		limits.Window5hMinutes != nil && *limits.Window5hMinutes == 5*60 &&
+		limits.Reset5hSeconds != nil && *limits.Reset5hSeconds >= 0 {
+		return "5h_window"
+	}
+	return "unknown_window"
+}
+
+// SetRecentTrafficChecker 注入「账号近窗是否有真实推理流量」查询（usage_logs）。
+// 未注入时真实流量顺延逻辑整体关闭，行为与 r15 之前一致。
+func (r *OpenAIDowngradeProbeRunner) SetRecentTrafficChecker(
+	fn func(ctx context.Context, accountID int64, within time.Duration) bool,
+) {
+	if r == nil {
+		return
+	}
+	r.recentTraffic = fn
+}
+
+// applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户
+// 裁定：机制必须能检测到额度耗尽，耗尽号不能一直探）。两级：
+//  1. 429 带显式重置时间（x-codex-* 窗口头或 usage_limit_reached 体，真实
+//     流量路径同款解析）→ 下一针取 min(重置点+错峰, 现在+稀疏复查)（r17
+//     稀疏复查：重置不是固定的，供应商可能提前手动重置——长持有每天最多
+//     一针随机复查，重置点更近时自然收敛回重置点一侧）；重置点过近/过远
+//     分别落 floor/cap。分窗差异化：5h 短窗只顺探针不动账号；7d 显式周限
+//     额外单调延长真实流量冷却（到点自动放行）；未知窗口不猜分类。
+//  2. 不带时间信息的 429 连续达阈值 → 风暴退避 1 小时（spread 错开）；
+//     账号已处于限流持有中（rate_limit_reset_at 未到）的无信息 429 不进
+//     风暴闸——账号已被长退避摘出真实流量，1 小时连打正是 1029 事故形态，
+//     锚定已持久化的持有继续稀疏复查节奏。
+//
+// 非 429 且为上游真实接受（传输 OK 且 2xx）时，按 CAS 清除观察到的持有
+// （rate_limit_recheck_recovered）——这是官方重置/提前手动重置的检测回路
+// 终点，检测而非猜测，auto-reset 纪律不破。
+// 命中任一级时计数器一律不动（限流不是降智证据），落事件后返回 handled=true，
+// 所有 429 均返回 handled=true，包括普通短周期重探，不能落入失败/换号路径。
+// 官方重置的检测回路：错峰首针在重置点后落下一探，200 即回正常轨道；仍未
+// 重置则吃新 429 带新重置点继续顺延（自纠错）。
+// The streak is persisted with the probe mutation, including its commit fence.
+func (r *OpenAIDowngradeProbeRunner) applyRateLimitDeferral(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) (bool, error) {
+	if state == nil {
+		return false, nil
+	}
+	if result.HTTPStatus != http.StatusTooManyRequests {
+		state.Consecutive429s = 0
+		r.releaseObservedRateLimitOnAcceptedProbe(ctx, account, state, result, now)
+		return false, nil
+	}
+	if result.RateLimitResetAt != nil {
+		state.Consecutive429s = 0
+		resetAt := *result.RateLimitResetAt
+		window := result.RateLimitWindow
+		if window != "5h_window" && window != "7d_window" {
+			window = "unknown_window"
+		}
+		details := map[string]any{"class": window}
+		if floor := now.Add(openAIDowngradeRateLimitResetFloor); resetAt.Before(floor) {
+			resetAt = floor
+			details["floored"] = true
+		}
+		if capLimit := now.Add(openAIDowngradeRateLimitResetCap); resetAt.After(capLimit) {
+			resetAt = capLimit
+			details["capped"] = true
+		}
+		if window == "7d_window" {
+			store, ok := r.accountRepo.(OpenAIDowngradeRateLimitStore)
+			if !ok {
+				return true, errors.New("openai downgrade monotonic rate limit store unavailable")
+			}
+			if err := store.SetRateLimitedIfLater(ctx, state.AccountID, resetAt); err != nil {
+				return true, err
+			}
+		}
+		// 重置点后错峰首探：同窗口打满的多个账号不会在同一秒集体醒来（jitter
+		// 后 15-45min），「重置时刻整点回访」本身也是可聚类特征。r17 稀疏
+		// 复查：长持有不死等重置点——min(重置点+错峰, 现在+spread复查)，
+		// 复查每次重新抽签，无可聚类周期；5h 短窗的重置点恒早于复查侧，
+		// 行为不变；接近重置点时收敛回官方重置检测回路。
+		nextProbeAt := resetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger))
+		if recheck := now.Add(r.spread(openAIDowngradeRateLimitRecheckInterval)); recheck.Before(nextProbeAt) {
+			nextProbeAt = recheck
+			details["recheck"] = true
+		}
+		state.NextProbeAt = nextProbeAt
+		state.LastProbeAt = &now
+		state.UpdatedAt = now
+		details["reset_at"] = resetAt.Format(time.RFC3339)
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventRateLimitDeferred, details); err != nil {
+			return true, err
+		}
+		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	// 持有中的无时间信息 429：不进风暴闸、不计数（限流非降智证据），锚定
+	// 已持久化的持有走稀疏复查节奏。新证据（带重置点的 429 / 2xx 接受）由
+	// 对应分支自纠。未持有的账号保持原风暴退避语义。
+	if account != nil && account.RateLimitResetAt != nil && now.Before(*account.RateLimitResetAt) {
+		state.NextProbeAt = now.Add(r.spread(openAIDowngradeRateLimitRecheckInterval))
+		state.LastProbeAt = &now
+		state.UpdatedAt = now
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventRateLimitDeferred,
+			map[string]any{"class": "recheck_streak_suppressed"}); err != nil {
+			return true, err
+		}
+		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	// Saturate after escalation; a long outage must not overflow the counter.
+	if state.Consecutive429s < openAIDowngrade429StreakThreshold {
+		state.Consecutive429s = max(state.Consecutive429s, 0) + 1
+	} else {
+		state.Consecutive429s = openAIDowngrade429StreakThreshold
+	}
+	if state.Consecutive429s < openAIDowngrade429StreakThreshold {
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeRateLimitedRetryInterval))
+		state.LastProbeAt = &now
+		state.UpdatedAt = now
+		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	state.NextProbeAt = now.Add(r.spread(openAIDowngrade429StreakBackoff))
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventRateLimitDeferred,
+		map[string]any{"class": "streak", "count": state.Consecutive429s}); err != nil {
+		return true, err
+	}
+	return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// releaseObservedRateLimitOnAcceptedProbe 在账号处于限流持有期间收到上游真实
+// 接受（传输 OK 且 2xx）的探针结果时，按 CAS 语义清除「本针观察到的那一次
+// 持有」（2026-09-16 用户裁定「有时候可以手动重置」——检测而非猜测，恢复
+// 动作有上游证据，auto-reset 纪律不破）。CAS 只清观察到的 (limited_at,
+// reset_at) 对，探测期间他处延长/改写的持有不被覆盖，由后续探针自纠。任何
+// 失败只记日志：成功针的状态机处理不能被持有清除的副产物打断。
+func (r *OpenAIDowngradeProbeRunner) releaseObservedRateLimitOnAcceptedProbe(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) {
+	if r == nil || account == nil || state == nil || account.ID <= 0 {
+		return
+	}
+	if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
+		return
+	}
+	if !now.Before(*account.RateLimitResetAt) {
+		// 持有已自然过期：调度侧本就会放行，无需探针清理。
+		return
+	}
+	if !result.TransportOK || result.HTTPStatus < 200 || result.HTTPStatus >= 300 {
+		return
+	}
+	releaser, ok := r.accountRepo.(OpenAIDowngradeRateLimitReleaser)
+	if !ok {
+		return
+	}
+	cleared, err := releaser.ClearOpenAIRateLimitIfObserved(ctx, account.ID, *account.RateLimitedAt, *account.RateLimitResetAt)
+	if err != nil {
+		slog.Warn("openai_downgrade_rate_limit_release_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	if !cleared {
+		return
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventRateLimitRecheckRecovered,
+		map[string]any{
+			"reset_at": account.RateLimitResetAt.Format(time.RFC3339),
+			"http":     result.HTTPStatus,
+		}); err != nil {
+		slog.Warn("openai_downgrade_rate_limit_release_event_failed", "account_id", account.ID, "error", err)
+	}
+}
+
+// shouldDeferForRealTraffic 判断是否因近窗真实流量顺延本次常规探针。
+// 只在 runMu 临界区内（RunOnce→processState）调用，deferCounts 无需额外加锁。
+func (r *OpenAIDowngradeProbeRunner) shouldDeferForRealTraffic(ctx context.Context, accountID int64) bool {
+	if r == nil || r.recentTraffic == nil || r.deferCounts == nil {
+		return false
+	}
+	if r.deferCounts[accountID] >= openAIDowngradeMaxTrafficDeferrals {
+		// 连续顺延达上限：重置并照常探测，保证降智 canary 的覆盖上限。
+		r.deferCounts[accountID] = 0
+		return false
+	}
+	if !r.recentTraffic(ctx, accountID, openAIDowngradeRecentTrafficWindow) {
+		r.deferCounts[accountID] = 0
+		return false
+	}
+	r.deferCounts[accountID]++
+	return true
+}
+
+func (r *OpenAIDowngradeProbeRunner) jitter(interval time.Duration) time.Duration {
+	return time.Duration(float64(interval) * (0.5 + probeRandomFloat()))
+}
+
+// spread 只做正向散布（1.0x-1.25x），与 jitter 的对称抖动（0.5x-1.5x）不同：
+// 静默/冷却/判死等截止型排期有最小时长语义，不能被缩短。RunOnce 一轮内共享
+// 同一个 now，固定时长会让同批账号在同一微秒集体醒来（同 IP 集中探测、同时
+// 换桶），是可被上游聚类的同步突发；spread 保持下界不变，只错开醒来时刻。
+func (r *OpenAIDowngradeProbeRunner) spread(base time.Duration) time.Duration {
+	return time.Duration(float64(base) * (1 + 0.25*probeRandomFloat()))
+}
+
+func (r *OpenAIDowngradeProbeRunner) runProbe(ctx context.Context, account *Account, mode string) OpenAIDowngradeProbeResult {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	probe := r.probeFn
+	if probe == nil {
+		probe = r.probe
+	}
+	result := probe(ctx, account, mode)
+	result.Mode = mode
+	return result
+}
+
+func (r *OpenAIDowngradeProbeRunner) recordProbeResult(ctx context.Context, result *OpenAIDowngradeProbeResult) error {
+	if err := r.store.RecordOpenAIDowngradeProbe(ctx, result); err != nil {
+		return err
+	}
+	if result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden {
+		return r.accountRepo.SetError(ctx, result.AccountID, "OpenAI probe authentication failed")
+	}
+	return nil
+}
+
+func (r *OpenAIDowngradeProbeRunner) probe(
+	ctx context.Context,
+	account *Account,
+	mode string,
+) OpenAIDowngradeProbeResult {
+	started := time.Now()
+	result := OpenAIDowngradeProbeResult{
+		AccountID: account.ID,
+		ProxyID:   account.ProxyID,
+		Mode:      mode,
+	}
+	if r.tokenProvider == nil || r.httpUpstream == nil {
+		result.ErrorMessage = "probe dependencies unavailable"
+		result.Latency = time.Since(started)
+		return result
+	}
+	token, err := r.tokenProvider.GetAccessToken(ctx, account)
+	if err != nil {
+		result.ErrorMessage = "access token unavailable"
+		result.Latency = time.Since(started)
+		return result
+	}
+	var proxyURL string
+	if r.proxyRepo != nil {
+		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
+	} else {
+		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
+	}
+	if err != nil {
+		// 出口硬闸：解析不出桶代理就不发探针。直连会把家用 IP 暴露给
+		// chatgpt.com，且裸 Go TLS 指纹与账号流量冲突；无结论（不奖不罚）
+		// 等下一轮资格流程绑桶后再探。
+		result.ErrorMessage = "probe requires account proxy bucket"
+		result.Latency = time.Since(started)
+		return result
+	}
+
+	question := openAIDowngradeProbeNextQuestion(time.Now())
+	turn := newOpenAIDowngradeProbeTurn(account)
+	probeModel := "gpt-6-astra"
+	if mode == "sol_fallback" {
+		probeModel = "gpt-5.6-sol"
+	}
+	telemetryProfile := r.beginProbeTelemetry(account, turn, proxyURL, token, probeModel)
+	defer func() {
+		status := "failed"
+		if result.TransportOK && (result.HTTPStatus == 0 || result.HTTPStatus == http.StatusOK) {
+			status = "completed"
+		}
+		r.finishProbeTelemetry(telemetryProfile, status, started)
+	}()
+	requestProbe := func(stream bool) (int, http.Header, []byte, error) {
+		body, marshalErr := turn.buildRequestBody(probeModel, question.Text, stream)
+		if marshalErr != nil {
+			return 0, nil, nil, marshalErr
+		}
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexAPIURL, bytes.NewReader(body))
+		if requestErr != nil {
+			return 0, nil, nil, requestErr
+		}
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+		// 探针请求逐字段复刻真实 codex exec 单轮 turn 的头与体（2026-09-15 本机
+		// 0.151 抓包地面真值）：UA/originator=codex_exec、session-id/thread-id/
+		// x-client-request-id、x-codex-window-id、x-codex-turn-metadata、
+		// x-codex-beta-features；不带 version/openai-beta/origin/referer/accept-encoding。
+		turn.applyRequestHeaders(req.Header, stream)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Host = "chatgpt.com"
+		setOpenAIChatGPTAccountHeaders(req.Header, account)
+		account.ApplyHeaderOverrides(req.Header)
+
+		// 探针走一次性专用传输（DoProbeWithTLS）：与账号共享连接池隔离。
+		// 共享池中探针与真实 turn 同连接复用会被服务端按连接降级
+		// （2026-09-18 生产实证，0/N 全败于 200 全长流缺 usage，而同 body
+		// 的进程外冷连接 12/12 通过）；真实 codex exec 单轮本就是每进程
+		// 新连接，独占传输与真实形态一致。
+		var probeProfile *tlsfingerprint.Profile
+		if r.tlsProfiles != nil {
+			probeProfile = r.tlsProfiles.ResolveTLSProfile(account)
+		}
+		var resp *http.Response
+		resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+		if requestErr != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return 0, nil, nil, requestErr
+		}
+		if resp == nil {
+			return 0, nil, nil, errors.New("probe upstream returned no response")
+		}
+		responseBody, readErr := readOpenAIDowngradeProbeBody(resp.Body)
+		respHeader := resp.Header
+		statusCode := resp.StatusCode
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if readErr != nil {
+			return statusCode, respHeader, nil, readErr
+		}
+		return statusCode, respHeader, responseBody, nil
+	}
+
+	// 上游已实测拒绝非流式（HTTP 400 "Stream must be set to true"），
+	// 因此第一针直接走流式；非流式仅作为历史兼容路径保留在重试逻辑里。
+	status, respHeader, responseBody, requestErr := requestProbe(true)
+	result.Latency = time.Since(started)
+	if requestErr != nil {
+		result.ErrorMessage = "probe transport failed: " + requestErr.Error()
+		return result
+	}
+	if shouldRetryOpenAIDowngradeStreamProbe(status, responseBody) {
+		status, respHeader, responseBody, requestErr = requestProbe(true)
+		result.Latency = time.Since(started)
+		if requestErr != nil {
+			result.ErrorMessage = "probe stream retry failed: " + requestErr.Error()
+			return result
+		}
+	}
+	result.HTTPStatus = status
+	if status == http.StatusTooManyRequests {
+		// 429 带显式重置时间（x-codex-* 窗口头或 usage_limit_reached 体）就
+		// 提取出来交给调度层长退避——真实流量路径同款解析，探针侧此前完全不
+		// 判，导致耗尽号以 2.5-7.5min 短周期持续空打（1029 实测 3 小时 20 针）。
+		if resetAt := probeOpenAI429ResetTime(respHeader, responseBody); resetAt != nil {
+			result.RateLimitResetAt = resetAt
+			result.RateLimitWindow = probeOpenAI429Window(respHeader)
+		}
+	}
+	if status != http.StatusOK {
+		result.ErrorMessage = "probe upstream returned HTTP " + strconv.Itoa(status)
+		return result
+	}
+	result.applyResponse(responseBody, question.AnswerPattern)
+	if !result.TransportOK {
+		// r17e 取证（2026-09-18 资格探针 200-无-usage 裁决）：进程外复现（冻结/
+		// live body × uTLS/原生 × h1/h2）全部带 usage 通过，唯生产进程 0/N。此行
+		// 只在解析失败时落一条流级取证——终态事件是否到达、usage/reasoning 字段
+		// 是否存在、流尾字节（探针合成题库，无用户数据、无凭据）——把「服务端剥
+		// usage」与「流被截断/解析拒收」分开。答案文本截 120 字节防刷屏。
+		body := string(responseBody)
+		tail := body
+		if len(tail) > 240 {
+			tail = tail[len(tail)-240:]
+		}
+		slog.Warn("openai_probe_parse_failed_forensics",
+			"account_id", account.ID,
+			"mode", mode,
+			"bytes", len(body),
+			"data_records", strings.Count(body, "\ndata:")+strings.Count(body, "\r\ndata:"),
+			"has_terminal", strings.Contains(body, `"response.completed"`),
+			"has_usage", strings.Contains(body, `"usage"`),
+			"has_reasoning", strings.Contains(body, `"reasoning_tokens"`),
+			"tail", tail)
+	}
+	return result
+}
+
+func (r *OpenAIDowngradeProbeResult) applyResponse(body []byte, answerPattern *regexp.Regexp) {
+	r.AnswerCorrect, r.ReasoningTokens, r.Juice = parseOpenAIDowngradeProbeResponse(body, answerPattern)
+	// An incomplete body is not a wrong answer. Keep it out of all votes.
+	r.TransportOK = r.ReasoningTokens != nil
+	r.ErrorMessage = ""
+	if !r.TransportOK {
+		r.ErrorMessage = "probe response missing valid completion or reasoning usage"
+	}
+}
+
+func readOpenAIDowngradeProbeBody(reader io.Reader) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("probe response body unavailable")
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, openAIDowngradeProbeMaxBodyBytes+1))
+	if len(body) > openAIDowngradeProbeMaxBodyBytes {
+		return nil, errors.New("probe response body exceeds limit")
+	}
+	if err != nil && len(body) == 0 {
+		return nil, err
+	}
+	// A closed stream may already contain a complete terminal record.
+	// The parser, not partial bytes alone, decides whether it is usable.
+	return body, nil
+}
+
+// openAIDowngradeProbeTurn 是一次探针 turn 的完整身份构件，逐字段对齐真实
+// codex exec 单轮 turn（2026-09-15 本机 codex-cli 0.151.0 抓包地面真值，本地
+// 监听器捕获 /responses 请求，模板见 openai_downgrade_probe_template.go）。
+// session/thread/turn/window/context_window 全部用 uuid v7（真实 codex 的 ID
+// 均为时间有序形态，v4 会成为可识别差异）；installation_id 账号级恒定且与
+// machine 指纹身份同源，保证同一账号的探针 turn 与真实 turn 处在同一身份宇宙。
+type openAIDowngradeProbeTurn struct {
+	sessionID       string
+	threadID        string
+	turnID          string
+	windowID        string
+	contextWindowID string
+	installationID  string
+	version         string
+	turnMetaJSON    string
+	started         time.Time
+}
+
+func newOpenAIDowngradeProbeTurn(account *Account) *openAIDowngradeProbeTurn {
+	session := uuid.Must(uuid.NewV7()).String()
+	turnID := uuid.Must(uuid.NewV7()).String()
+	turn := &openAIDowngradeProbeTurn{
+		sessionID:       session,
+		threadID:        session, // exec 单轮：thread == session
+		turnID:          turnID,
+		windowID:        session + ":0",
+		contextWindowID: uuid.Must(uuid.NewV7()).String(),
+		installationID:  openAIDowngradeProbeInstallationID(account),
+		version:         codexClientVersionFromUA(codexCanonicalUserAgent()),
+		started:         time.Now(),
+	}
+	turn.turnMetaJSON = turn.marshalTurnMetadata()
+	return turn
+}
+
+// userAgent 生成 codex_exec 形态的规范 UA。探针本质是一次一次性提问，对应
+// 真实世界里 `codex exec "问题"` 的单轮 turn，故 originator 取 codex_exec 而
+// 非 TUI 的 codex-tui；版本段与全站生效版本同源（面板/自动同步/编译期兜底），
+// 后缀复用 codexCLIUserAgentSuffix，尾部 (originator; version) 组按本版本拼装。
+func (t *openAIDowngradeProbeTurn) userAgent() string {
+	return "codex_exec/" + t.version + codexCLIUserAgentSuffix + " (codex_exec; " + t.version + ")"
+}
+
+func (t *openAIDowngradeProbeTurn) originator() string { return "codex_exec" }
+
+// openAIDowngradeProbeTurnMetadata 与抓包同字段同顺序。sandbox="none" +
+// sandbox_mode="danger-full-access" 是用户真实配置（rewriteCodexMachineSandbox
+// 对平台无关的 none 原样保留，账号真实出站就是这个组合）；agent_name="/root"
+// 为本机 exec 会话的实测值。
+type openAIDowngradeProbeTurnMetadata struct {
+	InstallationID             string `json:"installation_id"`
+	SessionID                  string `json:"session_id"`
+	ThreadID                   string `json:"thread_id"`
+	AgentName                  string `json:"agent_name"`
+	TurnID                     string `json:"turn_id"`
+	WindowID                   string `json:"window_id"`
+	WindowNumber               int    `json:"window_number"`
+	ContextWindowID            string `json:"context_window_id"`
+	RequestKind                string `json:"request_kind"`
+	RootTurnID                 string `json:"root_turn_id"`
+	ThreadSource               string `json:"thread_source"`
+	Sandbox                    string `json:"sandbox"`
+	SandboxMode                string `json:"sandbox_mode"`
+	AutoReviewEnabled          bool   `json:"auto_review_enabled"`
+	NodeReplAutoReviewRequired bool   `json:"node_repl_auto_review_required"`
+	NodeReplDisabled           bool   `json:"node_repl_disabled"`
+	TurnStartedAtUnixMs        int64  `json:"turn_started_at_unix_ms"`
+}
+
+func (t *openAIDowngradeProbeTurn) marshalTurnMetadata() string {
+	meta, err := json.Marshal(openAIDowngradeProbeTurnMetadata{
+		InstallationID:      t.installationID,
+		SessionID:           t.sessionID,
+		ThreadID:            t.threadID,
+		AgentName:           "/root",
+		TurnID:              t.turnID,
+		WindowID:            t.windowID,
+		WindowNumber:        0,
+		ContextWindowID:     t.contextWindowID,
+		RequestKind:         "turn",
+		RootTurnID:          t.turnID,
+		ThreadSource:        "user",
+		Sandbox:             "none",
+		SandboxMode:         "danger-full-access",
+		TurnStartedAtUnixMs: t.started.UnixMilli(),
+	})
+	if err != nil {
+		return "{}"
+	}
+	return string(meta)
+}
+
+// openAIDowngradeProbeCWDPool 探针 environment_context 的工作目录池：
+// 真实 codex turn 的 input 首条是 developer 环境上下文，cwd 恒定会形成指纹，
+// 从通用开发目录形态的池里取。
+var openAIDowngradeProbeCWDPool = [...]string{
+	"/Users/liyunlong/dev/scratch",
+	"/Users/liyunlong/Documents/dev/notes",
+	"/Users/liyunlong/dev/tools",
+	"/Users/liyunlong/Projects/tmp-check",
+}
+
+func openAIDowngradeProbeEnvContext(now time.Time) string {
+	cwd := openAIDowngradeProbeCWDPool[rand.IntN(len(openAIDowngradeProbeCWDPool))]
+	gitRepo := "No"
+	if rand.IntN(2) == 0 {
+		gitRepo = "Yes"
+	}
+	return "<environment_context>\nTime: " + now.Format("Mon Jan 02 15:04:05 2006") +
+		"\nWorking directory: " + cwd +
+		"\nIs directory a git repo: " + gitRepo +
+		"\nPlatform: macos\nOS Version: 26.3.1\n</environment_context>"
+}
+
+// buildRequestBody 按真实 codex 形态组装 /responses 体：instructions/tools
+// 逐字节取自抓包模板，reasoning{effort,summary}/include/text.verbosity/
+// tool_choice/parallel_tool_calls/store/stream/prompt_cache_key 与抓包一致，
+// canary 题作为 user 消息跟在 developer 环境上下文之后。
+func (t *openAIDowngradeProbeTurn) buildRequestBody(model, question string, stream bool) ([]byte, error) {
+	payload := struct {
+		Model          string           `json:"model"`
+		Instructions   string           `json:"instructions"`
+		Input          []map[string]any `json:"input"`
+		Tools          json.RawMessage  `json:"tools"`
+		ToolChoice     string           `json:"tool_choice"`
+		ParallelCalls  bool             `json:"parallel_tool_calls"`
+		Reasoning      map[string]any   `json:"reasoning"`
+		Store          bool             `json:"store"`
+		Stream         bool             `json:"stream"`
+		Include        []string         `json:"include"`
+		PromptCacheKey string           `json:"prompt_cache_key"`
+		Text           map[string]any   `json:"text"`
+		ClientMetadata map[string]any   `json:"client_metadata"`
+	}{
+		Model:        model,
+		Instructions: openAIDowngradeProbeBaseInstructions,
+		Input: []map[string]any{
+			{"type": "message", "id": "msg_" + uuid.Must(uuid.NewV7()).String(), "role": "developer",
+				"content": []map[string]any{{"type": "input_text", "text": openAIDowngradeProbeEnvContext(t.started)}}},
+			{"type": "message", "id": "msg_" + uuid.Must(uuid.NewV7()).String(), "role": "user",
+				"content": []map[string]any{{"type": "input_text", "text": question}}},
+		},
+		Tools:          json.RawMessage(openAIDowngradeProbeToolsJSON),
+		ToolChoice:     "auto",
+		ParallelCalls:  true,
+		Reasoning:      map[string]any{"effort": "xhigh", "summary": "auto"},
+		Store:          false,
+		Stream:         stream,
+		Include:        []string{"reasoning.encrypted_content"},
+		PromptCacheKey: t.sessionID,
+		Text:           map[string]any{"verbosity": "medium"},
+		ClientMetadata: map[string]any{
+			"session_id":              t.sessionID,
+			"turn_id":                 t.turnID,
+			"thread_id":               t.threadID,
+			"root_turn_id":            t.turnID,
+			"x-codex-installation-id": t.installationID,
+			"x-codex-window-id":       t.windowID,
+			"x-codex-turn-metadata":   t.turnMetaJSON,
+		},
+	}
+	return json.Marshal(payload)
+}
+
+// applyRequestHeaders 与抓包逐头对齐：会话身份头（x-client-request-id ==
+// session-id == thread-id）、x-codex-window-id、x-codex-turn-metadata、
+// x-codex-beta-features；不带 version / openai-beta / origin / referer /
+// accept-encoding（真实 codex 全都不发，多一个头就是一处合成特征）。
+func (t *openAIDowngradeProbeTurn) applyRequestHeaders(h http.Header, stream bool) {
+	if h == nil {
+		return
+	}
+	if stream {
+		h.Set("Accept", "text/event-stream")
+	} else {
+		h.Set("Accept", "application/json")
+	}
+	h.Set("originator", t.originator())
+	h.Set("user-agent", t.userAgent())
+	h.Set("session-id", t.sessionID)
+	h.Set("thread-id", t.threadID)
+	h.Set("x-client-request-id", t.sessionID)
+	h.Set("x-codex-window-id", t.windowID)
+	h.Set("x-codex-beta-features", "prevent_idle_sleep,remote_compaction_v2")
+	h.Set("x-codex-turn-metadata", t.turnMetaJSON)
+}
+
+// openAIDowngradeProbeInstallNamespace 探针 installation_id 的账号级派生命名空间。
+var openAIDowngradeProbeInstallNamespace = uuid.MustParse("9c1f0a76-2f5e-4b8a-9d3c-6e0b2a5d4c88")
+
+// openAIDowngradeProbeInstallationID 账号级恒定：machine 指纹账号直接复用收敛
+// installation ID（与账号真实出站流量同一身份），其余账号从账号 ID 稳定派生。
+func openAIDowngradeProbeInstallationID(account *Account) string {
+	if account == nil {
+		return uuid.NewSHA1(openAIDowngradeProbeInstallNamespace, []byte("anonymous")).String()
+	}
+	if seed, ok := codexFingerprintSeed(account.Extra); ok && strings.TrimSpace(seed) != "" {
+		return resolveConvergedInstallationID(account, seed)
+	}
+	return uuid.NewSHA1(openAIDowngradeProbeInstallNamespace,
+		[]byte("openai-downgrade-probe-install:"+strconv.FormatInt(account.ID, 10))).String()
+}
+
+// beginProbeTelemetry 为探针 turn 补发与真实 turn 同源的客户端遥测。默认关闭
+// （openAIProbeTelemetryEnabled）：analytics 端点对探针形事件回 400，且遥测与
+// 探针共用上游连接会被服务端按连接降级（2026-09-18 生产实证，详见开关注释）；
+// 真实客户端丢遥测不构成异常特征。返回 nil 时 finishProbeTelemetry 安全空转。
+func (r *OpenAIDowngradeProbeRunner) beginProbeTelemetry(
+	account *Account, turn *openAIDowngradeProbeTurn, proxyURL, token, model string,
+) *openAICodexTelemetryProfile {
+	if r == nil || account == nil || turn == nil || !openAIProbeTelemetryEnabled() {
+		return nil
+	}
+	if r.httpUpstream == nil {
+		return nil
+	}
+	accountID := strings.TrimSpace(account.GetCredential("chatgpt_account_id"))
+	if token == "" || accountID == "" {
+		return nil
+	}
+	var tlsProfile *tlsfingerprint.Profile
+	if r.tlsProfiles != nil {
+		tlsProfile = r.tlsProfiles.ResolveTLSProfile(account)
+	}
+	manager := openAICodexTelemetryGlobal
+	manager.bindUpstream(r.httpUpstream)
+	profile := openAICodexTelemetryProfile{
+		client: openAICodexTelemetryIdentity{
+			account:     account,
+			accessToken: token,
+			accountID:   accountID,
+			proxyURL:    proxyURL,
+			userAgent:   turn.userAgent(),
+			originator:  turn.originator(),
+			version:     turn.version,
+			tlsProfile:  tlsProfile,
+		},
+		sessionID:   turn.sessionID,
+		threadID:    turn.threadID,
+		turnID:      turn.turnID,
+		rootTurnID:  turn.turnID,
+		model:       model,
+		effort:      "xhigh",
+		serviceTier: "default",
+		started:     turn.started,
+		turnMeta:    gjson.Parse(turn.turnMetaJSON),
+	}
+	profile.firstThread = manager.markThread(account.ID, profile.threadID, profile.started)
+	// 与真实会话同分布的工具事件抽样（对齐 beginOpenAICodexTelemetry）。
+	profile.dynamicTool = rand.IntN(5) < 2
+	profile.command = profile.dynamicTool && rand.IntN(2) == 0
+	profile.fileChange = rand.IntN(5) == 0
+	manager.enqueueAnalytics(openAICodexInitializationEvents(profile))
+	manager.touchMetrics(profile)
+	return &profile
+}
+
+// finishProbeTelemetry 提交探针 turn 的终止事件与指标（经 defer 调用，
+// status 取 completed/failed，与真实 turn 的终态语义一致）。
+func (r *OpenAIDowngradeProbeRunner) finishProbeTelemetry(profile *openAICodexTelemetryProfile, status string, started time.Time) {
+	if profile == nil {
+		return
+	}
+	finished := time.Now()
+	terminal := openAICodexTelemetryTerminal{
+		status:     status,
+		firstEvent: finished,
+		firstToken: finished,
+	}
+	openAICodexTelemetryGlobal.enqueueAnalytics(openAICodexTerminalEvents(*profile, terminal))
+	openAICodexTelemetryGlobal.recordTurnMetrics(*profile, terminal)
+}
+
+func shouldRetryOpenAIDowngradeStreamProbe(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	if !strings.Contains(lower, "stream") {
+		return false
+	}
+	return strings.Contains(lower, "unsupported") ||
+		strings.Contains(lower, "not support") ||
+		strings.Contains(lower, "invalid") ||
+		strings.Contains(lower, "must be true") ||
+		strings.Contains(lower, "only supports")
+}
+
+// parseOpenAIDowngradeProbeResponse 按该针题目专属的期望答案正则判分；
+// 正则由题域生成器构造（数字带边界 / 星期X 字面），见
+// openai_downgrade_probe_questions.go。
+func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp) (bool, *int, *int) {
+	if answerPattern == nil || len(body) > openAIDowngradeProbeMaxBodyBytes {
+		return false, nil, nil
+	}
+	decode := func(data []byte) (map[string]any, bool) {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		var value map[string]any
+		if decoder.Decode(&value) != nil || value == nil {
+			return nil, false
+		}
+		var trailing any
+		return value, decoder.Decode(&trailing) == io.EOF
+	}
+	completion, isJSON := decode(body)
+	var deltas strings.Builder
+	var itemDoneText strings.Builder
+	allowLegacyDeltas := false
+	if !isJSON {
+		var eventName string
+		var dataLines []string
+		var responseID, deltaLane string
+		mixedDeltaLanes := false
+		acceptID := func(value any) bool {
+			if value == nil {
+				return true
+			}
+			id, ok := value.(string)
+			if !ok || id == "" || (responseID != "" && responseID != id) {
+				return false
+			}
+			responseID = id
+			return true
+		}
+		consume := func() bool {
+			if len(dataLines) == 0 {
+				return true
+			}
+			data := strings.Join(dataLines, "\n")
+			if data == "[DONE]" {
+				return completion != nil && (eventName == "" || eventName == "message")
+			}
+			event, ok := decode([]byte(data))
+			if !ok || completion != nil {
+				return false
+			}
+			kind, validKind := event["type"].(string)
+			if _, exists := event["type"]; exists && (!validKind || kind == "") {
+				return false
+			}
+			if eventName != "" && eventName != "message" {
+				if kind != "" && kind != eventName {
+					return false
+				}
+				kind = eventName
+			}
+			response, nested := event["response"].(map[string]any)
+			if _, exists := event["response"]; exists && !nested {
+				return false
+			}
+			if !acceptID(event["response_id"]) || (nested && !acceptID(response["id"])) {
+				return false
+			}
+			switch kind {
+			case "response.failed", "response.incomplete", "error":
+				return false
+			case "response.output_text.delta":
+				delta, ok := event["delta"].(string)
+				if !ok {
+					return false
+				}
+				lane, err := json.Marshal([]any{event["item_id"], event["output_index"], event["content_index"]})
+				if err != nil {
+					return false
+				}
+				if deltaLane != "" && deltaLane != string(lane) {
+					mixedDeltaLanes = true
+				}
+				deltaLane = string(lane)
+				deltas.WriteString(delta)
+			case "response.output_item.done":
+				// 2026-09-18 服务端流形态变更（冻结流实证）：终态 response.completed
+				// 不再回显 output 条目（response.output=[]），答案全文改经
+				// output_item.done 的 message 条目交付。此处与终态 output 数组
+				// 走查同一规则累积文本；旧形态（终态带回显）优先级在前不受影响。
+				// item 事件无 response_id，acceptID(nil) 天然放行。
+				item, valid := event["item"].(map[string]any)
+				if !valid {
+					return false
+				}
+				if !appendOpenAIProbeItemOutputText(&itemDoneText, item) {
+					return false
+				}
+			case "response.completed":
+				completion = event
+				if nested {
+					completion = response
+				} else if !acceptID(event["id"]) {
+					return false
+				}
+				// Only the legacy terminal shape can omit the final output.
+				allowLegacyDeltas = !nested && !mixedDeltaLanes
+			}
+			return true
+		}
+		// Dispatch only complete SSE records; a partial terminal record is
+		// not evidence even when its last JSON line happens to parse.
+		stream := strings.ReplaceAll(strings.ReplaceAll(string(body), "\r\n", "\n"), "\r", "\n")
+		for _, line := range strings.Split(strings.TrimSuffix(stream, "\n"), "\n") {
+			if line == "" {
+				if !consume() {
+					return false, nil, nil
+				}
+				eventName, dataLines = "", nil
+				continue
+			}
+			field, value, _ := strings.Cut(line, ":")
+			value = strings.TrimPrefix(value, " ")
+			switch field {
+			case "event":
+				eventName = value
+			case "data":
+				dataLines = append(dataLines, value)
+			}
+		}
+		if completion == nil || len(dataLines) != 0 {
+			return false, nil, nil
+		}
+	}
+	if value, exists := completion["response"]; isJSON && exists {
+		nested, ok := value.(map[string]any)
+		if !ok || completion["type"] != "response.completed" {
+			return false, nil, nil
+		}
+		completion = nested
+	}
+	if kind, exists := completion["type"]; exists && kind != "response" && kind != "response.completed" {
+		return false, nil, nil
+	}
+	if status, exists := completion["status"]; exists && status != "completed" {
+		return false, nil, nil
+	}
+	if completion["error"] != nil || completion["incomplete_details"] != nil {
+		return false, nil, nil
+	}
+	usage, ok := completion["usage"].(map[string]any)
+	if !ok {
+		return false, nil, nil
+	}
+	// Do not search output, metadata or echoed input for usage counters.
+	var reasoningTokens, juice *int
+	var details map[string]any
+	if value, exists := usage["output_tokens_details"]; exists {
+		details, ok = value.(map[string]any)
+		if !ok {
+			return false, nil, nil
+		}
+	}
+	for _, counters := range []map[string]any{usage, details} {
+		if value, exists := counters["reasoning_tokens"]; exists {
+			n, valid := jsonNumberAsInt(value)
+			if !valid || (reasoningTokens != nil && *reasoningTokens != n) {
+				return false, nil, nil
+			}
+			reasoningTokens = &n
+		}
+	}
+	if reasoningTokens == nil {
+		return false, nil, nil
+	}
+	if value, exists := usage["juice"]; exists {
+		n, valid := jsonNumberAsInt(value)
+		if !valid {
+			return false, nil, nil
+		}
+		juice = &n
+	}
+	var text strings.Builder
+	terminalOutputEmpty := true
+	if value, exists := completion["output"]; exists {
+		output, ok := value.([]any)
+		if !ok {
+			return false, nil, nil
+		}
+		terminalOutputEmpty = len(output) == 0
+		for _, value := range output {
+			item, ok := value.(map[string]any)
+			if !ok {
+				return false, nil, nil
+			}
+			if !appendOpenAIProbeItemOutputText(&text, item) {
+				return false, nil, nil
+			}
+		}
+	}
+	if terminalOutputEmpty && itemDoneText.Len() > 0 {
+		// 新形态（2026-09-18 服务端流形态变更，冻结流实证）：终态不再回显
+		// output 条目——键可能缺席，也可能在场但为空数组，两种都算空回显。
+		// 答案全文改经 output_item.done 的 message 条目交付，此处回退到条目
+		// 终文。排在 delta 兜底之前：条目是权威交付形态，delta 只是过程流。
+		text.WriteString(itemDoneText.String())
+	}
+	if terminalOutputEmpty && text.Len() == 0 && allowLegacyDeltas {
+		text.WriteString(deltas.String())
+	}
+	if text.Len() == 0 {
+		return false, nil, nil
+	}
+	return answerPattern != nil && answerPattern.MatchString(text.String()), reasoningTokens, juice
+}
+
+// appendOpenAIProbeItemOutputText 按终态 output 数组同款规则走查单个输出条目：
+// 跳过非 message / 非 assistant 条目；status 非 completed 视为结构损坏（与终态
+// 走查的硬拒一致）；output_text 部件逐段追加、每段尾随 \n（与旧终态行为逐字节
+// 一致）。终态回显路径与 output_item.done 路径共用，保证两形态判分同源同规则。
+func appendOpenAIProbeItemOutputText(dst *strings.Builder, item map[string]any) bool {
+	if kind, exists := item["type"]; exists && kind != "message" {
+		return true
+	}
+	if role, exists := item["role"]; exists && role != "assistant" {
+		return true
+	}
+	if status, exists := item["status"]; exists && status != "completed" {
+		return false
+	}
+	content, ok := item["content"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range content {
+		part, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		if kind, exists := part["type"]; exists && kind != "output_text" {
+			continue
+		}
+		text, ok := part["text"].(string)
+		if !ok {
+			return false
+		}
+		dst.WriteString(text)
+		dst.WriteByte('\n')
+	}
+	return true
+}
+
+func jsonNumberAsInt(value any) (int, bool) {
+	switch n := value.(type) {
+	case float64:
+		if n < 0 || n >= float64(uint64(1)<<(strconv.IntSize-1)) {
+			return 0, false
+		}
+		i := int(n)
+		return i, float64(i) == n
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil && i >= 0 && int64(int(i)) == i
+	case int:
+		return n, n >= 0
+	case int64:
+		return int(n), n >= 0 && int64(int(n)) == n
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		return i, err == nil && i >= 0
+	default:
+		return 0, false
+	}
+}
+
+func probeRandomFloat() float64 {
+	// crypto/rand is intentionally not required for scheduling jitter; this
+	// only prevents pool-wide synchronization and carries no security meaning.
+	return rand.Float64()
+}
+
+func timePtr(value time.Time) *time.Time { return &value }
+
+type OpenAIDowngradeBucket struct {
+	ProxyID      int64   `json:"proxy_id"`
+	Name         string  `json:"name"`
+	Role         string  `json:"role"`
+	ExitIP       string  `json:"exit_ip"`
+	Capacity     int     `json:"capacity"`
+	RiskScore    int     `json:"risk_score"`
+	AccountIDs   []int64 `json:"account_ids"`
+	HealthyCount int     `json:"healthy_count"`
+	CircuitCount int     `json:"circuit_count"`
+	ReprobeCount int     `json:"reprobe_count"`
+	ReplaceCount int     `json:"replace_count"`
+	AtCapacity   bool    `json:"at_capacity"`
+}
+
+type OpenAIDowngradeDashboard struct {
+	Buckets               []OpenAIDowngradeBucket      `json:"buckets"`
+	RecentEvents          []OpenAIDowngradeEvent       `json:"recent_events"`
+	AccountStats          []OpenAIDowngradeAccountStat `json:"account_stats"`
+	ProbeCount24h         int64                        `json:"probe_count_24h"`
+	SuccessCount24h       int64                        `json:"success_count_24h"`
+	DegradedAccountCount  int64                        `json:"degraded_account_count"`
+	AtCapacityBucketCount int64                        `json:"at_capacity_bucket_count"`
+}
+
+type OpenAIDowngradeEvent struct {
+	ID        int64          `json:"id"`
+	AccountID *int64         `json:"account_id,omitempty"`
+	ProxyID   *int64         `json:"proxy_id,omitempty"`
+	EventType string         `json:"event_type"`
+	Details   map[string]any `json:"details"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type OpenAIDowngradeAccountStat struct {
+	AccountID           int64      `json:"account_id"`
+	State               string     `json:"state"`
+	ProbeMode           string     `json:"probe_mode"`
+	Schedulable         bool       `json:"schedulable"`
+	ProxyID             *int64     `json:"proxy_id,omitempty"`
+	ProxyExitIP         string     `json:"proxy_exit_ip,omitempty"`
+	ProbeCount24h       int64      `json:"probe_count_24h"`
+	SuccessCount24h     int64      `json:"success_count_24h"`
+	SuccessRate24h      float64    `json:"success_rate_24h"`
+	AvgReasoningTokens  *float64   `json:"avg_reasoning_tokens,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	LastProbeAt         *time.Time `json:"last_probe_at,omitempty"`
+}

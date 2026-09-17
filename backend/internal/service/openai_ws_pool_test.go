@@ -151,8 +151,9 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsync(t *testing.T) {
 	ap := pool.getOrCreateAccountPool(accountID)
 	ap.mu.Lock()
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	}
 	ap.mu.Unlock()
 
@@ -189,8 +190,9 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncCooldown(t *testing.T) {
 	ap := pool.getOrCreateAccountPool(accountID)
 	ap.mu.Lock()
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	}
 	ap.mu.Unlock()
 
@@ -246,8 +248,9 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncFailureSuppress(t *testing.T) {
 	ap := pool.getOrCreateAccountPool(accountID)
 	ap.mu.Lock()
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	}
 	ap.mu.Unlock()
 
@@ -296,8 +299,9 @@ func TestOpenAIWSConnPool_AcquireQueueWaitMetrics(t *testing.T) {
 	ap.mu.Lock()
 	ap.conns[conn.id] = conn
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	}
 	ap.mu.Unlock()
 
@@ -307,8 +311,9 @@ func TestOpenAIWSConnPool_AcquireQueueWaitMetrics(t *testing.T) {
 	}()
 
 	lease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, lease)
@@ -332,8 +337,10 @@ func TestOpenAIWSConnPool_DialSuccessWakesTopologyWaiterAndCanceledWaiterDoesNot
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 991, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	req := openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses"}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 991, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	req := openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses"}
 
 	type result struct {
 		lease *openAIWSConnLease
@@ -407,7 +414,8 @@ func TestOpenAIWSConnPool_PrewarmHintChangeDoesNotInvalidateHealthyDial(t *testi
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 992, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 992, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	oldHeaders := make(http.Header)
 	oldHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex")
 	newHeaders := make(http.Header)
@@ -415,9 +423,10 @@ func TestOpenAIWSConnPool_PrewarmHintChangeDoesNotInvalidateHealthyDial(t *testi
 	ap := pool.getOrCreateAccountPool(account.ID)
 	ap.mu.Lock()
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: oldHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  oldHeaders,
 	}
 	ap.mu.Unlock()
 
@@ -429,9 +438,10 @@ func TestOpenAIWSConnPool_PrewarmHintChangeDoesNotInvalidateHealthyDial(t *testi
 	// not discard an otherwise compatible connection.
 	ap.mu.Lock()
 	ap.lastAcquire = &openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: newHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  newHeaders,
 	}
 	ap.mu.Unlock()
 	close(dialer.releaseFirst)
@@ -459,8 +469,10 @@ func TestOpenAIWSConnPool_ClearAccountWakesIncompatibleTopologyWaiter(t *testing
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 993, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	baseReq := openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses"}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 993, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	baseReq := openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses"}
 	betaAReq := baseReq
 	betaAReq.Headers = http.Header{"X-Codex-Beta-Features": {"feature_a"}}
 	betaBReq := baseReq
@@ -503,8 +515,10 @@ func TestOpenAIWSConnPool_ClearAccountDoesNotReviveInFlightDialGeneration(t *tes
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 994, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	req := openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses"}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 994, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	req := openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses"}
 
 	type result struct {
 		lease *openAIWSConnLease
@@ -548,14 +562,16 @@ func TestOpenAIWSConnPool_ForceNewConnSkipsReuse(t *testing.T) {
 	account := &Account{ID: 123, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 
 	lease1, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, lease1)
 	lease1.Release()
 
 	lease2, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:     openAITransportTestRoute(account),
 		Account:      account,
 		WSURL:        "wss://example.com/v1/responses",
 		ForceNewConn: true,
@@ -579,8 +595,9 @@ func TestOpenAIWSConnPool_AcquireReusesOnlyMatchingBetaFeatures(t *testing.T) {
 
 	account := &Account{ID: 128, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	baseReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	}
 
 	plainLease, err := pool.Acquire(context.Background(), baseReq)
@@ -606,6 +623,7 @@ func TestOpenAIWSConnPool_AcquireReusesOnlyMatchingBetaFeatures(t *testing.T) {
 	reorderedLease.Release()
 
 	_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              baseReq.WSURL,
 		Headers:            betaReq.Headers,
@@ -625,6 +643,7 @@ func TestOpenAIWSConnPool_AcquireReusesOnlyMatchingBetaFeatures(t *testing.T) {
 
 func activeCodexFingerprintPoolAccountForTest(id int64) *Account {
 	return &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       id,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -662,9 +681,10 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	headers.Set("x-codex-turn-metadata", `{"turn_id":"turn-a"}`)
 
 	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: headers,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  headers,
 	})
 	require.NoError(t, err)
 	firstConnID := first.ConnID()
@@ -675,9 +695,10 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	nextHeaders.Set("x-codex-turn-metadata", `{"turn_id":"turn-b"}`)
 	nextHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex;tier=priority")
 	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: nextHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  nextHeaders,
 	})
 	require.NoError(t, err)
 	require.True(t, second.Reused())
@@ -711,9 +732,10 @@ func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.
 			account := activeCodexFingerprintPoolAccountForTest(133)
 
 			first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-				Account: account,
-				WSURL:   "wss://example.com/v1/responses",
-				Headers: stableOpenAIWSIdentityHeadersForTest(),
+				ProxyURL: openAITransportTestRoute(account),
+				Account:  account,
+				WSURL:    "wss://example.com/v1/responses",
+				Headers:  stableOpenAIWSIdentityHeadersForTest(),
 			})
 			require.NoError(t, err)
 			firstConnID := first.ConnID()
@@ -722,9 +744,10 @@ func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.
 			nextHeaders := stableOpenAIWSIdentityHeadersForTest()
 			nextHeaders.Set(tt.header, tt.value)
 			second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-				Account: account,
-				WSURL:   "wss://example.com/v1/responses",
-				Headers: nextHeaders,
+				ProxyURL: openAITransportTestRoute(account),
+				Account:  account,
+				WSURL:    "wss://example.com/v1/responses",
+				Headers:  nextHeaders,
 			})
 			require.NoError(t, err)
 			require.False(t, second.Reused())
@@ -749,9 +772,10 @@ func TestOpenAIWSConnPool_AcquireRoutingHintRemainsSoftAffinity(t *testing.T) {
 	firstHeaders := stableOpenAIWSIdentityHeadersForTest()
 	firstHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex")
 	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: firstHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  firstHeaders,
 	})
 	require.NoError(t, err)
 	firstConnID := first.ConnID()
@@ -760,9 +784,10 @@ func TestOpenAIWSConnPool_AcquireRoutingHintRemainsSoftAffinity(t *testing.T) {
 	secondHeaders := stableOpenAIWSIdentityHeadersForTest()
 	secondHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex;tier=priority")
 	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: secondHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  secondHeaders,
 	})
 	require.NoError(t, err)
 	require.True(t, second.Reused())
@@ -785,9 +810,10 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 
 	firstHeaders := stableOpenAIWSIdentityHeadersForTest()
 	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: firstHeaders,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  firstHeaders,
 	})
 	require.NoError(t, err)
 	firstConnID := first.ConnID()
@@ -800,9 +826,10 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 	sessionChanged.Set("x-client-request-id", "client-request-b")
 	sessionChanged.Set("x-codex-window-id", "window-b")
 	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: sessionChanged,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  sessionChanged,
 	})
 	require.NoError(t, err)
 	require.True(t, second.Reused())
@@ -812,9 +839,10 @@ func TestOpenAIWSConnPool_DeviceModeKeysOnlyInstallationIdentity(t *testing.T) {
 	installationChanged := sessionChanged.Clone()
 	installationChanged.Set("x-codex-installation-id", "install-b")
 	third, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: installationChanged,
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  installationChanged,
 	})
 	require.NoError(t, err)
 	require.False(t, third.Reused())
@@ -835,17 +863,19 @@ func TestOpenAIWSConnPool_AcquireReplacesIdleConnWithDifferentBetaFeatures(t *te
 
 	account := &Account{ID: 129, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	plainLease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.NoError(t, err)
 	plainConnID := plainLease.ConnID()
 	plainLease.Release()
 
 	betaLease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
-		Headers: http.Header{"X-Codex-Beta-Features": {"remote_compaction_v2"}},
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
+		Headers:  http.Header{"X-Codex-Beta-Features": {"remote_compaction_v2"}},
 	})
 	require.NoError(t, err)
 	require.False(t, betaLease.Reused())
@@ -865,7 +895,8 @@ func TestOpenAIWSConnPool_AcquireWaitsForBusyIncompatibleConnection(t *testing.T
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
 	account := &Account{ID: 130, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
-	baseReq := openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses"}
+	baseReq := openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses"}
 
 	plainLease, err := pool.Acquire(context.Background(), baseReq)
 	require.NoError(t, err)
@@ -909,7 +940,8 @@ func TestOpenAIWSConnPool_AcquireReplacesIncompatibleIdleWhenMatchingBusy(t *tes
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
 	account := &Account{ID: 131, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
-	baseReq := openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses"}
+	baseReq := openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses"}
 
 	plainLease, err := pool.Acquire(context.Background(), baseReq)
 	require.NoError(t, err)
@@ -947,6 +979,7 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnUnavailable(t *testing.T) {
 	ap.mu.Unlock()
 
 	_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              "wss://example.com/v1/responses",
 		ForcePreferredConn: true,
@@ -954,6 +987,7 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnUnavailable(t *testing.T) {
 	require.ErrorIs(t, err, errOpenAIWSPreferredConnUnavailable)
 
 	_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              "wss://example.com/v1/responses",
 		PreferredConnID:    "missing_conn",
@@ -989,6 +1023,7 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnQueuesOnPreferredOnly(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	lease, err := pool.Acquire(ctx, openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              "wss://example.com/v1/responses",
 		PreferredConnID:    preferredConn.id,
@@ -1022,6 +1057,7 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnDirectAndQueueFull(t *testing
 	ap.mu.Unlock()
 
 	lease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              "wss://example.com/v1/responses",
 		PreferredConnID:    preferredConn.id,
@@ -1034,6 +1070,7 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnDirectAndQueueFull(t *testing
 	require.True(t, preferredConn.tryAcquire())
 	preferredConn.waiters.Store(1)
 	_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL:           openAITransportTestRoute(account),
 		Account:            account,
 		WSURL:              "wss://example.com/v1/responses",
 		PreferredConnID:    preferredConn.id,
@@ -1134,10 +1171,12 @@ func TestOpenAIWSConnPool_EffectiveMaxConnsByAccount(t *testing.T) {
 
 	pool := newOpenAIWSConnPool(cfg)
 
-	oauthHigh := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 10}
+	oauthHigh := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 10}
 	require.Equal(t, 8, pool.effectiveMaxConnsByAccount(oauthHigh), "应受全局硬上限约束")
 
-	oauthLow := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 3}
+	oauthLow := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 3}
 	require.Equal(t, 3, pool.effectiveMaxConnsByAccount(oauthLow))
 
 	apiKeyHigh := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 10}
@@ -1146,7 +1185,8 @@ func TestOpenAIWSConnPool_EffectiveMaxConnsByAccount(t *testing.T) {
 	apiKeyLow := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1}
 	require.Equal(t, 1, pool.effectiveMaxConnsByAccount(apiKeyLow), "最小值应保持为 1")
 
-	unlimited := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 0}
+	unlimited := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 0}
 	require.Equal(t, 8, pool.effectiveMaxConnsByAccount(unlimited), "无限并发应回退到全局硬上限")
 
 	require.Equal(t, 8, pool.effectiveMaxConnsByAccount(nil), "缺少账号上下文应回退到全局硬上限")
@@ -1160,7 +1200,8 @@ func TestOpenAIWSConnPool_EffectiveMaxConnsDisabledFallbackHardCap(t *testing.T)
 	cfg.Gateway.OpenAIWS.APIKeyMaxConnsFactor = 1.0
 
 	pool := newOpenAIWSConnPool(cfg)
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 2}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 2}
 	require.Equal(t, 8, pool.effectiveMaxConnsByAccount(account), "关闭动态模式后应保持旧行为")
 }
 
@@ -1174,7 +1215,8 @@ func TestOpenAIWSConnPool_EffectiveMaxConnsByAccount_ModeRouterV2RespectsHardCap
 
 	pool := newOpenAIWSConnPool(cfg)
 
-	high := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 20}
+	high := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 20}
 	require.Equal(t, 8, pool.effectiveMaxConnsByAccount(high), "v2 路径也必须受连接池硬上限约束")
 
 	nonPositive := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 0}
@@ -1187,10 +1229,12 @@ func TestOpenAIWSConnPool_AcquireRejectsWhenEffectiveMaxConnsIsZero(t *testing.T
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 8
 	pool := newOpenAIWSConnPool(cfg)
 
-	account := &Account{ID: 901, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 0}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 901, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 0}
 	_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.ErrorIs(t, err, errOpenAIWSConnQueueFull)
 }
@@ -1422,6 +1466,12 @@ func TestOpenAIWSConnPool_RunBackgroundCleanupSweep_SkipsInvalidAndUsesAccountCa
 	stale.lastUsedNano.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	ap.conns[stale.id] = stale
 	ap.lastAcquire = &openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(&Account{
+			ID:          accountID,
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Concurrency: 1,
+		}),
 		Account: &Account{
 			ID:          accountID,
 			Platform:    PlatformOpenAI,
@@ -1981,8 +2031,9 @@ func TestOpenAIWSConnPool_TargetConnCountAndPrewarmBranches(t *testing.T) {
 
 	// prewarm: account pool 缺失时，拨号后的连接应被关闭并提前返回
 	req := openAIWSAcquireRequest{
-		Account: &Account{ID: 999, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(&Account{ID: 999, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}),
+		Account:  &Account{ID: 999, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		WSURL:    "wss://example.com/v1/responses",
 	}
 	pool.prewarmConns(999, req, 1)
 
@@ -2008,8 +2059,9 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 
 	pool := newOpenAIWSConnPool(&config.Config{})
 	_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: &Account{ID: 1},
-		WSURL:   "   ",
+		ProxyURL: openAITransportTestRoute(&Account{ID: 1}),
+		Account:  &Account{ID: 1},
+		WSURL:    "   ",
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ws url is empty")
@@ -2026,8 +2078,9 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 	ap.lastCleanupAt = time.Now()
 	ap.mu.Unlock()
 	_, err = fullPool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.ErrorIs(t, err, errOpenAIWSConnClosed)
 
@@ -2042,8 +2095,9 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 	ap2.lastCleanupAt = time.Now()
 	ap2.mu.Unlock()
 	_, err = fullPool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account2,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account2),
+		Account:  account2,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.ErrorIs(t, err, errOpenAIWSConnQueueFull)
 }
@@ -2368,8 +2422,9 @@ func TestOpenAIWSConnPool_DialConnNilConnection(t *testing.T) {
 	account := &Account{ID: 91, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 
 	_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   "wss://example.com/v1/responses",
+		ProxyURL: openAITransportTestRoute(account),
+		Account:  account,
+		WSURL:    "wss://example.com/v1/responses",
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil connection")

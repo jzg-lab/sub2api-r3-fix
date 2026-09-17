@@ -34,6 +34,7 @@ func TestAccountTestService_OpenAIImageOAuthHandlesOutputItemDoneFallback(t *tes
 	}
 	svc := &AccountTestService{httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       53,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,

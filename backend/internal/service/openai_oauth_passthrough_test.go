@@ -110,6 +110,7 @@ func TestOpenAIGatewayService_ResponsesUnknownModelDoesNotFallbackToGPT54(t *tes
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          123,
 		Name:        "acc",
 		Platform:    PlatformOpenAI,
@@ -147,6 +148,7 @@ func TestOpenAIGatewayService_OAuthResponsesPromotesSystemMessageWithoutDuplicat
 	upstream := &httpUpstreamRecorder{err: errors.New("stop after capture")}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          124,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -241,6 +243,7 @@ func TestOpenAIGatewayService_OAuthMessagesBridgeDoesNotInjectDefaultInstruction
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          123,
 		Name:        "acc",
 		Platform:    PlatformOpenAI,
@@ -424,6 +427,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_StreamKeepsToolNameAndBodyNormali
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -488,6 +492,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_GroupForceOpenAIFastInjectsMissin
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 123, Name: "oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra:       map[string]any{"openai_passthrough": true}, Status: StatusActive, Schedulable: true,
@@ -547,6 +552,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_PreservesNamespaceRequest(t *test
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 125, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra:       map[string]any{"openai_passthrough": true}, Status: StatusActive, Schedulable: true, RateMultiplier: f64p(1),
@@ -616,6 +622,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_FlattenEnabledNamespaceRequestAnd
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 123, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra: map[string]any{
@@ -676,6 +683,7 @@ func TestOpenAIGatewayService_NativeOAuth_FlattenEnabledNamespaceRequestAndStrea
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 124, Name: "native", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra:       map[string]any{"openai_responses_flatten_namespaces": true},
@@ -763,6 +771,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_FlattenEnabledNamespaceCollisionR
 	upstream := &httpUpstreamRecorder{}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 123, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra: map[string]any{
@@ -806,6 +815,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_CompactUsesJSONAndKeepsNonStreami
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          123,
 		Name:        "acc",
 		Platform:    PlatformOpenAI,
@@ -868,6 +878,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_UpstreamRequestIgnoresClientCance
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -916,6 +927,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexMissingInstructionsGetsDefau
 			}}
 			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 			account := &Account{
+				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 				ID: 123, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 				Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 				Extra:       map[string]any{"openai_passthrough": true, "openai_oauth_responses_websockets_v2_mode": OpenAIWSIngressModeOff},
@@ -960,6 +972,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_DisabledUsesLegacyTransform(t *te
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -997,6 +1010,7 @@ func TestOpenAIGatewayService_OAuthLegacy_GroupForceOpenAIFastInjectsMissingTier
 	svc.cfg = &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}}
 	svc.httpUpstream = upstream
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 123, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra:       map[string]any{"openai_passthrough": false, "openai_oauth_responses_websockets_v2_mode": OpenAIWSIngressModeOff},
@@ -1031,6 +1045,7 @@ func TestOpenAIGatewayService_OAuthLegacy_GroupForceStillHonorsGlobalFilter(t *t
 	svc.cfg = &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}}
 	svc.httpUpstream = upstream
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 123, Name: "acc", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Extra:       map[string]any{"openai_passthrough": false, "openai_oauth_responses_websockets_v2_mode": OpenAIWSIngressModeOff},
@@ -1075,6 +1090,7 @@ func TestOpenAIGatewayService_OAuthLegacy_UpstreamRequestIgnoresClientCancel(t *
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -1118,6 +1134,7 @@ func TestOpenAIGatewayService_OAuthLegacy_CompositeCodexUAUsesCodexOriginator(t 
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -1179,6 +1196,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_ResponseHeadersAllowXCodex(t *tes
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -1221,6 +1239,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_UpstreamErrorIncludesPassthroughF
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -1650,6 +1669,7 @@ func TestOpenAIGatewayService_OpenAIPassthrough_RetryableStatusesTriggerFailover
 			}
 
 			account := newAccount(tc.accountType)
+			assignOpenAITransportTestProxy(account)
 			start := time.Now()
 			_, err := svc.Forward(context.Background(), c, account, originalBody)
 			require.Error(t, err)
@@ -1920,6 +1940,7 @@ func TestOpenAIGatewayService_OpenAIPassthrough_CompactNetworkErrorsTriggerFailo
 				httpUpstream: upstream,
 			}
 			account := &Account{
+				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 				ID:             123,
 				Name:           "acc",
 				Platform:       PlatformOpenAI,
@@ -1973,6 +1994,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_NonCodexUAFallbackToCodexUA(t *te
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2022,6 +2044,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_OfficialIdentityUnified(t *testin
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2039,7 +2062,8 @@ func TestOpenAIGatewayService_OAuthPassthrough_OfficialIdentityUnified(t *testin
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, codexCLIUserAgent, upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, openai.CodexDefaultOriginator, upstream.lastReq.Header.Get("originator"))
-	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("version"))
+	// 真实 codex 不带 version 头（0.151 抓包），透传收口不再补写。
+	require.Empty(t, upstream.lastReq.Header.Get("version"))
 }
 
 // 透传模式下真实 TUI 客户端的身份同样被统一：被优先降载的身份不会带到上游。
@@ -2066,6 +2090,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexTuiIdentityUnified(t *testin
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2083,7 +2108,8 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexTuiIdentityUnified(t *testin
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, codexCLIUserAgent, upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, openai.CodexDefaultOriginator, upstream.lastReq.Header.Get("originator"))
-	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("version"))
+	// 真实 codex 不带 version 头（0.151 抓包），透传收口不再补写。
+	require.Empty(t, upstream.lastReq.Header.Get("version"))
 }
 
 func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAndDefaultCacheKey(t *testing.T) {
@@ -2307,6 +2333,7 @@ func TestOpenAIGatewayService_CodexCLIOnly_RejectsNonCodexClient(t *testing.T) {
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2369,6 +2396,7 @@ func TestOpenAIGatewayService_CodexCLIOnly_AllowOfficialClientFamilies(t *testin
 			}
 
 			account := &Account{
+				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 				ID:             123,
 				Name:           "acc",
 				Platform:       PlatformOpenAI,
@@ -2417,6 +2445,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_StreamingSetsFirstTokenMs(t *test
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2473,6 +2502,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_StreamClientDisconnectStillCollec
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             123,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2577,6 +2607,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_WarnOnTimeoutHeadersForStream(t *
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             321,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2618,6 +2649,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_InfoWhenStreamEndsWithoutDone(t *
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             654,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2664,6 +2696,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_DefaultFiltersTimeoutHeaders(t *t
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             111,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2713,6 +2746,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_AllowTimeoutHeadersWhenConfigured
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             222,
 		Name:           "acc",
 		Platform:       PlatformOpenAI,
@@ -2730,4 +2764,8 @@ func TestOpenAIGatewayService_OAuthPassthrough_AllowTimeoutHeadersWhenConfigured
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, "120000", upstream.lastReq.Header.Get("x-stainless-timeout"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Test"))
+}
+
+func (u *httpUpstreamRecorder) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

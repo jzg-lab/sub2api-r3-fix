@@ -95,6 +95,12 @@ func (u *openAIImagesFailoverHTTPUpstream) calls() []int64 {
 func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhenExhausted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	groupID := int64(3130)
+	// OAuth 出网硬闸（r15 起）：非 PAT 的 openai oauth 账号选号即校验代理路由，
+	// 夹具必须带有效 ProxyID+活跃快照，否则 0 上游命中、failover 语义测不到。
+	proxyID := int64(55)
+	proxySnapshot := &service.Proxy{
+		ID: proxyID, Protocol: "http", Host: "127.0.0.1", Port: 18080, Status: service.StatusActive,
+	}
 	accounts := []service.Account{
 		{
 			ID:          1,
@@ -105,6 +111,8 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 			Schedulable: true,
 			Concurrency: 0,
 			Priority:    0,
+			ProxyID:     &proxyID,
+			Proxy:       proxySnapshot,
 			Credentials: map[string]any{"access_token": "token-1"},
 		},
 		{
@@ -116,6 +124,8 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 			Schedulable: true,
 			Concurrency: 0,
 			Priority:    1,
+			ProxyID:     &proxyID,
+			Proxy:       proxySnapshot,
 			Credentials: map[string]any{"access_token": "token-2"},
 		},
 	}
@@ -205,4 +215,8 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 	require.Len(t, events, 2)
 	require.Equal(t, "failover", events[0].Kind)
 	require.Equal(t, "failover", events[1].Kind)
+}
+
+func (u *openAIImagesFailoverHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

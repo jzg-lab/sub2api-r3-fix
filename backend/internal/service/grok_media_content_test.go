@@ -342,3 +342,7 @@ func TestRewriteGrokMediaVideoContentURLsRewritesSignedVideoURL(t *testing.T) {
 	require.Equal(t, "8", gjson.GetBytes(rewritten, "video.duration").String())
 	require.Equal(t, "done", gjson.GetBytes(rewritten, "status").String())
 }
+
+func (u *grokMediaContentUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

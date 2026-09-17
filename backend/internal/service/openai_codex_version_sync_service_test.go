@@ -328,13 +328,15 @@ func TestGetOpenAICodexClientVersionFallsBackOnError(t *testing.T) {
 }
 
 // 规范 UA：面板未填完整 UA 时按当前生效版本号拼出标准 TUI 形态。
+// 尾部 (originator; version) 组与首段是同一版本声明的两个出口，随生效版本
+// 一并重建，不能再用「版本无关后缀」拼预期。
 func TestGetOpenAICodexCanonicalUserAgentBuildsFromVersion(t *testing.T) {
 	svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
 		SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
 	}}, nil)
 
 	require.Equal(t,
-		"codex-tui/0.200.1"+codexCLIUserAgentSuffix,
+		"codex-tui/0.200.1 (Mac OS 26.3.1; arm64) Apple_Terminal/466 (codex-tui; 0.200.1)",
 		svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 	)
 }

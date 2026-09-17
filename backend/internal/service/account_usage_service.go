@@ -754,18 +754,17 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		return usage, nil
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-		if usage.FiveHour == nil {
-			usage.FiveHour = &UsageProgress{Utilization: 0}
+	// Local request counts cannot establish an upstream quota percentage.
+	if usage.FiveHour != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
+			usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
-	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-		if usage.SevenDay == nil {
-			usage.SevenDay = &UsageProgress{Utilization: 0}
+	if usage.SevenDay != nil {
+		if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
+			usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
 	return usage, nil
@@ -934,8 +933,13 @@ func extractOpenAICodexProbeUpdates(resp *http.Response) (map[string]any, error)
 	if resp == nil {
 		return nil, nil
 	}
+	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusTooManyRequests {
+		return nil, fmt.Errorf("openai codex probe returned status %d", resp.StatusCode)
+	}
 	if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-		return buildCodexUsageExtraUpdates(snapshot, time.Now()), nil
+		if updates := buildCodexUsageExtraUpdates(snapshot, time.Now()); len(updates) > 0 {
+			return updates, nil
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("openai codex probe returned status %d", resp.StatusCode)
@@ -962,12 +966,8 @@ func applyExtraToUsage(usage *UsageInfo, extra map[string]any, now time.Time) {
 	if usage == nil {
 		return
 	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "5h", now); progress != nil {
-		usage.FiveHour = progress
-	}
-	if progress := buildCodexUsageProgressFromExtra(extra, "7d", now); progress != nil {
-		usage.SevenDay = progress
-	}
+	usage.FiveHour = buildCodexUsageProgressFromExtra(extra, "5h", now)
+	usage.SevenDay = buildCodexUsageProgressFromExtra(extra, "7d", now)
 }
 
 func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
@@ -1505,7 +1505,10 @@ func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now t
 	}
 
 	usedRaw, ok := extra[usedPercentKey]
-	if !ok {
+	if !ok || usedRaw == nil {
+		return nil
+	}
+	if duration, present := extra["codex_"+window+"_window_minutes"]; present && parseExtraInt(duration) <= 0 {
 		return nil
 	}
 
@@ -1513,7 +1516,7 @@ func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now t
 	if resetAtRaw, ok := extra[resetAtKey]; ok {
 		if resetAt, err := parseTime(fmt.Sprint(resetAtRaw)); err == nil {
 			progress.ResetsAt = &resetAt
-			progress.RemainingSeconds = int(time.Until(resetAt).Seconds())
+			progress.RemainingSeconds = int(resetAt.Sub(now).Seconds())
 			if progress.RemainingSeconds < 0 {
 				progress.RemainingSeconds = 0
 			}
@@ -1529,16 +1532,16 @@ func buildCodexUsageProgressFromExtra(extra map[string]any, window string, now t
 			}
 			resetAt := base.Add(time.Duration(resetAfterSeconds) * time.Second)
 			progress.ResetsAt = &resetAt
-			progress.RemainingSeconds = int(time.Until(resetAt).Seconds())
+			progress.RemainingSeconds = int(resetAt.Sub(now).Seconds())
 			if progress.RemainingSeconds < 0 {
 				progress.RemainingSeconds = 0
 			}
 		}
 	}
 
-	// 窗口已过期（resetAt 在 now 之前）→ 额度已重置，归零
+	// Expiry invalidates this sample; it does not prove an upstream reset.
 	if progress.ResetsAt != nil && !now.Before(*progress.ResetsAt) {
-		progress.Utilization = 0
+		return nil
 	}
 
 	return progress

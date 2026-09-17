@@ -23,7 +23,8 @@ func TestIsOpenAIOAuthLike(t *testing.T) {
 		want    bool
 		codex   bool
 	}{
-		{name: "openai_oauth", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, want: true, codex: true},
+		{name: "openai_oauth", account: &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}, want: true, codex: true},
 		{name: "openai_setup_token", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}, want: true, codex: true},
 		{name: "openai_api_key", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, want: false, codex: false},
 		{name: "anthropic_setup_token", account: &Account{Platform: PlatformAnthropic, Type: AccountTypeSetupToken}, want: false, codex: false},

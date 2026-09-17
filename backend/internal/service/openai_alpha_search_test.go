@@ -68,6 +68,7 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          42,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -91,7 +92,8 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	require.Equal(t, "Bearer oauth-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "chatgpt-account", upstream.lastReq.Header.Get("chatgpt-account-id"))
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"))
-	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("Version"))
+	require.Equal(t, "0.144.1", upstream.lastReq.Header.Get("Version"),
+		"客户端自带且高于门槛的 version 原样透传，网关不增不减")
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "session", "search-session"),
@@ -137,6 +139,7 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+
 		ID:          43,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -164,7 +167,8 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Content-Type"))
 	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"))
 	require.Equal(t, "responses=experimental", upstream.lastReq.Header.Get("OpenAI-Beta"))
-	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("Version"))
+	require.Equal(t, "0.144.1", upstream.lastReq.Header.Get("Version"),
+		"客户端自带且高于门槛的 version 原样透传，网关不增不减")
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "turn", "turn-1"),
 		gjson.Get(upstream.lastReq.Header.Get("X-Codex-Turn-Metadata"), "turn_id").String(),
@@ -222,6 +226,7 @@ func TestForwardAlphaSearchPATBackfillsMissingChatGPTAccountMetadata(t *testing.
 		openAITokenProvider: NewOpenAITokenProvider(nil, nil, oauthService),
 	}
 	account := &Account{
+
 		ID:          45,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -382,6 +387,7 @@ func TestForwardAlphaSearchAccessStateUsesTypedFailover(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          11,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -417,6 +423,7 @@ func TestForwardAlphaSearchPATFallbackAccessStateUsesTypedFailover(t *testing.T)
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+
 		ID:          12,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -472,6 +479,7 @@ func TestForwardAlphaSearchUnauthorizedDoesNotMarkAccountError(t *testing.T) {
 		rateLimitService: NewRateLimitService(repo, nil, cfg, nil, nil),
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          44,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -515,6 +523,7 @@ func TestForwardAlphaSearchPATResponsesFallbackUnauthorizedDoesNotMarkAccountErr
 		rateLimitService: NewRateLimitService(repo, nil, cfg, nil, nil),
 	}
 	account := &Account{
+
 		ID:          46,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -602,6 +611,7 @@ func TestForwardAlphaSearchOAuthNotFoundPassesThrough(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          10,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -648,7 +658,8 @@ func TestSanitizeOpenAIAlphaSearchBody_RemovesResponsesOnlyFields(t *testing.T) 
 
 func TestIsOpenAIAlphaSearchEndpointUnsupported(t *testing.T) {
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
-	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	require.True(t, isOpenAIAlphaSearchEndpointUnsupported(apiKey, http.StatusNotFound))
 	require.True(t, isOpenAIAlphaSearchEndpointUnsupported(apiKey, http.StatusMethodNotAllowed))

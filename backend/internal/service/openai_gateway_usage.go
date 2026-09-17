@@ -1040,6 +1040,10 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	if snapshot == nil {
 		return nil
 	}
+	normalized := snapshot.Normalize()
+	if normalized == nil {
+		return nil
+	}
 
 	baseTime := codexSnapshotBaseTime(snapshot, fallbackNow)
 	updates := make(map[string]any)
@@ -1068,8 +1072,24 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	}
 	updates["codex_usage_updated_at"] = baseTime.Format(time.RFC3339)
 
+	// A partial valid response must not refresh an old, unavailable peer window.
+	if (snapshot.PrimaryWindowMinutes != nil && *snapshot.PrimaryWindowMinutes <= 0) ||
+		(snapshot.SecondaryWindowMinutes != nil && *snapshot.SecondaryWindowMinutes <= 0) {
+		clearWindow := func(window string) {
+			for _, suffix := range []string{"used_percent", "reset_after_seconds", "window_minutes", "reset_at"} {
+				updates["codex_"+window+"_"+suffix] = nil
+			}
+		}
+		if normalized.Used5hPercent == nil && normalized.Reset5hSeconds == nil && normalized.Window5hMinutes == nil {
+			clearWindow("5h")
+		}
+		if normalized.Used7dPercent == nil && normalized.Reset7dSeconds == nil && normalized.Window7dMinutes == nil {
+			clearWindow("7d")
+		}
+	}
+
 	// 归一化到 5h/7d 规范字段
-	if normalized := snapshot.Normalize(); normalized != nil {
+	if normalized != nil {
 		if normalized.Used5hPercent != nil {
 			updates["codex_5h_used_percent"] = *normalized.Used5hPercent
 		}

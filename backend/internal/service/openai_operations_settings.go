@@ -123,7 +123,10 @@ func applyOpenAINewAccountDefaults(input *CreateAccountInput, defaults *OpenAINe
 	if out.Extra == nil {
 		out.Extra = make(map[string]any)
 	}
-	if defaults.ProxyID != nil {
+	account := &Account{Platform: input.Platform, Type: input.Type, Credentials: input.Credentials}
+	browserOAuth := account.IsOpenAIOAuth() && !account.IsOpenAIPersonalAccessToken() && !account.IsOpenAIAgentIdentity()
+	// A template is not authority to replace a browser authorization's route.
+	if defaults.ProxyID != nil && !browserOAuth {
 		out.ProxyID = nil
 		if *defaults.ProxyID > 0 {
 			id := *defaults.ProxyID

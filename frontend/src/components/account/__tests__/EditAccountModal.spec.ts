@@ -328,6 +328,14 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
+  it('shows the fixed concurrency instead of a stale account limit', async () => {
+    const wrapper = mountModal(buildGrokAPIKeyAccount())
+    await flushPromises()
+    const limit = wrapper.get('input[type="number"][readonly]')
+    expect((limit.element as HTMLInputElement).value).toBe('50')
+    wrapper.unmount()
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

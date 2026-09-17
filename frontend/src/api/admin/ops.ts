@@ -1080,6 +1080,65 @@ export async function getOpenAITokenStats(
   return data
 }
 
+export interface OpsOpenAIDowngradeBucket {
+  proxy_id: number
+  name: string
+  role: string
+  exit_ip: string
+  capacity: number
+  risk_score: number
+  account_ids: number[]
+  healthy_count: number
+  circuit_count: number
+  reprobe_count: number
+  replace_count: number
+  at_capacity: boolean
+}
+
+export interface OpsOpenAIDowngradeEvent {
+  id: number
+  account_id?: number | null
+  proxy_id?: number | null
+  event_type: string
+  details: Record<string, unknown>
+  created_at: string
+}
+
+export interface OpsOpenAIDowngradeAccountStat {
+  account_id: number
+  state: string
+  probe_mode: string
+  schedulable: boolean
+  proxy_id?: number | null
+  proxy_exit_ip?: string
+  probe_count_24h: number
+  success_count_24h: number
+  success_rate_24h: number
+  avg_reasoning_tokens?: number | null
+  consecutive_failures: number
+  last_probe_at?: string | null
+}
+
+export interface OpsOpenAIDowngradeDashboard {
+  buckets: OpsOpenAIDowngradeBucket[]
+  recent_events: OpsOpenAIDowngradeEvent[]
+  account_stats: OpsOpenAIDowngradeAccountStat[]
+  probe_count_24h: number
+  success_count_24h: number
+  degraded_account_count: number
+  at_capacity_bucket_count: number
+}
+
+export async function getOpenAIDowngradeDashboard(
+  options: OpsRequestOptions = {}
+): Promise<OpsOpenAIDowngradeDashboard> {
+  const { data } = await apiClient.get<OpsOpenAIDowngradeDashboard>('/admin/ops/openai/downgrade-probe', {
+    params: { time_range: '24h', event_limit: 100, account_limit: 200 },
+    signal: options.signal
+  })
+  return data
+}
+
 export type OpsErrorListView = 'errors' | 'excluded' | 'all'
 
 export type OpsErrorListQueryParams = {
@@ -1314,6 +1373,7 @@ export const opsAPI = {
   getErrorTrend,
   getErrorDistribution,
   getOpenAITokenStats,
+  getOpenAIDowngradeDashboard,
   getConcurrencyStats,
   getUserConcurrencyStats,
   getAccountAvailabilityStats,

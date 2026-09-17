@@ -36,14 +36,25 @@ func (s *openaiOAuthClientStateStub) RefreshTokenWithClientID(ctx context.Contex
 
 func TestOpenAIOAuthService_ExchangeCode_StateRequired(t *testing.T) {
 	client := &openaiOAuthClientStateStub{}
-	svc := NewOpenAIOAuthService(nil, client)
+	proxyID := int64(7)
+	svc := NewOpenAIOAuthService(&mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
+	}, client)
+	store := newTestOpenAIOAuthSessionStore()
+	svc.SetSessionStore(store)
 	defer svc.Stop()
 
-	svc.sessionStore.Set("sid", &openai.OAuthSession{
-		State:        "expected-state",
-		CodeVerifier: "verifier",
-		RedirectURI:  openai.DefaultRedirectURI,
-		CreatedAt:    time.Now(),
+	_ = store.Create(context.Background(), &OpenAIOAuthSession{
+		ID:             "sid",
+		State:          "expected-state",
+		CodeVerifier:   "verifier",
+		ClientID:       openai.ClientID,
+		RedirectURI:    openai.DefaultRedirectURI,
+		ProxyID:        proxyID,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("http://127.0.0.1:8080"),
+		CreatedAt:      time.Now(),
 	})
 
 	_, err := svc.ExchangeCode(context.Background(), &OpenAIExchangeCodeInput{
@@ -57,14 +68,25 @@ func TestOpenAIOAuthService_ExchangeCode_StateRequired(t *testing.T) {
 
 func TestOpenAIOAuthService_ExchangeCode_StateMismatch(t *testing.T) {
 	client := &openaiOAuthClientStateStub{}
-	svc := NewOpenAIOAuthService(nil, client)
+	proxyID := int64(7)
+	svc := NewOpenAIOAuthService(&mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
+	}, client)
+	store := newTestOpenAIOAuthSessionStore()
+	svc.SetSessionStore(store)
 	defer svc.Stop()
 
-	svc.sessionStore.Set("sid", &openai.OAuthSession{
-		State:        "expected-state",
-		CodeVerifier: "verifier",
-		RedirectURI:  openai.DefaultRedirectURI,
-		CreatedAt:    time.Now(),
+	_ = store.Create(context.Background(), &OpenAIOAuthSession{
+		ID:             "sid",
+		State:          "expected-state",
+		CodeVerifier:   "verifier",
+		ClientID:       openai.ClientID,
+		RedirectURI:    openai.DefaultRedirectURI,
+		ProxyID:        proxyID,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("http://127.0.0.1:8080"),
+		CreatedAt:      time.Now(),
 	})
 
 	_, err := svc.ExchangeCode(context.Background(), &OpenAIExchangeCodeInput{
@@ -79,14 +101,25 @@ func TestOpenAIOAuthService_ExchangeCode_StateMismatch(t *testing.T) {
 
 func TestOpenAIOAuthService_ExchangeCode_StateMatch(t *testing.T) {
 	client := &openaiOAuthClientStateStub{}
-	svc := NewOpenAIOAuthService(nil, client)
+	proxyID := int64(7)
+	svc := NewOpenAIOAuthService(&mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
+	}, client)
+	store := newTestOpenAIOAuthSessionStore()
+	svc.SetSessionStore(store)
 	defer svc.Stop()
 
-	svc.sessionStore.Set("sid", &openai.OAuthSession{
-		State:        "expected-state",
-		CodeVerifier: "verifier",
-		RedirectURI:  openai.DefaultRedirectURI,
-		CreatedAt:    time.Now(),
+	_ = store.Create(context.Background(), &OpenAIOAuthSession{
+		ID:             "sid",
+		State:          "expected-state",
+		CodeVerifier:   "verifier",
+		ClientID:       openai.ClientID,
+		RedirectURI:    openai.DefaultRedirectURI,
+		ProxyID:        proxyID,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("http://127.0.0.1:8080"),
+		CreatedAt:      time.Now(),
 	})
 
 	info, err := svc.ExchangeCode(context.Background(), &OpenAIExchangeCodeInput{
@@ -96,11 +129,12 @@ func TestOpenAIOAuthService_ExchangeCode_StateMatch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, info)
+	require.Equal(t, proxyID, info.ProxyID)
 	require.Equal(t, "at", info.AccessToken)
 	require.Equal(t, openai.ClientID, info.ClientID)
 	require.Equal(t, openai.ClientID, client.lastClientID)
 	require.Equal(t, int32(1), atomic.LoadInt32(&client.exchangeCalled))
 
-	_, ok := svc.sessionStore.Get("sid")
-	require.False(t, ok)
+	_, err = svc.sessionStore.Get(context.Background(), "sid")
+	require.Error(t, err)
 }

@@ -178,8 +178,8 @@ func TestCodexMachineSandboxTagFromUA(t *testing.T) {
 	assert.Equal(t, "seccomp", codexMachineSandboxTagFromUA("codex_cli_rs/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color"))
 	assert.Equal(t, "seccomp", codexMachineSandboxTagFromUA("codex_cli_rs/0.146.0 (Arch Linux rolling; x86_64) alacritty"))
 	assert.Equal(t, "", codexMachineSandboxTagFromUA("codex_cli_rs/0.1.0"), "无 OS 段不改写")
-	// 规范 UA（Ubuntu 后缀）⇒ seccomp
-	assert.Equal(t, "seccomp", codexMachineSandboxTagFromUA(codexCLIUserAgent))
+	// 规范 UA（Mac OS 后缀，与 TLS profile 同叙事）⇒ seatbelt
+	assert.Equal(t, "seatbelt", codexMachineSandboxTagFromUA(codexCLIUserAgent))
 }
 
 // §4.3 sandbox 映射 3×5 表 + accountTag 为空 + external。
@@ -224,18 +224,18 @@ func TestStampCodexMachineSandboxTag(t *testing.T) {
 	stampCodexMachineSandboxTag(sessionIDs, "codex-tui/0.146.0 (Mac OS 26.0.1; arm64) xterm-256color")
 	assert.Empty(t, sessionIDs.sandboxTag)
 
-	// machine：overrideUA 为空 ⇒ 规范 UA（Ubuntu）⇒ seccomp
+	// machine：overrideUA 为空 ⇒ 规范 UA（Mac OS）⇒ seatbelt
 	ids := newTestMachineIDs(t, 5202, testCodexFingerprintSeed)
 	stampCodexMachineSandboxTag(ids, "")
-	assert.Equal(t, "seccomp", ids.sandboxTag)
+	assert.Equal(t, "seatbelt", ids.sandboxTag)
 	// 账号级 Mac UA ⇒ seatbelt（resolveCodexOutboundIdentity 只重建版本段，保留 OS 段）
 	stampCodexMachineSandboxTag(ids, "codex-tui/0.120.0 (Mac OS 26.0.1; arm64) xterm-256color")
 	assert.Equal(t, "seatbelt", ids.sandboxTag)
 	stampCodexMachineSandboxTag(ids, "codex_cli_rs/0.146.0 (Windows 10.0.26100; x86_64) WindowsTerminal")
 	assert.Equal(t, "windows_sandbox", ids.sandboxTag)
-	// 非官方 UA 整体回退规范身份 ⇒ seccomp
+	// 非官方 UA 整体回退规范身份 ⇒ seatbelt
 	stampCodexMachineSandboxTag(ids, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
-	assert.Equal(t, "seccomp", ids.sandboxTag)
+	assert.Equal(t, "seatbelt", ids.sandboxTag)
 }
 
 func TestRewriteCodexMachineTurnMetadata(t *testing.T) {

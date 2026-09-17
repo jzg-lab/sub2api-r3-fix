@@ -25,13 +25,21 @@ func (s *openaiOAuthClientAuthURLStub) RefreshTokenWithClientID(ctx context.Cont
 }
 
 func TestOpenAIOAuthService_GenerateAuthURL_OpenAIKeepsCodexFlow(t *testing.T) {
-	svc := NewOpenAIOAuthService(nil, &openaiOAuthClientAuthURLStub{})
+	proxyID := int64(7)
+	proxyRepo := &mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
+	}
+	svc := NewOpenAIOAuthService(proxyRepo, &openaiOAuthClientAuthURLStub{})
+	svc.SetSessionStore(newTestOpenAIOAuthSessionStore())
 	defer svc.Stop()
 
-	result, err := svc.GenerateAuthURL(context.Background(), nil, "", PlatformOpenAI)
+	result, err := svc.GenerateAuthURL(context.Background(), &proxyID, "", PlatformOpenAI)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.AuthURL)
 	require.NotEmpty(t, result.SessionID)
+	require.Equal(t, proxyID, result.ProxyID)
 
 	parsed, err := url.Parse(result.AuthURL)
 	require.NoError(t, err)
@@ -39,7 +47,8 @@ func TestOpenAIOAuthService_GenerateAuthURL_OpenAIKeepsCodexFlow(t *testing.T) {
 	require.Equal(t, openai.ClientID, q.Get("client_id"))
 	require.Equal(t, "true", q.Get("codex_cli_simplified_flow"))
 
-	session, ok := svc.sessionStore.Get(result.SessionID)
-	require.True(t, ok)
+	session, err := svc.sessionStore.Get(context.Background(), result.SessionID)
+	require.NoError(t, err)
 	require.Equal(t, openai.ClientID, session.ClientID)
+	require.Equal(t, openAIOAuthProxyRouteHash("http://127.0.0.1:8080"), session.ProxyRouteHash)
 }

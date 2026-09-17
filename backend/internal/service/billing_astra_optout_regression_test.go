@@ -19,7 +19,7 @@ func TestAstraAccountLongContextOptOutMatchesProductionBaseline(t *testing.T) {
 				result, err := billing.CalculateCostUnified(CostInput{
 					Ctx: context.Background(), Model: "gpt-6-astra", Tokens: tokens,
 					RateMultiplier: 1, ServiceTier: tier, Resolver: resolver,
-					Group: &Group{LongContextPricingEnabled: true},
+					Group:                     &Group{LongContextPricingEnabled: true},
 					LongContextBillingEnabled: gate,
 				})
 				require.NoError(t, err)

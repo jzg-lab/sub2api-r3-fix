@@ -17,8 +17,8 @@ import (
 const (
 	schedulerBucketSetKey          = "sched:buckets"
 	schedulerOutboxWatermarkKey    = "sched:outbox:watermark"
-	schedulerAccountPrefix         = "sched:acc:"
-	schedulerAccountMetaPrefix     = "sched:meta:"
+	schedulerAccountPrefix         = "sched:acc:v2:"
+	schedulerAccountMetaPrefix     = "sched:meta:v2:"
 	schedulerAccountLastUsedPrefix = "sched:acc:last_used:"
 	schedulerActivePrefix          = "sched:active:"
 	schedulerReadyPrefix           = "sched:ready:"
@@ -589,22 +589,15 @@ func (c *schedulerCache) SetAccount(ctx context.Context, account *service.Accoun
 	if account == nil || account.ID <= 0 {
 		return nil
 	}
-	accountIDs, err := c.writeAccountIDs(ctx, []service.Account{*account})
-	if err != nil {
-		return err
-	}
-	if len(accountIDs) == 0 {
-		return c.DeleteAccount(ctx, account.ID)
-	}
-	return nil
+	_, err := c.writeAccountIDs(ctx, []service.Account{*account})
+	return err
 }
 
 func (c *schedulerCache) DeleteAccount(ctx context.Context, accountID int64) error {
 	if accountID <= 0 {
 		return nil
 	}
-	id := strconv.FormatInt(accountID, 10)
-	return c.rdb.Del(ctx, schedulerAccountKey(id), schedulerAccountMetaKey(id), schedulerLastUsedKey(id)).Err()
+	return c.retireAccount(ctx, accountID)
 }
 
 func (c *schedulerCache) UpdateLastUsed(ctx context.Context, updates map[int64]time.Time) error {
@@ -783,37 +776,58 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 
 	pipe := c.rdb.Pipeline()
 	accountIDs := make([]int64, 0, len(accounts))
-	pending := 0
+	type publication struct {
+		accountID int64
+		encoded   bool
+		result    *redis.Cmd
+	}
+	pending := make([]publication, 0, c.writeChunkSize)
 	flush := func() error {
-		if pending == 0 {
+		if len(pending) == 0 {
 			return nil
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
 			return err
 		}
+		for _, item := range pending {
+			result, err := item.result.Int64()
+			if err != nil {
+				return err
+			}
+			if item.encoded && result >= 0 {
+				accountIDs = append(accountIDs, item.accountID)
+			}
+		}
 		pipe = c.rdb.Pipeline()
-		pending = 0
+		pending = pending[:0]
 		return nil
 	}
 
 	for _, account := range accounts {
+		if account.ID <= 0 {
+			continue
+		}
+		revision, err := schedulerAccountRevision(account.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
 		fullPayload, metaPayload, err := marshalSchedulerCacheAccount(account)
+		operation := "publish"
 		if err != nil {
 			slog.Warn("scheduler cache skips account with unencodable payload",
 				"account_id", account.ID,
 				"error", err,
 			)
-			continue
+			operation = "evict"
 		}
 
-		id := strconv.FormatInt(account.ID, 10)
-		pipe.Set(ctx, schedulerAccountKey(id), fullPayload, 0)
-		pipe.Set(ctx, schedulerAccountMetaKey(id), metaPayload, 0)
+		result := publishSchedulerAccountScript.Eval(ctx, pipe,
+			schedulerAccountPublicationKeys(account.ID), operation, revision,
+			string(fullPayload), string(metaPayload))
 		// Keep the hot LastUsedAt side key untouched: a lagging snapshot rebuild
 		// must not overwrite a newer scheduler update.
-		accountIDs = append(accountIDs, account.ID)
-		pending++
-		if pending >= c.writeChunkSize {
+		pending = append(pending, publication{account.ID, err == nil, result})
+		if len(pending) >= c.writeChunkSize {
 			if err := flush(); err != nil {
 				return nil, err
 			}
@@ -873,6 +887,7 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		Priority:                account.Priority,
 		RateMultiplier:          account.RateMultiplier,
 		Status:                  account.Status,
+		UpdatedAt:               account.UpdatedAt,
 		LastUsedAt:              account.LastUsedAt,
 		ExpiresAt:               account.ExpiresAt,
 		AutoPauseOnExpired:      account.AutoPauseOnExpired,

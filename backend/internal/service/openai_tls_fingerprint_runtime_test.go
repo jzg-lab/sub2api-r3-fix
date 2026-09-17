@@ -82,3 +82,7 @@ func TestOpenAIOAuthTLSFingerprintResolvesAndUsesProfile(t *testing.T) {
 	require.NotNil(t, upstream.profile)
 	require.Equal(t, "test", upstream.profile.Name)
 }
+
+func (u *recordingTLSUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

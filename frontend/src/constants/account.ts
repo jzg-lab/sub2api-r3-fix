@@ -1,3 +1,6 @@
+/** Must match service.LocalAccountConcurrency in the local backend. */
+export const LOCAL_ACCOUNT_CONCURRENCY = 50
+
 /** WebSearch emulation mode values (must match backend WebSearchMode* constants in account.go) */
 export const WEB_SEARCH_MODE_DEFAULT = 'default' as const
 export const WEB_SEARCH_MODE_ENABLED = 'enabled' as const

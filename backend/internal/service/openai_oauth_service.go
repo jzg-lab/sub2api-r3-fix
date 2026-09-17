@@ -15,7 +15,7 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore         *openai.SessionStore
+	sessionStore         OpenAIOAuthSessionStore
 	proxyRepo            ProxyRepository
 	oauthClient          OpenAIOAuthClient
 	tlsProfiles          *TLSFingerprintProfileService
@@ -25,10 +25,16 @@ type OpenAIOAuthService struct {
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
 func NewOpenAIOAuthService(proxyRepo ProxyRepository, oauthClient OpenAIOAuthClient) *OpenAIOAuthService {
 	return &OpenAIOAuthService{
-		sessionStore: openai.NewSessionStore(),
-		proxyRepo:    proxyRepo,
-		oauthClient:  oauthClient,
+		proxyRepo:   proxyRepo,
+		oauthClient: oauthClient,
 	}
+}
+
+// SetSessionStore injects the durable OAuth session store (P0-14). Sessions
+// persist in pending_auth_sessions with a 2h TTL so slow 接码 flows and
+// process restarts no longer lose in-flight authorizations.
+func (s *OpenAIOAuthService) SetSessionStore(store OpenAIOAuthSessionStore) {
+	s.sessionStore = store
 }
 
 // SetPrivacyClientFactory 注入 ImpersonateChrome 客户端工厂，
@@ -55,10 +61,20 @@ func (s *OpenAIOAuthService) profileContext(ctx context.Context, account *Accoun
 type OpenAIAuthURLResult struct {
 	AuthURL   string `json:"auth_url"`
 	SessionID string `json:"session_id"`
+	ProxyID   int64  `json:"proxy_id"`
 }
 
 // GenerateAuthURL generates an OpenAI OAuth authorization URL
 func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string) (*OpenAIAuthURLResult, error) {
+	if s.sessionStore == nil {
+		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "openai oauth persistent session store is not configured")
+	}
+	// P0-14: 强制代理——授权浏览器出口、服务端 code→token 交换出口、账号常驻
+	// 出口三者必须一致，否则 OpenAI 可凭 IP 不一致拒绝或标记账号。
+	if proxyID == nil || *proxyID <= 0 {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_REQUIRED", "a proxy is required for OpenAI OAuth")
+	}
+
 	// Generate PKCE values
 	state, err := openai.GenerateState()
 	if err != nil {
@@ -78,16 +94,9 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_FAILED", "failed to generate session ID: %v", err)
 	}
 
-	// Get proxy URL if specified
-	var proxyURL string
-	if proxyID != nil {
-		proxy, err := s.proxyRepo.GetByID(ctx, *proxyID)
-		if err != nil {
-			return nil, infraerrors.Newf(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_NOT_FOUND", "proxy not found: %v", err)
-		}
-		if proxy != nil {
-			proxyURL = proxy.URL()
-		}
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, proxyID)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_INVALID", err.Error())
 	}
 
 	// Use default redirect URI if not specified
@@ -97,16 +106,21 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	normalizedPlatform := normalizeOpenAIOAuthPlatform(platform)
 	clientID, _ := openai.OAuthClientConfigByPlatform(normalizedPlatform)
 
-	// Store session
-	session := &openai.OAuthSession{
-		State:        state,
-		CodeVerifier: codeVerifier,
-		ClientID:     clientID,
-		RedirectURI:  redirectURI,
-		ProxyURL:     proxyURL,
-		CreatedAt:    time.Now(),
+	// Store session durably
+	session := &OpenAIOAuthSession{
+		State:          state,
+		CodeVerifier:   codeVerifier,
+		ClientID:       clientID,
+		RedirectURI:    redirectURI,
+		ProxyID:        *proxyID,
+		ProxyRouteHash: openAIOAuthProxyRouteHash(proxyURL),
+		Platform:       normalizedPlatform,
+		CreatedAt:      time.Now(),
 	}
-	s.sessionStore.Set(sessionID, session)
+	session.ID = sessionID
+	if err := s.sessionStore.Create(ctx, session); err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_PERSIST_FAILED", "failed to persist oauth session: %v", err)
+	}
 
 	// Build authorization URL
 	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform)
@@ -114,6 +128,7 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	return &OpenAIAuthURLResult{
 		AuthURL:   authURL,
 		SessionID: sessionID,
+		ProxyID:   session.ProxyID,
 	}, nil
 }
 
@@ -134,6 +149,7 @@ type OpenAITokenInfo struct {
 	ExpiresIn             int64  `json:"expires_in"`
 	ExpiresAt             int64  `json:"expires_at"`
 	ClientID              string `json:"client_id,omitempty"`
+	ProxyID               int64  `json:"proxy_id,omitempty"`
 	AuthMode              string `json:"auth_mode,omitempty"`
 	Email                 string `json:"email,omitempty"`
 	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
@@ -148,9 +164,14 @@ type OpenAITokenInfo struct {
 // ExchangeCode exchanges authorization code for tokens
 func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExchangeCodeInput) (*OpenAITokenInfo, error) {
 	ctx = s.profileContext(ctx, nil)
-	// Get session
-	session, ok := s.sessionStore.Get(input.SessionID)
-	if !ok {
+	if s.sessionStore == nil {
+		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "openai oauth persistent session store is not configured")
+	}
+	if input == nil || strings.TrimSpace(input.SessionID) == "" {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_REQUIRED", "session_id is required")
+	}
+	session, err := s.sessionStore.Get(ctx, input.SessionID)
+	if err != nil || session == nil {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_NOT_FOUND", "session not found or expired")
 	}
 	if input.State == "" {
@@ -160,32 +181,58 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_STATE", "invalid oauth state")
 	}
 
-	// Get proxy URL: prefer input.ProxyID, fallback to session.ProxyURL
-	proxyURL := session.ProxyURL
-	if input.ProxyID != nil {
-		proxy, err := s.proxyRepo.GetByID(ctx, *input.ProxyID)
-		if err != nil {
-			return nil, infraerrors.Newf(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_NOT_FOUND", "proxy not found: %v", err)
-		}
-		if proxy != nil {
-			proxyURL = proxy.URL()
-		}
+	// P0-14: 交换必须与授权会话同一个代理出口，禁止换 IP 交换。
+	if input.ProxyID != nil && *input.ProxyID != session.ProxyID {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_MISMATCH", "oauth proxy does not match the authorization session")
 	}
 
-	// Use redirect URI from session or input
+	// Use redirect URI from session; a conflicting input is rejected outright.
 	redirectURI := session.RedirectURI
-	if input.RedirectURI != "" {
-		redirectURI = input.RedirectURI
+	if strings.TrimSpace(input.RedirectURI) != "" && input.RedirectURI != redirectURI {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_REDIRECT_MISMATCH", "oauth redirect URI does not match the authorization session")
+	}
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, &session.ProxyID)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_INVALID", err.Error())
+	}
+	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_CHANGED", "oauth proxy configuration changed; start a new authorization")
 	}
 	clientID := strings.TrimSpace(session.ClientID)
 	if clientID == "" {
 		clientID = openai.ClientID
 	}
 
+	// Consume before exchanging so the code verifier is one-shot even when two
+	// browser callbacks race. A failed exchange requires a fresh authorization.
+	expectedSession := *session
+	session, err = s.sessionStore.Consume(ctx, input.SessionID)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_CONSUMED", "session not found, expired, or already used")
+	}
+	if session == nil || *session != expectedSession {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_CHANGED", "oauth session changed; start a new authorization")
+	}
+	proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, &session.ProxyID)
+	if err != nil || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_CHANGED", "oauth proxy configuration changed; start a new authorization")
+	}
+
 	// Exchange code for token
 	tokenResp, err := s.oauthClient.ExchangeCode(ctx, input.Code, session.CodeVerifier, redirectURI, proxyURL, clientID)
 	if err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// An administrator can change or remove the route while exchange is in flight.
+	currentProxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, &session.ProxyID)
+	if err != nil || session.ProxyRouteHash != openAIOAuthProxyRouteHash(currentProxyURL) {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_CHANGED", "oauth proxy configuration changed; start a new authorization")
+	}
+	if tokenResp == nil {
+		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_OAUTH_EMPTY_RESPONSE", "oauth provider returned an empty response")
 	}
 
 	// Parse ID token to get user info
@@ -199,8 +246,7 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		}
 	}
 
-	// Delete session after successful exchange
-	s.sessionStore.Delete(input.SessionID)
+	// 会话已在交换前一次性消费（Consume），无需再删除。
 
 	tokenInfo := &OpenAITokenInfo{
 		AccessToken:  tokenResp.AccessToken,
@@ -209,6 +255,7 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		ExpiresIn:    int64(tokenResp.ExpiresIn),
 		ExpiresAt:    time.Now().Unix() + int64(tokenResp.ExpiresIn),
 		ClientID:     clientID,
+		ProxyID:      session.ProxyID,
 	}
 
 	if userInfo != nil {
@@ -229,8 +276,21 @@ func (s *OpenAIOAuthService) RefreshToken(ctx context.Context, refreshToken stri
 	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, "")
 }
 
+// RefreshTokenWithProxyID keeps the admin refresh endpoint on the same
+// assignment validation path as authorization exchange and account refresh.
+func (s *OpenAIOAuthService) RefreshTokenWithProxyID(ctx context.Context, refreshToken string, proxyID *int64, clientID string) (*OpenAITokenInfo, error) {
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
+}
+
 // RefreshTokenWithClientID refreshes an OpenAI OAuth token with optional client_id.
 func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken string, proxyURL string, clientID string) (*OpenAITokenInfo, error) {
+	if err := validateOpenAIOAuthProxyURL(proxyURL); err != nil {
+		return nil, err
+	}
 	ctx = s.profileContext(ctx, nil)
 	tokenResp, err := s.oauthClient.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 	if err != nil {
@@ -364,10 +424,13 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 	}
 
 	var proxyURL string
-	if account.ProxyID != nil && s.proxyRepo != nil {
-		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+	// PAT imports are not browser OAuth grants. Preserve their explicit direct
+	// mode, but never bypass a proxy that was assigned to either account type.
+	if !account.IsOpenAIPersonalAccessToken() || account.ProxyID != nil {
+		var err error
+		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, account.ProxyID)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -457,9 +520,9 @@ func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo)
 	return NormalizeOpenAIPersonalAccessTokenCredentials(nil, tokenInfo, creds)
 }
 
-// Stop stops the session store cleanup goroutine
+// Stop is retained for lifecycle compatibility. Durable pending auth sessions
+// have no goroutine of their own; they are cleaned up by the database cleanup path.
 func (s *OpenAIOAuthService) Stop() {
-	s.sessionStore.Stop()
 }
 
 func normalizeOpenAIOAuthPlatform(platform string) string {

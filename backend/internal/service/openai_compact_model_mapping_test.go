@@ -32,6 +32,7 @@ func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstr
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -113,6 +114,7 @@ func TestOpenAIGatewayService_Forward_NormalizesCompactionTriggerAfterHistoryCle
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 4, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 		Status:      StatusActive, Schedulable: true,
@@ -146,6 +148,7 @@ func TestOpenAIGatewayService_Forward_NonCompactRequestIgnoresCompactOnlyModelMa
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          2,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -186,6 +189,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_CompactOnlyModelMappingOverridesU
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          3,
 		Name:        "openai-oauth-pass",
 		Platform:    PlatformOpenAI,

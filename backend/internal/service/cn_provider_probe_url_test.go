@@ -127,3 +127,7 @@ func TestCNProviderBalanceService_OfficialHostPassesValidation(t *testing.T) {
 	_, _ = svc.QueryBalance(context.Background(), 3)
 	require.Equal(t, 1, upstream.calls, "official host must pass URL policy and reach the upstream layer")
 }
+
+func (u *recordingHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

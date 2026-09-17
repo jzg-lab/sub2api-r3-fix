@@ -322,7 +322,19 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 	if s.cache == nil || account == nil {
 		return nil
 	}
-	return s.cache.SetAccount(ctx, account)
+	if s.accountRepo == nil {
+		return errors.New("scheduler account repository unavailable")
+	}
+	// The caller may hold a request-start snapshot with a locally edited
+	// field. Publish the committed account and its database revision instead.
+	current, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return ErrAccountNotFound
+	}
+	return s.cache.SetAccount(ctx, current)
 }
 
 func (s *SchedulerSnapshotService) runInitialRebuild() {

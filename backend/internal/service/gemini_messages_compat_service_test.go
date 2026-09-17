@@ -1158,3 +1158,7 @@ func parseAnthropicContentBlockEvents(t *testing.T, raw string) []anthropicConte
 	}
 	return events
 }
+
+func (u *geminiCompatHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

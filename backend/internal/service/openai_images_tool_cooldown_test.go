@@ -42,7 +42,8 @@ func newImagesCooldownContext(t *testing.T) (*gin.Context, *httptest.ResponseRec
 }
 
 func imagesCooldownAccount() *Account {
-	return &Account{ID: 77, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Name: "img-oauth"}
+	return &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 77, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Name: "img-oauth"}
 }
 
 func TestShouldCoolOpenAIImagesToolForError(t *testing.T) {

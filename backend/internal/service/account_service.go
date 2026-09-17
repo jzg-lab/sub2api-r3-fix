@@ -157,17 +157,18 @@ type AdminAccountRepository interface {
 // AccountBulkUpdate describes the fields that can be updated in a bulk operation.
 // Nil pointers mean "do not change".
 type AccountBulkUpdate struct {
-	Name           *string
-	ProxyID        *int64
-	Concurrency    *int
-	Priority       *int
-	RateMultiplier *float64
-	LoadFactor     *int
-	Status         *string
-	Schedulable    *bool
-	Credentials    map[string]any
-	Extra          map[string]any
-	ProbeEnabled   *bool
+	Name             *string
+	ProxyID          *int64
+	Concurrency      *int
+	Priority         *int
+	RateMultiplier   *float64
+	LoadFactor       *int
+	Status           *string
+	Schedulable      *bool
+	ManualScheduling bool
+	Credentials      map[string]any
+	Extra            map[string]any
+	ProbeEnabled     *bool
 	// EnsureCodexFingerprintSeed asks the repository to atomically preserve an
 	// existing valid Codex fingerprint seed or create one for eligible rows.
 	EnsureCodexFingerprintSeed bool
@@ -231,7 +232,8 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 			return nil, err
 		}
 		defaulted := applyOpenAINewAccountDefaults(&CreateAccountInput{
-			Platform: req.Platform, ProxyID: req.ProxyID, Extra: req.Extra, Concurrency: req.Concurrency,
+			Platform: req.Platform, Type: req.Type, Credentials: req.Credentials,
+			ProxyID: req.ProxyID, Extra: req.Extra, Concurrency: req.Concurrency,
 		}, settings.NewAccountDefaults)
 		req.ProxyID, req.Extra, req.Concurrency = defaulted.ProxyID, defaulted.Extra, defaulted.Concurrency
 	}
@@ -255,6 +257,15 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Priority:    req.Priority,
 		Status:      StatusActive,
 		ExpiresAt:   req.ExpiresAt,
+	}
+	// 新 OpenAI OAuth 账号先进入质检流水线（需求3）：默认不可调度，
+	// 由降智探针完成 2 次质检合格后自动分桶上岗。
+	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		if account.Extra == nil {
+			account.Extra = make(map[string]any, 1)
+		}
+		account.Schedulable = false
+		account.Extra[openAIDowngradeQualificationExtraKey] = true
 	}
 	if req.AutoPauseOnExpired != nil {
 		account.AutoPauseOnExpired = *req.AutoPauseOnExpired
@@ -352,6 +363,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		delete(extra, OllamaCloudUsageSessionExtraKey)
 		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
 		delete(extra, OllamaCloudUsageSnapshotExtraKey)
+		extra = PreserveModelRateLimitsForAccountEdit(account.Platform, account.Extra, extra)
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, extra)
 	} else {
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)

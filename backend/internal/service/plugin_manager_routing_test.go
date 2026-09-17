@@ -96,8 +96,9 @@ func TestOpenAIGatewayPluginRoutingPreservesAPIKeyAndFailsClosedForOAuth(t *test
 
 	oauthRequest, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/v1/responses", nil)
 	require.NoError(t, err)
-	oauthResponse, err := service.doOpenAIUpstream(oauthRequest, "", &Account{
+	oauthResponse, err := service.doOpenAIUpstream(oauthRequest, openAITransportTestProxy().URL(), &Account{
 		ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 	})
 	require.Error(t, err)
 	assert.Nil(t, oauthResponse)
@@ -111,4 +112,8 @@ func TestStablePluginBucketIsDeterministicAndBounded(t *testing.T) {
 		assert.Equal(t, first, stablePluginBucket(id))
 		assert.Less(t, first, uint64(100))
 	}
+}
+
+func (u *pluginRoutingHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

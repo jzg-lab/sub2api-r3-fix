@@ -112,8 +112,10 @@ func ProvideOpenAIOAuthService(
 	oauthClient OpenAIOAuthClient,
 	privacyClientFactory PrivacyClientFactory,
 	tlsProfiles *TLSFingerprintProfileService,
+	authPendingIdentityService *AuthPendingIdentityService,
 ) *OpenAIOAuthService {
 	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
+	svc.SetSessionStore(NewPendingAuthOpenAIOAuthSessionStore(authPendingIdentityService))
 	svc.SetPrivacyClientFactory(privacyClientFactory)
 	svc.tlsProfiles = tlsProfiles
 	return svc
@@ -210,6 +212,33 @@ func ProvideOpenAIQuotaService(
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
 	service.agentIdentityWS = openAIGatewayService
 	return service
+}
+
+// ProvideOpenAIDowngradeProbeRunner creates and starts the bill-free OpenAI
+// account quality probe scheduler. usageLogRepo backs the real-traffic
+// deferral check: an account with recent genuine inference traffic gets its
+// routine probe postponed instead of injecting a synthetic turn right behind
+// real ones (bounded, see openAIDowngradeMaxTrafficDeferrals).
+func ProvideOpenAIDowngradeProbeRunner(
+	store OpenAIDowngradeProbeStore,
+	accountRepo AccountRepository,
+	proxyRepo ProxyRepository,
+	tokenProvider *OpenAITokenProvider,
+	httpUpstream HTTPUpstream,
+	tlsProfiles *TLSFingerprintProfileService,
+	usageLogRepo UsageLogRepository,
+) *OpenAIDowngradeProbeRunner {
+	runner := NewOpenAIDowngradeProbeRunner(
+		store, accountRepo, proxyRepo, tokenProvider, httpUpstream, tlsProfiles,
+	)
+	if usageLogRepo != nil {
+		runner.SetRecentTrafficChecker(func(ctx context.Context, accountID int64, within time.Duration) bool {
+			logs, _, err := usageLogRepo.ListByAccountAndTimeRange(ctx, accountID, time.Now().Add(-within), time.Now())
+			return err == nil && len(logs) > 0
+		})
+	}
+	runner.Start()
+	return runner
 }
 
 // ProvideOpenAIGatewayService wires the shared TLS fingerprint profile
@@ -796,6 +825,7 @@ func ProvideOpsService(
 	geminiCompatService *GeminiMessagesCompatService,
 	antigravityGatewayService *AntigravityGatewayService,
 	systemLogSink *OpsSystemLogSink,
+	openAIDowngradeStore OpenAIDowngradeProbeStore,
 	settingService *SettingService,
 	authCacheInvalidationWorker *AuthCacheInvalidationWorker,
 	apiKeyService *APIKeyService,
@@ -813,6 +843,7 @@ func ProvideOpsService(
 		antigravityGatewayService,
 		systemLogSink,
 	)
+	svc.SetOpenAIDowngradeProbeStore(openAIDowngradeStore)
 	if settingService != nil {
 		svc.SetOpenAIQuotaAutoPauseSettingsSink(settingService.SetOpenAIQuotaAutoPauseSettings)
 		// Optional warm-up so the first scheduled request after process start observes
@@ -945,6 +976,7 @@ var ProviderSet = wire.NewSet(
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,
+	ProvideOpenAIDowngradeProbeRunner,
 	ProvideOpenAIQuotaAutoResetService,
 	ProvideGrokQuotaService,
 	ProvideCNProviderQuotaService,

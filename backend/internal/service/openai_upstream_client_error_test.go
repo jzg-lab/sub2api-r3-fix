@@ -42,7 +42,8 @@ func newOpenAIUpstreamErrorResponse(statusCode int, body string) *http.Response 
 }
 
 func newOpenAIUpstreamErrorTestAccount() *Account {
-	return &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Name: "acct"}
+	return &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Name: "acct"}
 }
 
 // 主复现：原生 Responses 路径必须回真实的 400 与上游诊断信息，而不是可重试的 502。

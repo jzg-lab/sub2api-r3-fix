@@ -135,7 +135,8 @@ func TestEvaluateOpenAIFastPolicy_ScopeFiltersOAuth(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, settings)
 
 	// OAuth account → rule matches
-	oauthAccount := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauthAccount := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	action, _ := svc.evaluateOpenAIFastPolicy(context.Background(), oauthAccount, "gpt-4", OpenAIFastTierPriority)
 	require.Equal(t, BetaPolicyActionFilter, action)
 
@@ -270,7 +271,8 @@ func TestApplyOpenAIFastPolicyToBody_ForcePriorityRewritesKnownTier(t *testing.T
 
 func TestApplyOpenAIFastPolicyToBody_GroupForceInjectsAndOverridesTier(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, DefaultOpenAIFastPolicySettings())
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	ctx := context.WithValue(context.Background(), ctxkey.Group, &Group{
 		ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, ForceOpenAIFast: true,
 	})
@@ -289,7 +291,8 @@ func TestApplyOpenAIFastPolicyToBody_GroupForceInjectsAndOverridesTier(t *testin
 
 func TestApplyOpenAIFastPolicyToBody_GroupForceStillHonorsGlobalPolicy(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, openAIFastFilterPriorityPolicy())
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	ctx := context.WithValue(context.Background(), ctxkey.Group, &Group{
 		ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, ForceOpenAIFast: true,
 	})
@@ -302,7 +305,8 @@ func TestApplyOpenAIFastPolicyToBody_GroupForceStillHonorsGlobalPolicy(t *testin
 
 func TestApplyOpenAIFastPolicyToBody_GroupForceRequiresHydratedGroup(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, DefaultOpenAIFastPolicySettings())
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"model":"gpt-5.6-sol"}`)
 	ctx := context.WithValue(context.Background(), ctxkey.Group, &Group{
 		ID: 7, Platform: PlatformOpenAI, Status: StatusActive, ForceOpenAIFast: true,
@@ -339,7 +343,8 @@ func TestApplyOpenAIFastPolicyToBody_GroupForceRequiresSupportedGroupPlatform(t 
 
 	updated, err := svc.applyOpenAIFastPolicyToBody(
 		ctx,
-		&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		&Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 		"gpt-5.6-sol",
 		body,
 	)

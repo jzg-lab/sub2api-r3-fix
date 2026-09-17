@@ -336,7 +336,10 @@ func TestOpenAIHTTP429StillUsesQuotaResetHeaders(t *testing.T) {
 	account := &Account{ID: 422, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	svc.openaiOAuth429RetryStartedAt.Store(account.ID, time.Now().Add(-openAIOAuth429RetryWindow-time.Second))
 	headers := http.Header{}
-	headers.Set("x-codex-primary-used-percent", "37")
+	// r16 429 重置语义（Codex 2026-09-16 批次）：只有 used≥100% 的耗尽窗口
+	// 其 reset 头才可延长持有——37% 的成功握手快照按 7 天持有正是 1043/1045
+	// 「满额还 429」的病根（stream 路径的孪生测试已覆盖 37% 忽略侧）。
+	headers.Set("x-codex-primary-used-percent", "100")
 	headers.Set("x-codex-primary-reset-after-seconds", "604800")
 	headers.Set("x-codex-primary-window-minutes", "10080")
 

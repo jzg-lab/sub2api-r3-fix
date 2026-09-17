@@ -9,11 +9,13 @@ import (
 )
 
 func TestShouldFlattenOpenAIResponsesNamespaces(t *testing.T) {
-	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	grokOAuth := &Account{Platform: PlatformGrok, Type: AccountTypeOAuth}
 	// 账号级兼容开关：为不认识 namespace 的兼容上游恢复旧的摊平行为。
 	flattenOAuth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{"openai_responses_flatten_namespaces": true},
@@ -63,10 +65,12 @@ func TestShouldFlattenOpenAIResponsesNamespaces(t *testing.T) {
 }
 
 func TestShouldKeepOpenAIResponsesToolCallNamespaces(t *testing.T) {
-	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	setupToken := &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}
 	flattenOAuth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{"openai_responses_flatten_namespaces": true},
@@ -113,7 +117,8 @@ func TestShouldKeepOpenAIResponsesToolCallNamespaces(t *testing.T) {
 }
 
 func TestShouldStripOpenAIResponsesInputNamespaces(t *testing.T) {
-	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	setupToken := &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}
 	grokOAuth := &Account{Platform: PlatformGrok, Type: AccountTypeOAuth}

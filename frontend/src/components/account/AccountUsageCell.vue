@@ -30,12 +30,12 @@
       </div>
 
       <!-- Error state -->
-      <div v-else-if="error" class="text-xs text-red-500">
+      <div v-if="error" class="text-xs text-red-500">
         {{ error }}
       </div>
 
       <!-- Usage data -->
-      <div v-else-if="usageInfo" class="space-y-1">
+      <div v-if="usageInfo" class="space-y-1">
         <!-- API error (degraded response) -->
         <div v-if="usageInfo.error" class="text-xs text-amber-600 dark:text-amber-400 truncate max-w-[200px]" :title="usageInfo.error">
           {{ usageInfo.error }}
@@ -76,11 +76,14 @@
           :resets-at="usageInfo.seven_day_fable.resets_at"
           color="amber"
         />
+      </div>
+
+      <div v-else-if="!loading" class="text-xs text-gray-400">-</div>
 
         <!-- Passive sampling label + active query button -->
         <div class="flex items-center gap-1.5 mt-0.5">
           <span
-            v-if="usageInfo.source === 'passive'"
+            v-if="usageInfo?.source === 'passive'"
             class="text-[9px] text-gray-400 dark:text-gray-500 italic"
           >
             {{ t('admin.accounts.usageWindow.passiveSampled') }}
@@ -88,7 +91,7 @@
           <button
             type="button"
             class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors"
-            :disabled="activeQueryLoading"
+            :disabled="activeQueryLoading || loading"
             @click="loadActiveUsage"
           >
             <svg
@@ -108,16 +111,13 @@
             {{ t('admin.accounts.usageWindow.activeQuery') }}
           </button>
         </div>
-      </div>
-
-      <!-- No data yet -->
-      <div v-else class="space-y-1">
-        <div class="text-xs text-gray-400">-</div>
-      </div>
     </template>
 
     <!-- OpenAI OAuth accounts: single source from /usage API -->
     <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
+      <div v-if="error || usageInfo?.error" class="text-xs text-amber-600 dark:text-amber-400">
+        {{ error || usageInfo?.error }}
+      </div>
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
           v-if="usageInfo?.five_hour"
@@ -147,7 +147,7 @@
             <button
               type="button"
               class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="activeQueryLoading"
+              :disabled="activeQueryLoading || loading"
               @click="loadActiveUsage"
             >
               <svg
@@ -662,7 +662,7 @@ import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
 import { cnQuotaCellVisible as cnQuotaCellVisibleFn, cnBalanceCellVisible as cnBalanceCellVisibleFn } from './credentialsBuilder'
 
-// Module-level cache shared across all AccountUsageCell instances
+// Direct-query cache for this cell; batch-managed results belong to the parent.
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
@@ -675,7 +675,7 @@ const props = withDefaults(
     batchedUsage?: AccountUsageInfo | null
     batchedUsageError?: string | null
     batchedUsageLoading?: boolean
-    requestBatchedUsage?: ((account: Account, options?: { force?: boolean }) => void) | null
+    requestBatchedUsage?: ((account: Account, options?: { force?: boolean; source?: 'active' | 'passive' }) => void | Promise<void>) | null
   }>(),
   {
     todayStats: null,
@@ -697,7 +697,11 @@ const { t } = useI18n()
 const desktopViewportQuery = '(min-width: 768px)'
 
 const unmounted = ref(false)
-onBeforeUnmount(() => { unmounted.value = true })
+let usageRequestGeneration = 0
+onBeforeUnmount(() => {
+  unmounted.value = true
+  usageRequestGeneration++
+})
 
 const loading = ref(false)
 const activeQueryLoading = ref(false)
@@ -1348,9 +1352,9 @@ const isAnthropicOAuthOrSetupToken = computed(() => {
   return props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')
 })
 
-const requestParentBatchUsage = (options?: { force?: boolean }) => {
+const requestParentBatchUsage = (options?: { force?: boolean; source?: 'active' | 'passive' }) => {
   if (!isBatchManaged.value || !shouldFetchUsage.value) return
-  props.requestBatchedUsage?.(props.account, options)
+  return props.requestBatchedUsage?.(props.account, options)
 }
 
 const syncManagedUsageState = () => {
@@ -1362,17 +1366,38 @@ const syncManagedUsageState = () => {
 
 const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?: boolean }) => {
   if (!shouldFetchUsage.value) return
+  if (!isBatchManaged.value && activeQueryLoading.value && !options?.bypassCache) return
+  const account = props.account
+  const generation = ++usageRequestGeneration
+  const isCurrent = () => !unmounted.value &&
+    generation === usageRequestGeneration &&
+    account.id === props.account.id &&
+    account.platform === props.account.platform &&
+    account.type === props.account.type
+
+  activeQueryLoading.value = options?.source === 'active'
   if (isBatchManaged.value) {
-    requestParentBatchUsage({ force: options?.bypassCache === true })
+    try {
+      await requestParentBatchUsage({
+        force: options?.bypassCache === true,
+        ...(isAnthropicOAuthOrSetupToken.value && options?.source
+          ? { source: options.source } : {})
+      })
+    } finally {
+      if (isCurrent()) activeQueryLoading.value = false
+    }
     return
   }
 
   // Check cache
+  if (options?.bypassCache) _usageCache.delete(account.id)
   if (!options?.bypassCache) {
-    const cached = _usageCache.get(props.account.id)
+    const cached = _usageCache.get(account.id)
     if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
       usageInfo.value = cached.data
       loading.value = false
+      activeQueryLoading.value = false
+      error.value = null
       return
     }
   }
@@ -1381,21 +1406,24 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   error.value = null
 
   try {
-		const fetchFn = () => options?.source
-			? adminAPI.accounts.getUsage(props.account.id, options.source, options.bypassCache === true)
-			: adminAPI.accounts.getUsage(props.account.id)
-    const result = await enqueueUsageRequest(props.account, fetchFn)
-    if (!unmounted.value) {
+    const fetchFn = () => options?.source || options?.bypassCache
+      ? adminAPI.accounts.getUsage(account.id, options.source, options.bypassCache === true)
+      : adminAPI.accounts.getUsage(account.id)
+    const result = await enqueueUsageRequest(account, fetchFn)
+    if (isCurrent()) {
       usageInfo.value = result
-      _usageCache.set(props.account.id, { data: result, ts: Date.now() })
+      _usageCache.set(account.id, { data: result, ts: Date.now() })
     }
   } catch (e: any) {
-    if (!unmounted.value) {
+    if (isCurrent()) {
       error.value = t('common.error')
       console.error('Failed to load usage:', e)
     }
   } finally {
-    if (!unmounted.value) loading.value = false
+    if (isCurrent()) {
+      loading.value = false
+      activeQueryLoading.value = false
+    }
   }
 }
 
@@ -1449,16 +1477,7 @@ const attachVisibilityObserver = () => {
   visibilityObserver.observe(rootRef.value)
 }
 
-const loadActiveUsage = async () => {
-  activeQueryLoading.value = true
-  try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
-  } catch (e: any) {
-    console.error('Failed to load active usage:', e)
-  } finally {
-    activeQueryLoading.value = false
-  }
-}
+const loadActiveUsage = () => loadUsage({ source: 'active', bypassCache: true })
 
 // The probe persists upstream quota state; refresh this cell so its compact
 // bars and entitlement status reflect the newly observed snapshot.
@@ -1595,9 +1614,19 @@ watch(
 )
 
 watch(isBatchManaged, (managed, wasManaged) => {
+  usageRequestGeneration++
+  activeQueryLoading.value = false
+  loading.value = false
+  error.value = null
+  // A different owner may have refreshed while this cell's cache was idle.
+  _usageCache.delete(props.account.id)
   if (managed && !wasManaged) {
+    pendingAutoLoad.value = false
+    pendingAutoLoadSource.value = undefined
     syncManagedUsageState()
     requestParentBatchUsage()
+  } else if (!managed && wasManaged) {
+    requestAutoLoad(isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined)
   }
 })
 
@@ -1611,14 +1640,24 @@ watch(
     ) {
       return
     }
-    if (!managed || !shouldFetchUsage.value) return
-    syncManagedUsageState()
-    requestParentBatchUsage()
+    usageRequestGeneration++
+    usageInfo.value = null
+    error.value = null
+    loading.value = false
+    activeQueryLoading.value = false
+    if (!shouldFetchUsage.value) return
+    if (managed) {
+      syncManagedUsageState()
+      requestParentBatchUsage()
+    } else {
+      requestAutoLoad(isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined)
+    }
   },
   { flush: 'post' }
 )
 
-watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
+watch(() => [props.account.id, openAIUsageRefreshKey.value] as const, ([accountID, nextKey], [previousID, prevKey]) => {
+  if (accountID !== previousID) return
   if (!prevKey || nextKey === prevKey) return
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
 

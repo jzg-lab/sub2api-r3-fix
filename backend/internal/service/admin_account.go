@@ -334,13 +334,8 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	return duplicate, nil
 }
 
-func normalizeAccountConcurrency(platform, accountType string, concurrency int) int {
-	if platform == PlatformGrok && accountType == AccountTypeOAuth {
-		if concurrency <= 0 {
-			return 1
-		}
-	}
-	return concurrency
+func normalizeAccountConcurrency(_, _ string, _ int) int {
+	return LocalAccountConcurrency
 }
 
 // ValidateOpenAILongContextBillingExtra validates the OpenAI account billing flag when present.
@@ -421,6 +416,15 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Status:      StatusActive,
 		Schedulable: true,
 	}
+	// 新 OpenAI OAuth 账号先进入质检流水线（需求3）：默认不可调度，
+	// 由降智探针完成 2 次质检合格后自动分桶上岗。
+	if input.Platform == PlatformOpenAI && input.Type == AccountTypeOAuth {
+		if account.Extra == nil {
+			account.Extra = make(map[string]any)
+		}
+		account.Schedulable = false
+		account.Extra[openAIDowngradeQualificationExtraKey] = true
+	}
 	NormalizeOpenAICodexFingerprintExtraForCreate(account)
 	NormalizeTLSFingerprintExtraForCreate(account)
 	if input.ProbeEnabled != nil && *input.ProbeEnabled {
@@ -464,13 +468,93 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	return account, nil
 }
 
+// ErrOpenAIOAuthProvenanceRequired 表示 openai oauth 账号缺少真实凭据物料，
+// 只能经 codex 导入 / 数据恢复 / PAT 授权流进入，不接受裸表单直建。
+var ErrOpenAIOAuthProvenanceRequired = infraerrors.BadRequest(
+	"OPENAI_OAUTH_PROVENANCE_REQUIRED",
+	"openai oauth accounts require real credential material (refresh/access token, including PAT access tokens); use the codex import or authorization flow",
+)
+
+// hasOpenAIOAuthCredentialMaterial 判断 credentials 是否携带真实 OAuth
+// token 物料：浏览器 OAuth 的 refresh_token/access_token（含 auth.json 的
+// tokens 嵌套形态）或 PAT 的 access_token。auth_mode 标记及
+// Credentials/Extra 里的 oauth_verified 之类调用方旗标不属于物料。
+func hasOpenAIOAuthCredentialMaterial(credentials map[string]any) bool {
+	if len(credentials) == 0 {
+		return false
+	}
+	credString := func(key string) string {
+		value, _ := credentials[key].(string)
+		return strings.TrimSpace(value)
+	}
+	for _, key := range []string{"refresh_token", "access_token"} {
+		if credString(key) != "" {
+			return true
+		}
+	}
+	if tokens, ok := credentials["tokens"].(map[string]any); ok {
+		for _, key := range []string{"refresh_token", "access_token"} {
+			if value, ok := tokens[key].(string); ok && strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// openAICodexModelMappingFloorKeys 是 OpenAI OAuth(codex) 账号 model_mapping
+// 的保底键:上游导入工具(codex-auth-manager 等)携带的映射模板可能滞后于新
+// 模型发布(如 2026-09 的 gpt-6 批次),缺键会让测试连接面板与调度白名单看
+// 不到新模型。创建/更新时以恒等映射补齐;已存在的映射项永不覆盖。
+var openAICodexModelMappingFloorKeys = []string{"gpt-6", "gpt-6-astra"}
+
+// ensureOpenAICodexModelMappingFloor 为 OpenAI OAuth 账号的
+// credentials.model_mapping 合并保底模型键(恒等映射)。仅在已有非空映射时
+// 生效:无映射/空映射的账号走 DefaultModels 兜底,不强制播种。
+func ensureOpenAICodexModelMappingFloor(platform, accountType string, credentials map[string]any) {
+	if platform != PlatformOpenAI || accountType != AccountTypeOAuth || credentials == nil {
+		return
+	}
+	raw, ok := credentials["model_mapping"]
+	if !ok {
+		return
+	}
+	mapping, ok := raw.(map[string]any)
+	if !ok || len(mapping) == 0 {
+		return
+	}
+	changed := false
+	for _, key := range openAICodexModelMappingFloorKeys {
+		if _, exists := mapping[key]; !exists {
+			mapping[key] = key
+			changed = true
+		}
+	}
+	if changed {
+		credentials["model_mapping"] = mapping
+	}
+}
+
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
-	if input != nil && input.Platform == PlatformOpenAI {
+	if input == nil {
+		return nil, ErrAccountNilInput
+	}
+	if input.Platform == PlatformOpenAI {
 		settings, err := s.settingService.GetOpenAIOperationsSettings(ctx)
 		if err != nil {
 			return nil, err
 		}
 		input = applyOpenAINewAccountDefaults(input, settings.NewAccountDefaults)
+	}
+	// OpenAI OAuth 来源闸（Codex 9/17 补充，2026-09-17 实现）：裸表单直建的
+	// openai oauth 账号既无浏览器授权证据也无 token 物料，调用方自带的
+	// oauth_verified 等旗标不可信（admin_account_oauth_provenance_test.go）。
+	// 合法入口只有两类：codex 批量导入与数据恢复（都携带真实 token 物料）、
+	// PAT（携带 access_token）。无物料一律在写库前拒绝——凭据会被异步刷新/
+	// 遥测使用，落库本身就有隐私流量。
+	if input.Platform == PlatformOpenAI && input.Type == AccountTypeOAuth &&
+		!hasOpenAIOAuthCredentialMaterial(input.Credentials) {
+		return nil, ErrOpenAIOAuthProvenanceRequired
 	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
@@ -514,20 +598,23 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 	// Never persist ephemeral SSO/password secrets after OAuth conversion.
 	input.Credentials = SanitizeStoredCredentials(input.Platform, input.Credentials)
+	// 导入模板可能缺新模型键,gpt-6 家族恒等映射保底(见 helper 注释)。
+	ensureOpenAICodexModelMappingFloor(input.Platform, input.Type, input.Credentials)
 
 	account, err := buildAccountForCreate(input, accountExtra)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.accountRepo.Create(ctx, account); err != nil {
-		return nil, err
+	if s.accountDuplicateRepo == nil {
+		return nil, errors.New("atomic account creation repository is not configured")
 	}
-
-	// 绑定分组
-	if len(groupIDs) > 0 {
-		if err := s.accountRepo.BindGroups(ctx, account.ID, groupIDs); err != nil {
-			return nil, err
-		}
+	groups := make([]AccountGroup, len(groupIDs))
+	for i, groupID := range groupIDs {
+		groups[i] = AccountGroup{GroupID: groupID, Priority: i + 1}
+	}
+	// Publish the account only after its groups and scheduler event commit together.
+	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, account, groups); err != nil {
+		return nil, err
 	}
 
 	// OAuth 账号：创建后异步设置隐私。
@@ -613,8 +700,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				"cannot change account type while it has a spark shadow; delete the shadow first")
 		}
 	}
-	wasOveragesEnabled := account.IsOveragesEnabled()
-
 	if input.Name != "" {
 		account.Name = input.Name
 	}
@@ -636,6 +721,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
+		// 编辑/重导入同样保底 gpt-6 家族映射键(见 helper 注释)。
+		ensureOpenAICodexModelMappingFloor(account.Platform, account.Type, account.Credentials)
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
@@ -679,6 +766,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				normalizedExtra[key] = v
 			}
 		}
+		normalizedExtra = PreserveModelRateLimitsForAccountEdit(account.Platform, account.Extra, normalizedExtra)
 		normalizedExtra = normalizeOpenAICodexFingerprintExtraForUpdate(
 			account,
 			normalizedExtra,
@@ -688,17 +776,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		// Codex 指纹 seed 处理：剥掉用户带入值，已有合法 seed 保留，模式需要且缺失时铸造。
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
 		account.Extra = normalizedExtra
-		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
-			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
-			// 清除 AICredits 限流 key
-			if rawLimits, ok := account.Extra[modelRateLimitsKey].(map[string]any); ok {
-				delete(rawLimits, creditsExhaustedKey)
-			}
-		}
-		if account.Platform == PlatformAntigravity && !wasOveragesEnabled && account.IsOveragesEnabled() {
-			delete(account.Extra, modelRateLimitsKey)
-			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
-		}
 		// 校验并预计算固定时间重置的下次重置时间
 		if err := ValidateQuotaResetConfig(account.Extra); err != nil {
 			return nil, err
@@ -896,6 +973,9 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	// Codex 指纹 seed 系统管理：key 级更新不得写入 seed（需要时由 repo 层原子 ensure）。
 	updates = sanitizedCodexFingerprintExtraUpdates(updates)
 	updates = stripOpenAIAutoResetCreditManagedExtra(updates, true)
+	delete(updates, modelRateLimitsKey)
+	delete(updates, OpenAIDowngradeSolFallbackExtraKey)
+	delete(updates, OpenAIDowngradeQualificationExtraKey)
 	delete(updates, UpstreamBillingProbeEnabledExtraKey)
 	delete(updates, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(updates, UpstreamBillingProbeExtraKey)
@@ -924,6 +1004,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// Codex 指纹 seed 同理：批量更新不预写 seed，需要时由 repo 层原子 ensure。
 	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
 	input.Extra = stripOpenAIAutoResetCreditManagedExtra(input.Extra, true)
+	delete(input.Extra, modelRateLimitsKey)
+	delete(input.Extra, OpenAIDowngradeSolFallbackExtraKey)
+	delete(input.Extra, OpenAIDowngradeQualificationExtraKey)
 	delete(input.Extra, UpstreamBillingProbeEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	delete(input.Extra, UpstreamBillingProbeExtraKey)
@@ -1101,7 +1184,8 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.ProxyID = input.ProxyID
 	}
 	if input.Concurrency != nil {
-		repoUpdates.Concurrency = input.Concurrency
+		concurrency := LocalAccountConcurrency
+		repoUpdates.Concurrency = &concurrency
 	}
 	if input.Priority != nil {
 		repoUpdates.Priority = input.Priority
@@ -1123,6 +1207,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	if input.Schedulable != nil {
 		repoUpdates.Schedulable = input.Schedulable
+		repoUpdates.ManualScheduling = true
 	}
 
 	// Run bulk update for column/jsonb fields first.
@@ -1294,8 +1379,14 @@ func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorM
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
-	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
+	affected, err := s.accountRepo.BulkUpdate(ctx, []int64{id}, AccountBulkUpdate{
+		Schedulable: &schedulable, ManualScheduling: true,
+	})
+	if err != nil {
 		return nil, err
+	}
+	if affected == 0 {
+		return nil, ErrAccountNotFound
 	}
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
@@ -1380,15 +1471,11 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	if runes := []rune(name); len(runes) > 100 {
 		name = string(runes[:100])
 	}
-	// 并发未指定(<=0)时继承母账号，避免 0 被限流器解读为"无限并发"（外审 F3）。
-	concurrency := opts.Concurrency
-	if concurrency <= 0 {
-		concurrency = parent.Concurrency
-	}
+	concurrency := LocalAccountConcurrency
 	// 优先级未指定(<=0)时继承母账号——前端一键创建只传 name,opts.Priority 省略即 0,而调度
 	// 比较是「数值越小越优先」(openai_account_scheduler.isOpenAIAccountCandidateBetter),且 repo
 	// 显式 SetPriority 会绕过 ent 默认 50,直写 0 会让影子意外抢到最高优先级(外审第5轮 P1)。
-	// 与上方 Concurrency 一致采用「省略继承母账号」语义(影子的 proxy/分组/并发亦全部继承母账号)。
+	// Priority inherits the parent when omitted; concurrency follows local policy.
 	priority := opts.Priority
 	if priority <= 0 {
 		priority = parent.Priority
@@ -1410,29 +1497,21 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		},
 	}
 
-	// 5. 持久化（Create 填充 shadow.ID）。并发竞态:预查(步骤2)放行后另一请求抢先建成,本次会撞
-	// 一母一影唯一索引。复查确认确为"已存在"竞态时返回结构化 409 而非裸 500——外审 A/P1。
-	if err := s.accountRepo.Create(ctx, shadow); err != nil {
+	if s.accountDuplicateRepo == nil {
+		return nil, errors.New("atomic account creation repository is not configured")
+	}
+	groups := make([]AccountGroup, len(groupIDs))
+	for i, groupID := range groupIDs {
+		groups[i] = AccountGroup{GroupID: groupID, Priority: i + 1}
+	}
+	// Commit the shadow, groups and scheduler event together; no compensating delete.
+	// A concurrent winner still maps to the existing structured conflict response.
+	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, shadow, groups); err != nil {
 		if existing, qerr := s.accountRepo.ListShadowsByParent(ctx, parentID); qerr == nil && len(existing) > 0 {
 			return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
 				"parent account already has a spark shadow account")
 		}
 		return nil, fmt.Errorf("create spark shadow: %w", err)
-	}
-
-	// 6. 绑定分组。注意:create+bind 非单一 DB 事务(通用 Create 走 r.client、outbox 走 r.sql,
-	// 无现成共享事务路径),故绑组失败时做 best-effort 补偿删除刚建的影子,避免半成品影子(否则
-	// 一母一影唯一索引会挡住重试)——外审 C/P1。补偿删除用 detached ctx,即便请求 ctx 已取消/超时
-	// 仍能完成清理(外审第4轮);进程崩溃这种极端仍可能残留,属已知权衡。
-	if len(groupIDs) > 0 {
-		if err := s.accountRepo.BindGroups(ctx, shadow.ID, groupIDs); err != nil {
-			if delErr := s.accountRepo.Delete(context.WithoutCancel(ctx), shadow.ID); delErr != nil {
-				slog.Error("spark_shadow_bind_groups_rollback_failed",
-					"shadow_id", shadow.ID, "parent_id", parentID, "delete_err", delErr)
-			}
-			return nil, fmt.Errorf("bind groups for spark shadow: %w", err)
-		}
-		shadow.GroupIDs = groupIDs
 	}
 
 	return shadow, nil
@@ -1607,11 +1686,10 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 		return ""
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil {
-		if p, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && p != nil {
-			proxyURL = p.URL()
-		}
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, account.ProxyID)
+	if err != nil {
+		logger.LegacyPrintf("service.admin", "openai_privacy_proxy_unavailable: account_id=%d", account.ID)
+		return PrivacyModeFailed
 	}
 
 	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)
@@ -1641,11 +1719,10 @@ func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Acco
 		return ""
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil {
-		if p, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && p != nil {
-			proxyURL = p.URL()
-		}
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, account.ProxyID)
+	if err != nil {
+		logger.LegacyPrintf("service.admin", "openai_privacy_proxy_unavailable: account_id=%d", account.ID)
+		return PrivacyModeFailed
 	}
 
 	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)

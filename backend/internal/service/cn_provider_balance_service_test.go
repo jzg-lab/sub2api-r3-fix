@@ -128,3 +128,7 @@ func TestCNProviderBalanceService_DeepSeekValidZeroBalanceRemainsSuccessful(t *t
 	require.Len(t, result.Balances, 1)
 	require.Len(t, repo.extraWrites, 1, "a valid upstream zero balance must still be persisted")
 }
+
+func (u *cnBalanceResponseUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

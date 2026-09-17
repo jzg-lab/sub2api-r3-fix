@@ -7,6 +7,10 @@ const {
   probeUpstreamBillingMock,
   syncUpstreamModelsMock,
   showWarningMock,
+  showErrorMock,
+  showSuccessMock,
+  generateAuthUrlMock,
+  exchangeCodeMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
   authIsSimpleMode,
@@ -15,6 +19,10 @@ const {
   probeUpstreamBillingMock: vi.fn(),
   syncUpstreamModelsMock: vi.fn(),
   showWarningMock: vi.fn(),
+  showErrorMock: vi.fn(),
+  showSuccessMock: vi.fn(),
+  generateAuthUrlMock: vi.fn(),
+  exchangeCodeMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
   authIsSimpleMode: { value: true },
@@ -22,8 +30,8 @@ const {
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showError: showErrorMock,
+    showSuccess: showSuccessMock,
     showWarning: showWarningMock,
   }),
 }))
@@ -45,6 +53,8 @@ vi.mock('@/api/admin', () => ({
       checkMixedChannelRisk: vi.fn().mockResolvedValue({ has_risk: false }),
       importCodexSession: importCodexSessionMock,
       createOpenAICodexPAT: createOpenAICodexPATMock,
+      generateAuthUrl: generateAuthUrlMock,
+      exchangeCode: exchangeCodeMock,
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -84,13 +94,16 @@ const OAuthAuthorizationFlowStub = defineComponent({
     showAgentIdentityOption: Boolean,
     showCodexPatOption: Boolean,
     initialInputMethod: String,
+    loading: Boolean,
   },
-  data: () => ({ inputMethod: 'manual' }),
-  emits: ['import-codex-session', 'import-codex-pat'],
+  data: () => ({ inputMethod: 'manual', authCode: 'test-code', oauthState: 'test-state' }),
+  methods: { reset() {} },
+  emits: ['import-codex-session', 'import-codex-pat', 'generate-url'],
   template: `
     <div>
       <button data-testid="import-codex-session" @click="$emit('import-codex-session', 'session-json')">session</button>
       <button data-testid="import-codex-pat" @click="$emit('import-codex-pat', 'pat-token')">pat</button>
+      <button data-testid="generate-url" @click="$emit('generate-url')">authorize</button>
     </div>
   `,
 })
@@ -206,6 +219,145 @@ async function openCodexImportStep(
   await wrapper.get('form#create-account-form').trigger('submit.prevent')
   return wrapper
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+async function startOAuthFlow(wrapper: ReturnType<typeof mountModal>) {
+  await selectButtonByText(wrapper, 'OpenAI')
+  await wrapper.get('form#create-account-form input[type="text"]').setValue('OAuth account')
+  wrapper.findComponent({ name: 'ProxySelector' }).vm.$emit('update:modelValue', 23)
+  await wrapper.get('form#create-account-form').trigger('submit.prevent')
+  await wrapper.get('[data-testid="generate-url"]').trigger('click')
+  await flushPromises()
+}
+
+function authSubmit(wrapper: ReturnType<typeof mountModal>) {
+  return wrapper.findAll('button').find(button =>
+    /admin\.accounts\.oauth\.(completeAuth|verifying)/.test(button.text())
+  )!
+}
+
+describe('CreateAccountModal local concurrency', () => {
+  it('keeps the fixed limit after platform changes and reopening', async () => {
+    const wrapper = mountModal()
+    const limit = () => wrapper.get('input[type="number"][readonly]')
+    expect((limit().element as HTMLInputElement).value).toBe('50')
+    await selectButtonByText(wrapper, 'OpenAI')
+    expect((limit().element as HTMLInputElement).value).toBe('50')
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect((limit().element as HTMLInputElement).value).toBe('50')
+    wrapper.unmount()
+  })
+})
+
+describe('CreateAccountModal OpenAI authorization lifecycle', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'oauth' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    showErrorMock.mockReset()
+    showSuccessMock.mockReset()
+    generateAuthUrlMock.mockReset().mockResolvedValue({
+      auth_url: 'https://auth.example.invalid/authorize?state=test-state',
+      session_id: 'test-session',
+    })
+    exchangeCodeMock.mockReset().mockResolvedValue({ proxy_id: 17, expires_in: 3600 })
+  })
+
+  it('uses the exchange route and stays busy until account creation completes', async () => {
+    const creation = deferred<unknown>()
+    createAccountMock.mockReturnValueOnce(creation.promise)
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ proxy_id: 17 }))
+    expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(true)
+    await authSubmit(wrapper).trigger('click')
+    expect(exchangeCodeMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+
+    creation.resolve({ id: 42 })
+    await flushPromises()
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it.each(['close', 'back', 'unmount'])('does not create after %s cancels an exchange', async (action) => {
+    const exchange = deferred<unknown>()
+    exchangeCodeMock.mockReturnValueOnce(exchange.promise)
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    if (action === 'close') wrapper.findComponent(BaseDialogStub).vm.$emit('close')
+    if (action === 'back') await selectButtonByText(wrapper, 'common.back')
+    if (action === 'unmount') wrapper.unmount()
+    exchange.resolve({ proxy_id: 17 })
+    await flushPromises()
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).not.toHaveBeenCalled()
+    if (action !== 'unmount') wrapper.unmount()
+  })
+
+  it.each(['success', 'failure'])('does not let an old create %s change a new flow', async (outcome) => {
+    const oldCreation = deferred<unknown>()
+    const newCreation = deferred<unknown>()
+    createAccountMock.mockReturnValueOnce(oldCreation.promise).mockReturnValueOnce(newCreation.promise)
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    generateAuthUrlMock.mockResolvedValueOnce({
+      auth_url: 'https://auth.example.invalid/authorize?state=test-state',
+      session_id: 'next-session',
+    })
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalledTimes(2)
+
+    if (outcome === 'success') oldCreation.resolve({ id: 42 })
+    else oldCreation.reject(new Error('older creation failed'))
+    await flushPromises()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(showErrorMock).not.toHaveBeenCalled()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(true)
+    expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.emitted('created')?.length ?? 0).toBe(outcome === 'success' ? 1 : 0)
+
+    newCreation.resolve({ id: 43 })
+    await flushPromises()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('rejects an exchange without a server-assigned proxy before creating', async () => {
+    exchangeCodeMock.mockResolvedValueOnce({ expires_in: 3600 })
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    await flushPromises()
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalled()
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(false)
+    wrapper.unmount()
+  })
+})
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
   beforeEach(() => {

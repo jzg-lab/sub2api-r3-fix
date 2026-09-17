@@ -20,8 +20,10 @@ func TestAdminService_EnsureOpenAIPrivacy_RetriesNonSuccessModes(t *testing.T) {
 			t.Parallel()
 
 			privacyCalls := 0
+			proxyID, proxyRepo := openAIPrivacyRetryProxyFixture()
 			svc := &adminServiceImpl{
 				accountRepo: &mockAccountRepoForGemini{},
+				proxyRepo:   proxyRepo,
 				privacyClientFactory: func(proxyURL string) (*req.Client, error) {
 					privacyCalls++
 					return nil, errors.New("factory failed")
@@ -30,6 +32,7 @@ func TestAdminService_EnsureOpenAIPrivacy_RetriesNonSuccessModes(t *testing.T) {
 
 			account := &Account{
 				ID:       101,
+				ProxyID:  &proxyID,
 				Platform: PlatformOpenAI,
 				Type:     AccountTypeOAuth,
 				Credentials: map[string]any{
@@ -64,13 +67,15 @@ func TestTokenRefreshService_ensureOpenAIPrivacy_RetriesNonSuccessModes(t *testi
 
 			service := NewTokenRefreshService(&tokenRefreshAccountRepo{}, nil, nil, nil, nil, nil, nil, cfg, nil)
 			privacyCalls := 0
+			proxyID, proxyRepo := openAIPrivacyRetryProxyFixture()
 			service.SetPrivacyDeps(func(proxyURL string) (*req.Client, error) {
 				privacyCalls++
 				return nil, errors.New("factory failed")
-			}, nil)
+			}, proxyRepo)
 
 			account := &Account{
 				ID:       202,
+				ProxyID:  &proxyID,
 				Platform: PlatformOpenAI,
 				Type:     AccountTypeOAuth,
 				Credentials: map[string]any{
@@ -85,5 +90,14 @@ func TestTokenRefreshService_ensureOpenAIPrivacy_RetriesNonSuccessModes(t *testi
 
 			require.Equal(t, 1, privacyCalls)
 		})
+	}
+}
+
+func openAIPrivacyRetryProxyFixture() (int64, *mockProxyRepoForOAuth) {
+	id := int64(7)
+	return id, &mockProxyRepoForOAuth{
+		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+			return &Proxy{ID: id, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
+		},
 	}
 }

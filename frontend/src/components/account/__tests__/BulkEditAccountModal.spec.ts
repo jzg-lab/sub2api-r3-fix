@@ -81,6 +81,20 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('BulkEditAccountModal', () => {
+  it('keeps the concurrency control at 50 when enabled and reopened', async () => {
+    const wrapper = mountModal()
+    const limit = wrapper.get<HTMLInputElement>('#bulk-edit-concurrency')
+    expect(limit.element.value).toBe('50')
+    expect(limit.element.readOnly).toBe(true)
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    expect(limit.element.disabled).toBe(false)
+    expect(limit.element.value).toBe('50')
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    expect(limit.element.value).toBe('50')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     vi.mocked(adminAPI.accounts.bulkUpdate).mockReset()
     vi.mocked(adminAPI.accounts.checkMixedChannelRisk).mockReset()

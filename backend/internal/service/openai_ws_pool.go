@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -82,6 +83,7 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	proxyRouteDigest    [32]byte
 	tlsTransportKey     string
 	betaFeatures        string
 	codexInstallationID string
@@ -870,6 +872,9 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	}
 
 retryAcquire:
+	if err := validateOpenAIAccountProxyRoute(req.Account, req.ProxyURL); err != nil {
+		return nil, err
+	}
 	if p.resolveTLSProfile != nil {
 		req.tlsProfile = p.resolveTLSProfile(req.Account).ForWebSocket()
 	}
@@ -1806,6 +1811,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
 	}
+	if err := validateOpenAIAccountProxyRoute(req.Account, req.ProxyURL); err != nil {
+		return nil, err
+	}
 	// Prewarm requests may outlive a profile edit. Resolve a fresh snapshot at
 	// dial time and bind the resulting connection to that same snapshot.
 	if p.resolveTLSProfile != nil {
@@ -1819,6 +1827,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := validateOpenAIAccountProxyRoute(req.Account, req.ProxyURL); err != nil {
+		return nil, err
 	}
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
 	if err != nil {
@@ -2008,6 +2019,16 @@ func (p *openAIWSConnPool) dialTimeout() time.Duration {
 
 func cloneOpenAIWSAcquireRequest(req openAIWSAcquireRequest) openAIWSAcquireRequest {
 	copied := req
+	if req.Account != nil {
+		account := *req.Account
+		account.ProxyID = cloneAccountValuePointer(req.Account.ProxyID)
+		if req.Account.Proxy != nil {
+			proxy := *req.Account.Proxy
+			proxy.ExpiresAt = cloneAccountValuePointer(proxy.ExpiresAt)
+			account.Proxy = &proxy
+		}
+		copied.Account = &account
+	}
 	copied.tlsProfile = req.tlsProfile.Clone()
 	copied.Headers = cloneHeader(req.Headers)
 	copied.WSURL = stringsTrim(req.WSURL)
@@ -2063,6 +2084,9 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header, profiles ...*tlsfingerprint.Profile) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+	}
+	if account != nil && account.Proxy != nil {
+		key.proxyRouteDigest = sha256.Sum256([]byte(account.Proxy.URL()))
 	}
 	if len(profiles) > 0 && profiles[0] != nil {
 		key.tlsTransportKey = profiles[0].TransportKey()

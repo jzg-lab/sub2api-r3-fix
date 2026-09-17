@@ -1023,9 +1023,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 		// Send request
 		upstreamStart := time.Now()
+		// Codex 客户端遥测：身份取自终态出站头，异步补发分析事件与 OTLP 指标，
+		// 失败仅记日志，绝不影响主链路（openai_codex_telemetry.go）。
+		telemetryAttempt := beginOpenAICodexTelemetry(s, account, body, upstreamReq.Header, proxyURL, false, isOpenAIResponsesCompactPath(c))
 		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if headerGuard != nil && headerGuard.stopHeaderWait() {
+			telemetryAttempt.finishFailed()
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
@@ -1036,6 +1040,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			)
 		}
 		if err != nil {
+			telemetryAttempt.finishFailed()
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
@@ -1047,12 +1052,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			// unschedule the account on durable faults (e.g. rejected proxy credentials).
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 		}
+		// 成功响应：遥测观测器包裹原始响应流，解析 SSE 终态与真实用量。
+		telemetryAttempt.observe(resp)
 		if headerGuard != nil {
 			resp.Body = &openAIRequestContextReadCloser{ReadCloser: resp.Body, cleanup: headerGuard.close}
 		}
 
 		// Handle error response
 		if resp.StatusCode >= 400 {
+			telemetryAttempt.finishFailed()
 			respBody := s.readUpstreamErrorBody(resp)
 			_ = resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))

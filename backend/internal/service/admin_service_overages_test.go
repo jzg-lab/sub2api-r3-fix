@@ -154,6 +154,42 @@ func TestUpdateAccount_EmptyExtraPayloadCanClearQuotaLimits(t *testing.T) {
 	require.Len(t, repo.account.Extra, 0)
 }
 
+func TestUpdateAccount_PlainEditPreservesModelRateLimits(t *testing.T) {
+	// fork PreserveAccountProtection 移植回归（admin 路径）：普通编辑不带
+	// model_rate_limits 时保留现值；antigravity overages 切换的有意删除见
+	// 相邻两个 overages 用例（删除发生在保留之后，语义不冲突）。
+	accountID := int64(105)
+	repo := &updateAccountOveragesRepoStub{
+		account: &Account{
+			ID:       accountID,
+			Platform: PlatformAnthropic,
+			Type:     AccountTypeAPIKey,
+			Status:   StatusActive,
+			Extra: map[string]any{
+				"mixed_scheduling": true,
+				modelRateLimitsKey: map[string]any{
+					"claude-sonnet-4-5": map[string]any{
+						"rate_limited_at":     "2026-03-15T00:00:00Z",
+						"rate_limit_reset_at": "2099-03-15T00:00:00Z",
+					},
+				},
+			},
+		},
+	}
+
+	svc := &adminServiceImpl{accountRepo: repo}
+	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Extra: map[string]any{"mixed_scheduling": true}, // 不带 model_rate_limits
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, 1, repo.updateCalls)
+	rawLimits, ok := repo.account.Extra[modelRateLimitsKey].(map[string]any)
+	require.True(t, ok, "plain edit must preserve runtime model rate limits")
+	require.Contains(t, rawLimits, "claude-sonnet-4-5")
+}
+
 func TestUpdateAccount_FixedWeeklyResetClearsLegacyRollingUsage(t *testing.T) {
 	now := time.Now().UTC()
 	daysSinceMonday := (int(now.Weekday()) + 6) % 7

@@ -29,6 +29,8 @@ func newTestOAuthAccount(id int64, extra map[string]any) *Account {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    extra,
+		ProxyID:  openAITransportTestProxyID(),
+		Proxy:    openAITransportTestProxy(),
 	}
 }
 

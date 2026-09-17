@@ -212,6 +212,7 @@ func TestOpenAIImagesJSONKeepalive_HeartbeatBeforeForwardStillFailsOver(t *testi
 	waitForOpenAIImagesJSONKeepalive(t, c)
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       22,
 		Name:     "openai-oauth-heartbeat-failover",
 		Platform: PlatformOpenAI,

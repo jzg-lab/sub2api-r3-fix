@@ -377,14 +377,19 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 
 		upstreamStart := time.Now()
+		// Codex 客户端遥测：以终态出站头为身份，异步补发分析事件与 OTLP 指标。
+		// 失败仅记日志，绝不影响主链路（openai_codex_telemetry.go）。
+		telemetryAttempt := beginOpenAICodexTelemetry(s, account, body, upstreamReq.Header, proxyURL, imageIntent, isOpenAIResponsesCompactPath(c))
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
+			telemetryAttempt.finishFailed()
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 			// a failover so the handler switches to a healthy account.
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 		}
 		if resp.StatusCode >= 400 {
+			telemetryAttempt.finishFailed()
 			// Peek only to identify an invalid task. Restore the body so the existing
 			// passthrough error handling sees the same response after recovery fails.
 			probeBody := s.readUpstreamErrorBody(resp)
@@ -431,6 +436,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 			return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
 		}
+
+		// 成功响应：遥测观测器包裹原始响应流（必须在 grok 工具流改写之前，
+		// 保证观测到上游原始 response.completed 终态事件与真实用量）。
+		telemetryAttempt.observe(resp)
 
 		if mapping, ok := openAIResponsesClientToolMapping(c); ok && isEventStreamResponse(resp.Header) {
 			maxLineSize := defaultMaxLineSize

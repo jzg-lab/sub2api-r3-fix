@@ -77,6 +77,26 @@ func (s *accountRepoStubForBulkUpdate) Create(_ context.Context, account *Accoun
 	return s.createErr
 }
 
+func (s *accountRepoStubForBulkUpdate) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
+	if err := s.bindGroupErrByID[s.createID]; err != nil {
+		return err
+	}
+	if err := s.Create(ctx, account); err != nil {
+		return err
+	}
+	ids := make([]int64, len(groups))
+	for i := range groups {
+		ids[i] = groups[i].GroupID
+		groups[i].AccountID = account.ID
+	}
+	account.GroupIDs = ids
+	account.AccountGroups = append([]AccountGroup(nil), groups...)
+	return s.BindGroups(ctx, account.ID, ids)
+}
+
 func (s *accountRepoStubForBulkUpdate) Update(_ context.Context, account *Account) error {
 	s.updatedAccounts = append(s.updatedAccounts, account)
 	return s.updateErr

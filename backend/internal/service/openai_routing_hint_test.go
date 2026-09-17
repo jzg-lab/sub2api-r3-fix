@@ -14,7 +14,8 @@ import (
 )
 
 func TestSetOpenAICodexRoutingHintCanonicalizesOfficialServiceTiers(t *testing.T) {
-	oauthAccount := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauthAccount := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	tests := []struct {
 		name        string
 		model       string
@@ -75,6 +76,7 @@ func TestSetOpenAICodexRoutingHintCanonicalizesOfficialServiceTiers(t *testing.T
 func TestOpenAIOAuthHTTPBuildersSendRoutingHintFromFinalBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	oauthAccount := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
@@ -149,6 +151,7 @@ func TestOpenAIHTTPPassthroughStripsOnlyOAuthLegacyResponsesBeta(t *testing.T) {
 	}
 
 	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
@@ -209,6 +212,7 @@ func TestBuildOpenAIWSHeadersSendsOAuthRoutingHintOnly(t *testing.T) {
 	}
 
 	oauthAccount := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
@@ -226,6 +230,7 @@ func TestOpenAIRoutingDiagnosticsUseFinalDerivedValuesOnly(t *testing.T) {
 	defer restore()
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       917,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -274,7 +279,8 @@ func TestOpenAIWSConnPoolPreferredContinuationIgnoresRoutingHintChanges(t *testi
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 913, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 913, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	acquire := func(t *testing.T, hint, preferred string, forcePreferred bool) *openAIWSConnLease {
 		t.Helper()
@@ -283,6 +289,7 @@ func TestOpenAIWSConnPoolPreferredContinuationIgnoresRoutingHintChanges(t *testi
 			headers.Set(openAICodexRoutingHintHeader, hint)
 		}
 		lease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+			ProxyURL:           openAITransportTestRoute(account),
 			Account:            account,
 			WSURL:              "wss://example.com/v1/responses",
 			Headers:            headers,
@@ -320,15 +327,17 @@ func TestOpenAIWSConnPoolUsesRoutingHintAsSoftDialAffinity(t *testing.T) {
 	pool := newOpenAIWSConnPool(cfg)
 	dialer := &openAIWSCountingDialer{}
 	pool.setClientDialerForTest(dialer)
-	account := &Account{ID: 913, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 913, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	acquire := func(t *testing.T, hint string) *openAIWSConnLease {
 		headers := make(http.Header)
 		headers.Set(openAICodexRoutingHintHeader, hint)
 		lease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
-			Account: account,
-			WSURL:   "wss://example.com/v1/responses",
-			Headers: headers,
+			ProxyURL: openAITransportTestRoute(account),
+			Account:  account,
+			WSURL:    "wss://example.com/v1/responses",
+			Headers:  headers,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, lease)

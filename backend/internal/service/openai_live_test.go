@@ -66,10 +66,12 @@ func (s *liveHTTPUpstreamStub) DoWithTLS(
 }
 
 func TestLiveCapabilityOnlyAllowsOpenAIOAuth(t *testing.T) {
-	require.True(t, (&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}).SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive))
+	require.True(t, (&Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}).SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive))
 	require.False(t, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}).SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive))
 	require.False(t, (&Account{Platform: PlatformGrok, Type: AccountTypeOAuth}).SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive))
 	require.False(t, (&Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
@@ -77,6 +79,7 @@ func TestLiveCapabilityOnlyAllowsOpenAIOAuth(t *testing.T) {
 		},
 	}).SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityLive))
 	require.False(t, (&Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
@@ -101,6 +104,7 @@ func TestCreateUpstreamLiveCallPreservesSession(t *testing.T) {
 		httpUpstream: upstream,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          7,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -239,4 +243,8 @@ func TestRequestTypeLive(t *testing.T) {
 	parsed, err := ParseUsageRequestType("live")
 	require.NoError(t, err)
 	require.Equal(t, RequestTypeLive, parsed)
+}
+
+func (u *liveHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

@@ -342,6 +342,7 @@ func TestGetLiveCallForIdentityRejectsMismatchedCaller(t *testing.T) {
 
 func TestProxyLiveSidebandForwardsTextAndBinary(t *testing.T) {
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          11,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,

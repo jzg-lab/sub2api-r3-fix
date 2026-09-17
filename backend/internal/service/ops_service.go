@@ -59,6 +59,7 @@ type OpsService struct {
 	geminiCompatService         *GeminiMessagesCompatService
 	antigravityGatewayService   *AntigravityGatewayService
 	systemLogSink               *OpsSystemLogSink
+	openAIDowngradeStore        OpenAIDowngradeProbeStore
 	ingressRejectAggregator     *OpsIngressRejectAggregator
 	authCacheInvalidationWorker *AuthCacheInvalidationWorker
 	apiKeyService               *APIKeyService
@@ -148,6 +149,16 @@ func (s *OpsService) RequireMonitoringEnabled(ctx context.Context) error {
 		return nil
 	}
 	return ErrOpsDisabled
+}
+
+// SetOpenAIDowngradeProbeStore injects the read-only probe store used by the
+// OpenAI downgrade dashboard. Optional: when nil the dashboard endpoint
+// reports OPS_OPENAI_PROBE_UNAVAILABLE.
+func (s *OpsService) SetOpenAIDowngradeProbeStore(store OpenAIDowngradeProbeStore) {
+	if s == nil {
+		return
+	}
+	s.openAIDowngradeStore = store
 }
 
 func (s *OpsService) IsMonitoringEnabled(ctx context.Context) bool {

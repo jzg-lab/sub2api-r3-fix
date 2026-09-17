@@ -4,12 +4,12 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -82,20 +82,15 @@ func (s *ProxyExpirySuite) TestSweep_EnqueuesChangedAccountIDsWithoutFullRebuild
 	s.Require().NoError(err)
 	s.Require().EqualValues(2, changed)
 
-	var payloadRaw []byte
+	var notified []int64
 	err = scanSingleRow(s.ctx, s.tx, `
-		SELECT payload
-		FROM scheduler_outbox
+		SELECT array_agg(DISTINCT value::bigint ORDER BY value::bigint)
+		FROM scheduler_outbox,
+			LATERAL jsonb_array_elements_text(payload->'account_ids')
 		WHERE event_type=$1
-		ORDER BY id DESC
-		LIMIT 1`, []any{service.SchedulerOutboxEventAccountBulkChanged}, &payloadRaw)
+		`, []any{service.SchedulerOutboxEventAccountBulkChanged}, pq.Array(&notified))
 	s.Require().NoError(err)
-
-	var payload struct {
-		AccountIDs []int64 `json:"account_ids"`
-	}
-	s.Require().NoError(json.Unmarshal(payloadRaw, &payload))
-	s.Require().Equal([]int64{firstAccountID, secondAccountID}, payload.AccountIDs)
+	s.Require().Equal([]int64{firstAccountID, secondAccountID}, notified)
 
 	var fullRebuildCount int
 	err = scanSingleRow(s.ctx, s.tx, `

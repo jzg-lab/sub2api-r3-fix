@@ -20,6 +20,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
+// LocalAccountConcurrency is the local deployment's upstream-account policy,
+// independent of user limits and upstream subscription quotas.
+const LocalAccountConcurrency = 50
+
 type Account struct {
 	ID                      int64
 	Name                    string

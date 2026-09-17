@@ -86,6 +86,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_SanitizesNativeToolItemIDs(t *tes
 			c, _ := newOpenAIImageGenerationControlTestContext(true, "codex_cli_rs/0.144.1")
 			account := newOpenAIImageGenerationControlTestAccount()
 			account.Type = accountType
+			assignOpenAITransportTestProxy(account)
 			account.Credentials = map[string]any{
 				"access_token":       "oauth-token",
 				"chatgpt_account_id": "chatgpt-account",

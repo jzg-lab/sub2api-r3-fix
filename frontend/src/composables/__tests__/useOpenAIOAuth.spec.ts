@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
@@ -31,6 +31,15 @@ vi.mock('@/api/admin', () => ({
 
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { adminAPI } from '@/api/admin'
+
+beforeEach(() => vi.clearAllMocks())
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
 
 describe('useOpenAIOAuth.buildCredentials', () => {
   it('should keep client_id when token response contains it', () => {
@@ -76,6 +85,50 @@ describe('useOpenAIOAuth.buildCredentials', () => {
 })
 
 describe('useOpenAIOAuth.exchangeAuthCode', () => {
+  it('returns the server assignment, not the mutable form selection', async () => {
+    vi.mocked(adminAPI.accounts.exchangeCode).mockResolvedValueOnce({ proxy_id: 7 })
+    const oauth = useOpenAIOAuth()
+    const result = await oauth.exchangeAuthCode('code', 'session-id', 'state')
+    expect(result?.proxy_id).toBe(7)
+  })
+
+  it.each([undefined, null, 0, -1, 1.5, '7'])('rejects an unbound exchange result: %s', async (proxy_id) => {
+    vi.mocked(adminAPI.accounts.exchangeCode).mockResolvedValueOnce({ proxy_id })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state')).toBeNull()
+    expect(oauth.error.value).not.toBe('')
+  })
+
+  it('does not return an exchange after the dialog is reset', async () => {
+    const response = deferred<Record<string, unknown>>()
+    vi.mocked(adminAPI.accounts.exchangeCode).mockReturnValueOnce(response.promise)
+    const oauth = useOpenAIOAuth()
+    const pending = oauth.exchangeAuthCode('code', 'session-id', 'state')
+    oauth.resetState()
+    response.resolve({ proxy_id: 7 })
+    expect(await pending).toBeNull()
+    expect(oauth.error.value).toBe('')
+    expect(oauth.loading.value).toBe(false)
+  })
+
+  it('does not clear loading or publish errors from a superseded request', async () => {
+    const first = deferred<Record<string, unknown>>()
+    const second = deferred<Record<string, unknown>>()
+    vi.mocked(adminAPI.accounts.exchangeCode)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const oauth = useOpenAIOAuth()
+    const old = oauth.exchangeAuthCode('code', 'old-session', 'state')
+    const current = oauth.exchangeAuthCode('code', 'new-session', 'state')
+    first.reject(new Error('obsolete'))
+    expect(await old).toBeNull()
+    expect(oauth.error.value).toBe('')
+    expect(oauth.loading.value).toBe(true)
+    second.resolve({ proxy_id: 8 })
+    expect((await current)?.proxy_id).toBe(8)
+    expect(oauth.loading.value).toBe(false)
+  })
+
   it('shows a clear proxy hint when code exchange fails without a proxy', async () => {
     vi.mocked(adminAPI.accounts.exchangeCode).mockRejectedValueOnce({
       status: 502,
@@ -90,5 +143,50 @@ describe('useOpenAIOAuth.exchangeAuthCode', () => {
     expect(oauth.error.value).toBe(
       '未设置代理，当前服务器无法直连 OpenAI，导致 OpenAI OAuth 请求失败。请先选择可访问 OpenAI 的代理后重试；如果授权码已失效，请重新生成授权链接。'
     )
+  })
+})
+
+describe('useOpenAIOAuth session generation', () => {
+  it('keeps the newer authorization when responses arrive in reverse order', async () => {
+    type Result = Awaited<ReturnType<typeof adminAPI.accounts.generateAuthUrl>>
+    const first = deferred<Result>()
+    const second = deferred<Result>()
+    vi.mocked(adminAPI.accounts.generateAuthUrl)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const oauth = useOpenAIOAuth()
+    const old = oauth.generateAuthUrl(7)
+    const current = oauth.generateAuthUrl(8)
+    second.resolve({ auth_url: 'https://example.test/?state=new', session_id: 'new' })
+    expect(await current).toBe(true)
+    first.resolve({ auth_url: 'https://example.test/?state=old', session_id: 'old' })
+    expect(await old).toBe(false)
+    expect(oauth.sessionId.value).toBe('new')
+    expect(oauth.oauthState.value).toBe('new')
+  })
+
+  it('does not restore a discarded authorization after closing the dialog', async () => {
+    type Result = Awaited<ReturnType<typeof adminAPI.accounts.generateAuthUrl>>
+    const response = deferred<Result>()
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockReturnValueOnce(response.promise)
+    const oauth = useOpenAIOAuth()
+    const pending = oauth.generateAuthUrl(7)
+    oauth.resetState()
+    response.resolve({ auth_url: 'https://example.test/?state=old', session_id: 'old' })
+    expect(await pending).toBe(false)
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+  })
+
+  it('does not return refresh credentials from a discarded dialog', async () => {
+    type Result = Awaited<ReturnType<typeof adminAPI.accounts.refreshOpenAIToken>>
+    const response = deferred<Result>()
+    vi.mocked(adminAPI.accounts.refreshOpenAIToken).mockReturnValueOnce(response.promise)
+    const oauth = useOpenAIOAuth()
+    const pending = oauth.validateRefreshToken('fixture', 7)
+    oauth.resetState()
+    response.resolve({ proxy_id: 7 } as Result)
+    expect(await pending).toBeNull()
+    expect(oauth.loading.value).toBe(false)
   })
 })

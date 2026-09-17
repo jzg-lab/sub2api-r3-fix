@@ -715,12 +715,11 @@
             v-model.number="concurrency"
             id="bulk-edit-concurrency"
             type="number"
-            min="1"
+            readonly
             :disabled="!enableConcurrency"
             class="input"
             :class="!enableConcurrency && 'cursor-not-allowed opacity-50'"
             aria-labelledby="bulk-edit-concurrency-label"
-            @input="concurrency = Math.max(1, concurrency || 1)"
           />
         </div>
         <div>
@@ -1473,6 +1472,7 @@
 </template>
 
 <script setup lang="ts">
+import { LOCAL_ACCOUNT_CONCURRENCY } from '@/constants/account'
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -1686,7 +1686,7 @@ const interceptWarmupRequests = ref(false)
 const headerOverrideEnabled = ref(false)
 const headerOverrideRows = ref<HeaderOverrideRow[]>([])
 const proxyId = ref<number | null>(null)
-const concurrency = ref(1)
+const concurrency = ref<number>(LOCAL_ACCOUNT_CONCURRENCY)
 const loadFactor = ref<number | null>(null)
 const priority = ref(1)
 const rateMultiplier = ref(1)
@@ -2380,7 +2380,7 @@ watch(
       headerOverrideEnabled.value = false
       headerOverrideRows.value = []
       proxyId.value = null
-      concurrency.value = 1
+      concurrency.value = LOCAL_ACCOUNT_CONCURRENCY
       loadFactor.value = null
       priority.value = 1
       rateMultiplier.value = 1

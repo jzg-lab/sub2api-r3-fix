@@ -34,15 +34,21 @@ const (
 	openaiPlatformAPIURL            = "https://api.openai.com/v1/responses"
 	openaiPlatformAPIInputTokensURL = "https://api.openai.com/v1/responses/input_tokens"
 	openaiStickySessionTTL          = time.Hour // 粘性会话TTL
-	// 与真实 Codex TUI 的 User-Agent 结构对齐：
-	// {originator}/{version} ({OS} {OS_version}; {arch}) {terminal}
-	// 缺少 OS/架构/终端后缀的形态易被上游指纹识别为非官方客户端。
+	// 与真实 Codex 客户端的 User-Agent 结构对齐（2026-09-14 usage_logs 地面真值）：
+	// {originator}/{version} ({OS} {OS_version}; {arch}) {terminal} ({originator}; {version})
+	// 后缀必须与全账号共用的 TLS profile（codex-exec-0.151-macos，macOS arm64 真实
+	// 抓包）讲同一套 OS/架构叙事。后缀只含 OS/架构/终端指纹；尾部 (originator;
+	// version) 组与首段是同一个版本声明的两个出口，由构建处按生效版本拼装
+	// （buildCodexCLIUserAgent / codexCLIUserAgent），版本自动同步时再由
+	// SetCodexUserAgentVersion 一并改写——写死在常量里会随版本同步过期成
+	// 首尾自相矛盾的身份。
 	// 该后缀是 UA 形态的唯一定义处，buildCodexCLIUserAgent 按运行时版本号复用它。
-	codexCLIUserAgentSuffix = " (Ubuntu 22.4.0; x86_64) xterm-256color"
+	codexCLIUserAgentSuffix = " (Mac OS 26.3.1; arm64) Apple_Terminal/466"
 	// codexCLIUserAgent 是编译期兜底 UA；运行时优先使用由后台版本号拼出的规范 UA。
 	// 版本段必须来自 codexCLIVersion：UA 与 version 头是同一个版本声明的两个出口，
 	// 各自硬编码会漂移成互相矛盾的身份。
-	codexCLIUserAgent = openai.CodexDefaultOriginator + "/" + codexCLIVersion + codexCLIUserAgentSuffix
+	codexCLIUserAgent = openai.CodexDefaultOriginator + "/" + codexCLIVersion + codexCLIUserAgentSuffix +
+		" (" + openai.CodexDefaultOriginator + "; " + codexCLIVersion + ")"
 	// codex_cli_only 拒绝时单个请求头日志长度上限（字符）
 	codexCLIOnlyHeaderValueMaxBytes = 256
 
@@ -62,7 +68,9 @@ const (
 	// 陈旧版本会被优先丢弃（HTTP 200 + 流内 server_is_overloaded）；非官方客户端配不出
 	// 官方身份时整体回退到本常量，因此它必须跟随官方 CLI 的当前发布版本，
 	// 落后多个版本会让这些请求稳定落在被优先丢弃的一侧。
-	codexCLIVersion = "0.146.0"
+	// 0.151.0 与全账号绑定的 TLS profile（codex-exec-0.151-macos）同版本：
+	// UA 版本段与 TLS 抓包来源描述的是同一个客户端，二者偏离即自我矛盾。
+	codexCLIVersion = "0.151.0"
 	// Codex 限额快照仅用于后台展示/诊断，不需要每个成功请求都立即落库。
 	openAICodexSnapshotPersistMinInterval = 30 * time.Second
 	// 配额自动暂停时，超过该时长仍未刷新的 used% 快照视为陈旧，不再据此暂停账号。
@@ -169,6 +177,25 @@ type NormalizedCodexLimits struct {
 // Returns nil if snapshot is nil or has no useful data.
 func (s *OpenAICodexUsageSnapshot) Normalize() *NormalizedCodexLimits {
 	if s == nil {
+		return nil
+	}
+
+	// An explicitly unavailable window is not a zero-usage quota. Keep missing
+	// duration headers compatible with older upstream responses.
+	valid := *s
+	if valid.PrimaryWindowMinutes != nil && *valid.PrimaryWindowMinutes <= 0 {
+		valid.PrimaryUsedPercent = nil
+		valid.PrimaryResetAfterSeconds = nil
+		valid.PrimaryWindowMinutes = nil
+	}
+	if valid.SecondaryWindowMinutes != nil && *valid.SecondaryWindowMinutes <= 0 {
+		valid.SecondaryUsedPercent = nil
+		valid.SecondaryResetAfterSeconds = nil
+		valid.SecondaryWindowMinutes = nil
+	}
+	s = &valid
+	if s.PrimaryUsedPercent == nil && s.PrimaryResetAfterSeconds == nil && s.PrimaryWindowMinutes == nil &&
+		s.SecondaryUsedPercent == nil && s.SecondaryResetAfterSeconds == nil && s.SecondaryWindowMinutes == nil {
 		return nil
 	}
 

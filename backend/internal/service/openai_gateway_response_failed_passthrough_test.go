@@ -122,7 +122,8 @@ func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T)
 				Body:       io.NopCloser(strings.NewReader(stream)),
 			}
 			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
-			err := tt.run(svc, c, resp, &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+			err := tt.run(svc, c, resp, &Account{
+				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 
 			var failoverErr *UpstreamFailoverError
 			require.ErrorAs(t, err, &failoverErr)
@@ -170,7 +171,8 @@ func TestResponsesStreamCyberPolicyPrecedesPassthroughRule(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(stream)),
 			}
 			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
-			err := tt.run(svc, c, resp, &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+			err := tt.run(svc, c, resp, &Account{
+				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 
 			require.Error(t, err)
 			var failoverErr *UpstreamFailoverError

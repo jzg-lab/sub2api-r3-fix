@@ -191,12 +191,12 @@ func TestCodexMachineChain_HTTP_NonPassthrough_RootWindow_I1_I4_I5(t *testing.T)
 func TestCodexMachineChain_HTTP_Passthrough_RootWindow_I1_I4_I5(t *testing.T) {
 	c, _, body := machineChainRequest(t, "/v1/responses", testMachineChainRoot, testMachineChainRoot, testMachineChainRoot+":0", "")
 	svc, upstream := newMachineChainService()
-	// 无账号级 UA ⇒ 规范 UA（Ubuntu）⇒ seccomp
+	// 无账号级 UA ⇒ 规范 UA（Mac OS）⇒ seatbelt
 	account := newMachineChainAccount(t, 6002, testCodexFingerprintSeed, true, "")
 
 	_, _ = svc.Forward(context.Background(), c, account, body)
 	require.NotNil(t, upstream.lastReq)
-	assertMachineChainRootWindow(t, account, upstream.lastReq, upstream.lastBody, "seccomp")
+	assertMachineChainRootWindow(t, account, upstream.lastReq, upstream.lastBody, "seatbelt")
 	// 透传 body 其余字节原样
 	assert.Equal(t, "hi", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
 }

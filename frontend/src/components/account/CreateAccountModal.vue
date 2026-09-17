@@ -2970,8 +2970,7 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" min="1" class="input"
-            @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+          <input v-model.number="form.concurrency" type="number" readonly class="input" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -3803,7 +3802,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import {
@@ -3875,7 +3874,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
-import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3990,6 +3989,14 @@ const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
+const openAIAccountCreationPending = ref(false)
+let openAIExchangeVersion = 0
+const resetOpenAIFlow = () => {
+  openAIExchangeVersion++
+  openAIAccountCreationPending.value = false
+  openaiOAuth.resetState()
+}
+onBeforeUnmount(resetOpenAIFlow)
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
@@ -4009,7 +4016,7 @@ const currentSessionId = computed(() => {
 })
 
 const currentOAuthLoading = computed(() => {
-  if (form.platform === 'openai') return openaiOAuth.loading.value
+  if (form.platform === 'openai') return openaiOAuth.loading.value || openAIAccountCreationPending.value
   if (form.platform === 'gemini') return geminiOAuth.loading.value
   if (form.platform === 'antigravity') return antigravityOAuth.loading.value
   if (form.platform === 'grok') return grokOAuth.loading.value
@@ -4566,7 +4573,7 @@ const form = reactive({
   type: 'oauth' as AccountType, // Will be 'oauth', 'setup-token', or 'apikey'
   credentials: {} as Record<string, unknown>,
   proxy_id: null as number | null,
-  concurrency: 10,
+  concurrency: LOCAL_ACCOUNT_CONCURRENCY,
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
@@ -4603,7 +4610,7 @@ const expiresAtInput = computed({
 const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   if (form.platform === 'openai') {
-    return authCode.trim() && openaiOAuth.sessionId.value && !openaiOAuth.loading.value
+    return authCode.trim() && openaiOAuth.sessionId.value && !currentOAuthLoading.value
   }
   if (form.platform === 'gemini') {
     return authCode.trim() && geminiOAuth.sessionId.value && !geminiOAuth.loading.value
@@ -4713,7 +4720,7 @@ watch(
       accountCategory.value = 'oauth-based'
       addMethod.value = 'oauth'
       modelRestrictionMode.value = 'mapping'
-      form.concurrency = 1
+      form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
       form.load_factor = null
     }
     if (newPlatform !== 'gemini' && newPlatform !== 'anthropic' && accountCategory.value === 'service_account') {
@@ -4760,7 +4767,7 @@ watch(
     grokOAuthBaseUrl.value = ''
     // Reset OAuth states
     oauth.resetState()
-    openaiOAuth.resetState()
+    resetOpenAIFlow()
 
     geminiOAuth.resetState()
     antigravityOAuth.resetState()
@@ -5139,7 +5146,7 @@ const resetForm = () => {
   form.type = 'oauth'
   form.credentials = {}
   form.proxy_id = null
-  form.concurrency = 10
+  form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
   form.load_factor = null
   form.priority = 1
   form.rate_multiplier = 1
@@ -5234,7 +5241,7 @@ const resetForm = () => {
   geminiTierGcp.value = 'gcp_standard'
   geminiTierAIStudio.value = 'aistudio_free'
   oauth.resetState()
-  openaiOAuth.resetState()
+  resetOpenAIFlow()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
@@ -5245,6 +5252,7 @@ const resetForm = () => {
 }
 
 const handleClose = () => {
+  resetOpenAIFlow()
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
   emit('close')
@@ -5710,7 +5718,7 @@ const handleSubmit = async () => {
 const goBackToBasicInfo = () => {
   step.value = 1
   oauth.resetState()
-  openaiOAuth.resetState()
+  resetOpenAIFlow()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
@@ -5719,6 +5727,8 @@ const goBackToBasicInfo = () => {
 
 const handleGenerateUrl = async () => {
   if (form.platform === 'openai') {
+    if (openAIAccountCreationPending.value) return
+    resetOpenAIFlow()
     await openaiOAuth.generateAuthUrl(form.proxy_id)
   } else if (form.platform === 'gemini') {
     await geminiOAuth.generateAuthUrl(
@@ -6114,9 +6124,13 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
 // OpenAI OAuth 授权码兑换
 const handleOpenAIExchange = async (authCode: string) => {
   const oauthClient = openaiOAuth
-  if (!authCode.trim() || !oauthClient.sessionId.value) return
+  if (!authCode.trim() || !oauthClient.sessionId.value || openAIAccountCreationPending.value) return
+  const version = ++openAIExchangeVersion
+  const sessionId = oauthClient.sessionId.value
+  const isCurrent = () => version === openAIExchangeVersion &&
+    props.show && form.platform === 'openai' && oauthClient.sessionId.value === sessionId
 
-  oauthClient.loading.value = true
+  openAIAccountCreationPending.value = true
   oauthClient.error.value = ''
 
   try {
@@ -6129,11 +6143,11 @@ const handleOpenAIExchange = async (authCode: string) => {
 
     const tokenInfo = await oauthClient.exchangeAuthCode(
       authCode.trim(),
-      oauthClient.sessionId.value,
+      sessionId,
       stateToUse,
       form.proxy_id
     )
-    if (!tokenInfo) return
+    if (!tokenInfo || !isCurrent()) return
 
     const credentials = oauthClient.buildCredentials(tokenInfo)
     const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
@@ -6167,7 +6181,7 @@ const handleOpenAIExchange = async (authCode: string) => {
         type: 'oauth',
         credentials,
         extra,
-        proxy_id: form.proxy_id,
+        proxy_id: tokenInfo.proxy_id,
         concurrency: form.concurrency,
         load_factor: form.load_factor ?? undefined,
         priority: form.priority,
@@ -6176,16 +6190,19 @@ const handleOpenAIExchange = async (authCode: string) => {
         expires_at: form.expires_at,
         auto_pause_on_expired: autoPauseOnExpired.value
       })
+      // Refresh the list for a committed create, even if the dialog was replaced.
+      emit('created')
+      if (!isCurrent()) return
       appStore.showSuccess(t('admin.accounts.accountCreated'))
     }
 
-    emit('created')
     handleClose()
   } catch (error: any) {
+    if (!isCurrent()) return
     oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
     appStore.showError(oauthClient.error.value)
   } finally {
-    oauthClient.loading.value = false
+    if (version === openAIExchangeVersion) openAIAccountCreationPending.value = false
   }
 }
 

@@ -1546,8 +1546,7 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" min="1" class="input"
-            @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+          <input v-model.number="form.concurrency" type="number" readonly class="input" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -3005,7 +3004,7 @@ import {
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
-import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3677,7 +3676,7 @@ const form = reactive({
   name: '',
   notes: '',
   proxy_id: null as number | null,
-  concurrency: 1,
+  concurrency: LOCAL_ACCOUNT_CONCURRENCY,
   load_factor: null as number | null,
   priority: 1,
   rate_multiplier: 1,
@@ -3785,7 +3784,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
-  form.concurrency = newAccount.concurrency
+  form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
   form.rate_multiplier = newAccount.rate_multiplier ?? 1

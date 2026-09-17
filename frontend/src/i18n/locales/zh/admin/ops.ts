@@ -169,6 +169,38 @@ export default {
           requestsWithFirstToken: '首 Token 样本数'
         }
       },
+      openaiDowngrade: {
+        title: 'OpenAI 降智探针',
+        summary: '近24小时探针 {probes} 次，成功 {success} 次',
+        degraded: '异常账号：{count}',
+        fullBuckets: '满载桶：{count}',
+        buckets: '出口桶',
+        accounts: '账号探针统计',
+        timeline: '事件时间线',
+        healthy: '在岗',
+        circuit: '熔断',
+        reprobe: '复探',
+        replace: '待换号',
+        account: '账号',
+        state: '状态',
+        successRate: '成功率',
+        reasoning: '平均 reasoning',
+        probes: '探针数',
+        loadFailed: '加载 OpenAI 降智探针数据失败',
+        states: {
+          onDuty: '在岗',
+          circuitOpen: '熔断',
+          reprobe: '换桶复探',
+          pendingReplace: '待换号'
+        },
+        events: {
+          circuitOpen: '触发熔断',
+          bucketReprobe: '开始换桶复探',
+          bucketRescue: '换桶救回',
+          replaceRequired: '标记待换号',
+          recovered: '恢复上岗'
+        }
+      },
       customTimeRange: {
         startTime: '开始时间',
         endTime: '结束时间'

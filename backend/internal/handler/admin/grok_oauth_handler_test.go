@@ -432,3 +432,7 @@ func TestGrokOAuthHandlerReconcileExplicitApply(t *testing.T) {
 	require.Equal(t, 25, reconciler.input.Limit)
 	require.Equal(t, time.Hour, reconciler.input.RefreshWindow)
 }
+
+func (u *grokQuotaHandlerUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

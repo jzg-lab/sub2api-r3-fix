@@ -56,6 +56,12 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 
 func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
 	t.Helper()
+	// OAuth 出网硬闸（r15 起）：非 PAT 的 openai oauth 账号选号即校验代理路由，
+	// 夹具必须带有效 ProxyID+活跃快照，否则 0 上游命中、failover 语义测不到。
+	proxyID := int64(55)
+	proxySnapshot := &service.Proxy{
+		ID: proxyID, Protocol: "http", Host: "127.0.0.1", Port: 18080, Status: service.StatusActive,
+	}
 	accounts := []service.Account{
 		{
 			ID:          1,
@@ -66,6 +72,8 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 			Schedulable: true,
 			Concurrency: 0,
 			Priority:    0,
+			ProxyID:     &proxyID,
+			Proxy:       proxySnapshot,
 			Credentials: map[string]any{"access_token": "token-1"},
 		},
 		{
@@ -77,6 +85,8 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 			Schedulable: true,
 			Concurrency: 0,
 			Priority:    1,
+			ProxyID:     &proxyID,
+			Proxy:       proxySnapshot,
 			Credentials: map[string]any{"access_token": "token-2"},
 		},
 	}
@@ -196,4 +206,8 @@ func TestOpenAIGatewayHandlerResponses_FailoverContinuesForConnectedClient(t *te
 	require.Equal(t, []int64{1, 2}, upstream.calls(), "在线客户端应正常切换账号")
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+}
+
+func (u *openAIResponsesFailoverCancelUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

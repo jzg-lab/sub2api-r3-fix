@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -114,7 +115,7 @@ func TestUpdateAccountRoutesRateIntentThroughAtomicBillingUpdater(t *testing.T) 
 
 func TestCreateAccountDropsManagedUpstreamBillingProbeState(t *testing.T) {
 	repo := &upstreamBillingProbeAccountRepo{}
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 
 	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "upstream",
@@ -138,7 +139,7 @@ func TestCreateAccountDropsManagedUpstreamBillingProbeState(t *testing.T) {
 func TestCreateAccountAcceptsDedicatedUpstreamBillingProbeSetting(t *testing.T) {
 	enabled := true
 	repo := &upstreamBillingProbeAccountRepo{}
-	created, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+	created, err := (&adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "upstream",
 		Platform:             PlatformOpenAI,
 		Type:                 AccountTypeAPIKey,
@@ -150,7 +151,7 @@ func TestCreateAccountAcceptsDedicatedUpstreamBillingProbeSetting(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, true, created.Extra[UpstreamBillingProbeEnabledExtraKey])
 
-	_, err = (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+	_, err = (&adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                 "oauth",
 		Platform:             PlatformOpenAI,
 		Type:                 AccountTypeOAuth,
@@ -641,6 +642,52 @@ func TestBulkUpdateAccountsDropsManagedUpstreamBillingProbeState(t *testing.T) {
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingProbeEnabledExtraKey)
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingProbeExtraKey)
+}
+
+func TestAdminAccountPartialEditsRejectManagedSchedulingState(t *testing.T) {
+	for _, managedValue := range []any{nil, false, true, map[string]any{"stale": "limit"}} {
+		t.Run(fmt.Sprintf("%T/%v", managedValue, managedValue), func(t *testing.T) {
+			input := map[string]any{
+				modelRateLimitsKey:                   managedValue,
+				OpenAIDowngradeSolFallbackExtraKey:   managedValue,
+				OpenAIDowngradeQualificationExtraKey: managedValue,
+				"custom":                             "edited",
+			}
+			accountID := int64(153)
+			repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
+				accountID: {ID: accountID, Extra: map[string]any{
+					modelRateLimitsKey:                   map[string]any{"current": "limit"},
+					OpenAIDowngradeQualificationExtraKey: true,
+				}},
+			}}
+			svc := &adminServiceImpl{accountRepo: repo}
+
+			require.NoError(t, svc.UpdateAccountExtra(context.Background(), accountID, input))
+			require.Equal(t, map[string]any{
+				modelRateLimitsKey:                   map[string]any{"current": "limit"},
+				OpenAIDowngradeQualificationExtraKey: true,
+				"custom":                             "edited",
+			}, repo.accounts[accountID].Extra)
+
+			result, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{
+				AccountIDs: []int64{accountID}, Extra: input,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, result.Success)
+			require.Len(t, repo.bulkUpdates, 1)
+			require.Equal(t, map[string]any{"custom": "edited"}, repo.bulkUpdates[0].Extra)
+			require.Len(t, input, 4, "sanitizing must not change the caller's map")
+		})
+	}
+}
+
+func TestUpdateAccountExtraOnlyManagedSchedulingStateIsNoOp(t *testing.T) {
+	svc := &adminServiceImpl{}
+	require.NoError(t, svc.UpdateAccountExtra(context.Background(), 153, map[string]any{
+		modelRateLimitsKey:                   nil,
+		OpenAIDowngradeSolFallbackExtraKey:   true,
+		OpenAIDowngradeQualificationExtraKey: false,
+	}))
 }
 
 func TestBulkUpdateAccountsAcceptsDedicatedUpstreamBillingProbeSetting(t *testing.T) {

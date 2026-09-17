@@ -82,7 +82,8 @@ func (c *openAIWSSessionPreemptCacheStub) CompareAndDeleteOpenAIResponsesSession
 func TestOpenAIWSSessionPreemptContextEligibilityAndLocalCancellation(t *testing.T) {
 	stateStore := NewOpenAIWSStateStore(nil)
 	svc := &OpenAIGatewayService{openaiWSStateStore: stateStore}
-	oauth := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	grok := &Account{ID: 3, Platform: PlatformGrok, Type: AccountTypeOAuth}
 
@@ -125,7 +126,8 @@ func TestOpenAIWSIngressSessionPreemptionSurvivesNestedForwardCleanup(t *testing
 	}
 
 	svc := &OpenAIGatewayService{}
-	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	firstMessage := []byte(`{"type":"response.create","prompt_cache_key":"session-1","input":"hello"}`)
 
 	firstCtx, firstCleanup, armed := svc.BeginOpenAIWSIngressSessionPreemption(
@@ -163,6 +165,7 @@ func TestOpenAIWSIngressSessionPreemptionRespectsResolvedMode(t *testing.T) {
 	}
 	newAccount := func(mode string) *Account {
 		return &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			ID:       1,
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,

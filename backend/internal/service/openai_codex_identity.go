@@ -33,12 +33,15 @@ func NormalizeCodexClientVersion(version string) string {
 }
 
 // buildCodexCLIUserAgent 按版本号拼出规范 Codex TUI User-Agent。
-// UA 形态只在 codexCLIUserAgentSuffix 一处定义，避免多处拼装漂移。
+// UA 形态只在 codexCLIUserAgentSuffix 一处定义，避免多处拼装漂移；尾部
+// (originator; version) 官方客户端标识组按本函数的 version 拼装，保证首尾
+// 版本声明永远一致（真实 codex 客户端的 UA 都带这个尾部组）。
 func buildCodexCLIUserAgent(version string) string {
 	if version = NormalizeCodexClientVersion(version); version == "" {
 		return codexCLIUserAgent
 	}
-	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix
+	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix +
+		" (" + openai.CodexDefaultOriginator + "; " + version + ")"
 }
 
 // codexIdentityEnforcement 控制 enforceCodexIdentityHeaders 是否强制统一出站身份，
@@ -169,7 +172,9 @@ func codexClientVersionFromUA(ua string) string {
 }
 
 // ensureCodexIdentityHeaders 补齐 OAuth（ChatGPT 内部接口）出站请求所需的 Codex 身份头。
-// 已有 User-Agent 与 version 保持不变，交给紧随其后的 enforceCodexIdentityHeaders 收口。
+// 只补 User-Agent 与 originator：真实 codex 客户端（2026-09-15 本机 0.151 抓包地面真值）
+// 的 /responses 请求不携带 version / OpenAI-Beta / accept-encoding，多补一个头就是
+// 多一处合成特征。version 门槛语义保留在 UA 版本段（codexClientVersionFromUA）。
 func ensureCodexIdentityHeaders(h http.Header) {
 	if h == nil {
 		return
@@ -181,10 +186,6 @@ func ensureCodexIdentityHeaders(h http.Header) {
 	if strings.TrimSpace(h.Get("originator")) == "" {
 		h.Set("originator", identity.originator)
 	}
-	if strings.TrimSpace(h.Get("version")) == "" {
-		h.Set("version", identity.version)
-	}
-	h.Set("OpenAI-Beta", "responses=experimental")
 }
 
 // applyOpenAICodexProbeHeaders 为合成探测请求补齐 Codex 身份和引擎指纹。
@@ -202,10 +203,13 @@ func enforceCodexIdentityHeaders(h http.Header) {
 	enforceCodexIdentityHeadersWithUA(h, "")
 }
 
-// enforceCodexIdentityHeadersWithUA 强制统一 OAuth 出站身份：User-Agent / originator / version
+// enforceCodexIdentityHeadersWithUA 强制统一 OAuth 出站身份：User-Agent / originator
 // 一律改写为网关的规范身份，客户端自报身份不参与构造。上游在容量紧张时按客户端身份分优先级
 // 降载，被降载的请求会拿到 HTTP 200 + 流内 server_is_overloaded；统一出口可确保没有请求带着
 // 第三方或陈旧身份出站，也天然满足 originator 与 UA 首段配套的上游校验（issue #3901）。
+// 不再补写 version 头：真实 codex 客户端（2026-09-15 本机 0.151 抓包地面真值）的 /responses
+// 请求不携带该头——对未携带 version 的请求补写，等于给每个出站请求盖上网关印章；
+// version 门槛语义仍由 UA 版本段承担。compact 路径的 version 补写由各自构建处负责。
 //
 // overrideUA 是账号级自定义 User-Agent：管理员的显式配置仍然生效，但只贡献客户端名与
 // OS / 架构 / 终端指纹——版本段与 originator 都由规范身份重建，不允许出现自相矛盾或陈旧的身份。
@@ -227,17 +231,21 @@ func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
 	identity := resolveCodexOutboundIdentity(overrideUA)
 	h.Set("user-agent", identity.userAgent)
 	h.Set("originator", identity.originator)
-	h.Set("version", identity.version)
+	// 已携带 version 的请求（真实 codex 不带，见上）只做门槛纠正：
+	// 低于上游最低可接受版本（404，issue #3901）时抬到生效版本，不新增。
+	if v := strings.TrimSpace(h.Get("version")); v != "" && CompareVersions(v, codexUpstreamMinVersion) < 0 {
+		h.Set("version", identity.version)
+	}
 }
 
 // pairCodexIdentityHeaders 是关闭强制统一后的兜底收口：保留客户端真实身份，
-// 仅保证 originator 与最终 User-Agent 首段配套、version 不低于上游门槛（issue #3901）。
+// 仅保证 originator 与最终 User-Agent 首段配套、已携带的 version 不低于上游门槛
+// （issue #3901）。不为未携带 version 的请求补写——真实 codex 不发该头。
 func pairCodexIdentityHeaders(h http.Header) {
 	originator, pairedUA, ok := openai.PairCodexClientIdentity(h.Get("user-agent"))
 	if !ok {
 		identity := resolveCodexOutboundIdentity("")
 		originator, pairedUA = identity.originator, identity.userAgent
-		h.Set("version", identity.version)
 	}
 	h.Set("user-agent", pairedUA)
 	h.Set("originator", originator)

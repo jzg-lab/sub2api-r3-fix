@@ -521,6 +521,7 @@ import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
@@ -725,6 +726,21 @@ let usageBatchFlushTimer: ReturnType<typeof setTimeout> | null = null
 let queuedUsageBatchForce = false
 let usageBatchRequestToken = 0
 
+const invalidateBatchedUsageRequests = () => {
+  if (usageBatchFlushTimer !== null) {
+    clearTimeout(usageBatchFlushTimer)
+    usageBatchFlushTimer = null
+  }
+  pendingUsageBatchIds.clear()
+  queuedUsageBatchForce = false
+  usageBatchRequestTokenByAccountId.value = {}
+  usageBatchLoadingByAccountId.value = {}
+}
+
+watch(isDesktopViewport, (desktop) => {
+  if (!desktop) invalidateBatchedUsageRequests()
+}, { flush: 'sync' })
+
 const buildDefaultTodayStats = (): WindowStats => ({
   requests: 0,
   tokens: 0,
@@ -765,7 +781,30 @@ const setUsageBatchState = (accountID: number, usage: AccountUsageInfo | null, e
 
 const handleAccountUsageLoaded = (accountID: number, usage: AccountUsageInfo) => {
   if (usageBatchByAccountId.value[String(accountID)] === usage) return
+  // A direct (mobile) result supersedes any older queued or in-flight batch.
+  pendingUsageBatchIds.delete(accountID)
+  usageBatchRequestTokenByAccountId.value[String(accountID)] = ++usageBatchRequestToken
+  usageBatchCache.set(accountID, { data: usage, ts: Date.now() })
   setUsageBatchState(accountID, usage, null)
+  setUsageBatchLoading(accountID, false)
+}
+
+const loadActiveAccountUsage = async (account: Account, token: number) => {
+  const key = String(account.id)
+  const isCurrent = () => usageBatchRequestTokenByAccountId.value[key] === token
+  try {
+    const usage = await enqueueUsageRequest(account, () =>
+      adminAPI.accounts.getUsage(account.id, 'active', true))
+    if (!isCurrent()) return
+    usageBatchCache.set(account.id, { data: usage, ts: Date.now() })
+    setUsageBatchState(account.id, usage, null)
+  } catch (error) {
+    if (!isCurrent()) return
+    usageBatchErrorByAccountId.value[key] = 'Failed'
+    console.error('Failed to load active account usage:', error)
+  } finally {
+    if (isCurrent()) setUsageBatchLoading(account.id, false)
+  }
 }
 
 const flushQueuedUsageBatch = async () => {
@@ -798,10 +837,11 @@ const flushQueuedUsageBatch = async () => {
         continue
       }
       const usage = usageMap[key] ?? null
-      nextUsage[key] = usage
-      nextErrors[key] = errorMap[key] ?? null
+      const usageError = errorMap[key] ?? (usage ? null : 'Failed')
+      nextUsage[key] = usage ?? nextUsage[key] ?? null
+      nextErrors[key] = usageError
       nextLoading[key] = false
-      if (usage) {
+      if (usage && !usageError) {
         usageBatchCache.set(accountID, { data: usage, ts: now })
       } else {
         usageBatchCache.delete(accountID)
@@ -828,13 +868,16 @@ const flushQueuedUsageBatch = async () => {
   }
 }
 
-const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
+const queueBatchedUsage = (account: Account, options?: { force?: boolean; source?: 'active' | 'passive' }) => {
   if (!isDesktopViewport.value) return
   if (!accountSupportsBatchUsage(account)) return
 
-  const force = options?.force === true
+  const active = account.platform === 'anthropic' && options?.source === 'active'
+  const force = options?.force === true || active
   const cacheKey = account.id
   const key = String(cacheKey)
+
+  if (!force && usageBatchLoadingByAccountId.value[key]) return
 
   if (force) {
     usageBatchCache.delete(cacheKey)
@@ -856,6 +899,10 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
     [key]: ++usageBatchRequestToken
   }
   setUsageBatchLoading(cacheKey, true)
+  if (active) {
+    pendingUsageBatchIds.delete(cacheKey)
+    return loadActiveAccountUsage(account, usageBatchRequestTokenByAccountId.value[key])
+  }
   pendingUsageBatchIds.add(cacheKey)
   queuedUsageBatchForce = queuedUsageBatchForce || force
 
@@ -1349,6 +1396,9 @@ watch(loading, (isLoading, wasLoading) => {
 
 watch(accounts, (rows) => {
   const visibleIDs = new Set(rows.map((row) => String(row.id)))
+  for (const accountID of pendingUsageBatchIds) {
+    if (!visibleIDs.has(String(accountID))) pendingUsageBatchIds.delete(accountID)
+  }
   usageBatchByAccountId.value = Object.fromEntries(
     Object.entries(usageBatchByAccountId.value).filter(([key]) => visibleIDs.has(key))
   )
@@ -2583,11 +2633,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   upstreamBillingRateAbortController?.abort()
-  if (usageBatchFlushTimer !== null) {
-    clearTimeout(usageBatchFlushTimer)
-    usageBatchFlushTimer = null
-  }
-  pendingUsageBatchIds.clear()
+  invalidateBatchedUsageRequests()
   window.removeEventListener('scroll', handleScroll, true)
   window.removeEventListener('resize', handleViewportResize)
   document.removeEventListener('click', handleClickOutside)

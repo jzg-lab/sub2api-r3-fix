@@ -37,6 +37,10 @@ type RateLimitService struct {
 	// OpenAI Team 联动熔断的进程内去重：teamID → 去重窗口截止时间
 	openaiTeamLinkedMu     sync.Mutex
 	openaiTeamLinkedRecent map[string]time.Time
+
+	// 降额基线告警的事件写出器（可选依赖，装配期经 SetOpenAIQuotaCutEventWriter
+	// 注入；nil 时只记日志不落事件，行为与旧版一致）。
+	openAIQuotaCutEventWriter OpenAIQuotaCutEventWriter
 }
 
 type AccountRuntimeBlocker interface {
@@ -1159,6 +1163,9 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	if account.Platform == PlatformOpenAI {
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
+		// 降额基线告警：7d 打满时被动记录本窗消耗并比对历史基线，纯只读
+		// usage_logs + extra 落库，内部失败不影响下面的 429 主流程。
+		s.noteOpenAI7dExhaustion(ctx, account, headers)
 		notifyOpenAIAutoReset(account.ID)
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
 			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
@@ -1350,29 +1357,18 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	is7dExhausted := normalized.Used7dPercent != nil && *normalized.Used7dPercent >= 100
 	is5hExhausted := normalized.Used5hPercent != nil && *normalized.Used5hPercent >= 100
 
-	// 优先使用被触发限制的重置时间
-	if is7dExhausted && normalized.Reset7dSeconds != nil {
-		resetAt := now.Add(time.Duration(*normalized.Reset7dSeconds) * time.Second)
-		slog.Info("openai_429_7d_limit_exhausted", "reset_after_seconds", *normalized.Reset7dSeconds, "reset_at", resetAt)
-		return &resetAt
-	}
-	if is5hExhausted && normalized.Reset5hSeconds != nil {
-		resetAt := now.Add(time.Duration(*normalized.Reset5hSeconds) * time.Second)
-		slog.Info("openai_429_5h_limit_exhausted", "reset_after_seconds", *normalized.Reset5hSeconds, "reset_at", resetAt)
-		return &resetAt
-	}
-
-	// 都未达到100%但收到429，使用较长的重置时间
+	// Only exhausted windows explain a quota 429. Otherwise let the caller
+	// inspect the explicit error-body reset or use the short fallback cooldown.
 	var maxResetSecs int
-	if normalized.Reset7dSeconds != nil && *normalized.Reset7dSeconds > maxResetSecs {
+	if is7dExhausted && normalized.Reset7dSeconds != nil && *normalized.Reset7dSeconds > maxResetSecs {
 		maxResetSecs = *normalized.Reset7dSeconds
 	}
-	if normalized.Reset5hSeconds != nil && *normalized.Reset5hSeconds > maxResetSecs {
+	if is5hExhausted && normalized.Reset5hSeconds != nil && *normalized.Reset5hSeconds > maxResetSecs {
 		maxResetSecs = *normalized.Reset5hSeconds
 	}
 	if maxResetSecs > 0 {
 		resetAt := now.Add(time.Duration(maxResetSecs) * time.Second)
-		slog.Info("openai_429_using_max_reset", "max_reset_seconds", maxResetSecs, "reset_at", resetAt)
+		slog.Info("openai_429_exhausted_window_reset", "reset_after_seconds", maxResetSecs, "reset_at", resetAt)
 		return &resetAt
 	}
 

@@ -1963,3 +1963,11 @@ func generateLargeUnwrapJSON(minSize int) []byte {
 	b, _ := json.Marshal(outer)
 	return b
 }
+
+func (u *httpUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
+func (u *queuedHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

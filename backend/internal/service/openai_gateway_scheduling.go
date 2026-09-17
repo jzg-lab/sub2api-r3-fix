@@ -451,6 +451,13 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 		}
 		return "not_schedulable"
 	}
+	// A sol fallback account is deliberately restricted at the common
+	// eligibility boundary so both sticky hits and fresh candidate selection
+	// reject astra (and unknown) model traffic consistently.
+	if platform == PlatformOpenAI && isOpenAIDowngradeSolFallbackAccount(account) &&
+		!isOpenAIDowngradeSolModel(requestedModel) {
+		return "sol_fallback_only"
+	}
 	if account.IsOpenAI() {
 		if paused, reason := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
 			// Debug level: this fires per-candidate on the scheduling hot path, so Info

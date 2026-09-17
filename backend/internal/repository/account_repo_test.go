@@ -6,8 +6,10 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
@@ -124,7 +126,27 @@ func queryWithParameterLimit(query string, args []driver.NamedValue) (driver.Row
 	if err := parameterLimitError(len(args)); err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(query, `SELECT "accounts"."id", "accounts"."updated_at"`) {
+		ids := make([]driver.Value, len(args))
+		for i, arg := range args {
+			ids[i] = arg.Value
+		}
+		return &parameterLimitRevisionRows{ids: ids}, nil
+	}
 	return parameterLimitRows{columns: columnsForParameterLimitQuery(query)}, nil
+}
+
+type parameterLimitRevisionRows struct{ ids []driver.Value }
+
+func (*parameterLimitRevisionRows) Columns() []string { return []string{"id", "updated_at"} }
+func (*parameterLimitRevisionRows) Close() error      { return nil }
+func (r *parameterLimitRevisionRows) Next(dest []driver.Value) error {
+	if len(r.ids) == 0 {
+		return io.EOF
+	}
+	dest[0], dest[1] = r.ids[0], time.Time{}
+	r.ids = r.ids[1:]
+	return nil
 }
 
 func parameterLimitError(paramCount int) error {

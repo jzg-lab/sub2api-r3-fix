@@ -149,6 +149,38 @@ export default {
         '30d': 'Last 30 days',
         custom: 'Custom Range'
       },
+      openaiDowngrade: {
+        title: 'OpenAI downgrade probes',
+        summary: '{probes} probes in 24h, {success} successful',
+        degraded: 'Degraded accounts: {count}',
+        fullBuckets: 'Full buckets: {count}',
+        buckets: 'Exit buckets',
+        accounts: 'Account probe stats',
+        timeline: 'Event timeline',
+        healthy: 'On duty',
+        circuit: 'Circuit',
+        reprobe: 'Reprobe',
+        replace: 'Replace',
+        account: 'Account',
+        state: 'State',
+        successRate: 'Success rate',
+        reasoning: 'Avg reasoning',
+        probes: 'Probes',
+        loadFailed: 'Failed to load OpenAI downgrade probe data',
+        states: {
+          onDuty: 'On duty',
+          circuitOpen: 'Circuit open',
+          reprobe: 'Bucket reprobe',
+          pendingReplace: 'Pending replacement'
+        },
+        events: {
+          circuitOpen: 'Circuit opened',
+          bucketReprobe: 'Bucket reprobe started',
+          bucketRescue: 'Bucket rescue',
+          replaceRequired: 'Replacement required',
+          recovered: 'Recovered'
+        }
+      },
       customTimeRange: {
         startTime: 'Start Time',
         endTime: 'End Time'

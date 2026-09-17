@@ -670,6 +670,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_CodexImageBridge
 		},
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          31,
 		Name:        "openai-codex-image-ws",
 		Platform:    PlatformOpenAI,
@@ -1284,6 +1285,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughHeade
 		openaiWSPassthroughDialer: captureDialer,
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          453,
 		Name:        "openai-ingress-passthrough-headers",
 		Platform:    PlatformOpenAI,

@@ -120,7 +120,7 @@ func TestAdminService_CreateAccountAllowsCompositeGroupAssignment(t *testing.T) 
 			99: {ID: 99, Platform: PlatformComposite},
 		},
 	}
-	svc := &adminServiceImpl{accountRepo: accountRepo, groupRepo: groupRepo}
+	svc := &adminServiceImpl{accountRepo: accountRepo, accountDuplicateRepo: accountRepo, groupRepo: groupRepo}
 
 	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
 		Name:                  "OpenAI account",

@@ -25,6 +25,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersi
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -87,6 +88,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuth404MarksUnsu
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          2,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -223,6 +225,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompact2xxWithoutItemMar
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          5,
 		Name:        "openai-oauth-no-item",
 		Platform:    PlatformOpenAI,
@@ -272,6 +275,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          6,
 		Name:        "openai-oauth-identity",
 		Platform:    PlatformOpenAI,
@@ -330,6 +334,7 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeI
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          16,
 		Name:        "openai-oauth-machine-probe",
 		Platform:    PlatformOpenAI,

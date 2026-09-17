@@ -204,14 +204,6 @@ func (h *OpenAIOAuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	var proxyURL string
-	if req.ProxyID != nil {
-		proxy, err := h.adminService.GetProxy(c.Request.Context(), *req.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
-		}
-	}
-
 	// 未指定 client_id 时，根据请求路径平台自动设置默认值，避免 repository 层盲猜
 	clientID := strings.TrimSpace(req.ClientID)
 	if clientID == "" {
@@ -219,7 +211,7 @@ func (h *OpenAIOAuthHandler) RefreshToken(c *gin.Context) {
 		clientID, _ = openai.OAuthClientConfigByPlatform(platform)
 	}
 
-	tokenInfo, err := h.openaiOAuthService.RefreshTokenWithClientID(c.Request.Context(), refreshToken, proxyURL, clientID)
+	tokenInfo, err := h.openaiOAuthService.RefreshTokenWithProxyID(c.Request.Context(), refreshToken, req.ProxyID, clientID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -339,13 +331,14 @@ func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 	}
 
 	// Create account
+	proxyID := tokenInfo.ProxyID
 	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
 		Name:        name,
 		Platform:    platform,
 		Type:        "oauth",
 		Credentials: credentials,
 		Extra:       nil,
-		ProxyID:     req.ProxyID,
+		ProxyID:     &proxyID,
 		Concurrency: req.Concurrency,
 		Priority:    req.Priority,
 		GroupIDs:    req.GroupIDs,

@@ -38,7 +38,8 @@ func TestSelectedModelCapacitySSEBeforeAndAfterOutput(t *testing.T) {
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader(stream)),
 				}
-				account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+				account := &Account{
+					ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 				var err error
 				if passthrough {
 					_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), response, c, account, time.Now(), "gpt-6-astra", "gpt-6-astra")

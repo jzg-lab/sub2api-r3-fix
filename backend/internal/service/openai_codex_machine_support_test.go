@@ -72,6 +72,7 @@ func TestCodexIdentityHeaders_WhitelistParityAcrossHTTPAndWS(t *testing.T) {
 	for _, mode := range []string{"off", "device", "session", "full"} {
 		// 本用例只验证握手白名单，不混入账号 namespace 或 staged 指纹 sink。
 		other := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			ID:       7001,
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
@@ -160,7 +161,8 @@ func TestNormalizeOpenAIWSHandshakeCompatibility_MachineKeysOnWindowIdentity(t *
 	assert.NotEqual(t, keyA, normalizeOpenAIWSHandshakeCompatibility(account, other))
 
 	// 无 seed 的 machine 退化为 off：键只含 beta features
-	noSeed := &Account{ID: 7004, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{codexFingerprintModeExtraKey: "machine"}}
+	noSeed := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 7004, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{codexFingerprintModeExtraKey: "machine"}}
 	keyOff := normalizeOpenAIWSHandshakeCompatibility(noSeed, base)
 	assert.Empty(t, keyOff.codexInstallationID)
 	assert.Empty(t, keyOff.threadID)
@@ -180,7 +182,8 @@ func TestOpenAIWSConnPool_MachineModeDoesNotShareConnAcrossWindows(t *testing.T)
 
 	first := stableOpenAIWSIdentityHeadersForTest()
 	first.Del("session_id")
-	lease1, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses", Headers: first})
+	lease1, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses", Headers: first})
 	require.NoError(t, err)
 	conn1 := lease1.ConnID()
 	lease1.Release()
@@ -188,7 +191,8 @@ func TestOpenAIWSConnPool_MachineModeDoesNotShareConnAcrossWindows(t *testing.T)
 	// 同一窗口复用
 	again := first.Clone()
 	again.Set("x-codex-turn-metadata", `{"turn_id":"turn-x"}`)
-	lease2, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses", Headers: again})
+	lease2, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses", Headers: again})
 	require.NoError(t, err)
 	assert.True(t, lease2.Reused())
 	assert.Equal(t, conn1, lease2.ConnID())
@@ -199,7 +203,8 @@ func TestOpenAIWSConnPool_MachineModeDoesNotShareConnAcrossWindows(t *testing.T)
 	other.Set("thread-id", "thread-b")
 	other.Set("x-client-request-id", "client-request-b")
 	other.Set("x-codex-window-id", "window-b")
-	lease3, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{Account: account, WSURL: "wss://example.com/v1/responses", Headers: other})
+	lease3, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		ProxyURL: openAITransportTestRoute(account), Account: account, WSURL: "wss://example.com/v1/responses", Headers: other})
 	require.NoError(t, err)
 	assert.False(t, lease3.Reused())
 	assert.NotEqual(t, conn1, lease3.ConnID())
@@ -210,11 +215,13 @@ func TestOpenAIWSConnPool_MachineModeDoesNotShareConnAcrossWindows(t *testing.T)
 // §2 seed 生命周期：machine 与 device/session/full 同一套规则。
 func TestAdminCreateAccount_MachineModeMintsSeed(t *testing.T) {
 	repo := &upstreamBillingProbeAccountRepo{}
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
-		Name:                 "codex-oauth-machine",
-		Platform:             PlatformOpenAI,
-		Type:                 AccountTypeOAuth,
+		Name:     "codex-oauth-machine",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		// 来源闸要求真实凭据物料：codex 导入形态的 refresh_token。
+		Credentials:          map[string]any{"refresh_token": "rt-seed-test"},
 		SkipDefaultGroupBind: true,
 		Extra: map[string]any{
 			codexFingerprintModeExtraKey: "machine",

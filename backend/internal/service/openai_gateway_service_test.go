@@ -1960,6 +1960,7 @@ func TestOpenAIStreamingResponseFailedRateLimitDoesNotBlockAccountScheduling(t *
 		},
 	}
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       11,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -3243,7 +3244,8 @@ func TestOpenAIBuildUpstreamRequestOAuthOfficialClientOriginatorCompatibility(t 
 			require.NoError(t, err)
 			require.Equal(t, openai.CodexDefaultOriginator, req.Header.Get("originator"))
 			require.Equal(t, codexCLIUserAgent, req.Header.Get("User-Agent"))
-			require.Equal(t, codexCLIVersion, req.Header.Get("version"))
+			// 真实 codex 不带 version 头（0.151 抓包），收口不再补写。
+			require.Empty(t, req.Header.Get("version"))
 		})
 	}
 }

@@ -1230,7 +1230,18 @@ func (s *TokenRefreshService) postRefreshStateSync(ctx context.Context, account 
 	}
 	// 同步更新调度器缓存，确保调度获取的 Account 对象包含最新的 credentials
 	if s.schedulerCache != nil {
-		if err := s.schedulerCache.SetAccount(ctx, account); err != nil {
+		// Refresh began with an older snapshot. A concurrent manual pause or
+		// proxy edit must survive post-refresh cache propagation.
+		if s.accountRepo == nil {
+			slog.Warn("token_refresh.scheduler_account_repository_unavailable", "account_id", account.ID)
+			return
+		}
+		current, err := s.accountRepo.GetByID(ctx, account.ID)
+		if err != nil || current == nil {
+			slog.Warn("token_refresh.scheduler_account_reload_failed", "account_id", account.ID)
+			return
+		}
+		if err := s.schedulerCache.SetAccount(ctx, current); err != nil {
 			slog.Warn("token_refresh.sync_scheduler_cache_failed",
 				"account_id", account.ID,
 				"error", err,
@@ -1456,11 +1467,10 @@ func (s *TokenRefreshService) ensureOpenAIPrivacy(ctx context.Context, account *
 		return
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil && s.proxyRepo != nil {
-		if p, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && p != nil {
-			proxyURL = p.URL()
-		}
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, account.ProxyID)
+	if err != nil {
+		slog.Warn("token_refresh.openai_privacy_proxy_unavailable", "account_id", account.ID)
+		return
 	}
 
 	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)

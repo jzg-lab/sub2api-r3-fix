@@ -1402,3 +1402,7 @@ func TestAntigravityRetryLoop_SmartRetryFailed_StickySession_SwitchErrorPropagat
 	require.Equal(t, int64(55), cache.deleteCalls[0].groupID)
 	require.Equal(t, "sticky-loop-test", cache.deleteCalls[0].sessionHash)
 }
+
+func (u *mockSmartRetryUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}

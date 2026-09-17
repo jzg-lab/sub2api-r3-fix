@@ -21,4 +21,10 @@ type HTTPUpstream interface {
 	// Profile 由调用方通过 TLSFingerprintProfileService 解析后传入，
 	// 支持按账号绑定的数据库 profile 或内置默认 profile。
 	DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error)
+
+	// DoProbeWithTLS 执行探针请求的一次性专用传输：不进入按账号缓存的共享连接
+	// 池，响应体关闭后回收传输。真实 codex exec 单轮 turn 本就是每进程一条新
+	// 连接；探针与真实 turn 同连接复用会被服务端按连接降级（2026-09-18 生产
+	// 实证，详见 repository 实现注释），探针必须与共享池隔离。
+	DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error)
 }

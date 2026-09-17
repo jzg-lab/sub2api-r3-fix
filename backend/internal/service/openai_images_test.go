@@ -464,6 +464,7 @@ func TestOpenAIUpstreamErrorBodyReadLimitForConfig_RespectsDiagnosticLimit(t *te
 
 func TestAccountSupportsOpenAIImageCapability_OAuthSupportsNative(t *testing.T) {
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 	}
@@ -507,6 +508,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("OpenAI OAuth 默认仅兼容 chat", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 		}
@@ -524,6 +526,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 			Type:     AccountTypeAPIKey,
 		}
 		oauth := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 		}
@@ -567,6 +570,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("OAuth 显式列表沿用 chat 能力放行 alpha search", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -595,6 +599,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("空 openai_capabilities（{}）与未配置一致，不排除 OAuth 文本调度", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -608,6 +613,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("空 openai_capabilities（[]any）与未配置一致，不排除 OAuth 文本调度", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -620,6 +626,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("空 openai_capabilities（[]string）与未配置一致，不排除 OAuth 文本调度", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -632,6 +639,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("非空但全 false 的 map 仍按显式禁用处理，不默认放行", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -644,6 +652,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("类型异常（字符串）仍视为已配置但不含能力，不默认放行", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -706,6 +715,7 @@ func TestAccountSupportsOpenAIEndpointCapability(t *testing.T) {
 
 	t.Run("responses 能力：OAuth 账号不受探测标记影响", func(t *testing.T) {
 		account := &Account{
+			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Extra:    map[string]any{"openai_responses_supported": false},
@@ -820,6 +830,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthPassesNAndReturnsAllImages(t *te
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       1,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -975,6 +986,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUpstreamHTTPErrorSurfacesRealErr
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       1,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -1033,6 +1045,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthNonStreamModerationBlockedReturn
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       1,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -1083,6 +1096,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthNonStreamServerErrorReturnsFailo
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       21,
 		Name:     "openai-oauth-server-error",
 		Platform: PlatformOpenAI,
@@ -1127,7 +1141,8 @@ func TestOpenAIGatewayServiceForwardImages_OAuth429CarriesSameAccountRetryWindow
 	}}}
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
-	account := &Account{ID: 22, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token-123"}}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 22, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "token-123"}}
 	startedAt := time.Now()
 
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
@@ -1153,7 +1168,8 @@ func TestOpenAIImagesOAuthBodyReadTransportErrorFailover(t *testing.T) {
 		},
 		Body: &openAIImagesReadErrorBody{err: errors.New("stream error: stream ID 11; INTERNAL_ERROR; received from peer")},
 	}
-	account := &Account{ID: 5400, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 5400, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	svc := &OpenAIGatewayService{}
 
 	_, _, _, readErr := svc.handleOpenAIImagesOAuthNonStreamingResponse(resp, c, "b64_json", "gpt-image-2")
@@ -1217,7 +1233,8 @@ func TestOpenAIImagesOAuthTransportErrorAfterDownstreamWriteDoesNotFailover(t *t
 	_, writeErr := c.Writer.Write([]byte("downstream image bytes"))
 	require.NoError(t, writeErr)
 	classifiedErr := newOpenAIUpstreamStreamReadError(errors.New("unexpected EOF"))
-	account := &Account{ID: 5401, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 5401, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	resp := &http.Response{Header: http.Header{"X-Request-Id": []string{"req_after_write"}}}
 
 	err := (&OpenAIGatewayService{}).handleOpenAIImagesOAuthResponseError(context.Background(), c, account, "gpt-image-2", "", resp, before, classifiedErr)
@@ -1273,6 +1290,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamServerErrorAfterFlushDoesN
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       22,
 		Name:     "openai-oauth-partial-server-error",
 		Platform: PlatformOpenAI,
@@ -1687,6 +1705,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingTransformsEvents(t *tes
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       2,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -1841,6 +1860,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthEditsMultipartUsesResponsesAPI(t
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       3,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -1903,6 +1923,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthEditsStreamingTransformsEvents(t
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       4,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -2093,6 +2114,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingHandlesOutputItemDoneFa
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       5,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -2149,6 +2171,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingHandlesMultilineSSE(t *
 	}
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       11,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -2213,6 +2236,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthStreamingDrainsAfterClientDiscon
 	svc.httpUpstream = upstream
 
 	account := &Account{
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       9,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
