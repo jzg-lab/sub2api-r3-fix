@@ -96,6 +96,12 @@ dist/
 build/
 release/
 
+# This directory contains Vite build source, not build output.
+!frontend/build/
+!frontend/build/**
+frontend/build/payment-chunk-guard.js
+frontend/build/payment-chunk-guard.d.ts
+
 # 后端嵌入的前端构建产物
 # Deliver the complete embedded UI, including newly hashed build assets.
 # The separate frontend/dist output remains ignored.
@@ -140,6 +146,8 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
+!docs/ANTI_BYPASS_PROMPT_BOUNDARIES.md
+!docs/PRODUCTION_RELIABILITY.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
