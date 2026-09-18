@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -85,6 +86,13 @@ func (r *longContextBillingRepoStub) Create(_ context.Context, account *Account)
 	r.account = account
 	r.createdAccount = account
 	return nil
+}
+
+func (r *longContextBillingRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+	if len(groups) != 0 {
+		return errors.New("long context fixture expects an ungrouped account")
+	}
+	return r.Create(ctx, account)
 }
 
 func (r *longContextBillingRepoStub) GetByID(_ context.Context, _ int64) (*Account, error) {

@@ -29,6 +29,9 @@ func atomicCreateAccount() *service.Account {
 	return &service.Account{
 		Name: "atomic-create", Platform: service.PlatformOpenAI,
 		Type: service.AccountTypeOAuth, Status: service.StatusActive,
+		Credentials: map[string]any{
+			"auth_mode": service.OpenAIAuthModePersonalAccessToken,
+		},
 		Concurrency: 1, Extra: map[string]any{"existing": true},
 	}
 }

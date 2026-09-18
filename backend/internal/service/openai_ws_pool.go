@@ -250,7 +250,11 @@ func (l *openAIWSConnLease) Release() {
 	}
 	l.conn.release()
 	if l.pool != nil {
-		l.pool.notifyAccountPoolChanged(l.accountID)
+		if l.pool.closed.Load() {
+			l.pool.evictConn(l.accountID, l.conn.id)
+		} else {
+			l.pool.notifyAccountPoolChanged(l.accountID)
+		}
 	}
 }
 
@@ -344,6 +348,11 @@ func (c *openAIWSConn) acquire(ctx context.Context) error {
 }
 
 func (c *openAIWSConn) release() {
+	c.releaseToken()
+	c.touch()
+}
+
+func (c *openAIWSConn) releaseToken() {
 	if c == nil {
 		return
 	}
@@ -351,7 +360,6 @@ func (c *openAIWSConn) release() {
 	case c.leaseCh <- struct{}{}:
 	default:
 	}
-	c.touch()
 }
 
 func (c *openAIWSConn) close() {
@@ -452,6 +460,10 @@ func (c *openAIWSConn) readMessage(readCtx context.Context) ([]byte, error) {
 }
 
 func (c *openAIWSConn) pingWithTimeout(timeout time.Duration) error {
+	return c.pingWithContextTimeout(context.Background(), timeout)
+}
+
+func (c *openAIWSConn) pingWithContextTimeout(parent context.Context, timeout time.Duration) error {
 	if c == nil {
 		return errOpenAIWSConnClosed
 	}
@@ -461,16 +473,30 @@ func (c *openAIWSConn) pingWithTimeout(timeout time.Duration) error {
 	default:
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if c.ws == nil {
-		return errOpenAIWSConnClosed
+	if parent == nil {
+		parent = context.Background()
 	}
 	if timeout <= 0 {
 		timeout = openAIWSConnHealthCheckTO
 	}
-	pingCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	pingCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	if err := pingCtx.Err(); err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := pingCtx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-c.closedCh:
+		return errOpenAIWSConnClosed
+	default:
+	}
+	if c.ws == nil {
+		return errOpenAIWSConnClosed
+	}
 	if err := c.ws.Ping(pingCtx); err != nil {
 		return err
 	}
@@ -641,15 +667,22 @@ type openAIWSConnPool struct {
 
 	metrics openAIWSPoolMetrics
 
+	lifecycleMu  sync.Mutex
+	closed       atomic.Bool
+	shutdownCtx  context.Context
+	shutdown     context.CancelFunc
 	workerStopCh chan struct{}
 	workerWg     sync.WaitGroup
 	closeOnce    sync.Once
 }
 
 func newOpenAIWSConnPool(cfg *config.Config, resolvers ...func(*Account) *tlsfingerprint.Profile) *openAIWSConnPool {
+	shutdownCtx, shutdown := context.WithCancel(context.Background())
 	pool := &openAIWSConnPool{
 		cfg:          cfg,
 		clientDialer: newDefaultOpenAIWSClientDialer(),
+		shutdownCtx:  shutdownCtx,
+		shutdown:     shutdown,
 		workerStopCh: make(chan struct{}),
 	}
 	if len(resolvers) > 0 {
@@ -699,9 +732,16 @@ func (p *openAIWSConnPool) Close() {
 		return
 	}
 	p.closeOnce.Do(func() {
+		// Serialize prewarm registration with shutdown before waiting on workers.
+		p.lifecycleMu.Lock()
+		p.closed.Store(true)
+		if p.shutdown != nil {
+			p.shutdown()
+		}
 		if p.workerStopCh != nil {
 			close(p.workerStopCh)
 		}
+		p.lifecycleMu.Unlock()
 		p.workerWg.Wait()
 		// 遍历所有账户池，关闭全部空闲连接。
 		p.accounts.Range(func(key, value any) bool {
@@ -709,13 +749,20 @@ func (p *openAIWSConnPool) Close() {
 			if !ok || ap == nil {
 				return true
 			}
+			var idle []*openAIWSConn
 			ap.mu.Lock()
-			for _, conn := range ap.conns {
+			ap.generation++
+			ap.lastAcquire = nil
+			for id, conn := range ap.conns {
 				if conn != nil && !conn.isLeased() {
-					conn.close()
+					delete(ap.conns, id)
+					delete(ap.pinnedConns, id)
+					idle = append(idle, conn)
 				}
 			}
+			ap.signalChangedLocked()
 			ap.mu.Unlock()
+			closeOpenAIWSConns(idle)
 			return true
 		})
 	})
@@ -758,19 +805,35 @@ func (p *openAIWSConnPool) runBackgroundPingWorker() {
 }
 
 func (p *openAIWSConnPool) runBackgroundPingSweep() {
-	if p == nil {
+	if p == nil || p.closed.Load() {
 		return
+	}
+	parent := p.shutdownCtx
+	if parent == nil {
+		parent = context.Background()
 	}
 	candidates := p.snapshotIdleConnsForPing()
 	var g errgroup.Group
 	g.SetLimit(10)
 	for _, item := range candidates {
+		if p.closed.Load() || parent.Err() != nil {
+			break
+		}
 		item := item
 		if item.conn == nil || item.conn.isLeased() || item.conn.waiters.Load() > 0 || !item.conn.supportsIdlePingWithoutReader() {
 			continue
 		}
 		g.Go(func() error {
-			if err := item.conn.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
+			if p.closed.Load() || parent.Err() != nil ||
+				item.conn.waiters.Load() > 0 || !item.conn.tryAcquire() {
+				return nil
+			}
+			defer func() {
+				// Maintenance must not refresh the application's idle age.
+				item.conn.releaseToken()
+				p.notifyAccountPoolChanged(item.accountID)
+			}()
+			if err := item.conn.pingWithContextTimeout(parent, openAIWSConnHealthCheckTO); err != nil && !p.closed.Load() {
 				p.evictConn(item.accountID, item.conn.id)
 			}
 			return nil
@@ -860,7 +923,30 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 	if p != nil {
 		p.metrics.acquireTotal.Add(1)
 	}
-	return p.acquire(ctx, cloneOpenAIWSAcquireRequest(req), 0)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if p != nil && p.shutdownCtx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(p.shutdownCtx, cancel)
+		defer stop()
+	}
+	lease, err := p.acquire(ctx, cloneOpenAIWSAcquireRequest(req), 0)
+	if p != nil && p.closed.Load() {
+		if lease != nil {
+			lease.Release()
+		}
+		return nil, errOpenAIWSConnClosed
+	}
+	if err == nil && ctx.Err() != nil {
+		if lease != nil {
+			lease.Release()
+		}
+		return nil, ctx.Err()
+	}
+	return lease, err
 }
 
 func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireRequest, retry int) (*openAIWSConnLease, error) {
@@ -872,6 +958,12 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 	}
 
 retryAcquire:
+	if p.closed.Load() {
+		return nil, errOpenAIWSConnClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := validateOpenAIAccountProxyRoute(req.Account, req.ProxyURL); err != nil {
 		return nil, err
 	}
@@ -920,7 +1012,7 @@ retryAcquire:
 				ap.mu.Unlock()
 				closeOpenAIWSConns(evicted)
 				if p.shouldHealthCheckConn(preferredConn) {
-					if err := preferredConn.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
+					if err := preferredConn.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 						preferredConn.close()
 						p.evictConn(accountID, preferredConn.id)
 						if retry < 1 {
@@ -963,8 +1055,7 @@ retryAcquire:
 				return nil, err
 			}
 			if p.shouldHealthCheckConn(preferredConn) {
-				if err := preferredConn.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
-					preferredConn.release()
+				if err := preferredConn.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 					preferredConn.close()
 					p.evictConn(accountID, preferredConn.id)
 					if retry < 1 {
@@ -997,7 +1088,7 @@ retryAcquire:
 				ap.mu.Unlock()
 				closeOpenAIWSConns(evicted)
 				if p.shouldHealthCheckConn(conn) {
-					if err := conn.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
+					if err := conn.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 						conn.close()
 						p.evictConn(accountID, conn.id)
 						if retry < 1 {
@@ -1024,7 +1115,7 @@ retryAcquire:
 			ap.mu.Unlock()
 			closeOpenAIWSConns(evicted)
 			if p.shouldHealthCheckConn(best) {
-				if err := best.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
+				if err := best.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 					best.close()
 					p.evictConn(accountID, best.id)
 					if retry < 1 {
@@ -1053,7 +1144,7 @@ retryAcquire:
 					ap.mu.Unlock()
 					closeOpenAIWSConns(evicted)
 					if p.shouldHealthCheckConn(conn) {
-						if err := conn.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
+						if err := conn.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 							conn.close()
 							p.evictConn(accountID, conn.id)
 							if retry < 1 {
@@ -1129,16 +1220,24 @@ retryAcquire:
 		ap = p.getOrCreateAccountPool(accountID)
 		ap.mu.Lock()
 		ap.creating--
-		if ap.generation != acquireGeneration {
+		if p.closed.Load() || ap.generation != acquireGeneration {
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
 			if conn != nil {
 				conn.close()
 			}
-			if retry < 1 {
+			if !p.closed.Load() && retry < 1 {
 				return p.acquire(ctx, req, retry+1)
 			}
 			return nil, errOpenAIWSConnClosed
+		}
+		if err := ctx.Err(); err != nil {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			if conn != nil {
+				conn.close()
+			}
+			return nil, err
 		}
 		if dialErr != nil {
 			ap.prewarmFails++
@@ -1206,8 +1305,7 @@ acquireAtCapacity:
 		return nil, err
 	}
 	if p.shouldHealthCheckConn(target) {
-		if err := target.pingWithTimeout(openAIWSConnHealthCheckTO); err != nil {
-			target.release()
+		if err := target.pingWithContextTimeout(ctx, openAIWSConnHealthCheckTO); err != nil {
 			target.close()
 			p.evictConn(accountID, target.id)
 			if retry < 1 {
@@ -1246,7 +1344,7 @@ func (p *openAIWSConnPool) recordLastSuccessfulAcquire(accountID int64, generati
 		return
 	}
 	ap.mu.Lock()
-	if ap.generation != generation {
+	if p.closed.Load() || ap.generation != generation {
 		ap.mu.Unlock()
 		return
 	}
@@ -1545,6 +1643,11 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	if p == nil || accountID <= 0 {
 		return
 	}
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	if p.closed.Load() {
+		return
+	}
 
 	var req openAIWSAcquireRequest
 	generation := uint64(0)
@@ -1590,7 +1693,11 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	ap.creating += need
 	p.metrics.scaleUpTotal.Add(int64(need))
 
-	go p.prewarmConns(accountID, req, need, generation)
+	p.workerWg.Add(1)
+	go func() {
+		defer p.workerWg.Done()
+		p.prewarmConns(accountID, req, need, generation)
+	}()
 }
 
 func (p *openAIWSConnPool) targetConnCountLocked(ap *openAIWSAccountPool, maxConns int) int {
@@ -1639,27 +1746,52 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		generation = generations[0]
 	}
 	staleTarget := false
+	remaining := total
 	defer func() {
 		if ap, ok := p.getAccountPool(accountID); ok && ap != nil {
 			ap.mu.Lock()
+			ap.creating = max(0, ap.creating-remaining)
 			ap.prewarmActive = false
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
 		}
 		if staleTarget {
-			// A newer acquire arrived while the old dial was in flight. Re-run
-			// target selection only after clearing prewarmActive so the latest
-			// beta/hint target can fill the idle budget.
+			// Return the old batch's reservations before selecting a target
+			// from the latest successful acquire.
 			p.ensureTargetIdleAsync(accountID)
 		}
 	}()
 
+	parent := p.shutdownCtx
+	if parent == nil {
+		parent = context.Background()
+	}
 	for i := 0; i < total; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
+		if p.closed.Load() {
+			return
+		}
+		ap, ok := p.getAccountPool(accountID)
+		if !ok || ap == nil {
+			return
+		}
+		ap.mu.Lock()
+		if ap.generation != generation || ap.lastAcquire == nil ||
+			!sameOpenAIWSPrewarmTarget(req, *ap.lastAcquire) {
+			staleTarget = ap.lastAcquire != nil
+			ap.mu.Unlock()
+			return
+		}
+		if len(ap.conns) >= p.effectiveMaxConnsByAccount(ap.lastAcquire.Account) {
+			ap.mu.Unlock()
+			return
+		}
+		ap.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(parent, p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
 		conn, err := p.dialConn(ctx, req)
 		cancel()
 
-		ap, ok := p.getAccountPool(accountID)
+		ap, ok = p.getAccountPool(accountID)
 		if !ok || ap == nil {
 			if conn != nil {
 				conn.close()
@@ -1670,6 +1802,27 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		if ap.creating > 0 {
 			ap.creating--
 		}
+		remaining--
+		if p.closed.Load() {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			if conn != nil {
+				conn.close()
+			}
+			return
+		}
+		// An obsolete dial must neither publish a connection nor count as a
+		// failure against the current target. Stop the entire reserved batch.
+		if ap.generation != generation || ap.lastAcquire == nil ||
+			!sameOpenAIWSPrewarmTarget(req, *ap.lastAcquire) {
+			staleTarget = ap.lastAcquire != nil
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			if conn != nil {
+				conn.close()
+			}
+			return
+		}
 		if err != nil {
 			ap.prewarmFails++
 			ap.prewarmFailAt = time.Now()
@@ -1677,23 +1830,11 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 			ap.mu.Unlock()
 			continue
 		}
-		if ap.generation != generation || ap.lastAcquire == nil {
-			ap.mu.Unlock()
-			conn.close()
-			continue
-		}
-		if !sameOpenAIWSPrewarmTarget(req, *ap.lastAcquire) {
-			staleTarget = true
+		if len(ap.conns) >= p.effectiveMaxConnsByAccount(ap.lastAcquire.Account) {
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
 			conn.close()
-			continue
-		}
-		if len(ap.conns) >= p.effectiveMaxConnsByAccount(req.Account) {
-			ap.signalChangedLocked()
-			ap.mu.Unlock()
-			conn.close()
-			continue
+			return
 		}
 		ap.conns[conn.id] = conn
 		ap.prewarmFails = 0

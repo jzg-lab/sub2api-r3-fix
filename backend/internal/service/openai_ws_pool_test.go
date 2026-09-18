@@ -460,6 +460,251 @@ func TestOpenAIWSConnPool_PrewarmHintChangeDoesNotInvalidateHealthyDial(t *testi
 	require.Equal(t, 1, dialer.DialCount(), "routing-hint-only changes must not turn advisory metadata into hard reconnects")
 }
 
+func TestOpenAIWSConnPool_PrewarmValidatesBatchBeforeDial(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation uint64
+		noTarget   bool
+		beta       string
+		hint       string
+		wantDials  int
+	}{
+		{name: "current", beta: "original", wantDials: 3},
+		{name: "hint_only", beta: "original", hint: "priority", wantDials: 3},
+		{name: "no_target", noTarget: true},
+		{name: "cleared", generation: 1, noTarget: true},
+		{name: "new_generation_same_target", generation: 1, beta: "original"},
+		{name: "new_target", beta: "replacement"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+			pool := newOpenAIWSConnPool(cfg)
+			t.Cleanup(pool.Close)
+			dialer := &openAIWSCountingDialer{}
+			pool.setClientDialerForTest(dialer)
+			account := &Account{ID: 996, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			req := openAIWSAcquireRequest{
+				Account: account, ProxyURL: openAITransportTestRoute(account),
+				WSURL: "wss://example.com/v1/responses",
+				Headers: http.Header{
+					"X-Codex-Beta-Features": {"original"},
+				},
+			}
+			ap := pool.getOrCreateAccountPool(account.ID)
+			ap.mu.Lock()
+			ap.generation = tc.generation
+			ap.prewarmActive = true
+			ap.creating = 5 // Three batch reservations plus two foreground dials.
+			if !tc.noTarget {
+				ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+				ap.lastAcquire.Headers.Set("X-Codex-Beta-Features", tc.beta)
+				ap.lastAcquire.Headers.Set(openAICodexRoutingHintHeader, tc.hint)
+			}
+			changed := ap.changeChannelLocked()
+			ap.mu.Unlock()
+
+			pool.prewarmConns(account.ID, req, 3, 0)
+
+			require.Equal(t, tc.wantDials, dialer.DialCount())
+			ap.mu.Lock()
+			creating, active, failures, conns := ap.creating, ap.prewarmActive, ap.prewarmFails, len(ap.conns)
+			ap.mu.Unlock()
+			require.Equal(t, 2, creating, "only this batch's reservations may be returned")
+			require.False(t, active)
+			require.Zero(t, failures)
+			require.Equal(t, tc.wantDials, conns)
+			select {
+			case <-changed:
+			default:
+				t.Fatal("returned reservations must wake topology waiters")
+			}
+		})
+	}
+}
+
+func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		clear   bool
+		resume  bool
+		dialErr bool
+	}{
+		{name: "clear", clear: true},
+		{name: "clear_failed_dial", clear: true, dialErr: true},
+		{name: "clear_then_reacquire", clear: true, resume: true},
+		{name: "clear_then_reacquire_failed_dial", clear: true, resume: true, dialErr: true},
+		{name: "target_change", resume: true},
+		{name: "target_change_failed_dial", resume: true, dialErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 3
+			cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 5
+			pool := newOpenAIWSConnPool(cfg)
+			t.Cleanup(pool.Close)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			raw := &openAIWSFakeConn{}
+			var dials atomic.Int32
+			pool.setClientDialerForTest(openAIWSLifecycleDialer(func(ctx context.Context) (openAIWSClientConn, error) {
+				if dials.Add(1) == 1 {
+					close(started)
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-release:
+					}
+					if tc.dialErr {
+						return nil, errors.New("obsolete prewarm failed")
+					}
+					return raw, nil
+				}
+				return &openAIWSFakeConn{}, nil
+			}))
+			account := &Account{ID: 997, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			req := openAIWSAcquireRequest{
+				Account: account, ProxyURL: openAITransportTestRoute(account),
+				WSURL: "wss://example.com/v1/responses",
+				Headers: http.Header{
+					"X-Codex-Beta-Features": {"original"},
+				},
+			}
+			ap := pool.getOrCreateAccountPool(account.ID)
+			ap.mu.Lock()
+			ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+			ap.prewarmFails = 1
+			ap.prewarmFailAt = time.Now()
+			ap.mu.Unlock()
+			pool.ensureTargetIdleAsync(account.ID)
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("prewarm did not start")
+			}
+			ap.mu.Lock()
+			reservations := ap.creating
+			ap.mu.Unlock()
+			require.Equal(t, 3, reservations)
+
+			if tc.clear {
+				pool.ClearAccount(account.ID)
+			}
+			if tc.resume {
+				current := cloneOpenAIWSAcquireRequest(req)
+				current.Headers.Set("X-Codex-Beta-Features", "replacement")
+				ap.mu.Lock()
+				generation := ap.generation
+				ap.mu.Unlock()
+				pool.recordLastSuccessfulAcquire(account.ID, generation, current)
+				pool.ensureTargetIdleAsync(account.ID)
+			}
+			require.Equal(t, int32(1), dials.Load(), "the old batch still owns its reservations")
+			unblock()
+
+			wantConns, wantDials := 0, int32(1)
+			if tc.resume {
+				wantConns, wantDials = 3, 4
+			}
+			require.Eventually(t, func() bool {
+				ap.mu.Lock()
+				defer ap.mu.Unlock()
+				return !ap.prewarmActive && ap.creating == 0 && len(ap.conns) == wantConns
+			}, 2*time.Second, 5*time.Millisecond)
+			require.Equal(t, wantDials, dials.Load(), "remaining old reservations must not dial")
+			ap.mu.Lock()
+			failures, failAt := ap.prewarmFails, ap.prewarmFailAt
+			var betas []string
+			for _, conn := range ap.conns {
+				betas = append(betas, conn.handshakeCompatibility.betaFeatures)
+			}
+			targetMissing := ap.lastAcquire == nil
+			ap.mu.Unlock()
+			require.Zero(t, failures, "obsolete failures must not suppress the replacement target")
+			require.True(t, failAt.IsZero())
+			require.Equal(t, !tc.resume, targetMissing)
+			for _, beta := range betas {
+				require.Equal(t, "replacement", beta)
+			}
+			if !tc.dialErr {
+				raw.mu.Lock()
+				closed := raw.closed
+				raw.mu.Unlock()
+				require.True(t, closed, "late obsolete connections must be closed")
+			}
+		})
+	}
+}
+
+func TestOpenAIWSConnPool_PrewarmUsesCurrentCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		beforeDial bool
+		capacity   int
+		wantDials  int32
+	}{
+		{name: "disabled_before_dial", beforeDial: true, capacity: 0},
+		{name: "reduced_before_dial", beforeDial: true, capacity: 1, wantDials: 1},
+		{name: "disabled_during_dial", capacity: 0, wantDials: 1},
+		{name: "reduced_during_dial", capacity: 1, wantDials: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
+			cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+			pool := newOpenAIWSConnPool(cfg)
+			t.Cleanup(pool.Close)
+			account := &Account{ID: 998, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 3}
+			req := openAIWSAcquireRequest{
+				Account: account, ProxyURL: openAITransportTestRoute(account),
+				WSURL: "wss://example.com/v1/responses",
+			}
+			current := cloneOpenAIWSAcquireRequest(req)
+			current.Account.Concurrency = tc.capacity
+			ap := pool.getOrCreateAccountPool(account.ID)
+			ap.mu.Lock()
+			ap.creating = 3
+			ap.prewarmActive = true
+			ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+			if tc.beforeDial {
+				ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&current)
+			}
+			ap.mu.Unlock()
+			raw := &openAIWSFakeConn{}
+			var dials atomic.Int32
+			pool.setClientDialerForTest(openAIWSLifecycleDialer(func(context.Context) (openAIWSClientConn, error) {
+				if dials.Add(1) == 1 {
+					pool.recordLastSuccessfulAcquire(account.ID, 0, current)
+					return raw, nil
+				}
+				return &openAIWSFakeConn{}, nil
+			}))
+
+			pool.prewarmConns(account.ID, req, 3, 0)
+
+			require.Equal(t, tc.wantDials, dials.Load())
+			ap.mu.Lock()
+			creating, active, failures, conns := ap.creating, ap.prewarmActive, ap.prewarmFails, len(ap.conns)
+			ap.mu.Unlock()
+			require.Zero(t, creating)
+			require.False(t, active)
+			require.Zero(t, failures)
+			require.Equal(t, tc.capacity, conns, "the old request's larger capacity must not govern admission")
+			if tc.wantDials > 0 {
+				raw.mu.Lock()
+				closed := raw.closed
+				raw.mu.Unlock()
+				require.Equal(t, tc.capacity == 0, closed)
+			}
+		})
+	}
+}
+
 func TestOpenAIWSConnPool_ClearAccountWakesIncompatibleTopologyWaiter(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
@@ -1328,6 +1573,340 @@ func TestOpenAIWSConnPool_BackgroundPingSweep_EvictsDeadIdleConn(t *testing.T) {
 	require.False(t, exists, "后台 ping 失败的空闲连接应被回收")
 }
 
+func TestOpenAIWSConnPool_BackgroundPingOwnsLeaseAndPreservesIdleAge(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	raw := &openAIWSHealthProbeConn{ping: func(ctx context.Context) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}}
+	account := &Account{ID: 304, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	req := openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	}
+	conn := newOpenAIWSConn("maintenance_lease", account.ID, raw, nil)
+	conn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(account, req.Headers)
+	lastUsed := time.Now().Add(-time.Minute).UnixNano()
+	conn.lastUsedNano.Store(lastUsed)
+	ap := pool.getOrCreateAccountPool(account.ID)
+	ap.mu.Lock()
+	ap.conns[conn.id] = conn
+	changed := ap.changeChannelLocked()
+	ap.mu.Unlock()
+	sweepDone := make(chan struct{})
+	pool.workerWg.Add(1)
+	go func() {
+		defer pool.workerWg.Done()
+		pool.runBackgroundPingSweep()
+		close(sweepDone)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background ping did not start")
+	}
+	acquired := conn.tryAcquire()
+	if acquired {
+		conn.releaseToken()
+	}
+	require.False(t, acquired, "business traffic must not share a connection with an idle ping")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var acquiredLease *openAIWSConnLease
+	var acquireErr error
+	acquireDone := make(chan struct{})
+	go func() {
+		acquiredLease, acquireErr = pool.Acquire(ctx, req)
+		close(acquireDone)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-acquireDone:
+			if acquiredLease != nil {
+				acquiredLease.Release()
+			}
+		case <-time.After(time.Second):
+			t.Error("business acquire did not terminate during cleanup")
+		}
+	})
+	require.Eventually(t, func() bool { return conn.waiters.Load() == 1 }, time.Second, 5*time.Millisecond)
+	unblock()
+	select {
+	case <-sweepDone:
+	case <-time.After(time.Second):
+		t.Fatal("background ping did not release its reservation")
+	}
+	select {
+	case <-acquireDone:
+		require.NoError(t, acquireErr)
+		require.NotNil(t, acquiredLease)
+		require.True(t, acquiredLease.Reused())
+		require.Equal(t, conn.id, acquiredLease.ConnID())
+	case <-time.After(time.Second):
+		t.Fatal("business waiter did not acquire the released connection")
+	}
+	require.Equal(t, lastUsed, conn.lastUsedNano.Load(), "a successful keepalive must not extend application idle retention")
+	require.Zero(t, dialer.DialCount())
+	select {
+	case <-changed:
+	default:
+		t.Fatal("maintenance release must wake topology waiters")
+	}
+}
+
+func TestOpenAIWSConnPool_BackgroundPingRejectsStaleIdleSnapshot(t *testing.T) {
+	pool := newOpenAIWSConnPool(&config.Config{})
+	t.Cleanup(pool.Close)
+	selected := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var capabilityChecks, pings atomic.Int32
+	raw := &openAIWSHealthProbeConn{
+		ping: func(context.Context) error {
+			pings.Add(1)
+			return nil
+		},
+		idlePingCapability: func() bool {
+			if capabilityChecks.Add(1) == 1 {
+				close(selected)
+				<-release
+			}
+			return true
+		},
+	}
+	accountID := int64(305)
+	conn := newOpenAIWSConn("stale_idle_snapshot", accountID, raw, nil)
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.conns[conn.id] = conn
+	ap.mu.Unlock()
+	done := make(chan struct{})
+	pool.workerWg.Add(1)
+	go func() {
+		defer pool.workerWg.Done()
+		pool.runBackgroundPingSweep()
+		close(done)
+	}()
+	select {
+	case <-selected:
+	case <-time.After(time.Second):
+		t.Fatal("sweep did not select the idle connection")
+	}
+	require.True(t, conn.tryAcquire())
+	defer conn.release()
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweep did not skip the now-leased connection")
+	}
+	require.Zero(t, pings.Load(), "the snapshot is not authority to ping a subsequently acquired connection")
+	require.True(t, conn.isLeased(), "maintenance must not return another caller's lease")
+	raw.mu.Lock()
+	closed := raw.closed
+	raw.mu.Unlock()
+	require.False(t, closed)
+}
+
+func TestOpenAIWSConnPool_CloseCancelsPingBatchWithoutStartingQueuedPings(t *testing.T) {
+	pool := newOpenAIWSConnPool(&config.Config{})
+	t.Cleanup(pool.Close)
+	started := make(chan struct{}, 25)
+	release := make(chan struct{})
+	defer close(release)
+	var pings atomic.Int32
+	accountID := int64(306)
+	ap := pool.getOrCreateAccountPool(accountID)
+	conns := make([]*openAIWSConn, 0, 25)
+	for range 25 {
+		raw := &openAIWSHealthProbeConn{ping: func(ctx context.Context) error {
+			pings.Add(1)
+			started <- struct{}{}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-release:
+				return nil
+			}
+		}}
+		conn := newOpenAIWSConn(pool.nextConnID(accountID), accountID, raw, nil)
+		ap.mu.Lock()
+		ap.conns[conn.id] = conn
+		ap.mu.Unlock()
+		conns = append(conns, conn)
+	}
+	sweepDone := make(chan struct{})
+	pool.workerWg.Add(1)
+	go func() {
+		defer pool.workerWg.Done()
+		pool.runBackgroundPingSweep()
+		close(sweepDone)
+	}()
+	for range 10 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("the first bounded ping batch did not start")
+		}
+	}
+	closed := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown must cancel the active ping batch, not drain every timeout")
+	}
+	select {
+	case <-sweepDone:
+	default:
+		t.Fatal("shutdown returned before its ping worker")
+	}
+	require.Equal(t, int32(10), pings.Load(), "queued checks must not start after shutdown")
+	pool.runBackgroundPingSweep()
+	require.Equal(t, int32(10), pings.Load())
+	for _, conn := range conns {
+		require.False(t, conn.isLeased())
+		select {
+		case <-conn.closedCh:
+		default:
+			t.Fatal("shutdown left an idle connection open")
+		}
+	}
+}
+
+func TestOpenAIWSConnPool_AcquireHealthChecksRespectCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		preferred      bool
+		forcePreferred bool
+		queued         bool
+		differentHint  bool
+	}{
+		{name: "preferred", preferred: true},
+		{name: "forced_preferred", preferred: true, forcePreferred: true},
+		{name: "affinity"},
+		{name: "compatible_fallback", differentHint: true},
+		{name: "capacity_queue", queued: true},
+		{name: "forced_preferred_queue", preferred: true, forcePreferred: true, queued: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+			pool := newOpenAIWSConnPool(cfg)
+			t.Cleanup(pool.Close)
+			dialer := &openAIWSCountingDialer{}
+			pool.setClientDialerForTest(dialer)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			defer close(release)
+			var pingOnce sync.Once
+			raw := &openAIWSHealthProbeConn{ping: func(ctx context.Context) error {
+				pingOnce.Do(func() { close(started) })
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-release:
+					return errors.New("test released ping")
+				}
+			}}
+			account := &Account{ID: 307, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			req := openAIWSAcquireRequest{
+				Account: account, ProxyURL: openAITransportTestRoute(account),
+				WSURL: "wss://example.com/v1/responses",
+			}
+			if tc.differentHint {
+				req.Headers = http.Header{openAICodexRoutingHintHeader: {"priority"}}
+			}
+			conn := newOpenAIWSConn("cancel_health_check", account.ID, raw, nil)
+			conn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(account, req.Headers)
+			lastUsed := time.Now().Add(-2 * openAIWSConnHealthCheckIdle).UnixNano()
+			conn.lastUsedNano.Store(lastUsed)
+			if tc.preferred {
+				req.PreferredConnID = conn.id
+				req.ForcePreferredConn = tc.forcePreferred
+			}
+			if tc.queued {
+				require.True(t, conn.tryAcquire())
+			}
+			ap := pool.getOrCreateAccountPool(account.ID)
+			ap.mu.Lock()
+			ap.conns[conn.id] = conn
+			ap.lastCleanupAt = time.Now()
+			ap.mu.Unlock()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type result struct {
+				lease *openAIWSConnLease
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() {
+				lease, err := pool.Acquire(ctx, req)
+				if lease != nil {
+					lease.Release()
+				}
+				done <- result{lease, err}
+			}()
+			if tc.queued {
+				require.Eventually(t, func() bool { return conn.waiters.Load() == 1 }, time.Second, 5*time.Millisecond)
+				conn.releaseToken()
+			}
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("acquire did not reach its health check")
+			}
+			cancel()
+			select {
+			case got := <-done:
+				require.ErrorIs(t, got.err, context.Canceled)
+				require.Nil(t, got.lease)
+			case <-time.After(time.Second):
+				t.Fatal("a canceled acquire waited for the independent health timeout")
+			}
+			require.Zero(t, dialer.DialCount(), "cancellation must not trigger a replacement dial")
+			require.Equal(t, lastUsed, conn.lastUsedNano.Load(), "a failed health check must close before returning its token")
+			require.False(t, conn.isLeased())
+			select {
+			case <-conn.closedCh:
+			default:
+				t.Fatal("failed health check left a reusable connection")
+			}
+			ap.mu.Lock()
+			target := ap.lastAcquire
+			remainingConns := len(ap.conns)
+			ap.mu.Unlock()
+			require.Nil(t, target, "canceled health checks must not publish a prewarm target")
+			require.Zero(t, remainingConns)
+			require.Zero(t, conn.waiters.Load())
+		})
+	}
+}
+
 func TestOpenAIWSConnPool_BackgroundCleanupSweep_WithoutAcquire(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
@@ -1531,6 +2110,399 @@ func TestOpenAIWSConnPool_Close(t *testing.T) {
 	nilPool.Close()
 }
 
+func TestOpenAIWSConnPool_Close_RejectsAcquireAndPrewarm(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 610, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	req := openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	}
+	ap := pool.getOrCreateAccountPool(account.ID)
+	ap.mu.Lock()
+	ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
+	ap.mu.Unlock()
+
+	pool.Close()
+	for _, ctx := range []context.Context{context.Background(), nil} {
+		lease, err := pool.Acquire(ctx, req)
+		require.ErrorIs(t, err, errOpenAIWSConnClosed)
+		require.Nil(t, lease)
+	}
+	pool.recordLastSuccessfulAcquire(account.ID, ap.generation, req)
+	pool.ensureTargetIdleAsync(account.ID)
+	require.Zero(t, dialer.DialCount())
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Empty(t, ap.conns)
+	require.Zero(t, ap.creating)
+	require.False(t, ap.prewarmActive)
+	require.Nil(t, ap.lastAcquire)
+}
+
+func TestOpenAIWSConnPool_Close_CancelsQueuedAcquireAndDrainsLease(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 4
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 611, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	req := openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	}
+	lease, err := pool.Acquire(context.Background(), req)
+	require.NoError(t, err)
+	t.Cleanup(lease.Release)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		waitingLease, acquireErr := pool.Acquire(waitCtx, req)
+		if waitingLease != nil {
+			waitingLease.Release()
+		}
+		done <- acquireErr
+	}()
+	require.Eventually(t, func() bool {
+		return lease.conn.waiters.Load() == 1
+	}, time.Second, time.Millisecond)
+
+	pool.Close()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errOpenAIWSConnClosed)
+	case <-time.After(time.Second):
+		t.Fatal("pool shutdown did not cancel the queued acquire")
+	}
+	require.Zero(t, lease.conn.waiters.Load())
+	require.NoError(t, lease.WriteJSONContext(context.Background(), map[string]any{"type": "response.create"}))
+	_, err = lease.ReadMessageContext(context.Background())
+	require.NoError(t, err, "shutdown must not interrupt a lease already handed to a caller")
+	lease.Release()
+	lease.Release()
+	select {
+	case <-lease.conn.closedCh:
+	default:
+		t.Fatal("a lease returned after shutdown must close its connection")
+	}
+	inflight, waiters, conns := pool.AccountPoolLoad(account.ID)
+	require.Zero(t, inflight)
+	require.Zero(t, waiters)
+	require.Zero(t, conns)
+	require.Equal(t, 1, dialer.DialCount())
+}
+
+func TestOpenAIWSConnPool_Close_CancelsInflightDial(t *testing.T) {
+	pool := newOpenAIWSConnPool(&config.Config{})
+	t.Cleanup(pool.Close)
+	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 612, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		lease, err := pool.Acquire(ctx, openAIWSAcquireRequest{
+			Account: account, ProxyURL: openAITransportTestRoute(account),
+			WSURL: "wss://example.com/v1/responses",
+		})
+		if lease != nil {
+			lease.Release()
+		}
+		done <- err
+	}()
+	select {
+	case <-dialer.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not start")
+	}
+
+	pool.Close()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errOpenAIWSConnClosed)
+	case <-time.After(time.Second):
+		t.Fatal("pool shutdown did not cancel the in-flight dial")
+	}
+	require.Equal(t, 1, dialer.DialCount())
+	ap, ok := pool.getAccountPool(account.ID)
+	require.True(t, ok)
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Zero(t, ap.creating)
+	require.Empty(t, ap.conns)
+	require.Nil(t, ap.lastAcquire)
+}
+
+func TestOpenAIWSConnPool_Close_CancelsPrewarmAndReturnsReservations(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 3
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 3
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 5
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 613, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	ap := pool.getOrCreateAccountPool(account.ID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+	pool.ensureTargetIdleAsync(account.ID)
+	select {
+	case <-dialer.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm did not start")
+	}
+	ap.mu.Lock()
+	reservations := ap.creating
+	ap.mu.Unlock()
+	require.Equal(t, 3, reservations)
+
+	done := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pool shutdown did not cancel and join prewarm")
+	}
+	pool.ensureTargetIdleAsync(account.ID)
+	require.Equal(t, 1, dialer.DialCount(), "unstarted reservations must not dial after shutdown")
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Zero(t, ap.creating)
+	require.False(t, ap.prewarmActive)
+	require.Empty(t, ap.conns)
+	require.Nil(t, ap.lastAcquire)
+	require.Zero(t, ap.prewarmFails, "shutdown cancellation is not an upstream failure")
+}
+
+func TestOpenAIWSConnPool_Close_DiscardsLatePrewarmDial(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	raw := &openAIWSFakeConn{}
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	defer close(unblock)
+	var dials atomic.Int32
+	pool.setClientDialerForTest(openAIWSLifecycleDialer(func(ctx context.Context) (openAIWSClientConn, error) {
+		if dials.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-ctx.Done():
+		case <-unblock:
+		}
+		return raw, nil
+	}))
+	account := &Account{ID: 616, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	ap := pool.getOrCreateAccountPool(account.ID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+	pool.ensureTargetIdleAsync(account.ID)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm did not start")
+	}
+	pool.Close()
+	require.Equal(t, int32(1), dials.Load())
+	raw.mu.Lock()
+	closed := raw.closed
+	raw.mu.Unlock()
+	require.True(t, closed, "late prewarm results must be closed, not published")
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	require.Empty(t, ap.conns)
+	require.Zero(t, ap.creating)
+	require.False(t, ap.prewarmActive)
+}
+
+func TestOpenAIWSConnPool_Acquire_DiscardsLateDialAfterCancellation(t *testing.T) {
+	for _, closePool := range []bool{false, true} {
+		name := "caller_cancel"
+		if closePool {
+			name = "pool_close"
+		}
+		t.Run(name, func(t *testing.T) {
+			pool := newOpenAIWSConnPool(&config.Config{})
+			t.Cleanup(pool.Close)
+			raw := &openAIWSFakeConn{}
+			started := make(chan struct{})
+			unblock := make(chan struct{})
+			defer close(unblock)
+			pool.setClientDialerForTest(openAIWSLifecycleDialer(func(ctx context.Context) (openAIWSClientConn, error) {
+				close(started)
+				select {
+				case <-ctx.Done():
+				case <-unblock:
+				}
+				// Model a handshake completing at the same time as cancellation.
+				return raw, nil
+			}))
+			account := &Account{ID: 614, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type result struct {
+				lease *openAIWSConnLease
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() {
+				lease, err := pool.Acquire(ctx, openAIWSAcquireRequest{
+					Account: account, ProxyURL: openAITransportTestRoute(account),
+					WSURL: "wss://example.com/v1/responses",
+				})
+				done <- result{lease, err}
+			}()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("dial did not start")
+			}
+			expectedErr := context.Canceled
+			if closePool {
+				expectedErr = errOpenAIWSConnClosed
+				pool.Close()
+			} else {
+				cancel()
+			}
+			select {
+			case got := <-done:
+				if got.lease != nil {
+					got.lease.Release()
+				}
+				require.Nil(t, got.lease)
+				require.ErrorIs(t, got.err, expectedErr)
+			case <-time.After(time.Second):
+				t.Fatal("canceled acquire did not return")
+			}
+			ap, ok := pool.getAccountPool(account.ID)
+			require.True(t, ok)
+			ap.mu.Lock()
+			defer ap.mu.Unlock()
+			require.Zero(t, ap.creating)
+			require.Nil(t, ap.lastAcquire, "a canceled dial must not become the prewarm target")
+			require.Empty(t, ap.conns)
+			require.Zero(t, ap.prewarmFails, "cancellation must not count as an upstream failure")
+			raw.mu.Lock()
+			closed := raw.closed
+			raw.mu.Unlock()
+			require.True(t, closed, "a late successful dial must be closed after cancellation")
+		})
+	}
+}
+
+func TestOpenAIWSConnPool_Close_ConcurrentPrewarmRegistration(t *testing.T) {
+	for range 16 {
+		cfg := &config.Config{}
+		cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+		cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+		pool := newOpenAIWSConnPool(cfg)
+		t.Cleanup(pool.Close)
+		pool.setClientDialerForTest(&openAIWSCountingDialer{})
+		account := &Account{ID: 615, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+		ap := pool.getOrCreateAccountPool(account.ID)
+		ap.mu.Lock()
+		ap.lastAcquire = &openAIWSAcquireRequest{
+			Account: account, ProxyURL: openAITransportTestRoute(account),
+			WSURL: "wss://example.com/v1/responses",
+		}
+		ap.mu.Unlock()
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		for range 8 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				<-start
+				pool.ensureTargetIdleAsync(account.ID)
+			}()
+		}
+		close(start)
+		pool.Close()
+		workers.Wait()
+		ap.mu.Lock()
+		creating, active, conns, lastAcquire := ap.creating, ap.prewarmActive, len(ap.conns), ap.lastAcquire
+		ap.mu.Unlock()
+		require.Zero(t, creating)
+		require.False(t, active)
+		require.Zero(t, conns)
+		require.Nil(t, lastAcquire)
+	}
+}
+
+func TestOpenAIGatewayService_CloseOpenAIWSPool_BeforeFirstAcquire(t *testing.T) {
+	var nilService *OpenAIGatewayService
+	require.NotPanics(t, nilService.CloseOpenAIWSPool)
+	s := &OpenAIGatewayService{cfg: &config.Config{}}
+	t.Cleanup(s.CloseOpenAIWSPool)
+	s.CloseOpenAIWSPool()
+	pool := s.getOpenAIWSConnPool()
+	require.NotNil(t, pool)
+	require.True(t, pool.closed.Load(), "late initialization must not resurrect the service")
+	s.CloseOpenAIWSPool()
+	require.Same(t, pool, s.getOpenAIWSConnPool())
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 617, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	lease, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL: "wss://example.com/v1/responses",
+	})
+	require.Nil(t, lease)
+	require.ErrorIs(t, err, errOpenAIWSConnClosed)
+	require.Zero(t, dialer.DialCount())
+}
+
+func TestOpenAIGatewayService_CloseOpenAIWSPool_ConcurrentInitialization(t *testing.T) {
+	for range 16 {
+		s := &OpenAIGatewayService{cfg: &config.Config{}}
+		t.Cleanup(s.CloseOpenAIWSPool)
+		start := make(chan struct{})
+		results := make(chan *openAIWSConnPool, 8)
+		var workers sync.WaitGroup
+		for range 8 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				<-start
+				results <- s.getOpenAIWSConnPool()
+			}()
+		}
+		close(start)
+		s.CloseOpenAIWSPool()
+		workers.Wait()
+		close(results)
+		pool := s.getOpenAIWSConnPool()
+		require.True(t, pool.closed.Load())
+		for observed := range results {
+			require.Same(t, pool, observed)
+		}
+	}
+}
+
 func TestOpenAIWSDialError_ErrorAndUnwrap(t *testing.T) {
 	baseErr := errors.New("boom")
 	dialErr := &openAIWSDialError{StatusCode: 502, Err: baseErr}
@@ -1683,7 +2655,15 @@ func TestOpenAIWSConnPool_Close_ClosesOnlyIdleConnections(t *testing.T) {
 	default:
 	}
 
-	leased.release()
+	lease := &openAIWSConnLease{pool: pool, accountID: accountID, conn: leased}
+	lease.Release()
+	select {
+	case <-leased.closedCh:
+	default:
+		t.Fatal("a connection returned after Close must be closed")
+	}
+	_, _, conns := pool.AccountPoolLoad(accountID)
+	require.Zero(t, conns)
 	pool.Close()
 }
 
@@ -2011,6 +2991,7 @@ func TestOpenAIWSConnPool_TargetConnCountAndPrewarmBranches(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
 	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
 
 	require.Equal(t, 0, pool.targetConnCountLocked(nil, 1))
 	ap := &openAIWSAccountPool{conns: map[string]*openAIWSConn{}}
@@ -2029,23 +3010,28 @@ func TestOpenAIWSConnPool_TargetConnCountAndPrewarmBranches(t *testing.T) {
 	target := pool.targetConnCountLocked(ap, 4)
 	require.GreaterOrEqual(t, target, len(ap.conns)+1)
 
-	// prewarm: account pool 缺失时，拨号后的连接应被关闭并提前返回
+	// A missing account pool must stop before dialing, without network access.
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
 	req := openAIWSAcquireRequest{
 		ProxyURL: openAITransportTestRoute(&Account{ID: 999, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}),
 		Account:  &Account{ID: 999, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
 		WSURL:    "wss://example.com/v1/responses",
 	}
 	pool.prewarmConns(999, req, 1)
+	require.Zero(t, dialer.DialCount())
 
 	// prewarm: 拨号失败分支（prewarmFails 累加）
 	accountID := int64(1000)
 	failPool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(failPool.Close)
 	failPool.setClientDialerForTest(&openAIWSAlwaysFailDialer{})
+	req.Account.ID = accountID
 	apFail := failPool.getOrCreateAccountPool(accountID)
 	apFail.mu.Lock()
 	apFail.creating = 1
+	apFail.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
 	apFail.mu.Unlock()
-	req.Account.ID = accountID
 	failPool.prewarmConns(accountID, req, 1)
 	apFail.mu.Lock()
 	require.GreaterOrEqual(t, apFail.prewarmFails, 1)
@@ -2103,6 +3089,13 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 }
 
 type openAIWSFakeDialer struct{}
+
+type openAIWSLifecycleDialer func(context.Context) (openAIWSClientConn, error)
+
+func (d openAIWSLifecycleDialer) Dial(ctx context.Context, _ string, _ http.Header, _ string) (openAIWSClientConn, int, http.Header, error) {
+	conn, err := d(ctx)
+	return conn, 0, nil, err
+}
 
 func (d *openAIWSFakeDialer) Dial(
 	ctx context.Context,
@@ -2302,6 +3295,23 @@ func (c *openAIWSFakeConn) Close() error {
 	defer c.mu.Unlock()
 	c.closed = true
 	return nil
+}
+
+type openAIWSHealthProbeConn struct {
+	openAIWSFakeConn
+	ping               func(context.Context) error
+	idlePingCapability func() bool
+}
+
+func (c *openAIWSHealthProbeConn) Ping(ctx context.Context) error {
+	if c.ping != nil {
+		return c.ping(ctx)
+	}
+	return c.openAIWSFakeConn.Ping(ctx)
+}
+
+func (c *openAIWSHealthProbeConn) SupportsIdlePingWithoutReader() bool {
+	return c.idlePingCapability == nil || c.idlePingCapability()
 }
 
 type openAIWSBlockingConn struct {

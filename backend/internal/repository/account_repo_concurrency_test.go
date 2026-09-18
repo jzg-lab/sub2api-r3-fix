@@ -36,11 +36,13 @@ func TestAccountRepositoryCreateUsesLocalConcurrency(t *testing.T) {
 				account := atomicCreateAccount()
 				account.Platform = platform
 				account.Concurrency = requested
+				mock.ExpectBegin()
 				mock.ExpectQuery(`INSERT INTO "accounts"`).
 					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(71)))
 				mock.ExpectExec(`INSERT INTO scheduler_outbox`).
 					WithArgs(service.SchedulerOutboxEventAccountChanged, int64(71), nil, sqlmock.AnyArg(), sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectCommit()
 
 				require.NoError(t, repo.Create(t.Context(), account))
 				require.True(t, *seen)
@@ -53,7 +55,9 @@ func TestAccountRepositoryCreateUsesLocalConcurrency(t *testing.T) {
 func TestAccountRepositoryCreateFailureKeepsRequestedConcurrency(t *testing.T) {
 	repo, mock := atomicCreateRepository(t)
 	account := atomicCreateAccount()
+	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO "accounts"`).WillReturnError(errors.New("insert failed"))
+	mock.ExpectRollback()
 	require.EqualError(t, repo.Create(t.Context(), account), "insert failed")
 	require.Equal(t, 1, account.Concurrency)
 	require.Zero(t, account.ID)
@@ -67,8 +71,9 @@ func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
 			account := atomicCreateAccount()
 			account.ID = 71
 			mock.ExpectBegin()
+			expectNonBrowserOpenAIOAuthPATAccountLock(mock, account.ID)
 			mock.ExpectQuery(`(?s)SELECT.*FOR NO KEY UPDATE`).
-				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, "{}", nil).
+				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, `{"auth_mode":"personalAccessToken"}`, nil).
 				WillReturnRows(sqlmock.NewRows([]string{"identity", "group", "proxy", "probe", "sync", "snapshot", "session", "auto", "usage", "sol_fallback", "qualification", "model_rate_limits", "allow_overages"}).
 					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 			mock.ExpectExec(`UPDATE "accounts"`).WillReturnResult(sqlmock.NewResult(0, 1))

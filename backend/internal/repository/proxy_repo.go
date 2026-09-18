@@ -148,6 +148,15 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	if err != nil {
 		return nil, err
 	}
+	if err := validateOpenAIOAuthProtectedProxyUpdate(
+		ctx,
+		client,
+		proxyIn.ID,
+		currentIdentity != proxyProbeIdentityFromService(proxyIn),
+		proxyIn.ExpiresAt,
+	); err != nil {
+		return nil, err
+	}
 	builder := client.Proxy.UpdateOneID(proxyIn.ID).
 		SetName(proxyIn.Name).
 		SetProtocol(proxyIn.Protocol).
@@ -274,8 +283,39 @@ func enqueueProxyProbeAccountChanges(ctx context.Context, exec sqlExecutor, acco
 }
 
 func (r *proxyRepository) Delete(ctx context.Context, id int64) error {
-	_, err := r.client.Proxy.Delete().Where(proxy.IDEQ(id)).Exec(ctx)
-	return err
+	client := r.client
+	var tx *dbent.Tx
+	if contextTx := dbent.TxFromContext(ctx); contextTx != nil {
+		client = contextTx.Client()
+	} else {
+		var err error
+		tx, err = r.client.Tx(ctx)
+		if err != nil && err != dbent.ErrTxStarted {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+
+	if _, err := lockProxyProbeIdentity(ctx, client, id); err != nil {
+		if errors.Is(err, service.ErrProxyNotFound) {
+			return nil
+		}
+		return err
+	}
+	if err := validateOpenAIOAuthProtectedProxyDelete(ctx, client, id); err != nil {
+		return err
+	}
+	if _, err := client.Proxy.Delete().Where(proxy.IDEQ(id)).Exec(ctx); err != nil {
+		return err
+	}
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
 }
 
 func (r *proxyRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Proxy, *pagination.PaginationResult, error) {
@@ -828,7 +868,7 @@ func resolveLockedProxyFallback(ctx context.Context, exec sqlExecutor, source in
 	}
 }
 
-const openAIBrowserOAuthAccountSQL = `platform='openai' AND type='oauth'
+const openAIBrowserOAuthAccountSQL = `platform='openai' AND type='oauth' AND parent_account_id IS NULL
 	AND lower(btrim(COALESCE(credentials->>'auth_mode', ''))) NOT IN ('personalaccesstoken', 'personal_access_token', 'agentidentity')
 	AND lower(btrim(COALESCE(credentials->>'openai_auth_mode', ''))) NOT IN ('personalaccesstoken', 'personal_access_token')`
 

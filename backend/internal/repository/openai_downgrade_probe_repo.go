@@ -265,7 +265,23 @@ func (r *openAIDowngradeProbeRepository) SetOpenAIAccountProxy(
 	accountID int64,
 	proxyID *int64,
 ) error {
-	result, err := r.db.ExecContext(ctx, `
+	exec := r.db
+	var tx *sql.Tx
+	if beginner, ok := r.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	}); ok {
+		var err error
+		tx, err = beginner.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		exec = tx
+	}
+	if err := validateOpenAIOAuthProxyMutation(ctx, exec, accountID, proxyID); err != nil {
+		return err
+	}
+	result, err := exec.ExecContext(ctx, `
 		UPDATE accounts
 		SET proxy_id = $2, updated_at = NOW()
 		WHERE id = $1 AND platform = 'openai' AND deleted_at IS NULL
@@ -280,7 +296,13 @@ func (r *openAIDowngradeProbeRepository) SetOpenAIAccountProxy(
 	if affected == 0 {
 		return service.ErrAccountNotFound
 	}
-	return enqueueSchedulerOutbox(ctx, r.db, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil)
+	if err := enqueueSchedulerOutbox(ctx, exec, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		return err
+	}
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
 }
 
 // openAIDowngradePerIPAccountCap 是每个出口 IP（按 exit_ip 聚合）上允许挂载的

@@ -481,9 +481,15 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		}
 	}
 
-	// 同步 billing header cc_version 与实际发送的 User-Agent 版本
-	if ctFingerprint != nil && ctEnableFP {
-		body = syncBillingHeaderVersion(body, ctFingerprint.UserAgent)
+	// 同步 billing header cc_version 与实际生效的 User-Agent 版本。
+	// fingerprint unification 关闭时透传路径不 sync，但 mimicry 仍会覆写 UA，billing
+	// 仍须对齐默认 UA——effectiveBillingUserAgent 不依赖 ctEnableFP。（上游 v0.2.6 移植）
+	var ctBillingFingerprint *Fingerprint
+	if ctEnableFP {
+		ctBillingFingerprint = ctFingerprint
+	}
+	if billingUA := effectiveBillingUserAgent(tokenType, mimicClaudeCode, ctBillingFingerprint); billingUA != "" {
+		body = syncBillingHeaderVersion(body, billingUA)
 	}
 
 	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===

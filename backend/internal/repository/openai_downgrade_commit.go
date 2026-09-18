@@ -42,6 +42,22 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		mutation.Schedulable == nil || !*mutation.Schedulable || mutation.ErrorMessage != nil) {
 		return errors.New("invalid OpenAI probe owned-error recovery")
 	}
+	if mutation.CompleteQualification {
+		accepted := false
+		if mutation.ExpectedProxyID != nil && *mutation.ExpectedProxyID > 0 {
+			for _, result := range mutation.Results {
+				if result.IsQualificationPass() && result.ProxyID != nil &&
+					*result.ProxyID == *mutation.ExpectedProxyID {
+					accepted = true
+					break
+				}
+			}
+		}
+		if !accepted || mutation.Schedulable == nil || !*mutation.Schedulable ||
+			mutation.ProxyChanged {
+			return errors.New("invalid OpenAI OAuth qualification completion")
+		}
+	}
 	beginner, ok := r.db.(interface {
 		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 	})
@@ -53,6 +69,11 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if mutation.CompleteQualification {
+		if err := lockValidOpenAIOAuthProxy(ctx, tx, *mutation.ExpectedProxyID); err != nil {
+			return err
+		}
+	}
 
 	var version time.Time
 	err = scanSingleRow(ctx, tx, `
@@ -98,9 +119,16 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		if mutation.FallbackMode != nil {
 			extra[service.OpenAIDowngradeSolFallbackExtraKey] = *mutation.FallbackMode
 		}
+		if mutation.CompleteQualification {
+			extra[service.OpenAIOAuthQualifiedProxyExtraKey] = *mutation.ExpectedProxyID
+		}
 		payload, err := json.Marshal(extra)
 		if err != nil {
 			return err
+		}
+		extraExpression := "COALESCE(extra, '{}'::jsonb) || $5::jsonb"
+		if mutation.CompleteQualification {
+			extraExpression = "(" + extraExpression + ") - '" + service.OpenAIDowngradeQualificationExtraKey + "'"
 		}
 		// Merely naming status/error_message in UPDATE revokes error ownership,
 		// even if their values are unchanged. Leave them out for ordinary probes.
@@ -121,7 +149,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 			UPDATE accounts SET
 				proxy_id = CASE WHEN $2 THEN $3::bigint ELSE proxy_id END,
 				schedulable = COALESCE($4::boolean, schedulable),
-				extra = COALESCE(extra, '{}'::jsonb) || $5::jsonb,
+				extra = `+extraExpression+`,
 				rate_limited_at = CASE
 					WHEN $7::timestamptz IS NOT NULL THEN NULL
 					WHEN $6::timestamptz IS NOT NULL AND

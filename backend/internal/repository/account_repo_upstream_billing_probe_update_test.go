@@ -347,6 +347,7 @@ func TestUpdateCredentialsAtomicallyClearsProbeForOpenAIAPIKeyIdentityChange(t *
 	t.Cleanup(func() { _ = client.Close() })
 
 	mock.ExpectBegin()
+	expectNonBrowserOpenAIOAuthAccountLock(mock, 27)
 	mock.ExpectExec(`(?s)UPDATE accounts.*credentials IS DISTINCT FROM \$1::jsonb.*- 'upstream_billing_probe'`).
 		WithArgs(`{"api_key":"sk-new"}`, int64(27)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -370,6 +371,7 @@ func TestUpdateWithAccountBillingSettingsRollsBackWhenOutboxFails(t *testing.T) 
 	t.Cleanup(func() { _ = client.Close() })
 
 	mock.ExpectBegin()
+	expectNonBrowserOpenAIOAuthAccountLock(mock, 27)
 	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(27), service.PlatformOpenAI, service.AccountTypeAPIKey, `{"api_key":"sk-test"}`, nil).
 		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages"}).
@@ -437,6 +439,7 @@ func TestUpdateCredentialsRollsBackWhenOutboxFails(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	mock.ExpectBegin()
+	expectNonBrowserOpenAIOAuthAccountLock(mock, 27)
 	mock.ExpectExec(`(?s)UPDATE accounts.*credentials IS DISTINCT FROM \$1::jsonb.*- 'upstream_billing_probe'`).
 		WithArgs(`{"api_key":"sk-new"}`, int64(27)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -556,8 +559,9 @@ func TestAccountUpdateDoesNotWriteRuntimeCooldowns(t *testing.T) {
 			account.RateLimitedAt = staleCooldown
 			account.RateLimitResetAt = staleCooldown
 			mock.ExpectBegin()
+			expectNonBrowserOpenAIOAuthPATAccountLock(mock, account.ID)
 			mock.ExpectQuery(`(?s)SELECT.*FOR NO KEY UPDATE`).
-				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, "{}", nil).
+				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, `{"auth_mode":"personalAccessToken"}`, nil).
 				WillReturnRows(sqlmock.NewRows([]string{
 					"identity", "group", "proxy", "probe", "sync", "snapshot", "session",
 					"auto", "usage", "sol_fallback", "qualification", "model_rate_limits", "allow_overages",

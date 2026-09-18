@@ -29,6 +29,7 @@ type OpenAIDowngradeMutation struct {
 	ProxyChanged             bool
 	ProxyID                  *int64
 	Schedulable              *bool
+	CompleteQualification    bool
 	FallbackMode             *bool
 	RateLimitResetAt         *time.Time
 	RateLimitClear           *OpenAIDowngradeRateLimitObservation
@@ -62,7 +63,7 @@ type OpenAIDowngradeProbeControlStore interface {
 }
 
 func (m *OpenAIDowngradeMutation) ChangesAccount() bool {
-	return m.ProxyChanged || m.Schedulable != nil || m.FallbackMode != nil ||
+	return m.ProxyChanged || m.Schedulable != nil || m.CompleteQualification || m.FallbackMode != nil ||
 		m.RateLimitResetAt != nil || m.RateLimitClear != nil || m.ErrorMessage != nil || m.RecoverOwnedError
 }
 
@@ -131,6 +132,35 @@ func (s *openAIProbeStaging) SetSchedulable(_ context.Context, id int64, value b
 	if err := s.checkAccount(id); err != nil {
 		return err
 	}
+	if value && IsOpenAIBrowserOAuthAccount(s.account) {
+		qualifiedProxyID, qualified := OpenAIOAuthQualifiedProxyID(s.account.Extra)
+		if qualified {
+			if s.account.ProxyID == nil || qualifiedProxyID != *s.account.ProxyID {
+				return ErrOpenAIOAuthProxyMismatch
+			}
+		} else {
+			if _, exists := s.account.Extra[OpenAIOAuthQualifiedProxyExtraKey]; exists {
+				return ErrOpenAIOAuthProxyBindingCorrupt
+			}
+			if s.account.ProxyID == nil || *s.account.ProxyID <= 0 {
+				return ErrOpenAIOAuthProxyRequired
+			}
+		}
+		if !qualified || isOpenAIDowngradeQualificationCandidate(s.account) {
+			qualificationPassed := false
+			for _, result := range s.mutation.Results {
+				if result.IsQualificationPass() &&
+					sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) {
+					qualificationPassed = true
+					break
+				}
+			}
+			if !qualificationPassed {
+				return ErrOpenAIOAuthQualificationRequired
+			}
+			s.mutation.CompleteQualification = true
+		}
+	}
 	s.mutation.Schedulable = &value
 	if value && s.account.Status == StatusError {
 		s.mutation.RecoverOwnedError = true
@@ -186,6 +216,9 @@ func (s *openAIProbeStaging) SetError(_ context.Context, id int64, message strin
 func (s *openAIProbeStaging) SetOpenAIAccountProxy(_ context.Context, id int64, proxyID *int64) error {
 	if err := s.checkAccount(id); err != nil {
 		return err
+	}
+	if IsOpenAIBrowserOAuthAccount(s.account) && !sameOpenAIProbeProxy(s.account.ProxyID, proxyID) {
+		return ErrOpenAIOAuthProxyBindingProtected
 	}
 	s.mutation.ProxyChanged = true
 	s.mutation.ProxyID = cloneOpenAIProbePointer(proxyID)

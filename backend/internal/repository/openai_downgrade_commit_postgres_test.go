@@ -73,15 +73,16 @@ func newProbePostgresWithMigrations(t *testing.T, migrations []string) *sql.DB {
 	// Base columns mirror the production types; the probe/outbox schemas below
 	// are executed from the actual migrations, not reimplemented test schemas.
 	_, err = db.Exec(`
-		CREATE TABLE proxies (
-			id BIGINT PRIMARY KEY, status VARCHAR(20) NOT NULL DEFAULT 'active',
-			deleted_at TIMESTAMPTZ, exit_ip TEXT
-		);
-		CREATE TABLE accounts (
-			id BIGINT PRIMARY KEY, platform VARCHAR(50) NOT NULL DEFAULT 'openai',
-			type VARCHAR(50) NOT NULL DEFAULT 'oauth',
-			proxy_id BIGINT REFERENCES proxies(id),
-			parent_account_id BIGINT, status VARCHAR(20) NOT NULL DEFAULT 'active',
+			CREATE TABLE proxies (
+				id BIGINT PRIMARY KEY, status VARCHAR(20) NOT NULL DEFAULT 'active',
+				deleted_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, exit_ip TEXT
+			);
+			CREATE TABLE accounts (
+				id BIGINT PRIMARY KEY, platform VARCHAR(50) NOT NULL DEFAULT 'openai',
+				type VARCHAR(50) NOT NULL DEFAULT 'oauth',
+				credentials JSONB NOT NULL DEFAULT '{}',
+				proxy_id BIGINT REFERENCES proxies(id),
+				parent_account_id BIGINT, status VARCHAR(20) NOT NULL DEFAULT 'active',
 			schedulable BOOLEAN NOT NULL DEFAULT TRUE,
 			extra JSONB NOT NULL DEFAULT '{}', error_message TEXT,
 			updated_at TIMESTAMPTZ NOT NULL, deleted_at TIMESTAMPTZ,
@@ -107,8 +108,16 @@ func seedProbePostgres(t *testing.T, db *sql.DB) *service.OpenAIDowngradeMutatio
 		INSERT INTO proxies(id) VALUES(3), (4);
 	`)
 	require.NoError(t, err)
-	_, err = db.Exec("INSERT INTO accounts(id, proxy_id, updated_at) VALUES($1, $2, $3)",
-		mutation.AccountID, mutation.ExpectedProxyID, mutation.ExpectedAccountUpdatedAt)
+	_, err = db.Exec(`
+		INSERT INTO accounts(id, proxy_id, credentials, extra, updated_at)
+		VALUES(
+			$1, $2,
+			jsonb_build_object('email', 'probe-account@example.test'),
+			jsonb_build_object($3::text, $2::bigint),
+			$4
+		)
+	`, mutation.AccountID, mutation.ExpectedProxyID, service.OpenAIOAuthQualifiedProxyExtraKey,
+		mutation.ExpectedAccountUpdatedAt)
 	require.NoError(t, err)
 	repo := &openAIDowngradeProbeRepository{db: db}
 	_, err = repo.EnsureOpenAIDowngradeState(context.Background(), mutation.AccountID,
@@ -218,6 +227,51 @@ func TestOpenAIProbePostgresExactlyOneConcurrentCommit(t *testing.T) {
 	var schedulable bool
 	require.NoError(t, db.QueryRow("SELECT schedulable FROM accounts WHERE id = 7").Scan(&schedulable))
 	require.False(t, schedulable)
+}
+
+func TestOpenAIProbePostgresCompletesRestoredOAuthQualification(t *testing.T) {
+	db := newProbePostgres(t)
+	mutation := seedProbePostgres(t, db)
+	_, err := db.Exec(`
+		UPDATE accounts
+		SET schedulable = FALSE,
+			extra = jsonb_build_object($1::text, TRUE, $2::text, $3::bigint)
+		WHERE id = $4
+	`, service.OpenAIDowngradeQualificationExtraKey, service.OpenAIOAuthQualifiedProxyExtraKey,
+		*mutation.ExpectedProxyID, mutation.AccountID)
+	require.NoError(t, err)
+
+	enabled := true
+	reasoningTokens := 900
+	mutation.ExpectedSchedulable = false
+	mutation.Schedulable = &enabled
+	mutation.CompleteQualification = true
+	mutation.Events = nil
+	mutation.Results = []service.OpenAIDowngradeProbeResult{{
+		AccountID: mutation.AccountID, ProxyID: mutation.ExpectedProxyID,
+		TransportOK: true, AnswerCorrect: true, HTTPStatus: 200,
+		ReasoningTokens: &reasoningTokens,
+	}}
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	require.NoError(t, repo.CommitOpenAIDowngradeMutation(context.Background(), mutation))
+
+	var schedulable, qualificationPending bool
+	var qualifiedProxyID int64
+	require.NoError(t, db.QueryRow(`
+		SELECT schedulable,
+			COALESCE((extra ->> $1)::boolean, FALSE),
+			(extra ->> $2)::bigint
+		FROM accounts WHERE id = $3
+	`, service.OpenAIDowngradeQualificationExtraKey, service.OpenAIOAuthQualifiedProxyExtraKey,
+		mutation.AccountID).Scan(&schedulable, &qualificationPending, &qualifiedProxyID))
+	require.True(t, schedulable)
+	require.False(t, qualificationPending)
+	require.Equal(t, *mutation.ExpectedProxyID, qualifiedProxyID)
+
+	var outboxCount int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM scheduler_outbox").Scan(&outboxCount))
+	require.Equal(t, 1, outboxCount)
 }
 
 func TestOpenAIProbePostgresStaleStateAndHardDeletion(t *testing.T) {

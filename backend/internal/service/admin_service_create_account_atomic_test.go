@@ -15,13 +15,6 @@ func (r *upstreamBillingProbeAccountRepo) CreateWithAccountGroups(ctx context.Co
 	return r.Create(ctx, account)
 }
 
-func (r *longContextBillingRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
-	if len(groups) != 0 {
-		return errors.New("long context fixture expects an ungrouped account")
-	}
-	return r.Create(ctx, account)
-}
-
 type atomicAccountCreateTestRepo struct {
 	AccountRepository
 	err         error

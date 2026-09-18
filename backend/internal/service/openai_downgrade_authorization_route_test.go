@@ -73,10 +73,7 @@ func TestOpenAIProbeMissingAuthorizationRouteCannotAssignNewProxy(t *testing.T) 
 	}
 }
 
-func TestOpenAIProbeFreshUploadAutoBindsBucket(t *testing.T) {
-	// 用户裁定（2026-09-17）：从未绑过桶的新上传号必须自动分桶（r15b 行为），
-	// authorization_proxy_missing 只拦「绑过又丢」的号。判据 = state 里
-	// 从未记录过 original 绑定（OriginalProxyID == nil）。
+func TestOpenAIProbeFreshUploadWithoutAuthorizationProxyFailsClosed(t *testing.T) {
 	availableProxy := int64(9)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	account := &Account{
@@ -86,21 +83,27 @@ func TestOpenAIProbeFreshUploadAutoBindsBucket(t *testing.T) {
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	store := &downgradeProbeStoreStub{mainProxyID: &availableProxy}
 	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
-	runner.probeFn = func(_ context.Context, acct *Account, _ string) OpenAIDowngradeProbeResult {
-		require.Equal(t, &availableProxy, acct.ProxyID, "probe must run on the auto-assigned bucket")
-		return OpenAIDowngradeProbeResult{AccountID: 7}
+	runner.nextDelay = func() time.Duration { return time.Minute }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		t.Fatal("a browser OAuth account without its authorization proxy must not probe")
+		return OpenAIDowngradeProbeResult{}
 	}
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		NextProbeAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, runner.processState(context.Background(), state, now))
-	require.Equal(t, []*int64{&availableProxy}, store.proxyChanges, "fresh upload must auto-bind")
-	require.Equal(t, 1, store.probeCalls)
-	require.Equal(t, &availableProxy, account.ProxyID)
-	require.Equal(t, &availableProxy, state.OriginalProxyID)
-	require.Equal(t, &availableProxy, state.CurrentProxyID)
-	require.True(t, account.Schedulable, "fresh upload must not be force-paused by the lost-route guard")
+	require.Zero(t, store.mainProxyCalls)
+	require.Empty(t, store.proxyChanges)
+	require.Zero(t, store.probeCalls)
+	require.Equal(t, []bool{false}, repo.schedulableCalls)
+	require.False(t, account.Schedulable)
+	require.Nil(t, account.ProxyID)
+	require.Nil(t, state.OriginalProxyID)
+	require.Nil(t, state.CurrentProxyID)
+	require.Equal(t, now.Add(time.Minute), state.NextProbeAt)
+	require.Equal(t, []string{OpenAIDowngradeEventQualificationBlocked}, store.eventTypes)
+	require.Equal(t, []map[string]any{{"reason": "authorization_proxy_missing"}}, store.eventDetails)
 }
 
 func TestOpenAIProbeNonBrowserQualificationKeepsProxyAssignment(t *testing.T) {
@@ -128,9 +131,7 @@ func TestOpenAIProbeNonBrowserQualificationKeepsProxyAssignment(t *testing.T) {
 	}
 }
 
-func TestOpenAIProbeFreshUploadAtomicAutoBind(t *testing.T) {
-	// 生产 1070/1071 场景（2026-09-17）：原子路径下从未绑桶的新上传号
-	// 自动分桶后发认证针——绑桶与探针结果同事务提交。
+func TestOpenAIProbeFreshUploadAtomicWithoutAuthorizationProxyFailsClosed(t *testing.T) {
 	availableProxy := int64(5)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	account := &Account{
@@ -141,24 +142,31 @@ func TestOpenAIProbeFreshUploadAtomicAutoBind(t *testing.T) {
 	base := &downgradeProbeStoreStub{mainProxyID: &availableProxy}
 	store := &downgradeAtomicStoreStub{downgradeProbeStoreStub: base, accountRepo: repo}
 	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
-	probed := false
-	runner.probeFn = func(_ context.Context, acct *Account, _ string) OpenAIDowngradeProbeResult {
-		probed = true
-		require.Equal(t, &availableProxy, acct.ProxyID, "probe must run on the auto-assigned bucket")
-		return OpenAIDowngradeProbeResult{AccountID: 7}
+	runner.nextDelay = func() time.Duration { return time.Minute }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		t.Fatal("a browser OAuth account without its authorization proxy must not probe")
+		return OpenAIDowngradeProbeResult{}
 	}
 	state := OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		NextProbeAt: now, UpdatedAt: now.Add(-time.Minute),
 	}
 	require.NoError(t, runner.processStateAtomic(context.Background(), &state, now))
-	require.True(t, probed)
 	require.Equal(t, 1, store.commits)
-	require.Equal(t, 1, base.mainProxyCalls, "fresh upload must trigger proxy selection")
+	require.Zero(t, base.mainProxyCalls)
+	require.Zero(t, base.probeCalls)
+	require.Empty(t, base.proxyChanges)
 	require.NotNil(t, store.observed)
-	require.True(t, store.observed.ProxyChanged)
-	require.Nil(t, store.observed.ExpectedProxyID, "CAS precondition: auto-bind commits only from unbound")
-	require.Equal(t, &availableProxy, store.observed.ProxyID)
-	require.Equal(t, &availableProxy, store.observed.State.CurrentProxyID)
-	require.Len(t, store.observed.Results, 1)
+	require.False(t, store.observed.ProxyChanged)
+	require.Nil(t, store.observed.ProxyID)
+	require.Empty(t, store.observed.Results)
+	require.Len(t, store.observed.Events, 1)
+	require.Equal(t, OpenAIDowngradeEventQualificationBlocked, store.observed.Events[0].Type)
+	require.JSONEq(t, `{"reason":"authorization_proxy_missing"}`, string(store.observed.Events[0].Details))
+	require.NotNil(t, store.observed.Schedulable)
+	require.False(t, *store.observed.Schedulable)
+	require.Nil(t, state.CurrentProxyID)
+	require.Nil(t, state.OriginalProxyID)
+	require.Equal(t, now.Add(time.Minute), state.NextProbeAt)
+	require.False(t, account.Schedulable)
 }

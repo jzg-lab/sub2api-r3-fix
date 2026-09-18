@@ -139,7 +139,10 @@ func probeCommitErrorName(err error) string {
 }
 
 func TestOpenAIProbeCommitRejectsInvalidMutationBeforeTransaction(t *testing.T) {
-	for _, invalid := range []string{"nil", "missing_state", "account_mismatch", "result_mismatch", "unowned_error", "new_error"} {
+	for _, invalid := range []string{
+		"nil", "missing_state", "account_mismatch", "result_mismatch", "unowned_error", "new_error",
+		"qualification_missing_pass", "qualification_proxy_mismatch",
+	} {
 		t.Run(invalid, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
@@ -162,12 +165,99 @@ func TestOpenAIProbeCommitRejectsInvalidMutationBeforeTransaction(t *testing.T) 
 				message := "fixture"
 				mutation.ErrorMessage = &message
 				mutation.Schedulable = &enabled
+			case "qualification_missing_pass":
+				mutation.CompleteQualification = true
+				mutation.Schedulable = &enabled
+			case "qualification_proxy_mismatch":
+				wrongProxyID := int64(4)
+				reasoningTokens := 900
+				mutation.CompleteQualification = true
+				mutation.Schedulable = &enabled
+				mutation.Results[0] = service.OpenAIDowngradeProbeResult{
+					AccountID: mutation.AccountID, ProxyID: &wrongProxyID,
+					TransportOK: true, AnswerCorrect: true, HTTPStatus: 200,
+					ReasoningTokens: &reasoningTokens,
+				}
 			}
 			repo := &openAIDowngradeProbeRepository{db: db}
 			require.Error(t, repo.CommitOpenAIDowngradeMutation(context.Background(), mutation))
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestOpenAIProbeCommitCompletesQualificationAtomically(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	mutation := probeCommitFixture()
+	enabled := true
+	reasoningTokens := 900
+	mutation.ExpectedSchedulable = false
+	mutation.Schedulable = &enabled
+	mutation.CompleteQualification = true
+	mutation.Events = nil
+	mutation.Results = []service.OpenAIDowngradeProbeResult{{
+		AccountID: mutation.AccountID, ProxyID: mutation.ExpectedProxyID,
+		TransportOK: true, AnswerCorrect: true, HTTPStatus: 200,
+		ReasoningTokens: &reasoningTokens,
+	}}
+
+	mock.ExpectBegin()
+	expectValidOpenAIOAuthProxyLock(mock, *mutation.ExpectedProxyID)
+	expectProbeCommitLocks(mock, mutation)
+	mock.ExpectExec("UPDATE accounts SET.*openai_downgrade_qualification").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE openai_downgrade_probe_states").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO scheduler_outbox").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	require.NoError(t, repo.CommitOpenAIDowngradeMutation(context.Background(), mutation))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOpenAIProbeCommitQualificationRejectsInvalidCurrentProxy(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	mutation := probeCommitFixture()
+	enabled := true
+	reasoningTokens := 900
+	mutation.ExpectedSchedulable = false
+	mutation.Schedulable = &enabled
+	mutation.CompleteQualification = true
+	mutation.Results = []service.OpenAIDowngradeProbeResult{{
+		AccountID: mutation.AccountID, ProxyID: mutation.ExpectedProxyID,
+		TransportOK: true, AnswerCorrect: true, HTTPStatus: 200,
+		ReasoningTokens: &reasoningTokens,
+	}}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT status, expires_at.*FROM proxies.*FOR SHARE`).
+		WithArgs(*mutation.ExpectedProxyID).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).
+			AddRow(service.StatusDisabled, nil))
+	mock.ExpectRollback()
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	err = repo.CommitOpenAIDowngradeMutation(context.Background(), mutation)
+
+	require.ErrorIs(t, err, service.ErrOpenAIOAuthProxyInvalid)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func expectValidOpenAIOAuthProxyLock(mock sqlmock.Sqlmock, proxyID int64) {
+	mock.ExpectQuery(`(?s)SELECT status, expires_at.*FROM proxies.*FOR SHARE`).
+		WithArgs(proxyID).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).
+			AddRow(service.StatusActive, nil))
 }
 
 func TestOpenAIProbeCommitRequiresOneUpdatedRow(t *testing.T) {

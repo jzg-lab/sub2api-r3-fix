@@ -770,8 +770,10 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 // CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
-	if s != nil && s.openaiWSPool != nil {
-		s.openaiWSPool.Close()
+	// Use the same initialization barrier so a concurrent first acquire cannot
+	// create a new pool after shutdown has already observed a nil pointer.
+	if pool := s.getOpenAIWSConnPool(); pool != nil {
+		pool.Close()
 	}
 }
 

@@ -77,7 +77,10 @@ const DefaultCacheControlTTL = "5m"
 // CLICurrentVersion 是 sub2api 当前对外伪装的 Claude Code CLI 版本号（三段 semver）。
 // 用于 billing attribution block 中的 cc_version=X.Y.Z.{fp} 前缀以及 fingerprint 计算。
 // 必须与 DefaultHeaders["User-Agent"] 中的版本号严格一致；不一致会被 Anthropic 判第三方。
-const CLICurrentVersion = "2.1.220"
+// 2026-09-18 随上游 v0.2.6 同步 2.1.220 → 2.1.258：上游实测 Anthropic 按指纹 UA 做客户端
+// 版本闸门（Fable 5.1 要求 >= 2.1.251），旧基线卡在闸下；identity service 的版本下限抬升
+// （floorClaudeCLIUserAgentVersion）保证存量账号缓存指纹同步升到本基线。
+const CLICurrentVersion = "2.1.258"
 
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
 // 用于 OAuth 账号伪装成 Claude Code 时使用。

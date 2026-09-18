@@ -124,12 +124,31 @@ func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedul
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
-	if err := createAccountRecord(ctx, r.client, account); err != nil {
+	if account == nil {
+		return service.ErrAccountNilInput
+	}
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
 		return err
 	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, buildSchedulerGroupPayload(account.GroupIDs)); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account create failed: account=%d err=%v", account.ID, err)
+	defer func() { _ = tx.Rollback() }()
+	txClient := tx.Client()
+
+	staged := *account
+	staged.Extra = maps.Clone(account.Extra)
+	if err := prepareOpenAIOAuthAccountCreate(ctx, txClient, &staged); err != nil {
+		return err
 	}
+	if err := createAccountRecord(ctx, txClient, &staged); err != nil {
+		return err
+	}
+	if err := enqueueSchedulerOutbox(ctx, txClient, service.SchedulerOutboxEventAccountChanged, &staged.ID, nil, buildSchedulerGroupPayload(staged.GroupIDs)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	*account = staged
 	return nil
 }
 
@@ -222,6 +241,9 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 	// Callers treat success as committed. Keep generated state private until then.
 	staged := *account
 	staged.Extra = maps.Clone(account.Extra)
+	if err := prepareOpenAIOAuthAccountCreate(ctx, txClient, &staged); err != nil {
+		return err
+	}
 	if err := createAccountRecord(ctx, txClient, &staged); err != nil {
 		return err
 	}
@@ -479,6 +501,9 @@ func (r *accountRepository) updateAccount(
 			ctx = dbent.NewTxContext(ctx, tx)
 			client = tx.Client()
 		}
+	}
+	if err := validateOpenAIOAuthAccountUpdate(ctx, client, account); err != nil {
+		return err
 	}
 
 	updated, err := r.updateLockedAccount(
@@ -844,6 +869,9 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 			ctx = dbent.NewTxContext(ctx, tx)
 			client = tx.Client()
 		}
+	}
+	if err := validateOpenAIOAuthCredentialsUpdate(ctx, client, id, credentials); err != nil {
+		return err
 	}
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
@@ -1244,11 +1272,18 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 	// NOT (a AND b) 在 PG 三值逻辑下会把 a 或 b 为 NULL 的行（即绝大多数
 	// 健康账号：temp_unschedulable_until=NULL）也排除，导致后台 token
 	// 刷新工作器漏掉所有正常账号 → access_token 到期后请求开始 401。
+	// Deliberately NO `schedulable = TRUE` filter here: paused accounts
+	// (schedulable=false, status=active) still hold valid refresh tokens; their
+	// stored access_token must keep working (manual resume, admin probes).
+	// Excluding them lets the token silently expire while paused — 上游实测暂停
+	// 六天的账号无人续 token，恢复启用时 access_token 已过期。调度关注点
+	// (schedulable) 与凭证健康关注点（token 是否有效）分离：永久拒绝已由
+	// status='active' 过滤覆盖（error 账号自然出列），刷新确实失败的账号由
+	// 下方 ExcludeRetryCooldown 子句限流。（上游 v0.2.6 移植）
 	query := `
 		SELECT id
 		FROM accounts
 		WHERE deleted_at IS NULL
-			AND schedulable = TRUE
 			AND platform = ANY($1)
 			AND id > $2`
 	if options.ActiveOnly {
@@ -2557,18 +2592,45 @@ func (r *accountRepository) UpdateSessionWindowEnd(ctx context.Context, id int64
 }
 
 func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
-	_, err := r.client.Account.Update().
+	baseCtx := ctx
+	contextTx := dbent.TxFromContext(ctx)
+	client := clientFromContext(ctx, r.client)
+	var tx *dbent.Tx
+	if contextTx == nil {
+		var err error
+		tx, err = r.client.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+	if err := validateOpenAIOAuthSchedulable(ctx, client, id, schedulable); err != nil {
+		return err
+	}
+	result, err := client.Account.Update().
 		Where(dbaccount.IDEQ(id)).
 		SetSchedulable(schedulable).
 		Save(ctx)
 	if err != nil {
 		return err
 	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue schedulable change failed: account=%d err=%v", id, err)
+	if result != 1 {
+		return service.ErrAccountNotFound
 	}
-	if !schedulable {
-		r.syncSchedulerAccountSnapshot(ctx, id)
+	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		return err
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	if contextTx == nil {
+		r.syncSchedulerAccountSnapshot(baseCtx, id)
 	}
 	return nil
 }
@@ -2625,7 +2687,8 @@ func (r *accountRepository) SetOpenAIDowngradeFallbackMode(ctx context.Context, 
 }
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
-	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
+	updates = copyJSONMap(stripCodexFingerprintSeedFromExtraUpdate(updates))
+	delete(updates, service.OpenAIOAuthQualifiedProxyExtraKey)
 	if len(updates) == 0 {
 		return nil
 	}
@@ -2918,6 +2981,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	delete(updates.Extra, "model_rate_limits")
 	delete(updates.Extra, service.OpenAIDowngradeSolFallbackExtraKey)
 	delete(updates.Extra, service.OpenAIDowngradeQualificationExtraKey)
+	delete(updates.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
 
 	setClauses := make([]string, 0, 8)
 	args := make([]any, 0, 8)
@@ -3082,6 +3146,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 			ctx = dbent.NewTxContext(ctx, tx)
 			exec = tx.Client()
 		}
+	}
+	if err := validateOpenAIOAuthBulkUpdate(ctx, exec, ids, updates); err != nil {
+		return 0, err
 	}
 
 	var rows int64
@@ -3975,7 +4042,25 @@ func (r *accountRepository) ResetQuotaUsedAndClearRateLimitCooldown(ctx context.
 // 仅当 proxy_fallback_origin_id IS NOT NULL 时执行更新；
 // 若影响行数为 0，则返回 ErrAccountNotInFallback（账号存在但不在 fallback 状态）。
 func (r *accountRepository) RevertProxyFallback(ctx context.Context, accountID int64) error {
-	res, err := r.sql.ExecContext(ctx, `
+	contextTx := dbent.TxFromContext(ctx)
+	client := clientFromContext(ctx, r.client)
+	var tx *dbent.Tx
+	if contextTx == nil {
+		var err error
+		tx, err = r.client.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+	if err := validateOpenAIOAuthProxyFallbackRevert(ctx, client, accountID); err != nil {
+		return err
+	}
+	res, err := client.ExecContext(ctx, `
 		UPDATE accounts SET proxy_id=proxy_fallback_origin_id, proxy_fallback_origin_id=NULL, updated_at=NOW()
 		WHERE id=$1 AND proxy_fallback_origin_id IS NOT NULL AND deleted_at IS NULL`, accountID)
 	if err != nil {
@@ -3985,8 +4070,13 @@ func (r *accountRepository) RevertProxyFallback(ctx context.Context, accountID i
 	if n == 0 {
 		return service.ErrAccountNotInFallback
 	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] revert fallback enqueue failed: account=%d err=%v", accountID, err)
+	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		return err
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

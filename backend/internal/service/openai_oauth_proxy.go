@@ -69,7 +69,7 @@ func openAIOAuthProxySnapshotURL(p *Proxy, proxyID *int64) (string, error) {
 // Guard the final network boundary, including plugin and pooled WS paths.
 // Snapshot validity does not attest the proxy's physical public IP.
 func validateOpenAIAccountProxyRoute(account *Account, route string) error {
-	if account == nil || !account.IsOpenAIOAuth() || account.IsOpenAIPersonalAccessToken() || account.IsOpenAIAgentIdentity() {
+	if !IsOpenAIBrowserOAuthAccount(account) {
 		return nil
 	}
 	expected, err := openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)

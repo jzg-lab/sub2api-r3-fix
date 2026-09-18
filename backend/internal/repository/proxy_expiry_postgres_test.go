@@ -16,11 +16,9 @@ func newProxyExpiryPostgres(t *testing.T) (*sql.DB, *proxyRepository, service.Pr
 	db := newProbePostgres(t)
 	_, err := db.Exec(`
 		ALTER TABLE proxies ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			ADD COLUMN expires_at TIMESTAMPTZ,
 			ADD COLUMN fallback_mode TEXT NOT NULL DEFAULT 'none',
 			ADD COLUMN backup_proxy_id BIGINT;
-		ALTER TABLE accounts ADD COLUMN credentials JSONB NOT NULL DEFAULT '{}',
-			ADD COLUMN proxy_fallback_origin_id BIGINT;
+		ALTER TABLE accounts ADD COLUMN proxy_fallback_origin_id BIGINT;
 		INSERT INTO proxies(id, expires_at, fallback_mode) VALUES (3, NOW() - INTERVAL '1 hour', 'direct'), (4, NULL, 'none');
 		INSERT INTO accounts(id, platform, type, proxy_id, credentials, updated_at) VALUES
 			(1, 'openai', 'oauth', 3, '{}', NOW()),

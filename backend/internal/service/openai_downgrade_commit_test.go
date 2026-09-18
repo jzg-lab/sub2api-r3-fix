@@ -381,6 +381,61 @@ func TestOpenAIProbeStagingRejectsCrossAccountAndBadEvent(t *testing.T) {
 	require.Nil(t, stage.mutation.Schedulable)
 }
 
+func TestOpenAIProbeStagingRequalifiesRestoredBrowserOAuthBinding(t *testing.T) {
+	proxyID := int64(3)
+	wrongProxyID := int64(4)
+	passingResult := OpenAIDowngradeProbeResult{
+		AccountID: 1, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
+		TransportOK: true, AnswerCorrect: true, ReasoningTokens: downgradeProbeIntPtr(900),
+	}
+	for _, test := range []struct {
+		name    string
+		results []OpenAIDowngradeProbeResult
+		wantErr error
+	}{
+		{name: "matching_fresh_pass", results: []OpenAIDowngradeProbeResult{passingResult}},
+		{name: "missing_fresh_pass", wantErr: ErrOpenAIOAuthQualificationRequired},
+		{
+			name: "pass_from_different_proxy",
+			results: []OpenAIDowngradeProbeResult{func() OpenAIDowngradeProbeResult {
+				result := passingResult
+				result.ProxyID = &wrongProxyID
+				return result
+			}()},
+			wantErr: ErrOpenAIOAuthQualificationRequired,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			account := &Account{
+				ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, ProxyID: &proxyID,
+				Extra: map[string]any{
+					OpenAIOAuthQualifiedProxyExtraKey:    proxyID,
+					OpenAIDowngradeQualificationExtraKey: true,
+				},
+			}
+			stage := &openAIProbeStaging{
+				account: account,
+				mutation: OpenAIDowngradeMutation{
+					AccountID: 1,
+					Results:   test.results,
+				},
+			}
+			err := stage.SetSchedulable(context.Background(), 1, true)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				require.False(t, stage.mutation.CompleteQualification)
+				require.Nil(t, stage.mutation.Schedulable)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, stage.mutation.CompleteQualification)
+			require.NotNil(t, stage.mutation.Schedulable)
+			require.True(t, *stage.mutation.Schedulable)
+		})
+	}
+}
+
 func TestOpenAIProbeStagingKeepsLongestCooldown(t *testing.T) {
 	stage := &openAIProbeStaging{mutation: OpenAIDowngradeMutation{AccountID: 1}}
 	now := time.Now()

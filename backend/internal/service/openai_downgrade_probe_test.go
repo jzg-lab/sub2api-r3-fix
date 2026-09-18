@@ -1,24 +1,35 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
 
 type downgradeProbeAccountRepoStub struct {
 	AccountRepository
+	listByPlatformFn  func(context.Context, string) ([]Account, error)
+	getByIDFn         func(context.Context, int64) (*Account, error)
 	account           *Account
 	getByIDErr        error
 	schedulableErr    error
 	schedulableCalls  []bool
+	errorMessages     []string
 	proxyChanges      []*int64
 	fallbackModes     []bool
 	rateLimitedResets []time.Time
@@ -50,14 +61,20 @@ func (s *downgradeProbeAccountRepoStub) SyncOpenAIDowngradeAccountSnapshot(ctx c
 	return s.snapshotErr
 }
 
-func (s *downgradeProbeAccountRepoStub) ListByPlatform(context.Context, string) ([]Account, error) {
+func (s *downgradeProbeAccountRepoStub) ListByPlatform(ctx context.Context, platform string) ([]Account, error) {
+	if s.listByPlatformFn != nil {
+		return s.listByPlatformFn(ctx, platform)
+	}
 	if s.account == nil {
 		return nil, nil
 	}
 	return []Account{*s.account}, nil
 }
 
-func (s *downgradeProbeAccountRepoStub) GetByID(_ context.Context, _ int64) (*Account, error) {
+func (s *downgradeProbeAccountRepoStub) GetByID(ctx context.Context, id int64) (*Account, error) {
+	if s.getByIDFn != nil {
+		return s.getByIDFn(ctx, id)
+	}
 	if s.getByIDErr != nil {
 		return nil, s.getByIDErr
 	}
@@ -70,6 +87,11 @@ func (s *downgradeProbeAccountRepoStub) SetSchedulable(_ context.Context, _ int6
 		s.account.Schedulable = value
 	}
 	return s.schedulableErr
+}
+
+func (s *downgradeProbeAccountRepoStub) SetError(_ context.Context, _ int64, message string) error {
+	s.errorMessages = append(s.errorMessages, message)
+	return nil
 }
 
 func (s *downgradeProbeAccountRepoStub) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
@@ -101,11 +123,15 @@ func (s *downgradeProbeAccountRepoStub) SetOpenAIDowngradeFallbackMode(_ context
 
 type downgradeProbeStoreStub struct {
 	OpenAIDowngradeProbeStore
+	ensureFn       func(context.Context, int64, *int64, time.Time) (*OpenAIDowngradeProbeState, error)
+	reconcileFn    func(context.Context, time.Time, time.Duration) (int64, error)
+	listDueFn      func(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error)
 	state          *OpenAIDowngradeProbeState
 	ensureNextAt   time.Time
 	due            []OpenAIDowngradeProbeState
 	saveCalls      int
 	probeCalls     int
+	probeResults   []OpenAIDowngradeProbeResult
 	eventCalls     int
 	dashboard      *OpenAIDowngradeDashboard
 	events         []OpenAIDowngradeEvent
@@ -125,8 +151,11 @@ type downgradeProbeStoreStub struct {
 }
 
 func (s *downgradeProbeStoreStub) EnsureOpenAIDowngradeState(
-	_ context.Context, accountID int64, proxyID *int64, nextAt time.Time,
+	ctx context.Context, accountID int64, proxyID *int64, nextAt time.Time,
 ) (*OpenAIDowngradeProbeState, error) {
+	if s.ensureFn != nil {
+		return s.ensureFn(ctx, accountID, proxyID, nextAt)
+	}
 	s.ensureNextAt = nextAt
 	if s.state == nil {
 		s.state = &OpenAIDowngradeProbeState{
@@ -137,11 +166,17 @@ func (s *downgradeProbeStoreStub) EnsureOpenAIDowngradeState(
 	return s.state, nil
 }
 
-func (s *downgradeProbeStoreStub) ListDueOpenAIDowngradeStates(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error) {
+func (s *downgradeProbeStoreStub) ListDueOpenAIDowngradeStates(ctx context.Context, now time.Time, limit int) ([]OpenAIDowngradeProbeState, error) {
+	if s.listDueFn != nil {
+		return s.listDueFn(ctx, now, limit)
+	}
 	return s.due, nil
 }
 
-func (s *downgradeProbeStoreStub) ReconcileOpenAIRateLimitProbeSchedules(context.Context, time.Time, time.Duration) (int64, error) {
+func (s *downgradeProbeStoreStub) ReconcileOpenAIRateLimitProbeSchedules(ctx context.Context, now time.Time, interval time.Duration) (int64, error) {
+	if s.reconcileFn != nil {
+		return s.reconcileFn(ctx, now, interval)
+	}
 	return 0, nil
 }
 
@@ -162,8 +197,11 @@ func (s *downgradeProbeStoreStub) SaveOpenAIDowngradeState(_ context.Context, st
 	return nil
 }
 
-func (s *downgradeProbeStoreStub) RecordOpenAIDowngradeProbe(context.Context, *OpenAIDowngradeProbeResult) error {
+func (s *downgradeProbeStoreStub) RecordOpenAIDowngradeProbe(_ context.Context, result *OpenAIDowngradeProbeResult) error {
 	s.probeCalls++
+	if result != nil {
+		s.probeResults = append(s.probeResults, *result)
+	}
 	return nil
 }
 
@@ -484,6 +522,140 @@ func TestParseOpenAIDowngradeProbeResponseAcceptsItemDoneDelivery(t *testing.T) 
 	require.Nil(t, juice)
 }
 
+func TestOpenAIProbeTurnStateSignal(t *testing.T) {
+	header := http.Header{}
+	header.Set("Content-Type", "text/event-stream")
+	header.Set("X-Codex-Primary", "5h:reset")
+	length, is292 := openAIProbeTurnStateSignal(200, header)
+	require.Zero(t, length)
+	require.False(t, is292)
+
+	for _, name := range []string{"current_turn_state", "Current_Turn_State", "Current-Turn-State", "CURRENT_TURN_STATE"} {
+		carrier := http.Header{}
+		carrier.Set(name, "sig.definitely.not.a.real.credential")
+		length, is292 = openAIProbeTurnStateSignal(200, carrier)
+		require.Equal(t, len("sig.definitely.not.a.real.credential"), length, name)
+		require.False(t, is292, name)
+	}
+	length, is292 = openAIProbeTurnStateSignal(292, http.Header{})
+	require.Zero(t, length)
+	require.True(t, is292)
+	for _, status := range []int{201, 204, 404, 429, 502} {
+		_, is292 = openAIProbeTurnStateSignal(status, nil)
+		require.False(t, is292, status)
+	}
+	_, _ = openAIProbeTurnStateSignal(200, nil)
+}
+
+func TestOpenAIProbeCodexTurnStateLen(t *testing.T) {
+	carrier := http.Header{}
+	carrier.Set("X-Codex-Turn-State", "g"+strings.Repeat("A", 331))
+	require.Equal(t, 332, openAIProbeCodexTurnStateLen(carrier))
+
+	for _, name := range []string{"x-codex-turn-state", "X-CODEX-TURN-STATE", "x_codex_turn_state", "X_Codex_Turn_State"} {
+		variant := http.Header{}
+		variant.Set(name, "token")
+		require.Equal(t, 5, openAIProbeCodexTurnStateLen(variant), name)
+	}
+
+	absent := http.Header{}
+	absent.Set("Content-Type", "text/event-stream")
+	absent.Set("x-codex-primary-used-percent", "3")
+	require.Zero(t, openAIProbeCodexTurnStateLen(absent))
+	require.Zero(t, openAIProbeCodexTurnStateLen(nil))
+	require.Zero(t, openAIProbeCodexTurnStateLen(http.Header{"X-Codex-Turn-State": nil}))
+
+	neighbor := http.Header{}
+	neighbor.Set("X-Codex-Turn-Metadata", "meta")
+	require.Zero(t, openAIProbeCodexTurnStateLen(neighbor))
+}
+
+func TestOpenAIProbeParseFailureFieldsAreMetadataOnly(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n", "\r"} {
+		t.Run(fmtNewlineName(newline), func(t *testing.T) {
+			body := []byte(strings.Join([]string{
+				`data: {"type":"response.output_text.delta","delta":"upstream-private-marker"}`,
+				"",
+				`data: {"type":"response.completed","usage":{"reasoning_tokens":1600}}`,
+				"",
+			}, newline))
+			var output bytes.Buffer
+			slog.New(slog.NewJSONHandler(&output, nil)).
+				Warn("openai_probe_parse_failed_forensics", openAIProbeParseFailureFields(body)...)
+			require.NotContains(t, output.String(), "upstream-private-marker")
+			var fields map[string]any
+			require.NoError(t, json.Unmarshal(output.Bytes(), &fields))
+			require.Equal(t, float64(len(body)), fields["bytes"])
+			require.Equal(t, float64(2), fields["data_records"])
+			require.Equal(t, true, fields["has_terminal"])
+			require.Equal(t, true, fields["has_usage"])
+			require.Equal(t, true, fields["has_reasoning"])
+			for key := range fields {
+				require.Contains(t, []string{"time", "level", "msg", "bytes", "data_records", "has_terminal", "has_usage", "has_reasoning"}, key)
+			}
+		})
+	}
+}
+
+func fmtNewlineName(value string) string {
+	switch value {
+	case "\r\n":
+		return "CRLF"
+	case "\r":
+		return "CR"
+	default:
+		return "LF"
+	}
+}
+
+func TestProbeResponseItemDoneDoesNotResurrectDeltas(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		item string
+	}{
+		{"refusal", `{"type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"No answer"}]}`},
+		{"empty_message", `{"type":"message","role":"assistant","status":"completed","content":[]}`},
+		{"blank_text", `{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":" \t\n"}]}`},
+		{"reasoning_only", `{"type":"reasoning","status":"completed"}`},
+		{"non_assistant", `{"type":"message","role":"user","content":[{"type":"output_text","text":"21"}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, finalOutput := range []string{"", `,"output":[]`} {
+				body := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"21\"}\n\n" +
+					"data: {\"type\":\"response.output_item.done\",\"item\":" + tt.item + "}\n\n" +
+					"data: {\"type\":\"response.completed\",\"status\":\"completed\",\"usage\":{\"reasoning_tokens\":1992}" + finalOutput + "}\n\n")
+				result := OpenAIDowngradeProbeResult{HTTPStatus: http.StatusOK}
+				result.applyResponse(body, openAIDowngradeNumericAnswerPattern(21))
+				require.False(t, result.TransportOK)
+				require.Nil(t, result.ReasoningTokens)
+				require.False(t, result.IsQualificationPass())
+				require.False(t, result.IsRecovered())
+				require.False(t, result.IsDegraded())
+				require.NotEmpty(t, result.ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestProbeResponseBlankTextIsInconclusive(t *testing.T) {
+	for _, text := range []string{"", " \t\r\n", "\u2003"} {
+		encoded, err := json.Marshal(text)
+		require.NoError(t, err)
+		for _, body := range []string{
+			`{"status":"completed","usage":{"reasoning_tokens":1992},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(encoded) + `}]}]}`,
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":" + string(encoded) + "}\n\n" +
+				"data: {\"type\":\"response.completed\",\"usage\":{\"reasoning_tokens\":1992}}\n\n",
+		} {
+			result := OpenAIDowngradeProbeResult{HTTPStatus: http.StatusOK}
+			result.applyResponse([]byte(body), openAIDowngradeNumericAnswerPattern(21))
+			require.False(t, result.TransportOK)
+			require.Nil(t, result.ReasoningTokens)
+			require.False(t, result.IsDegraded())
+			require.False(t, result.IsQualificationPass())
+		}
+	}
+}
+
 func TestProbeResponseStreamFallbackRequiresEmptyTerminalOutput(t *testing.T) {
 	for _, delivery := range []struct {
 		name   string
@@ -674,6 +846,247 @@ func (r *downgradeProbeInterruptedReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+type downgradeProbeResponseBody struct {
+	io.Reader
+	closeCalls int
+}
+
+func (b *downgradeProbeResponseBody) Close() error {
+	b.closeCalls++
+	return nil
+}
+
+type downgradeProbeHTTPUpstream struct {
+	HTTPUpstream
+	doProbe func() (*http.Response, error)
+}
+
+func (u *downgradeProbeHTTPUpstream) DoProbeWithTLS(
+	_ *http.Request, _ string, _ int, _ *tlsfingerprint.Profile,
+) (*http.Response, error) {
+	return u.doProbe()
+}
+
+func newDowngradeProbeHTTPTestRunner(upstream HTTPUpstream) (*OpenAIDowngradeProbeRunner, *Account) {
+	proxyID := int64(3)
+	account := &Account{
+		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+		ProxyID: &proxyID, Concurrency: 50,
+		Proxy:       &Proxy{ID: proxyID, Protocol: "http", Host: "127.0.0.1", Port: 3128, Status: StatusActive},
+		Credentials: map[string]any{"access_token": "synthetic-probe-test-value"},
+	}
+	// Direct construction avoids rebinding the process-wide telemetry manager.
+	return &OpenAIDowngradeProbeRunner{
+		store: &downgradeProbeStoreStub{}, accountRepo: &downgradeProbeAccountRepoStub{account: account},
+		tokenProvider: NewOpenAITokenProvider(nil, nil, nil), httpUpstream: upstream,
+	}, account
+}
+
+func TestOpenAIDowngradeProbeBodyFailurePreservesHTTPEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		bodyKind   string
+		reset      bool
+		errorClass string
+	}{
+		{"429_reset_interrupted", http.StatusTooManyRequests, "interrupted", true, "connection interrupted"},
+		{"429_no_reset_interrupted", http.StatusTooManyRequests, "interrupted", false, "connection interrupted"},
+		{"429_reset_oversized", http.StatusTooManyRequests, "oversized", true, "response body exceeds limit"},
+		{"429_no_reset_oversized", http.StatusTooManyRequests, "oversized", false, "response body exceeds limit"},
+		{"401_interrupted", http.StatusUnauthorized, "interrupted", false, "connection interrupted"},
+		{"403_oversized", http.StatusForbidden, "oversized", false, "response body exceeds limit"},
+		{"200_interrupted", http.StatusOK, "interrupted", false, "connection interrupted"},
+		{"200_oversized", http.StatusOK, "oversized", false, "response body exceeds limit"},
+		{"200_nil_body", http.StatusOK, "nil", false, "response body unavailable"},
+		{"200_partial_completion", http.StatusOK, "partial", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := make(http.Header)
+			if tc.reset {
+				header.Set("x-codex-primary-window-minutes", "10080")
+				header.Set("x-codex-primary-used-percent", "100")
+				header.Set("x-codex-primary-reset-after-seconds", "259200")
+			}
+			var body *downgradeProbeResponseBody
+			response := &http.Response{StatusCode: tc.status, Header: header}
+			if tc.bodyKind != "nil" {
+				body = &downgradeProbeResponseBody{Reader: iotest.ErrReader(
+					fmt.Errorf("private-network-marker: %w", io.ErrUnexpectedEOF))}
+				if tc.bodyKind == "oversized" {
+					body.Reader = strings.NewReader(strings.Repeat("x", openAIDowngradeProbeMaxBodyBytes+1))
+				} else if tc.bodyKind == "partial" {
+					body.Reader = &downgradeProbeInterruptedReader{
+						data: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"",
+					}
+				}
+				response.Body = body
+			}
+			calls := 0
+			runner, account := newDowngradeProbeHTTPTestRunner(&downgradeProbeHTTPUpstream{
+				doProbe: func() (*http.Response, error) {
+					calls++
+					return response, nil
+				},
+			})
+			now := time.Now()
+			if tc.status == http.StatusOK {
+				limitedAt, resetAt := now.Add(-time.Hour), now.Add(time.Hour)
+				account.RateLimitedAt, account.RateLimitResetAt = &limitedAt, &resetAt
+			}
+			result := runner.probe(context.Background(), account, "qualification")
+			require.Equal(t, 1, calls)
+			if body != nil {
+				require.Equal(t, 1, body.closeCalls)
+			}
+			require.Equal(t, tc.status, result.HTTPStatus)
+			if tc.bodyKind == "partial" {
+				require.Equal(t, "probe response missing valid completion or reasoning usage", result.ErrorMessage)
+			} else {
+				require.Equal(t, "probe transport failed: "+tc.errorClass, result.ErrorMessage)
+			}
+			require.False(t, result.TransportOK)
+			require.False(t, result.IsQualificationPass())
+			require.False(t, result.IsRecovered())
+			require.False(t, result.IsDegraded())
+			require.Nil(t, result.ReasoningTokens)
+			if tc.reset {
+				require.NotNil(t, result.RateLimitResetAt)
+				require.WithinDuration(t, now.Add(72*time.Hour), *result.RateLimitResetAt, 5*time.Second)
+				require.Equal(t, "7d_window", result.RateLimitWindow)
+			} else {
+				require.Nil(t, result.RateLimitResetAt)
+			}
+
+			require.NoError(t, runner.recordProbeResult(context.Background(), &result))
+			store := runner.store.(*downgradeProbeStoreStub)
+			require.Equal(t, []OpenAIDowngradeProbeResult{result}, store.probeResults)
+			repo := runner.accountRepo.(*downgradeProbeAccountRepoStub)
+			if tc.status == http.StatusUnauthorized || tc.status == http.StatusForbidden {
+				require.Equal(t, []string{"OpenAI probe authentication failed"}, repo.errorMessages)
+			} else {
+				require.Empty(t, repo.errorMessages)
+			}
+			state := &OpenAIDowngradeProbeState{
+				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
+				ConsecutiveFailures: 1, ConsecutiveSuccesses: 3,
+				Consecutive429s: openAIDowngrade429StreakThreshold - 1,
+			}
+			transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
+			require.Equal(t, 1, transition.State.ConsecutiveFailures)
+			require.Equal(t, 3, transition.State.ConsecutiveSuccesses)
+			handled, err := runner.applyRateLimitDeferral(context.Background(), account, state, result, now)
+			require.NoError(t, err)
+			require.Equal(t, tc.status == http.StatusTooManyRequests, handled)
+			require.Empty(t, repo.openAIRateLimitClears)
+			if tc.status == http.StatusTooManyRequests {
+				require.Equal(t, 1, store.saveCalls)
+				require.True(t, state.NextProbeAt.After(now.Add(50*time.Minute)))
+				if tc.reset {
+					require.Equal(t, []time.Time{*result.RateLimitResetAt}, repo.rateLimitedResets)
+				} else {
+					require.Equal(t, openAIDowngrade429StreakThreshold, state.Consecutive429s)
+					require.Empty(t, repo.rateLimitedResets)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAIDowngradeProbeCompleteBodyRemainsUsable(t *testing.T) {
+	complete := "event: response.completed\ndata: {\"output\":[{\"content\":[{\"text\":\"21\"}]}],\"usage\":{\"reasoning_tokens\":1992}}\n\n"
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interrupted_%t", interrupted), func(t *testing.T) {
+			body := &downgradeProbeResponseBody{Reader: strings.NewReader(complete)}
+			if interrupted {
+				body.Reader = &downgradeProbeInterruptedReader{data: complete}
+			}
+			calls := 0
+			runner, account := newDowngradeProbeHTTPTestRunner(&downgradeProbeHTTPUpstream{
+				doProbe: func() (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+				},
+			})
+			result := runner.probe(context.Background(), account, "normal")
+			require.Equal(t, 1, calls)
+			require.Equal(t, 1, body.closeCalls)
+			require.Equal(t, http.StatusOK, result.HTTPStatus)
+			require.True(t, result.TransportOK)
+			require.Equal(t, downgradeProbeIntPtr(1992), result.ReasoningTokens)
+			require.Empty(t, result.ErrorMessage)
+		})
+	}
+}
+
+func TestOpenAIDowngradeProbeRetryFailureUsesFinalAttempt(t *testing.T) {
+	for _, transportFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("transport_failure_%t", transportFailure), func(t *testing.T) {
+			firstBody := &downgradeProbeResponseBody{Reader: strings.NewReader("stream unsupported")}
+			lastBody := &downgradeProbeResponseBody{Reader: iotest.ErrReader(io.ErrUnexpectedEOF)}
+			header := make(http.Header)
+			header.Set("x-codex-primary-window-minutes", "10080")
+			header.Set("x-codex-primary-used-percent", "100")
+			header.Set("x-codex-primary-reset-after-seconds", "259200")
+			calls := 0
+			runner, account := newDowngradeProbeHTTPTestRunner(&downgradeProbeHTTPUpstream{
+				doProbe: func() (*http.Response, error) {
+					calls++
+					if calls == 1 {
+						return &http.Response{StatusCode: http.StatusBadRequest, Body: firstBody}, nil
+					}
+					last := &http.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: lastBody}
+					if transportFailure {
+						return last, fmt.Errorf("private-network-marker: %w", context.DeadlineExceeded)
+					}
+					return last, nil
+				},
+			})
+			result := runner.probe(context.Background(), account, "normal")
+			require.Equal(t, 2, calls)
+			require.Equal(t, 1, firstBody.closeCalls)
+			require.Equal(t, 1, lastBody.closeCalls)
+			require.False(t, result.TransportOK)
+			if transportFailure {
+				// A response returned alongside a transport error is not accepted evidence.
+				require.Zero(t, result.HTTPStatus)
+				require.Nil(t, result.RateLimitResetAt)
+				require.Equal(t, "probe stream retry failed: timeout", result.ErrorMessage)
+			} else {
+				require.Equal(t, http.StatusTooManyRequests, result.HTTPStatus)
+				require.NotNil(t, result.RateLimitResetAt)
+				require.Equal(t, "7d_window", result.RateLimitWindow)
+				require.Equal(t, "probe stream retry failed: connection interrupted", result.ErrorMessage)
+			}
+			require.NotContains(t, result.ErrorMessage, "private-network-marker")
+		})
+	}
+}
+
+func TestOpenAIDowngradeProbeErrorClassesExcludeRawDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{context.Canceled, "canceled"},
+		{context.DeadlineExceeded, "timeout"},
+		{&net.DNSError{IsTimeout: true}, "timeout"},
+		{io.EOF, "connection interrupted"},
+		{io.ErrUnexpectedEOF, "connection interrupted"},
+		{net.ErrClosed, "connection interrupted"},
+		{syscall.ECONNRESET, "connection interrupted"},
+		{syscall.EPIPE, "connection interrupted"},
+		{errOpenAIDowngradeProbeBodyUnavailable, "response body unavailable"},
+		{errOpenAIDowngradeProbeBodyTooLarge, "response body exceeds limit"},
+		{errors.New("private-network-marker"), "network or response error"},
+	} {
+		t.Run(tc.want+"/"+fmt.Sprintf("%T", tc.err), func(t *testing.T) {
+			err := fmt.Errorf("private-network-marker: %w", tc.err)
+			require.Equal(t, tc.want, openAIDowngradeProbeErrorClass(err))
+		})
+	}
+}
+
 func TestProbeResponseBodyLimitAndInterruptedCompletion(t *testing.T) {
 	complete := "event: response.completed\ndata: {\"output\":[{\"content\":[{\"text\":\"21\"}]}],\"usage\":{\"reasoning_tokens\":1992}}\n\n"
 	for _, tt := range []struct {
@@ -737,6 +1150,449 @@ func TestOpenAIDowngradeProbeInconclusiveDoesNotMoveState(t *testing.T) {
 
 func (s *downgradeProbeStoreStub) CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error) {
 	return true, nil
+}
+
+func waitForDowngradeProbeShutdown(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe did not stop promptly")
+	}
+}
+
+func TestOpenAIDowngradeProbeStopBeforeStart(t *testing.T) {
+	store := &downgradeProbeStoreStub{}
+	repo := &downgradeProbeAccountRepoStub{}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	stopped := make(chan struct{})
+	go func() {
+		runner.Stop()
+		close(stopped)
+	}()
+	waitForDowngradeProbeShutdown(t, stopped)
+	runner.Start()
+	runner.Start()
+	runner.Stop()
+	waitForDowngradeProbeShutdown(t, runner.doneCh)
+	require.ErrorIs(t, runner.RunOnce(context.Background()), context.Canceled)
+	require.Zero(t, store.probeCalls)
+	require.Zero(t, store.saveCalls)
+	require.True(t, store.ensureNextAt.IsZero())
+}
+
+func TestOpenAIDowngradeProbeConcurrentStartStop(t *testing.T) {
+	runner := NewOpenAIDowngradeProbeRunner(
+		&downgradeProbeStoreStub{}, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
+	start := make(chan struct{})
+	results := make(chan error, 32)
+	var workers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		workers.Add(1)
+		go func(operation int) {
+			defer workers.Done()
+			<-start
+			switch operation {
+			case 0:
+				runner.Start()
+			case 1:
+				runner.Stop()
+			default:
+				results <- runner.RunOnce(context.Background())
+			}
+		}(i % 3)
+	}
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	close(start)
+	waitForDowngradeProbeShutdown(t, done)
+	close(results)
+	for err := range results {
+		require.True(t, err == nil || errors.Is(err, context.Canceled))
+	}
+	waitForDowngradeProbeShutdown(t, runner.doneCh)
+	require.ErrorIs(t, runner.RunOnce(context.Background()), context.Canceled)
+}
+
+func TestOpenAIDowngradeProbeStopCancelsAndWaitsForScan(t *testing.T) {
+	for _, phase := range []string{"accounts", "ensure", "reconcile", "due", "state"} {
+		t.Run(phase, func(t *testing.T) {
+			entered := make(chan context.Context, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var calls []string
+			visit := func(ctx context.Context, current string) {
+				calls = append(calls, current)
+				if current == phase {
+					entered <- ctx
+					<-ctx.Done()
+					<-release
+				}
+			}
+			proxyID := int64(3)
+			accounts := []Account{
+				{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+					Status: StatusActive, Schedulable: true, ProxyID: &proxyID},
+				{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+					Status: StatusActive, Schedulable: true, ProxyID: &proxyID},
+			}
+			repo := &downgradeProbeAccountRepoStub{
+				listByPlatformFn: func(ctx context.Context, _ string) ([]Account, error) {
+					visit(ctx, "accounts")
+					return accounts, nil
+				},
+				getByIDFn: func(ctx context.Context, _ int64) (*Account, error) {
+					visit(ctx, "state")
+					return nil, ctx.Err()
+				},
+			}
+			store := &downgradeProbeStoreStub{
+				ensureFn: func(ctx context.Context, _ int64, _ *int64, _ time.Time) (*OpenAIDowngradeProbeState, error) {
+					visit(ctx, "ensure")
+					return nil, nil
+				},
+				reconcileFn: func(ctx context.Context, _ time.Time, _ time.Duration) (int64, error) {
+					visit(ctx, "reconcile")
+					return 0, nil
+				},
+				listDueFn: func(ctx context.Context, _ time.Time, _ int) ([]OpenAIDowngradeProbeState, error) {
+					visit(ctx, "due")
+					return []OpenAIDowngradeProbeState{
+						{AccountID: 1, State: OpenAIDowngradeStateOnDuty},
+						{AccountID: 2, State: OpenAIDowngradeStateOnDuty},
+					}, nil
+				},
+			}
+			atomicStore := &downgradeAtomicStoreStub{downgradeProbeStoreStub: store, accountRepo: repo}
+			runner := NewOpenAIDowngradeProbeRunner(atomicStore, repo, nil, nil, nil, nil)
+			t.Cleanup(runner.Stop)
+			// Cover a manual scan both with and without a background loop.
+			if phase == "state" {
+				runner.Start()
+			}
+			result := make(chan error, 1)
+			go func() { result <- runner.RunOnce(context.Background()) }()
+			var scanCtx context.Context
+			select {
+			case scanCtx = <-entered:
+			case <-time.After(2 * time.Second):
+				runner.Stop()
+				t.Fatal("scan did not reach the selected phase")
+			}
+			// An overlapping caller must neither start work nor cancel the owner.
+			require.NoError(t, runner.RunOnce(context.Background()))
+			require.NoError(t, scanCtx.Err())
+			stopped := make(chan struct{})
+			go func() {
+				runner.Stop()
+				close(stopped)
+			}()
+			waitForDowngradeProbeShutdown(t, scanCtx.Done())
+			select {
+			case <-stopped:
+				t.Fatal("Stop returned while the scan still held a dependency")
+			default:
+			}
+			unblock()
+			select {
+			case err := <-result:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(2 * time.Second):
+				t.Fatal("canceled scan did not return")
+			}
+			waitForDowngradeProbeShutdown(t, stopped)
+			expected := map[string][]string{
+				"accounts":  {"accounts"},
+				"ensure":    {"accounts", "ensure"},
+				"reconcile": {"accounts", "ensure", "ensure", "reconcile"},
+				"due":       {"accounts", "ensure", "ensure", "reconcile", "due"},
+				"state":     {"accounts", "ensure", "ensure", "reconcile", "due", "state"},
+			}
+			require.Equal(t, expected[phase], calls)
+			require.Zero(t, store.probeCalls)
+			require.Zero(t, store.saveCalls)
+			require.Zero(t, atomicStore.commits)
+			require.ErrorIs(t, runner.RunOnce(context.Background()), context.Canceled)
+		})
+	}
+}
+
+func TestOpenAIDowngradeProbeCanceledCallerDoesNotStopRunner(t *testing.T) {
+	calls := 0
+	repo := &downgradeProbeAccountRepoStub{
+		listByPlatformFn: func(context.Context, string) ([]Account, error) {
+			calls++
+			return nil, nil
+		},
+	}
+	runner := NewOpenAIDowngradeProbeRunner(&downgradeProbeStoreStub{}, repo, nil, nil, nil, nil)
+	defer runner.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, runner.RunOnce(ctx), context.Canceled)
+	require.Zero(t, calls)
+	require.NoError(t, runner.RunOnce(context.Background()))
+	require.Equal(t, 1, calls)
+	runner.lifecycleMu.Lock()
+	hasCancel, hasDone := runner.runCancel != nil, runner.runDone != nil
+	runner.lifecycleMu.Unlock()
+	require.False(t, hasCancel)
+	require.False(t, hasDone)
+}
+
+type downgradeProbePurgeStoreStub struct {
+	*downgradeProbeStoreStub
+	purgeFn    func(context.Context, time.Time, time.Time) (int64, int64, error)
+	goneFn     func(context.Context) (int64, error)
+	purgeCalls int
+	goneCalls  int
+}
+
+func (s *downgradeProbePurgeStoreStub) PurgeOpenAIDowngradeProbeHistory(ctx context.Context, resultsBefore, eventsBefore time.Time) (int64, int64, error) {
+	s.purgeCalls++
+	if s.purgeFn != nil {
+		return s.purgeFn(ctx, resultsBefore, eventsBefore)
+	}
+	return 0, 0, nil
+}
+
+func (s *downgradeProbePurgeStoreStub) DeleteOpenAIDowngradeStatesForGoneAccounts(ctx context.Context) (int64, error) {
+	s.goneCalls++
+	if s.goneFn != nil {
+		return s.goneFn(ctx)
+	}
+	return 0, nil
+}
+
+func TestOpenAIDowngradeProbeCanceledPurgeDoesNotContinueCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &downgradeProbePurgeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+		purgeFn: func(context.Context, time.Time, time.Time) (int64, int64, error) {
+			cancel()
+			return 0, 0, nil
+		},
+	}
+	listCalls := 0
+	repo := &downgradeProbeAccountRepoStub{
+		listByPlatformFn: func(context.Context, string) ([]Account, error) {
+			listCalls++
+			return nil, nil
+		},
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	defer runner.Stop()
+	require.ErrorIs(t, runner.RunOnce(ctx), context.Canceled)
+	require.Zero(t, store.goneCalls)
+	require.Zero(t, listCalls)
+	require.True(t, runner.lastPurgeAt.IsZero())
+}
+
+func TestOpenAIDowngradeProbeCleanupFailureDoesNotConsumeDailySchedule(t *testing.T) {
+	for _, phase := range []string{"history", "gone"} {
+		for _, failure := range []string{"error", "canceled"} {
+			t.Run(phase+"/"+failure, func(t *testing.T) {
+				now := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+				lastSuccess := now.Add(-25 * time.Hour)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				fail := func() error {
+					if failure == "canceled" {
+						cancel()
+						return nil
+					}
+					return errors.New("cleanup unavailable")
+				}
+				store := &downgradeProbePurgeStoreStub{
+					downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+				}
+				store.purgeFn = func(_ context.Context, resultsBefore, eventsBefore time.Time) (int64, int64, error) {
+					require.Equal(t, now.Add(-openAIDowngradeResultsRetention), resultsBefore)
+					require.Equal(t, now.Add(-openAIDowngradeEventsRetention), eventsBefore)
+					if phase == "history" && store.purgeCalls == 1 {
+						return 0, 0, fail()
+					}
+					return 0, 0, nil
+				}
+				store.goneFn = func(context.Context) (int64, error) {
+					if phase == "gone" && store.goneCalls == 1 {
+						return 0, fail()
+					}
+					return 0, nil
+				}
+				runner := NewOpenAIDowngradeProbeRunner(
+					store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
+				defer runner.Stop()
+				runner.now = func() time.Time { return now }
+				runner.lastPurgeAt = lastSuccess
+				err := runner.RunOnce(ctx)
+				if failure == "canceled" {
+					require.ErrorIs(t, err, context.Canceled)
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, lastSuccess, runner.lastPurgeAt)
+				retryAt := now.Add(openAIDowngradePurgeRetryInterval)
+				require.Equal(t, retryAt, runner.purgeRetryAt)
+				require.Equal(t, 1, store.purgeCalls)
+				expectedGoneCalls := 0
+				if phase == "gone" || failure == "error" {
+					expectedGoneCalls = 1
+				}
+				require.Equal(t, expectedGoneCalls, store.goneCalls)
+
+				now = retryAt.Add(-time.Nanosecond)
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 1, store.purgeCalls)
+				require.Equal(t, expectedGoneCalls, store.goneCalls)
+				now = retryAt
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 2, store.purgeCalls)
+				require.Equal(t, expectedGoneCalls+1, store.goneCalls)
+				require.Equal(t, now, runner.lastPurgeAt)
+				require.True(t, runner.purgeRetryAt.IsZero())
+
+				nextDaily := now.Add(openAIDowngradePurgeInterval)
+				now = nextDaily.Add(-time.Nanosecond)
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 2, store.purgeCalls)
+				require.Equal(t, expectedGoneCalls+1, store.goneCalls)
+				now = nextDaily
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 3, store.purgeCalls)
+				require.Equal(t, expectedGoneCalls+2, store.goneCalls)
+				require.Equal(t, now, runner.lastPurgeAt)
+			})
+		}
+	}
+}
+
+func TestOpenAIDowngradeProbeCleanupSchedulesFromCompletion(t *testing.T) {
+	for _, phase := range []string{"history", "gone"} {
+		for _, outcome := range []string{"success", "error", "canceled"} {
+			t.Run(phase+"/"+outcome, func(t *testing.T) {
+				startedAt := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+				now := startedAt
+				lastSuccess := now.Add(-25 * time.Hour)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				finish := func() error {
+					now = now.Add(6 * time.Minute)
+					switch outcome {
+					case "error":
+						return errors.New("cleanup unavailable")
+					case "canceled":
+						cancel()
+					}
+					return nil
+				}
+				store := &downgradeProbePurgeStoreStub{
+					downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+				}
+				store.purgeFn = func(_ context.Context, resultsBefore, eventsBefore time.Time) (int64, int64, error) {
+					require.Equal(t, startedAt.Add(-openAIDowngradeResultsRetention), resultsBefore)
+					require.Equal(t, startedAt.Add(-openAIDowngradeEventsRetention), eventsBefore)
+					if phase == "history" {
+						return 0, 0, finish()
+					}
+					return 0, 0, nil
+				}
+				store.goneFn = func(context.Context) (int64, error) {
+					if phase == "gone" {
+						return 0, finish()
+					}
+					return 0, nil
+				}
+				runner := NewOpenAIDowngradeProbeRunner(
+					store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
+				defer runner.Stop()
+				runner.now = func() time.Time { return now }
+				runner.lastPurgeAt = lastSuccess
+				err := runner.RunOnce(ctx)
+				if outcome == "canceled" {
+					require.ErrorIs(t, err, context.Canceled)
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, startedAt.Add(6*time.Minute), now)
+				nextAt := now.Add(openAIDowngradePurgeRetryInterval)
+				if outcome == "success" {
+					require.Equal(t, now, runner.lastPurgeAt)
+					require.True(t, runner.purgeRetryAt.IsZero())
+					nextAt = now.Add(openAIDowngradePurgeInterval)
+				} else {
+					require.Equal(t, lastSuccess, runner.lastPurgeAt)
+					require.Equal(t, nextAt, runner.purgeRetryAt)
+				}
+				goneCalls := store.goneCalls
+				store.purgeFn = nil
+				store.goneFn = nil
+				now = nextAt.Add(-time.Nanosecond)
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 1, store.purgeCalls)
+				require.Equal(t, goneCalls, store.goneCalls)
+				now = nextAt
+				require.NoError(t, runner.RunOnce(context.Background()))
+				require.Equal(t, 2, store.purgeCalls)
+				require.Equal(t, goneCalls+1, store.goneCalls)
+				require.Equal(t, now, runner.lastPurgeAt)
+				require.True(t, runner.purgeRetryAt.IsZero())
+			})
+		}
+	}
+}
+
+func TestOpenAIDowngradeProbeCleanupOptionalCapabilities(t *testing.T) {
+	for _, capability := range []string{"none", "history", "gone", "both"} {
+		t.Run(capability, func(t *testing.T) {
+			now := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+			base := &downgradeProbeStoreStub{}
+			cleaner := &downgradeProbePurgeStoreStub{downgradeProbeStoreStub: base}
+			var store OpenAIDowngradeProbeStore = base
+			switch capability {
+			case "history":
+				store = &struct {
+					*downgradeProbeStoreStub
+					OpenAIDowngradeProbeHistoryCleaner
+				}{base, cleaner}
+			case "gone":
+				store = &struct {
+					*downgradeProbeStoreStub
+					OpenAIDowngradeGoneAccountStateCleaner
+				}{base, cleaner}
+			case "both":
+				store = cleaner
+			}
+			runner := NewOpenAIDowngradeProbeRunner(
+				store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
+			defer runner.Stop()
+			runner.now = func() time.Time { return now }
+			require.NoError(t, runner.RunOnce(context.Background()))
+			if capability == "none" {
+				require.True(t, runner.lastPurgeAt.IsZero())
+			} else {
+				require.Equal(t, now, runner.lastPurgeAt)
+			}
+			require.True(t, runner.purgeRetryAt.IsZero())
+			// Successful capabilities must not execute again in the same interval.
+			require.NoError(t, runner.RunOnce(context.Background()))
+			historyCalls, goneCalls := 0, 0
+			if capability == "history" || capability == "both" {
+				historyCalls = 1
+			}
+			if capability == "gone" || capability == "both" {
+				goneCalls = 1
+			}
+			require.Equal(t, historyCalls, cleaner.purgeCalls)
+			require.Equal(t, goneCalls, cleaner.goneCalls)
+		})
+	}
 }
 
 func TestOpenAIDowngradeProbeInitialScheduleIsNotRewrittenEveryRun(t *testing.T) {
@@ -1090,6 +1946,166 @@ func TestOpenAIDowngradeSolFallbackClearsAfterTwoAstraRecoveries(t *testing.T) {
 	require.Equal(t, "normal", state.ProbeMode)
 	require.Nil(t, state.AstraNextProbeAt)
 	require.Equal(t, false, account.Extra[OpenAIDowngradeSolFallbackExtraKey])
+}
+
+func TestOpenAIDowngradeSolFallbackAstraRecheckAdvancesSchedule(t *testing.T) {
+	now := time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC)
+	resetAt := now.Add(48 * time.Hour)
+	recovered := OpenAIDowngradeProbeResult{
+		HTTPStatus: http.StatusOK, TransportOK: true, AnswerCorrect: true,
+		ReasoningTokens: downgradeProbeIntPtr(OpenAIDowngradeRecoveryReasoningMinimum),
+	}
+	for _, tc := range []struct {
+		name          string
+		result        OpenAIDowngradeProbeResult
+		successes     int
+		streak        int
+		wantSuccesses int
+		wantFailures  int
+		wantNormal    bool
+		minDelay      time.Duration
+		maxDelay      time.Duration
+	}{
+		{name: "first_recovery", result: recovered, wantSuccesses: 1},
+		{name: "return_to_astra", result: recovered, successes: 1, wantNormal: true},
+		{name: "degraded", successes: 1, wantFailures: 1,
+			result: OpenAIDowngradeProbeResult{
+				HTTPStatus: http.StatusOK, TransportOK: true,
+				ReasoningTokens: downgradeProbeIntPtr(OpenAIDowngradeRecoveryReasoningMinimum),
+			}},
+		{name: "neutral_fingerprint", successes: 1, wantSuccesses: 1,
+			result: OpenAIDowngradeProbeResult{
+				HTTPStatus: http.StatusOK, TransportOK: true, AnswerCorrect: true,
+				ReasoningTokens: downgradeProbeIntPtr(1552),
+			}},
+		{name: "transport_failure", successes: 1, wantSuccesses: 1},
+		{name: "upstream_failure", successes: 1, wantSuccesses: 1,
+			result: OpenAIDowngradeProbeResult{HTTPStatus: http.StatusServiceUnavailable}},
+		{name: "short_429", successes: 1, wantSuccesses: 1,
+			result:   OpenAIDowngradeProbeResult{HTTPStatus: http.StatusTooManyRequests},
+			minDelay: openAIDowngradeRateLimitedRetryInterval / 2,
+			maxDelay: openAIDowngradeRateLimitedRetryInterval * 3 / 2},
+		{name: "storm_429", successes: 1, wantSuccesses: 1,
+			streak:   openAIDowngrade429StreakThreshold - 1,
+			result:   OpenAIDowngradeProbeResult{HTTPStatus: http.StatusTooManyRequests},
+			minDelay: openAIDowngrade429StreakBackoff,
+			maxDelay: openAIDowngrade429StreakBackoff * 5 / 4},
+		{name: "quota_429", successes: 1, wantSuccesses: 1,
+			result: OpenAIDowngradeProbeResult{
+				HTTPStatus: http.StatusTooManyRequests, RateLimitResetAt: &resetAt,
+				RateLimitWindow: "7d_window",
+			},
+			minDelay: openAIDowngradeRateLimitRecheckInterval,
+			maxDelay: openAIDowngradeRateLimitRecheckInterval * 5 / 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyID := int64(3)
+			account := &Account{
+				ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, Schedulable: true, ProxyID: &proxyID, UpdatedAt: now,
+				Extra: map[string]any{OpenAIDowngradeSolFallbackExtraKey: true},
+			}
+			repo := &downgradeProbeAccountRepoStub{account: account}
+			store := &downgradeAtomicStoreStub{
+				downgradeProbeStoreStub: &downgradeProbeStoreStub{}, accountRepo: repo,
+			}
+			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+			runner.probeFn = func(_ context.Context, _ *Account, mode string) OpenAIDowngradeProbeResult {
+				require.Equal(t, "sol_fallback_astra", mode)
+				result := tc.result
+				result.AccountID, result.ProxyID = account.ID, &proxyID
+				return result
+			}
+			state := OpenAIDowngradeProbeState{
+				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback",
+				OriginalProxyID: &proxyID, CurrentProxyID: &proxyID,
+				AstraNextProbeAt: timePtr(now), AstraConsecutiveSuccesses: tc.successes,
+				Consecutive429s: tc.streak, NextProbeAt: now.Add(-time.Minute), UpdatedAt: now,
+			}
+			require.NoError(t, runner.processStateAtomic(context.Background(), &state, now))
+			require.Equal(t, 1, store.commits)
+			require.NotNil(t, store.state)
+			require.Equal(t, OpenAIDowngradeStateOnDuty, state.State)
+			require.Equal(t, tc.wantSuccesses, state.AstraConsecutiveSuccesses)
+			require.Equal(t, tc.wantFailures, state.AstraConsecutiveFailures)
+			require.Equal(t, &now, state.LastProbeAt)
+			minDelay, maxDelay := tc.minDelay, tc.maxDelay
+			if minDelay == 0 {
+				minDelay = openAIDowngradeDefaultInterval / 2
+				maxDelay = openAIDowngradeDefaultInterval * 3 / 2
+			}
+			require.False(t, state.NextProbeAt.Before(now.Add(minDelay)))
+			require.False(t, state.NextProbeAt.After(now.Add(maxDelay)))
+			if tc.wantNormal {
+				require.Equal(t, "normal", state.ProbeMode)
+				require.Nil(t, state.AstraNextProbeAt)
+				require.NotNil(t, store.observed.FallbackMode)
+				require.False(t, *store.observed.FallbackMode)
+			} else {
+				require.Equal(t, "sol_fallback", state.ProbeMode)
+				require.NotNil(t, state.AstraNextProbeAt)
+				require.Nil(t, store.observed.FallbackMode)
+				if tc.result.HTTPStatus == http.StatusTooManyRequests {
+					require.Equal(t, now, *state.AstraNextProbeAt)
+				} else {
+					require.False(t, state.AstraNextProbeAt.Before(now.Add(openAIDowngradeSolFallbackInterval/2)))
+					require.False(t, state.AstraNextProbeAt.After(now.Add(openAIDowngradeSolFallbackInterval*3/2)))
+				}
+			}
+			require.Empty(t, repo.schedulableCalls)
+			require.Empty(t, store.proxyChanges)
+			require.Len(t, store.observed.Results, 1)
+			require.Equal(t, &state, store.state)
+			encoded, err := json.Marshal(store.state)
+			require.NoError(t, err)
+			var reloaded OpenAIDowngradeProbeState
+			require.NoError(t, json.Unmarshal(encoded, &reloaded))
+			require.Equal(t, state.NextProbeAt, reloaded.NextProbeAt)
+			require.Equal(t, state.AstraNextProbeAt, reloaded.AstraNextProbeAt)
+			require.Equal(t, state.ProbeMode, reloaded.ProbeMode)
+		})
+	}
+}
+
+func TestOpenAIDowngradeSolFallbackAstraScheduleCommitFailureDoesNotPublish(t *testing.T) {
+	for _, commitErr := range []error{ErrOpenAIProbeStale, errors.New("outbox unavailable")} {
+		t.Run(errorTestName(commitErr), func(t *testing.T) {
+			now := time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC)
+			proxyID := int64(3)
+			account := &Account{
+				ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, Schedulable: true, ProxyID: &proxyID, UpdatedAt: now,
+			}
+			repo := &downgradeProbeAccountRepoStub{account: account}
+			store := &downgradeAtomicStoreStub{
+				downgradeProbeStoreStub: &downgradeProbeStoreStub{}, accountRepo: repo, commitErr: commitErr,
+			}
+			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+				return OpenAIDowngradeProbeResult{
+					AccountID: account.ID, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
+					TransportOK: true, AnswerCorrect: true,
+					ReasoningTokens: downgradeProbeIntPtr(OpenAIDowngradeRecoveryReasoningMinimum),
+				}
+			}
+			state := OpenAIDowngradeProbeState{
+				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback",
+				OriginalProxyID: &proxyID, CurrentProxyID: &proxyID, UpdatedAt: now,
+				NextProbeAt: now.Add(-time.Minute), AstraNextProbeAt: timePtr(now),
+				AstraConsecutiveSuccesses: 1,
+			}
+			before := state
+			require.ErrorIs(t, runner.processStateAtomic(context.Background(), &state, now), commitErr)
+			require.Equal(t, before, state)
+			require.Equal(t, 1, store.commits)
+			require.Nil(t, store.state)
+			require.Empty(t, repo.fallbackModes)
+			require.Empty(t, repo.schedulableCalls)
+			require.Zero(t, repo.snapshotCalls)
+			require.True(t, store.observed.State.NextProbeAt.After(now),
+				"the candidate schedule must stay private when its commit fails")
+		})
+	}
 }
 
 func TestOpenAIDowngradeCandyQuestionKeepsAnchors(t *testing.T) {
@@ -1514,6 +2530,51 @@ func TestProbe429RecheckConvergesTowardResetPoint(t *testing.T) {
 		"converged backoff %v outside envelope [%v, %v]", state.NextProbeAt, lo, hi)
 }
 
+func TestProbe429UnknownWindowFarResetHoldsAccount(t *testing.T) {
+	now := time.Date(2026, 9, 18, 17, 51, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		window string
+		delay  time.Duration
+		hold   bool
+		capped bool
+	}{
+		{"unknown_capped", "unknown_window", 30 * 24 * time.Hour, true, true},
+		{"unknown_far", "unknown_window", 6 * 24 * time.Hour, true, false},
+		{"unknown_near", "unknown_window", 2 * time.Hour, false, false},
+		{"unknown_at_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance, false, false},
+		{"unknown_over_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance + time.Nanosecond, true, false},
+		{"short_window", "5h_window", 4 * time.Hour, false, false},
+		{"short_window_far", "5h_window", 6 * 24 * time.Hour, false, false},
+		{"weekly_near", "7d_window", time.Hour, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &downgradeProbeStoreStub{}
+			repo := &downgradeProbeAccountRepoStub{}
+			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+			resetAt := now.Add(tc.delay)
+			state := &OpenAIDowngradeProbeState{AccountID: 1, NextProbeAt: now}
+			handled, err := runner.applyRateLimitDeferral(context.Background(), nil, state,
+				OpenAIDowngradeProbeResult{HTTPStatus: http.StatusTooManyRequests,
+					RateLimitResetAt: &resetAt, RateLimitWindow: tc.window}, now)
+			require.True(t, handled)
+			require.NoError(t, err)
+			require.Len(t, store.eventDetails, 1)
+			require.Equal(t, tc.hold, store.eventDetails[0]["quota_like"])
+			if tc.hold {
+				expectedReset := resetAt
+				if tc.capped {
+					expectedReset = now.Add(openAIDowngradeRateLimitResetCap)
+				}
+				require.Equal(t, []time.Time{expectedReset}, repo.rateLimitedResets)
+			} else {
+				require.Empty(t, repo.rateLimitedResets)
+			}
+			require.Equal(t, tc.capped, store.eventDetails[0]["capped"] == true)
+		})
+	}
+}
+
 func TestProbe429WhileHeldSkipsStormGate(t *testing.T) {
 	// 账号已在限流持有中（reset 未到）再吃无时间信息 429：不进 1 小时风暴闸、
 	// 不计数（限流非降智证据），锚定持有走稀疏复查。未持有账号保持原语义。
@@ -1550,6 +2611,57 @@ func TestProbe429WhileHeldSkipsStormGate(t *testing.T) {
 	require.True(t, !state2.NextProbeAt.Before(shortLo) && !state2.NextProbeAt.After(shortHi),
 		"unheld no-info 429 must stay short-cycle, got %v", state2.NextProbeAt)
 	require.Equal(t, 1, state2.Consecutive429s)
+}
+
+func TestProbe429WhileHeldPreservesNearReset(t *testing.T) {
+	now := time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		delay time.Duration
+		held  bool
+	}{
+		{"near_reset", time.Hour, true},
+		{"at_reset", 0, false},
+		{"expired_reset", -time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAt := now.Add(tc.delay)
+			account := &Account{ID: 1, RateLimitResetAt: &resetAt}
+			store := &downgradeProbeStoreStub{}
+			repo := &downgradeProbeAccountRepoStub{}
+			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+			state := &OpenAIDowngradeProbeState{
+				AccountID: 1, NextProbeAt: now,
+				ConsecutiveSuccesses: 2, ConsecutiveFailures: 1,
+			}
+			handled, err := runner.applyRateLimitDeferral(context.Background(), account, state,
+				OpenAIDowngradeProbeResult{HTTPStatus: http.StatusTooManyRequests}, now)
+			require.True(t, handled)
+			require.NoError(t, err)
+			if tc.held {
+				lo := resetAt.Add(openAIDowngradeRateLimitResetStagger / 2)
+				hi := resetAt.Add(openAIDowngradeRateLimitResetStagger * 3 / 2)
+				require.False(t, state.NextProbeAt.Before(lo))
+				require.False(t, state.NextProbeAt.After(hi), "a known near reset must not wait for the daily recheck")
+				require.Zero(t, state.Consecutive429s)
+				require.Len(t, store.eventDetails, 1)
+				require.Equal(t, "recheck_streak_suppressed", store.eventDetails[0]["class"])
+			} else {
+				lo := now.Add(openAIDowngradeRateLimitedRetryInterval / 2)
+				hi := now.Add(openAIDowngradeRateLimitedRetryInterval * 3 / 2)
+				require.False(t, state.NextProbeAt.Before(lo))
+				require.False(t, state.NextProbeAt.After(hi))
+				require.Equal(t, 1, state.Consecutive429s)
+				require.Empty(t, store.eventDetails)
+			}
+			require.Equal(t, 2, state.ConsecutiveSuccesses)
+			require.Equal(t, 1, state.ConsecutiveFailures)
+			require.Equal(t, 1, store.saveCalls)
+			require.Empty(t, repo.rateLimitedResets)
+			require.Empty(t, repo.openAIRateLimitClears)
+			require.Equal(t, now.Add(tc.delay), *account.RateLimitResetAt)
+		})
+	}
 }
 
 func TestProbeAcceptedResultReleasesHeldRateLimit(t *testing.T) {
@@ -1630,14 +2742,14 @@ func TestProbe429WindowClassificationRequiresExplicitEvidence(t *testing.T) {
 		name   string
 		window string
 		delay  time.Duration
-		weekly bool
+		hold   bool
 	}{
 		{"short", "5h_window", 2 * time.Hour, false},
 		{"week", "7d_window", 72 * time.Hour, true},
 		{"week_near_reset", "7d_window", time.Hour, true},
 		{"unknown_near", "", time.Hour, false},
-		{"unknown_far", "", 72 * time.Hour, false},
-		{"invalid_label", "weekly", 72 * time.Hour, false},
+		{"unknown_far", "", 72 * time.Hour, true},
+		{"invalid_label", "weekly", 72 * time.Hour, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetAt := now.Add(tc.delay)
@@ -1658,7 +2770,7 @@ func TestProbe429WindowClassificationRequiresExplicitEvidence(t *testing.T) {
 				NextProbeAt: now,
 			}
 			require.NoError(t, runner.processState(context.Background(), state, now))
-			if tc.weekly {
+			if tc.hold {
 				require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
 			} else {
 				require.Empty(t, repo.rateLimitedResets)
@@ -1799,7 +2911,7 @@ func TestProbe429AllTracksUseSharedDeferral(t *testing.T) {
 		{State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback"},
 		{State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback", AstraNextProbeAt: &now},
 	} {
-		for _, window := range []string{"", "5h_window", "7d_window"} {
+		for _, window := range []string{"", "5h_window", "7d_window", "unknown_window"} {
 			t.Run(initial.State+"/"+initial.ProbeMode+"/"+window, func(t *testing.T) {
 				proxyID := int64(3)
 				account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -1808,6 +2920,9 @@ func TestProbe429AllTracksUseSharedDeferral(t *testing.T) {
 				repo := &downgradeProbeAccountRepoStub{account: account}
 				runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 				resetAt := now.Add(time.Hour)
+				if window == "unknown_window" {
+					resetAt = now.Add(72 * time.Hour)
+				}
 				runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
 					result := OpenAIDowngradeProbeResult{HTTPStatus: http.StatusTooManyRequests, RateLimitWindow: window}
 					if window != "" {
@@ -1831,7 +2946,7 @@ func TestProbe429AllTracksUseSharedDeferral(t *testing.T) {
 				require.Empty(t, store.proxyChanges)
 				require.Empty(t, repo.schedulableCalls)
 				require.Empty(t, repo.fallbackModes)
-				if window == "7d_window" {
+				if window == "7d_window" || window == "unknown_window" {
 					require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
 				} else {
 					require.Empty(t, repo.rateLimitedResets)

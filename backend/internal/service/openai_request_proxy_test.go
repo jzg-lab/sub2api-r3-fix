@@ -76,6 +76,7 @@ func TestOpenAIRequestProxyRejectsBeforeTransport(t *testing.T) {
 
 func TestOpenAIRequestProxyAcceptsAssignedRouteAndNonBrowserTraffic(t *testing.T) {
 	account := browserOAuthRouteFixture()
+	parentID := int64(99)
 	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusOK}}
 	gateway := &OpenAIGatewayService{httpUpstream: upstream}
 	request := httptest.NewRequest(http.MethodPost, "https://example.test/v1/responses", nil)
@@ -88,6 +89,7 @@ func TestOpenAIRequestProxyAcceptsAssignedRouteAndNonBrowserTraffic(t *testing.T
 		{Platform: PlatformAnthropic, Type: AccountTypeOAuth},
 		{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModePersonalAccessToken}},
 		{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModeAgentIdentity}},
+		{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parentID},
 	} {
 		require.NoError(t, validateOpenAIAccountProxyRoute(other, ""))
 	}
