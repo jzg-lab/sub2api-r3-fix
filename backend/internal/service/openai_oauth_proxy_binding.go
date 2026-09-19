@@ -69,11 +69,13 @@ func OpenAIOAuthStableIdentity(account *Account) (kind, value string, ok bool) {
 	if !IsOpenAIBrowserOAuthAccount(account) {
 		return "", "", false
 	}
-	if value = normalizeOpenAIOAuthIdentity(account.GetCredential("chatgpt_account_id")); value != "" {
-		return "chatgpt_account_id", value, true
-	}
+	// email 是席位级唯一身份（同一工作区多个席位共享 chatgpt_account_id，
+	// workspace 重复不代表同一账号）；chatgpt_account_id 仅作无 email 时兜底。
 	if value = normalizeOpenAIOAuthIdentity(account.GetCredential("email")); value != "" {
 		return "email", value, true
+	}
+	if value = normalizeOpenAIOAuthIdentity(account.GetCredential("chatgpt_account_id")); value != "" {
+		return "chatgpt_account_id", value, true
 	}
 	return "", "", false
 }

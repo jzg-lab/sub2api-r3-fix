@@ -149,8 +149,10 @@ func (s *openAIProbeStaging) SetSchedulable(_ context.Context, id int64, value b
 		if !qualified || isOpenAIDowngradeQualificationCandidate(s.account) {
 			qualificationPassed := false
 			for _, result := range s.mutation.Results {
-				if result.IsQualificationPass() &&
-					sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) {
+				// 结果的代理须匹配「实际探测出口」:老号=snapshot 代理,
+				// 新号同轮分桶=mutation 目标代理(mutation.ProxyID)。
+				if result.IsQualificationPass() && (sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) ||
+					(s.mutation.ProxyChanged && sameOpenAIProbeProxy(result.ProxyID, s.mutation.ProxyID))) {
 					qualificationPassed = true
 					break
 				}
@@ -218,7 +220,13 @@ func (s *openAIProbeStaging) SetOpenAIAccountProxy(_ context.Context, id int64, 
 		return err
 	}
 	if IsOpenAIBrowserOAuthAccount(s.account) && !sameOpenAIProbeProxy(s.account.ProxyID, proxyID) {
-		return ErrOpenAIOAuthProxyBindingProtected
+		// 从未绑定过代理、也没有合格戳的新号允许首次分桶（r17b 自动
+		// 分桶工作流）；一旦绑定过或合格过，代理即受保护不可再改。
+		_, qualified := OpenAIOAuthQualifiedProxyID(s.account.Extra)
+		if s.account.ProxyID != nil || qualified ||
+			s.account.Extra[OpenAIOAuthQualifiedProxyExtraKey] != nil {
+			return ErrOpenAIOAuthProxyBindingProtected
+		}
 	}
 	s.mutation.ProxyChanged = true
 	s.mutation.ProxyID = cloneOpenAIProbePointer(proxyID)

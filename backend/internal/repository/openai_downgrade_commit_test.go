@@ -186,6 +186,52 @@ func TestOpenAIProbeCommitRejectsInvalidMutationBeforeTransaction(t *testing.T) 
 	}
 }
 
+func TestOpenAIProbeCommitQualificationWithFirstBucketAssignment(t *testing.T) {
+	// 新号同轮分桶后完成资格(r15b/r17b 工作流):ExpectedProxyID 为 nil,
+	// 合格结果挂在 mutation.ProxyID 上。曾因解引用 nil ExpectedProxyID 在
+	// 生产触发 SIGSEGV 崩溃循环(9/20),此用例锁住该路径。
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	enabled := true
+	bucketProxyID := int64(9)
+	reasoningTokens := 900
+	mutation := &service.OpenAIDowngradeMutation{
+		AccountID: 7, ExpectedAccountUpdatedAt: now, ExpectedStateUpdatedAt: now,
+		ExpectedProxyID: nil, ExpectedStatus: service.StatusActive, ExpectedSchedulable: false,
+		ProxyChanged: true, ProxyID: &bucketProxyID,
+		Schedulable: &enabled, CompleteQualification: true,
+		State: &service.OpenAIDowngradeProbeState{
+			AccountID: 7, State: service.OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: now,
+		},
+		Results: []service.OpenAIDowngradeProbeResult{{
+			AccountID: 7, ProxyID: &bucketProxyID,
+			TransportOK: true, AnswerCorrect: true, HTTPStatus: 200,
+			ReasoningTokens: &reasoningTokens,
+		}},
+	}
+
+	mock.ExpectBegin()
+	expectValidOpenAIOAuthProxyLock(mock, bucketProxyID)
+	expectProbeCommitLocks(mock, mutation)
+	mock.ExpectExec("UPDATE accounts SET.*openai_downgrade_qualification").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE openai_downgrade_probe_states").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO scheduler_outbox").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	require.NoError(t, repo.CommitOpenAIDowngradeMutation(context.Background(), mutation))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestOpenAIProbeCommitCompletesQualificationAtomically(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

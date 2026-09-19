@@ -42,19 +42,25 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		mutation.Schedulable == nil || !*mutation.Schedulable || mutation.ErrorMessage != nil) {
 		return errors.New("invalid OpenAI probe owned-error recovery")
 	}
+	// 资格完成最终落账的合格代理:老号(代理未变)= 快照代理 ExpectedProxyID;
+	// 新号工作流(r15b/r17b)同轮先自动分桶再打资格针,目标在 mutation.ProxyID
+	// (此时 ExpectedProxyID 为 nil,解引用即 panic——9/20 生产崩溃循环根因)。
+	// 行锁与合格戳都必须落在这个目标代理上,与 UPDATE 后的 proxy_id 一致。
+	var qualificationProxyID int64
 	if mutation.CompleteQualification {
+		var ok bool
+		qualificationProxyID, ok = openAIQualificationProxyTarget(mutation)
 		accepted := false
-		if mutation.ExpectedProxyID != nil && *mutation.ExpectedProxyID > 0 {
+		if ok {
 			for _, result := range mutation.Results {
 				if result.IsQualificationPass() && result.ProxyID != nil &&
-					*result.ProxyID == *mutation.ExpectedProxyID {
+					*result.ProxyID == qualificationProxyID {
 					accepted = true
 					break
 				}
 			}
 		}
-		if !accepted || mutation.Schedulable == nil || !*mutation.Schedulable ||
-			mutation.ProxyChanged {
+		if !accepted || mutation.Schedulable == nil || !*mutation.Schedulable {
 			return errors.New("invalid OpenAI OAuth qualification completion")
 		}
 	}
@@ -70,7 +76,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 	}
 	defer func() { _ = tx.Rollback() }()
 	if mutation.CompleteQualification {
-		if err := lockValidOpenAIOAuthProxy(ctx, tx, *mutation.ExpectedProxyID); err != nil {
+		if err := lockValidOpenAIOAuthProxy(ctx, tx, qualificationProxyID); err != nil {
 			return err
 		}
 	}
@@ -120,7 +126,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 			extra[service.OpenAIDowngradeSolFallbackExtraKey] = *mutation.FallbackMode
 		}
 		if mutation.CompleteQualification {
-			extra[service.OpenAIOAuthQualifiedProxyExtraKey] = *mutation.ExpectedProxyID
+			extra[service.OpenAIOAuthQualifiedProxyExtraKey] = qualificationProxyID
 		}
 		payload, err := json.Marshal(extra)
 		if err != nil {
@@ -214,6 +220,22 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 	}
 	*mutation.State = state
 	return nil
+}
+
+// openAIQualificationProxyTarget 返回资格完成应落账的合格代理 id。
+// 老号(代理未变):快照代理 ExpectedProxyID。新号工作流(r15b/r17b):
+// 同轮自动分桶,目标为 mutation.ProxyID(快照为 nil)。两者皆无即非法。
+func openAIQualificationProxyTarget(mutation *service.OpenAIDowngradeMutation) (int64, bool) {
+	if !mutation.ProxyChanged {
+		if mutation.ExpectedProxyID != nil && *mutation.ExpectedProxyID > 0 {
+			return *mutation.ExpectedProxyID, true
+		}
+		return 0, false
+	}
+	if mutation.ProxyID != nil && *mutation.ProxyID > 0 {
+		return *mutation.ProxyID, true
+	}
+	return 0, false
 }
 
 func requireOpenAIProbeUpdatedRow(result sql.Result, err error) error {

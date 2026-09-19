@@ -153,18 +153,6 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 		wantError error
 	}{
 		{
-			name: "missing",
-			history: sqlmock.NewRows(
-				[]string{"credentials", "extra", "proxy_id", "deleted_at"},
-			).AddRow(
-				[]byte(`{"email":"user@example.com"}`),
-				[]byte(`{}`),
-				int64(7),
-				time.Now().Add(-time.Hour),
-			),
-			wantError: service.ErrOpenAIOAuthHistoryBindingMissing,
-		},
-		{
 			name: "corrupt",
 			history: sqlmock.NewRows(
 				[]string{"credentials", "extra", "proxy_id", "deleted_at"},
@@ -207,6 +195,30 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 			require.ErrorIs(t, err, tt.wantError)
 		})
 	}
+}
+
+func TestPrepareOpenAIOAuthAccountCreateTreatsLegacyDeletedHistoryAsFresh(t *testing.T) {
+	// r17j 之前删除的老号没有合格戳：不再报 HISTORY_BINDING_MISSING，
+	// 而是视为无历史、按全新号走资格流水线（自动分桶），不阻断重传。
+	db, mock := openAIOAuthPrepareMock(t)
+	account := openAIOAuthCreateFixture()
+	account.ProxyID = nil
+	expectOpenAIOAuthIdentityLock(mock)
+	expectOpenAIOAuthHistory(mock, sqlmock.NewRows(
+		[]string{"credentials", "extra", "proxy_id", "deleted_at"},
+	).AddRow(
+		[]byte(`{"email":"user@example.com"}`),
+		[]byte(`{}`),
+		int64(7),
+		time.Now().Add(-time.Hour),
+	))
+
+	err := prepareOpenAIOAuthAccountCreate(t.Context(), db, account)
+
+	require.NoError(t, err)
+	require.Nil(t, account.ProxyID)
+	require.Equal(t, true, account.Extra[service.OpenAIDowngradeQualificationExtraKey])
+	require.False(t, account.Schedulable)
 }
 
 func TestPrepareOpenAIOAuthAccountCreateRejectsRequestedProxyMismatch(t *testing.T) {
