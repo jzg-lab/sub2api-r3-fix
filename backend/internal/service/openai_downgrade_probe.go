@@ -40,6 +40,22 @@ const (
 	// 稀疏复查期间收到上游真实接受（传输 OK 且 2xx）→ CAS 清除观察到的持有，
 	// 账号回到调度。这是「官方到点重置 / 供应商提前手动重置」的检测回路终点。
 	OpenAIDowngradeEventRateLimitRecheckRecovered = "rate_limit_recheck_recovered"
+	// 相位2（2026-09-20 用户批准）：账号级 abuse 标记的响应侧证据事件。
+	// turn_state_degraded = 探针针自身 x-codex-turn-state 长度落在降智态；
+	// real_traffic_model_mismatch = 真实流量响应 model 与请求不符（usage 侧
+	// upstream_model_mismatch 同款判定，经 openAIAbuseRouteSignals 桥投递）。
+	// 两者都只驱动「记事件 + 加速复查」，单信号不摘号。
+	OpenAIDowngradeEventTurnStateDegraded        = "turn_state_degraded"
+	OpenAIDowngradeEventRealTrafficModelMismatch = "real_traffic_model_mismatch"
+)
+
+const (
+	// openAIDowngradeTurnStateDegradedLen 降智态凭据长度（现网 9/18-9/20 全部
+	// 降智号实测 356；健康号恒 332 零误报）。±20 容差吸收 Fernet 密文块边界
+	// （社区观测同头差一个 AES 块），中心值漂移靠事件流量侧写发现。
+	openAIDowngradeTurnStateDegradedLen = 356
+	// openAIDowngradeTurnStateLenTolerance 长度容差。
+	openAIDowngradeTurnStateLenTolerance = 20
 )
 
 const (
@@ -129,6 +145,15 @@ func isOpenAIDowngradeTruncationFingerprint(tokens int) bool {
 	return false
 }
 
+// isOpenAIDowngradeTurnStateLenDegraded 判定 x-codex-turn-state 头长度是否落在
+// 降智态带（356±20；0=无头不算——401/异常路径本来就没头，不能当降智证据）。
+// 单独成立只记事件+加速复查；与 IsDegraded 同针在场才双信号熔断。
+func isOpenAIDowngradeTurnStateLenDegraded(length int) bool {
+	return length > 0 &&
+		length >= openAIDowngradeTurnStateDegradedLen-openAIDowngradeTurnStateLenTolerance &&
+		length <= openAIDowngradeTurnStateDegradedLen+openAIDowngradeTurnStateLenTolerance
+}
+
 // OpenAIDowngradeProbeResult is the redacted, bill-free result of one probe.
 // It intentionally contains no response text or credential material.
 type OpenAIDowngradeProbeResult struct {
@@ -147,6 +172,12 @@ type OpenAIDowngradeProbeResult struct {
 	RateLimitResetAt *time.Time
 	// Window identity is evidence, not the distance to the next reset.
 	RateLimitWindow string
+	// TurnStateLen 是该针响应 x-codex-turn-state 头的字符长度（0=无头）。
+	// 只记长度不记值（隐私边界与既有观察哨一致）。现网双态：332=健康 /
+	// 356=降智（9/18 死亡链 1082-1086 + 9/20 1097/1098 全部 356，健康号
+	// 零误报）。相位2：356 记事件 + 加速复查；与降智证据同针在场时双信号
+	// 熔断（2026-09-20 用户批准）。
+	TurnStateLen int
 }
 
 func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
@@ -908,7 +939,28 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		return r.beginReprobe(ctx, account, state, now)
 	}
 
-	if state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "normal" &&
+	// P1（2026-09-20 用户批准）：真实流量 abuse 路由信号吸收。网关 usage 落账
+	// 侧发现的 upstream_model_mismatch 经 openAIAbuseRouteSignals 桥投递到此；
+	// 吸收即记事件 + 把本针从下方「真实流量顺延」里拉出来立即执行——吸收点
+	// 必须在顺延判定之前：mismatch 正是真实流量刚产生的，若先顺延，活跃账号
+	// 的信号会在 30min TTL 内永远等不到吸收（现网实证 1048/1055/1093 全灭、
+	// 1093 提前执法 401 三分钟，该信号是账号级标记的最强先行指标）。单信号
+	// 不摘号：是否熔断交给本针探针的完整证据。
+	absorbedAbuseSignal := false
+	if signal, ok := openAIAbuseRouteSignals.TakeRealTrafficSignal(state.AccountID, now); ok {
+		absorbedAbuseSignal = true
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventRealTrafficModelMismatch, map[string]any{
+				"requested_model": signal.RequestedModel,
+				"response_model":  signal.ResponseModel,
+				"observed_at":     signal.ObservedAt.Format(time.RFC3339),
+			}); err != nil {
+			return err
+		}
+	}
+
+	if !absorbedAbuseSignal &&
+		state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "normal" &&
 		r.shouldDeferForRealTraffic(ctx, state.AccountID) {
 		// 近窗有真实推理流量：降智会直接体现在真实流量里，此刻插入合成探针
 		// 只会制造紧随真实请求的可聚类流量。顺延（jitter 后 22-67 分钟），
@@ -925,11 +977,40 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
 		return err
 	}
+	// 相位2（2026-09-20 用户批准）：响应侧 abuse 证据联动。turn_state_len 落
+	// 降智态（356±20）时记事件；与降智证据（IsDegraded）同针在场 = 双信号，
+	// 当场熔断——单证据仍走两连败防误杀（1020 间歇性先例）。单 356 不判死，
+	// 只把下一针排到加速复查节奏。
+	turnStateDegraded := isOpenAIDowngradeTurnStateLenDegraded(result.TurnStateLen)
+	if turnStateDegraded {
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventTurnStateDegraded, map[string]any{
+				"mode":             result.Mode,
+				"turn_state_len":   result.TurnStateLen,
+				"http_status":      result.HTTPStatus,
+				"answer_correct":   result.AnswerCorrect,
+				"reasoning_tokens": result.ReasoningTokens,
+			}); err != nil {
+			return err
+		}
+	}
+	dualSignalCircuit := turnStateDegraded && result.IsDegraded()
 	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
+	if dualSignalCircuit && !transition.Circuit && state.State == OpenAIDowngradeStateOnDuty {
+		// 首针即双信号：把连败计数推到熔断阈值，复用既有熔断路径（事件、
+		// 摘调度、冷却排期全部同款），不另起一套摘除逻辑。
+		state.ConsecutiveFailures = 2
+		transition = ApplyOpenAIDowngradeProbeResult(*state, result, now)
+	}
 	*state = transition.State
 	state.LastProbeAt = &now
 	state.UpdatedAt = now
 	state.NextProbeAt = now.Add(r.nextDelay())
+	if turnStateDegraded && !dualSignalCircuit && state.ProbeMode == "normal" &&
+		state.State == OpenAIDowngradeStateOnDuty {
+		// 单 356：加速复查（jitter 后 2.5-7.5 分钟），双信号判定下一针即见分晓。
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeRateLimitedRetryInterval))
+	}
 	if state.ProbeMode == "qualification" && !transition.Circuit {
 		// 资格认证节奏：认证针按分钟级排（429 已在上方走同量级短周期）；
 		// 通过即解锁（r15h 起 1 针结业），此排期仅服务「未通过前的重试」
@@ -1709,6 +1790,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		"mode", mode,
 		"http_status", status,
 		"turn_state_len", codexTurnStateLen)
+	result.TurnStateLen = codexTurnStateLen
 	result.HTTPStatus = status
 	if status == http.StatusTooManyRequests {
 		// 429 带显式重置时间（x-codex-* 窗口头或 usage_limit_reached 体）就

@@ -396,6 +396,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSizeBreakdown:       result.ImageSizeBreakdown,
 		NativeCompactionV2:       input.NativeCompactionV2,
 	}
+	// P1（2026-09-20 用户批准）：OpenAI 真实流量 abuse 路由信号采集。响应自报
+	// model 与请求不符（usage_logs 同款 upstream_model_mismatch 判定）经进程内
+	// 信号桥投递给降智探针 runner——现网实证（1048/1055/1093 全灭、1093 早于
+	// 执法 401 三分钟）它是账号级标记的最强先行指标。只投 OpenAI 池；热路径
+	// 仅一次加锁 map 写，无阻塞、无额外上游请求。
+	if account.Platform == PlatformOpenAI &&
+		usageLog.UpstreamModelMismatch != nil && *usageLog.UpstreamModelMismatch {
+		openAIAbuseRouteSignals.ObserveRealTrafficModelMismatch(
+			account.ID, sentModel, strings.TrimSpace(result.UpstreamResponseModel), time.Now().UTC())
+	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount
