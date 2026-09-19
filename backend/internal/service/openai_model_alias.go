@@ -131,6 +131,10 @@ func isOpenAIGPT56Model(model string) bool {
 	return false
 }
 
+func openAIModelSupportsPromptCacheOptions(model string) bool {
+	return isOpenAIGPT6AstraModel(model) || isOpenAIGPT56Model(model)
+}
+
 func appendUsageBillingModelCandidate(candidates []string, seen map[string]struct{}, model string) []string {
 	trimmed := strings.TrimSpace(model)
 	if trimmed == "" {

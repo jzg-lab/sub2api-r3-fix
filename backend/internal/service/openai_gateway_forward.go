@@ -614,10 +614,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if gjson.GetBytes(body, "max_completion_tokens").Exists() && (account.Type == AccountTypeAPIKey || account.Platform != PlatformOpenAI) {
 			markPatchDelete("max_completion_tokens")
 		}
-		for _, unsupportedField := range []string{"prompt_cache_retention", "safety_identifier", "prompt_cache_options"} {
+		for _, unsupportedField := range []string{"prompt_cache_retention", "safety_identifier"} {
 			if gjson.GetBytes(body, unsupportedField).Exists() {
 				markPatchDelete(unsupportedField)
 			}
+		}
+		if gjson.GetBytes(body, "prompt_cache_options").Exists() &&
+			!openAIModelSupportsPromptCacheOptions(upstreamModel) {
+			markPatchDelete("prompt_cache_options")
 		}
 	}
 	previousResponseIDValue := gjson.GetBytes(body, "previous_response_id")

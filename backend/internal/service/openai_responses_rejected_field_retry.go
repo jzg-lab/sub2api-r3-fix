@@ -21,10 +21,10 @@ var (
 	openAIResponsesRejectedStatusParamPattern     = regexp.MustCompile(`(?i)^input\[(\d+)\]\.status$`)
 	openAIResponsesRejectedContentParamPattern    = regexp.MustCompile(`(?i)^input\[(\d+)\]\.content$`)
 	openAIResponsesRejectedCacheParamPattern      = regexp.MustCompile(`(?i)^input\[(\d+)\]\.prompt_cache_breakpoint$`)
-	openAIResponsesRejectedMessageParamPattern    = regexp.MustCompile(`(?i)(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?(max_output_tokens|truncation|input\[\d+\]\.(?:namespace|status))(?:["']|\b)`)
+	openAIResponsesRejectedMessageParamPattern    = regexp.MustCompile(`(?i)(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?(max_output_tokens|truncation|prompt_cache_options|input\[\d+\]\.(?:namespace|status))(?:["']|\b)`)
 	openAIResponsesInvalidTypeMessageParamPattern = regexp.MustCompile(`(?i)invalid[ _-]+type\s+for\s+["']?(input\[\d+\]\.content)(?:["']|\b)[^\n]*\b(?:got|received)\s+null\b`)
 	openAIResponsesMaxZeroContentMessagePattern   = regexp.MustCompile(`(?i)invalid\s+["']?(input\[\d+\]\.content)["']?\s*:\s*array too long\.[^\n]*maximum length 0\b`)
-	openAIResponsesCacheModelRejectionPattern     = regexp.MustCompile(`(?i)["']?(prompt_cache_breakpoint|input\[\d+\]\.prompt_cache_breakpoint)["']?\s+is\s+not\s+supported\s+on\s+this\s+model\b`)
+	openAIResponsesCacheModelRejectionPattern     = regexp.MustCompile(`(?i)["']?(prompt_cache_options|prompt_cache_breakpoint|input\[\d+\]\.prompt_cache_breakpoint)["']?\s+is\s+not\s+supported\s+on\s+this\s+model\b`)
 	openAIResponsesToolParametersParamPattern     = regexp.MustCompile(`(?i)^(?:tools|input)\[\d+\](?:\.tools\[\d+\])*(?:\.function)?\.parameters$`)
 	openAIResponsesMissingSchemaTypePattern       = regexp.MustCompile(`(?i)\bgot\s+["']?type\s*:\s*["']?none["']?`)
 )
@@ -138,6 +138,13 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 	cacheParamMatchesMessage := cacheMessageParam == "" || cacheParam == cacheMessageParam
 	cacheModelRejection := code == "invalid_parameter" || cacheMessageParam != ""
 	if cacheParam != "" && cacheParamMatchesMessage && cacheModelRejection {
+		if cacheParam == "prompt_cache_options" && gjson.GetBytes(body, cacheParam).Exists() {
+			retryBody, err := sjson.DeleteBytes(body, cacheParam)
+			if err != nil {
+				return nil, "", false, fmt.Errorf("delete rejected prompt_cache_options: %w", err)
+			}
+			return retryBody, "prompt_cache_options parameter rejection", true, nil
+		}
 		if cacheParam == "prompt_cache_breakpoint" && gjson.GetBytes(body, cacheParam).Exists() {
 			retryBody, err := sjson.DeleteBytes(body, cacheParam)
 			if err != nil {
@@ -176,6 +183,13 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 				return nil, "", false, fmt.Errorf("delete rejected truncation: %w", err)
 			}
 			return retryBody, "truncation parameter rejection", true, nil
+		}
+		if param == "prompt_cache_options" && gjson.GetBytes(body, "prompt_cache_options").Exists() {
+			retryBody, err := sjson.DeleteBytes(body, "prompt_cache_options")
+			if err != nil {
+				return nil, "", false, fmt.Errorf("delete rejected prompt_cache_options: %w", err)
+			}
+			return retryBody, "prompt_cache_options parameter rejection", true, nil
 		}
 	}
 

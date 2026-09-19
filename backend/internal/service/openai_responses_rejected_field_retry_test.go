@@ -452,6 +452,35 @@ func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyRemovesModelRejectedPromp
 	}
 }
 
+func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyRemovesRejectedPromptCacheOptions(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","prompt_cache_options":{"mode":"manual"},"input":"keep"}`)
+	tests := []struct {
+		name         string
+		responseBody []byte
+	}{
+		{
+			name:         "unsupported parameter",
+			responseBody: []byte(`{"error":{"code":"unsupported_parameter","message":"Unsupported parameter: prompt_cache_options","param":"prompt_cache_options"}}`),
+		},
+		{
+			name:         "model rejection",
+			responseBody: []byte(`{"error":{"code":"invalid_parameter","message":"prompt_cache_options is not supported on this model","param":"prompt_cache_options"}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			retryBody, reason, changed, err := normalizeOpenAIResponsesRejectedFieldRetryBody(http.StatusBadRequest, body, tt.responseBody)
+
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.Equal(t, "prompt_cache_options parameter rejection", reason)
+			require.False(t, gjson.GetBytes(retryBody, "prompt_cache_options").Exists())
+			require.Equal(t, "keep", gjson.GetBytes(retryBody, "input").String())
+		})
+	}
+}
+
 func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyRejectsAmbiguousPromptCacheBreakpointErrors(t *testing.T) {
 	body := []byte(`{"prompt_cache_breakpoint":{"type":"message_start"},"input":[{"type":"message","prompt_cache_breakpoint":{"type":"message_end"}}]}`)
 	tests := []struct {
@@ -621,6 +650,39 @@ func TestOpenAIGatewayService_RetriesExplicitMaxOutputTokensRejection(t *testing
 	require.Equal(t, int64(4096), gjson.GetBytes(upstream.bodies[0], "max_output_tokens").Int())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "max_output_tokens").Exists())
 	require.Equal(t, "keep", gjson.GetBytes(upstream.bodies[1], "input.0.content.max_output_tokens").String())
+}
+
+func TestOpenAIGatewayService_RetriesRejectedPromptCacheOptionsOnce(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-astra","stream":false,"prompt_cache_options":{"mode":"manual"},"input":[{"type":"message","role":"user","content":"hello"}]}`)
+	accounts := []struct {
+		name    string
+		account *Account
+	}{
+		{name: "api key", account: newOpenAIRejectedFieldTestAccount()},
+		{name: "oauth", account: newOpenAIOAuthNamespaceTestAccount()},
+	}
+
+	for _, tt := range accounts {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := &httpUpstreamRecorder{responses: []*http.Response{
+				newOpenAIRejectedFieldTestResponse(http.StatusBadRequest, `{"error":{"code":"unsupported_parameter","message":"Unsupported parameter: prompt_cache_options","param":"prompt_cache_options"}}`),
+				newOpenAIRejectedFieldTestResponse(http.StatusOK, `{"output":[],"usage":{"input_tokens":1,"output_tokens":1,"input_tokens_details":{"cached_tokens":0}}}`),
+			}}
+
+			result, err := newOpenAIRejectedFieldTestService(upstream).Forward(
+				context.Background(),
+				newOpenAIRejectedFieldTestContext(body),
+				tt.account,
+				body,
+			)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, upstream.bodies, 2)
+			require.Equal(t, "manual", gjson.GetBytes(upstream.bodies[0], "prompt_cache_options.mode").String())
+			require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_options").Exists())
+		})
+	}
 }
 
 func TestOpenAIGatewayService_ComposesProactiveNamespaceStripWithRejectedFieldRetry(t *testing.T) {
