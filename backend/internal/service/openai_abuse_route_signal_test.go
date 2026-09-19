@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -10,10 +11,12 @@ import (
 
 // drainAbuseRouteSignal 清理全局信号桥，防止用例断言失败时信号泄漏到后续用例。
 func drainAbuseRouteSignal(accountID int64) {
-	openAIAbuseRouteSignals.TakeRealTrafficSignal(accountID, time.Now())
+	openAIAbuseRouteSignals.mu.Lock()
+	defer openAIAbuseRouteSignals.mu.Unlock()
+	delete(openAIAbuseRouteSignals.signals, accountID)
 }
 
-func TestOpenAIAbuseRouteSignalHubObserveTakePeekTTL(t *testing.T) {
+func TestOpenAIAbuseRouteSignalHubObserveAcknowledgePeekTTL(t *testing.T) {
 	hub := &openAIAbuseRouteSignalHub{signals: make(map[int64]openAIAbuseRouteSignal)}
 	now := time.Date(2026, 9, 20, 2, 0, 0, 0, time.UTC)
 
@@ -23,18 +26,16 @@ func TestOpenAIAbuseRouteSignalHubObserveTakePeekTTL(t *testing.T) {
 	require.Equal(t, "gpt-6-astra", signal.RequestedModel)
 	require.Equal(t, "gpt-5.6-luna", signal.ResponseModel)
 
-	// 吸收即清除：同一信号不触发两次。
-	signal, ok = hub.TakeRealTrafficSignal(91001, now)
-	require.True(t, ok)
+	// Confirmation is idempotent, while reads leave the observation pending.
 	require.Equal(t, int64(91001), signal.AccountID)
-	_, ok = hub.TakeRealTrafficSignal(91001, now)
-	require.False(t, ok)
+	hub.AcknowledgeRealTrafficSignal(signal)
+	hub.AcknowledgeRealTrafficSignal(signal)
 	_, ok = hub.PeekRealTrafficSignal(91001, now)
 	require.False(t, ok)
 
 	// TTL 过期：未被吸收的信号自然失效，不产生迟到的加速复查。
 	hub.ObserveRealTrafficModelMismatch(91001, "gpt-6-astra", "gpt-5.6-luna", now)
-	_, ok = hub.TakeRealTrafficSignal(91001, now.Add(openAIAbuseRouteSignalTTL+time.Second))
+	_, ok = hub.PeekRealTrafficSignal(91001, now.Add(openAIAbuseRouteSignalTTL+time.Second))
 	require.False(t, ok)
 
 	// 后到的观测刷新时间戳；非法账号 ID 不落。
@@ -160,8 +161,9 @@ func TestProbeRealTrafficMismatchSignalSkipsTrafficDeferralAndRecordsEvent(t *te
 		ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: true,
 	}
-	store := &downgradeProbeStoreStub{}
+	base := &downgradeProbeStoreStub{}
 	repo := &downgradeProbeAccountRepoStub{account: account}
+	store := &downgradeAtomicStoreStub{downgradeProbeStoreStub: base, accountRepo: repo}
 	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 	now := time.Date(2026, 9, 20, 2, 0, 0, 0, time.UTC)
 	runner.now = func() time.Time { return now }
@@ -170,6 +172,7 @@ func TestProbeRealTrafficMismatchSignalSkipsTrafficDeferralAndRecordsEvent(t *te
 	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
 		probeRan = true
 		return OpenAIDowngradeProbeResult{
+			AccountID:   accountID,
 			TransportOK: true, AnswerCorrect: true,
 			ReasoningTokens: downgradeProbeIntPtr(1800),
 		}
@@ -183,18 +186,20 @@ func TestProbeRealTrafficMismatchSignalSkipsTrafficDeferralAndRecordsEvent(t *te
 	openAIAbuseRouteSignals.ObserveRealTrafficModelMismatch(
 		accountID, "gpt-6-astra", "gpt-5.6-luna", now.Add(-time.Minute))
 
-	require.NoError(t, runner.processState(context.Background(), state, now))
+	require.NoError(t, runner.processStateAtomic(context.Background(), state, now))
 	require.True(t, probeRan, "absorbed mismatch signal must pull this probe out of traffic deferral")
-	require.NotEmpty(t, store.eventTypes)
-	require.Equal(t, OpenAIDowngradeEventRealTrafficModelMismatch, store.eventTypes[0])
+	require.NotEmpty(t, store.observed.Events)
+	require.Equal(t, OpenAIDowngradeEventRealTrafficModelMismatch, store.observed.Events[0].Type)
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(store.observed.Events[0].Details, &details))
 	require.Equal(t, map[string]any{
 		"requested_model": "gpt-6-astra",
 		"response_model":  "gpt-5.6-luna",
 		"observed_at":     now.Add(-time.Minute).Format(time.RFC3339),
-	}, store.eventDetails[0])
+	}, details)
 	// 信号已吸收：同账号同窗再跑一轮（无新信号）回到顺延语义。
 	probeRan = false
-	require.NoError(t, runner.processState(context.Background(), state, now))
+	require.NoError(t, runner.processStateAtomic(context.Background(), state, now))
 	require.False(t, probeRan, "deferral must resume once the signal is absorbed")
 	require.LessOrEqual(t, state.NextProbeAt.Sub(now), 67*time.Minute+time.Second)
 	require.GreaterOrEqual(t, state.NextProbeAt.Sub(now), 22*time.Minute-time.Second)

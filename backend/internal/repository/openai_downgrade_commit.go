@@ -195,9 +195,9 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 	}
 	for _, event := range mutation.Events {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details)
-			VALUES ($1, $2, $3, $4::jsonb)
-		`, mutation.AccountID, event.ProxyID, event.Type, string(event.Details)); err != nil {
+			INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details, created_at)
+			VALUES ($1, $2, $3, $4::jsonb, COALESCE($5::timestamptz, NOW()))
+		`, mutation.AccountID, event.ProxyID, event.Type, string(event.Details), event.ObservedAt); err != nil {
 			return err
 		}
 	}

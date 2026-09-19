@@ -35,13 +35,16 @@ type openAIAbuseRouteSignal struct {
 	RequestedModel string
 	ResponseModel  string
 	ObservedAt     time.Time
+	generation     uint64
 }
 
 // openAIAbuseRouteSignalHub 进程内信号枢纽。网关侧只写，探针侧只读；
 // 短临界区互斥锁承接热路径并发（每账号至多一条在途信号，map 足够）。
 type openAIAbuseRouteSignalHub struct {
-	mu      sync.RWMutex
-	signals map[int64]openAIAbuseRouteSignal
+	mu             sync.RWMutex
+	signals        map[int64]openAIAbuseRouteSignal
+	nextGeneration uint64
+	nextPurgeAt    time.Time
 }
 
 var openAIAbuseRouteSignals = &openAIAbuseRouteSignalHub{
@@ -57,31 +60,55 @@ func (h *openAIAbuseRouteSignalHub) ObserveRealTrafficModelMismatch(accountID in
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !observedAt.Before(h.nextPurgeAt) {
+		h.purgeExpiredLocked(observedAt)
+	}
+	if current, ok := h.signals[accountID]; ok && current.ObservedAt.After(observedAt) {
+		return
+	}
+	if h.signals == nil {
+		h.signals = make(map[int64]openAIAbuseRouteSignal)
+	}
+	h.nextGeneration++
 	h.signals[accountID] = openAIAbuseRouteSignal{
 		AccountID:      accountID,
 		RequestedModel: requestedModel,
 		ResponseModel:  responseModel,
 		ObservedAt:     observedAt,
+		generation:     h.nextGeneration,
 	}
 }
 
-// TakeRealTrafficSignal 探针侧吸收：返回该账号未消化的 mismatch 信号
-// （仍在 TTL 窗口内）。吸收即清除——同一信号不触发两次加速复查。
-func (h *openAIAbuseRouteSignalHub) TakeRealTrafficSignal(accountID int64, now time.Time) (openAIAbuseRouteSignal, bool) {
+// AcknowledgeRealTrafficSignal runs only after the event's database commit.
+// Traffic observed during the probe or commit has a new generation and survives.
+func (h *openAIAbuseRouteSignalHub) AcknowledgeRealTrafficSignal(signal openAIAbuseRouteSignal) {
 	if h == nil {
-		return openAIAbuseRouteSignal{}, false
+		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	signal, ok := h.signals[accountID]
-	if !ok {
-		return openAIAbuseRouteSignal{}, false
+	if current, ok := h.signals[signal.AccountID]; ok && current.generation == signal.generation {
+		delete(h.signals, signal.AccountID)
 	}
-	delete(h.signals, accountID)
-	if now.Sub(signal.ObservedAt) > openAIAbuseRouteSignalTTL {
-		return openAIAbuseRouteSignal{}, false
+}
+
+// PurgeExpired also reclaims signals belonging to deleted or ineligible accounts.
+func (h *openAIAbuseRouteSignalHub) PurgeExpired(now time.Time) {
+	if h == nil {
+		return
 	}
-	return signal, true
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.purgeExpiredLocked(now)
+}
+
+func (h *openAIAbuseRouteSignalHub) purgeExpiredLocked(now time.Time) {
+	for id, signal := range h.signals {
+		if now.Sub(signal.ObservedAt) > openAIAbuseRouteSignalTTL {
+			delete(h.signals, id)
+		}
+	}
+	h.nextPurgeAt = now.Add(time.Minute)
 }
 
 // PeekRealTrafficSignal 只读探查（测试与观测用），不清除信号。

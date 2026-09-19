@@ -126,6 +126,7 @@ type downgradeProbeStoreStub struct {
 	ensureFn       func(context.Context, int64, *int64, time.Time) (*OpenAIDowngradeProbeState, error)
 	reconcileFn    func(context.Context, time.Time, time.Duration) (int64, error)
 	listDueFn      func(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error)
+	eventCountFn   func(context.Context, int64, string, time.Time) (int, error)
 	state          *OpenAIDowngradeProbeState
 	ensureNextAt   time.Time
 	due            []OpenAIDowngradeProbeState
@@ -209,6 +210,13 @@ func (s *downgradeProbeStoreStub) RecordOpenAIDowngradeProbe(_ context.Context, 
 // 未预置 state 时返回 nil,重试按"状态行不可用"让位。
 func (s *downgradeProbeStoreStub) GetOpenAIDowngradeState(context.Context, int64) (*OpenAIDowngradeProbeState, error) {
 	return s.state, nil
+}
+
+func (s *downgradeProbeStoreStub) CountOpenAIDowngradeEvents(ctx context.Context, id int64, eventType string, since time.Time) (int, error) {
+	if s.eventCountFn != nil {
+		return s.eventCountFn(ctx, id, eventType, since)
+	}
+	return 0, nil
 }
 
 func (s *downgradeProbeStoreStub) AppendOpenAIDowngradeEvent(_ context.Context, _ int64, _ *int64, eventType string, details map[string]any) error {

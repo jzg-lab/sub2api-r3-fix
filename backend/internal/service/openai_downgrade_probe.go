@@ -439,6 +439,8 @@ type OpenAIDowngradeProbeRunner struct {
 	// deferCounts 记录各账号连续顺延次数，仅在 runMu 临界区内访问。
 	recentTraffic func(ctx context.Context, accountID int64, within time.Duration) bool
 	deferCounts   map[int64]int
+	// The staged runner retains this observation until its database commit.
+	abuseSignal *openAIAbuseRouteSignal
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -661,6 +663,7 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	now := r.now()
+	openAIAbuseRouteSignals.PurgeExpired(now)
 	r.maybePurgeHistory(ctx, now)
 	if err := ctx.Err(); err != nil {
 		return err
@@ -712,6 +715,12 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 				logger.LegacyPrintf("service.openai_downgrade_probe",
 					"[OpenAIDowngradeProbe] arm qualification failed account=%d: %v", account.ID, err)
 				continue
+			}
+		}
+		if !qualification {
+			if err := r.armAbuseSignalAtomic(ctx, &account, state, now); err != nil {
+				logger.LegacyPrintf("service.openai_downgrade_probe",
+					"[OpenAIDowngradeProbe] arm mismatch recheck failed account=%d: %v", account.ID, err)
 			}
 		}
 	}
@@ -939,15 +948,10 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		return r.beginReprobe(ctx, account, state, now)
 	}
 
-	// P1（2026-09-20 用户批准）：真实流量 abuse 路由信号吸收。网关 usage 落账
-	// 侧发现的 upstream_model_mismatch 经 openAIAbuseRouteSignals 桥投递到此；
-	// 吸收即记事件 + 把本针从下方「真实流量顺延」里拉出来立即执行——吸收点
-	// 必须在顺延判定之前：mismatch 正是真实流量刚产生的，若先顺延，活跃账号
-	// 的信号会在 30min TTL 内永远等不到吸收（现网实证 1048/1055/1093 全灭、
-	// 1093 提前执法 401 三分钟，该信号是账号级标记的最强先行指标）。单信号
-	// 不摘号：是否熔断交给本针探针的完整证据。
+	// Read without consuming: only processStateAtomic may acknowledge the
+	// observation, after the event and probe state have committed together.
 	absorbedAbuseSignal := false
-	if signal, ok := openAIAbuseRouteSignals.TakeRealTrafficSignal(state.AccountID, now); ok {
+	if signal, ok := openAIAbuseRouteSignals.PeekRealTrafficSignal(state.AccountID, now); ok {
 		absorbedAbuseSignal = true
 		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
 			OpenAIDowngradeEventRealTrafficModelMismatch, map[string]any{
@@ -957,17 +961,25 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 			}); err != nil {
 			return err
 		}
+		r.abuseSignal = &signal
 	}
 
 	if !absorbedAbuseSignal &&
 		state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "normal" &&
 		r.shouldDeferForRealTraffic(ctx, state.AccountID) {
+		recheck, err := r.hasPendingAbuseRecheck(ctx, state)
+		if err != nil {
+			return err
+		}
 		// 近窗有真实推理流量：降智会直接体现在真实流量里，此刻插入合成探针
 		// 只会制造紧随真实请求的可聚类流量。顺延（jitter 后 22-67 分钟），
 		// 连续顺延达上限后照常探测，保证 canary 覆盖无永久盲区。
-		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeTrafficDeferral))
-		state.UpdatedAt = now
-		return r.store.SaveOpenAIDowngradeState(ctx, state)
+		if !recheck {
+			state.NextProbeAt = now.Add(r.jitter(openAIDowngradeTrafficDeferral))
+			state.UpdatedAt = now
+			return r.store.SaveOpenAIDowngradeState(ctx, state)
+		}
+		r.deferCounts[state.AccountID] = 0
 	}
 
 	result := r.runProbe(ctx, account, state.ProbeMode)
@@ -1624,6 +1636,30 @@ func (r *OpenAIDowngradeProbeRunner) shouldDeferForRealTraffic(ctx context.Conte
 	}
 	r.deferCounts[accountID]++
 	return true
+}
+
+// The preceding probe's committed event survives runner restarts. A later
+// successful probe advances LastProbeAt, so old signals cannot disable deferral.
+func (r *OpenAIDowngradeProbeRunner) hasPendingAbuseRecheck(ctx context.Context, state *OpenAIDowngradeProbeState) (bool, error) {
+	counter, ok := r.store.(OpenAIDowngradeReplaceEventCounter)
+	if !ok {
+		return false, errors.New("OpenAI probe event counter unavailable")
+	}
+	since := time.Time{}
+	if state.LastProbeAt != nil {
+		since = *state.LastProbeAt
+	}
+	count, err := counter.CountOpenAIDowngradeEvents(
+		ctx, state.AccountID, OpenAIDowngradeEventRealTrafficModelMismatch, since)
+	if err != nil || count > 0 {
+		return count > 0, err
+	}
+	if state.LastProbeAt == nil {
+		return false, nil
+	}
+	count, err = counter.CountOpenAIDowngradeEvents(
+		ctx, state.AccountID, OpenAIDowngradeEventTurnStateDegraded, since)
+	return count > 0, err
 }
 
 func (r *OpenAIDowngradeProbeRunner) jitter(interval time.Duration) time.Duration {

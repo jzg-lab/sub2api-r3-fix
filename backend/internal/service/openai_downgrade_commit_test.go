@@ -21,6 +21,7 @@ type downgradeAtomicStoreStub struct {
 	onCommitFail func(commits int)
 	commits      int
 	observed     *OpenAIDowngradeMutation
+	events       []OpenAIDowngradeMutationEvent
 	afterCommit  func()
 	committedAt  time.Time
 	paused       bool
@@ -50,6 +51,7 @@ func (s *downgradeAtomicStoreStub) CommitOpenAIDowngradeMutation(_ context.Conte
 	}
 	state := *mutation.State
 	s.state = &state
+	s.events = append(s.events, mutation.Events...)
 	if mutation.Schedulable != nil && s.accountRepo != nil {
 		s.accountRepo.account.Schedulable = *mutation.Schedulable
 		s.accountRepo.schedulableCalls = append(s.accountRepo.schedulableCalls, *mutation.Schedulable)
@@ -58,6 +60,25 @@ func (s *downgradeAtomicStoreStub) CommitOpenAIDowngradeMutation(_ context.Conte
 		s.afterCommit()
 	}
 	return nil
+}
+
+func (s *downgradeAtomicStoreStub) CountOpenAIDowngradeEvents(
+	ctx context.Context,
+	id int64,
+	eventType string,
+	since time.Time,
+) (int, error) {
+	if s.eventCountFn != nil {
+		return s.eventCountFn(ctx, id, eventType, since)
+	}
+	count := 0
+	for _, event := range s.events {
+		if event.Type == eventType &&
+			(event.ObservedAt == nil || !event.ObservedAt.Before(since)) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func TestOpenAIProbeAtomicCommitPublishesOnlyAfterSuccess(t *testing.T) {

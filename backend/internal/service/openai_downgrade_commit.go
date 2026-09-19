@@ -45,9 +45,10 @@ type OpenAIDowngradeRateLimitObservation struct {
 }
 
 type OpenAIDowngradeMutationEvent struct {
-	ProxyID *int64
-	Type    string
-	Details json.RawMessage
+	ProxyID    *int64
+	Type       string
+	Details    json.RawMessage
+	ObservedAt *time.Time
 }
 
 type OpenAIDowngradeAtomicStore interface {
@@ -324,6 +325,15 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	if err := runner.processState(ctx, &candidate, now); err != nil {
 		return err
 	}
+	if runner.abuseSignal != nil {
+		for i := len(stage.mutation.Events) - 1; i >= 0; i-- {
+			if stage.mutation.Events[i].Type == OpenAIDowngradeEventRealTrafficModelMismatch {
+				observedAt := runner.abuseSignal.ObservedAt
+				stage.mutation.Events[i].ObservedAt = &observedAt
+				break
+			}
+		}
+	}
 	if stage.mutation.State == nil {
 		return nil
 	}
@@ -340,6 +350,52 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	if committed {
 		*state = *stage.mutation.State
 		r.deferCounts = runner.deferCounts
+		if runner.abuseSignal != nil {
+			openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(*runner.abuseSignal)
+		}
+	}
+	return err
+}
+
+func (r *OpenAIDowngradeProbeRunner) armAbuseSignalAtomic(ctx context.Context, account *Account, state *OpenAIDowngradeProbeState, now time.Time) error {
+	if state == nil || account == nil || state.State != OpenAIDowngradeStateOnDuty ||
+		state.ProbeMode != "normal" ||
+		state.Consecutive429s > 0 || (account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now)) ||
+		!sameOpenAIProbeProxy(state.CurrentProxyID, account.ProxyID) {
+		return nil
+	}
+	signal, ok := openAIAbuseRouteSignals.PeekRealTrafficSignal(account.ID, now)
+	if !ok {
+		return nil
+	}
+	committer, ok := r.store.(OpenAIDowngradeAtomicStore)
+	if !ok {
+		return ErrOpenAIProbeAtomicStore
+	}
+	allowed, err := r.canRunOpenAIProbe(ctx, account.ID)
+	if err != nil || !allowed {
+		return err
+	}
+	stage := newOpenAIProbeStaging(r, account, state)
+	candidate := *state
+	candidate.NextProbeAt, candidate.UpdatedAt = now, now
+	stage.mutation.State = &candidate
+	if err := stage.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventRealTrafficModelMismatch, map[string]any{
+			"requested_model": signal.RequestedModel,
+			"response_model":  signal.ResponseModel,
+			"observed_at":     signal.ObservedAt.Format(time.RFC3339),
+		}); err != nil {
+		return err
+	}
+	stage.mutation.Events[len(stage.mutation.Events)-1].ObservedAt = &signal.ObservedAt
+	// Persist the observation before ListDue applies bucket spacing, admission
+	// and the batch limit. A restart can then recover the due recheck without
+	// depending on this process-local signal.
+	committed, err := r.commitOpenAIProbeMutation(ctx, committer, &stage.mutation)
+	if committed {
+		*state = *stage.mutation.State
+		openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(signal)
 	}
 	return err
 }
