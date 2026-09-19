@@ -74,8 +74,8 @@ func TestOpenAIProbeMissingAuthorizationRouteCannotAssignNewProxy(t *testing.T) 
 }
 
 func TestOpenAIProbeFreshUploadFallsThroughToBucketAssignment(t *testing.T) {
-	// r17b 裁定：从未绑过代理的新号（OriginalProxyID 为空）不拦，
-	// 照常走 FindOpenAIDowngradeMainProxy 自动分桶后打资格探针。
+	// A genuinely new upload has no OriginalProxyID, so it keeps the r17k
+	// automatic bucket assignment path.
 	availableProxy := int64(9)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	account := &Account{
@@ -129,7 +129,7 @@ func TestOpenAIProbeNonBrowserQualificationKeepsProxyAssignment(t *testing.T) {
 }
 
 func TestOpenAIProbeFreshUploadAtomicFallsThroughToBucketAssignment(t *testing.T) {
-	// 原子路径同语义：从未绑过的新号自动分桶打资格探针，不再 fails-closed。
+	// Atomic processing keeps the same fresh-import assignment behavior.
 	availableProxy := int64(5)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	account := &Account{
@@ -156,8 +156,6 @@ func TestOpenAIProbeFreshUploadAtomicFallsThroughToBucketAssignment(t *testing.T
 	require.True(t, store.observed.ProxyChanged)
 	require.Equal(t, &availableProxy, store.observed.ProxyID)
 	require.Len(t, store.observed.Results, 1)
-	// atomic 路径下 account 是 staging 快照,代理落账以 mutation 为准(上面
-	// observed.ProxyID/ProxyChanged 已断言);这里只验证 state 侧推进。
 	require.Equal(t, &availableProxy, state.CurrentProxyID)
 	require.Equal(t, &availableProxy, state.OriginalProxyID)
 }

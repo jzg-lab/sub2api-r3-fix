@@ -2964,7 +2964,11 @@
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
           <ProxyAdBanner />
         </div>
-        <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <ProxySelector
+          v-model="form.proxy_id"
+          :proxies="proxies"
+          :disabled="form.platform === 'openai' && !!openaiOAuth.sessionId.value"
+        />
       </div>
 
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">

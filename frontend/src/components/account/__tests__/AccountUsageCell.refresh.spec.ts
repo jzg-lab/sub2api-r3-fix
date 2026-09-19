@@ -11,7 +11,7 @@ vi.mock('vue-i18n', async () => ({
 }))
 
 const account = (id: number) => ({
-  id, platform: 'openai', type: 'oauth', extra: {}, credentials: {}
+  id, platform: 'openai', type: 'oauth', extra: {}, credentials: {}, schedulable: false
 }) as Account
 const usage = (percent: number) => ({
   five_hour: { utilization: percent, resets_at: null, remaining_seconds: 0 }
@@ -98,7 +98,7 @@ describe('AccountUsageCell refresh consistency', () => {
     requestBatchedUsage.mockClear()
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    expect(requestBatchedUsage).toHaveBeenCalledWith(current, { force: true })
+    expect(requestBatchedUsage).toHaveBeenCalledWith(current, { force: true, source: 'active' })
     expect(getUsage).not.toHaveBeenCalled()
     await wrapper.setProps({ batchedUsage: usage(73) })
     expect(wrapper.get('[data-test="quota"]').text()).toBe('73')
@@ -117,6 +117,41 @@ describe('AccountUsageCell refresh consistency', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(requestBatchedUsage).toHaveBeenCalledWith(current, { force: true, source: 'active' })
+    wrapper.unmount()
+  })
+
+  it('actively refreshes only the OpenAI account whose scheduling was enabled', async () => {
+    const requestBatchedUsage = vi.fn()
+    const current = account(90112)
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: current, batchedUsage: null, requestBatchedUsage },
+      global: { stubs }
+    })
+    await flushPromises()
+    requestBatchedUsage.mockClear()
+
+    await wrapper.setProps({ account: { ...current, schedulable: true } })
+    await flushPromises()
+
+    expect(requestBatchedUsage).toHaveBeenCalledTimes(1)
+    expect(requestBatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 90112, schedulable: true }),
+      { force: true, source: 'active' }
+    )
+    wrapper.unmount()
+  })
+
+  it('does not actively refresh an OpenAI account that was already schedulable on mount', async () => {
+    const requestBatchedUsage = vi.fn()
+    const current = { ...account(90113), schedulable: true } as Account
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: current, batchedUsage: null, requestBatchedUsage },
+      global: { stubs }
+    })
+    await flushPromises()
+
+    expect(requestBatchedUsage).toHaveBeenCalledTimes(1)
+    expect(requestBatchedUsage).toHaveBeenCalledWith(current, undefined)
     wrapper.unmount()
   })
 

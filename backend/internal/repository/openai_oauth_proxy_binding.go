@@ -76,9 +76,7 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		}
 		raw, exists := historical.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]
 		if !exists {
-			// r17j 之前删除的老号没有合格戳：视为无历史，按全新号走资格
-			// 流水线（自动分桶），不阻断重传。
-			continue
+			return service.ErrOpenAIOAuthHistoryBindingMissing
 		}
 		qualifiedProxyID, bindingOK := service.OpenAIOAuthQualifiedProxyID(historical.Extra)
 		if !bindingOK {
@@ -103,9 +101,10 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		account.ProxyID = int64Ptr(historicalProxyID)
 	}
 	if account.ProxyID == nil || *account.ProxyID <= 0 {
-		// 全新身份（无历史合格绑定、请求也未指派代理）：允许创建，
-		// 交给资格探针流水线自动分桶（r15b/r17b 裁定的新号工作流）。
-		// 历史绑定存在时 historyFound 分支必然已回填代理，不会走到这里。
+		// A genuinely new identity without an authorization-time proxy may
+		// come from the credential-import workflow. Preserve r17k's automatic
+		// qualification/bucket assignment for that path. Deleted identities
+		// never reach this branch unless their historical binding was valid.
 		account.Extra = maps.Clone(account.Extra)
 		if account.Extra == nil {
 			account.Extra = make(map[string]any, 2)
@@ -317,9 +316,9 @@ func validateOpenAIOAuthAccountReplacement(current, next *service.Account) error
 		return service.ErrOpenAIOAuthIdentityChanged
 	}
 	if !sameNullableInt64(current.ProxyID, next.ProxyID) {
-		// 从未绑定过代理、也没有合格戳的新号（current.ProxyID 为空且无
-		// qualified 键）允许首次指派出口——否则自动分桶前的手工调桶会被
-		// 拦死。一旦有过绑定或合格戳，代理即受保护不可再改（r17j 语义）。
+		// Fresh imports have no authorization binding yet and must be allowed
+		// to receive their first qualified proxy. Once any proxy or qualified
+		// binding exists, the authorization route is immutable.
 		_, currentQualified := service.OpenAIOAuthQualifiedProxyID(current.Extra)
 		if current.ProxyID != nil || currentQualified ||
 			current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] != nil {

@@ -269,7 +269,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
       auth_url: 'https://auth.example.invalid/authorize?state=test-state',
       session_id: 'test-session',
     })
-    exchangeCodeMock.mockReset().mockResolvedValue({ proxy_id: 17, expires_in: 3600 })
+    exchangeCodeMock.mockReset().mockResolvedValue({ proxy_id: 23, expires_in: 3600 })
   })
 
   it('uses the exchange route and stays busy until account creation completes', async () => {
@@ -280,7 +280,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
 
-    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ proxy_id: 17 }))
+    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ proxy_id: 23 }))
     expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
     expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(true)
     await authSubmit(wrapper).trigger('click')
@@ -303,7 +303,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     if (action === 'close') wrapper.findComponent(BaseDialogStub).vm.$emit('close')
     if (action === 'back') await selectButtonByText(wrapper, 'common.back')
     if (action === 'unmount') wrapper.unmount()
-    exchange.resolve({ proxy_id: 17 })
+    exchange.resolve({ proxy_id: 23 })
     await flushPromises()
     expect(createAccountMock).not.toHaveBeenCalled()
     expect(showErrorMock).not.toHaveBeenCalled()
@@ -355,6 +355,24 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     expect(createAccountMock).not.toHaveBeenCalled()
     expect(showErrorMock).toHaveBeenCalled()
     expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('rejects an exchange assigned to a different proxy than the authorization link', async () => {
+    exchangeCodeMock.mockResolvedValueOnce({ proxy_id: 17, expires_in: 3600 })
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await authSubmit(wrapper).trigger('click')
+    await flushPromises()
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('prevents proxy edits after the authorization session is created', async () => {
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
     wrapper.unmount()
   })
 })

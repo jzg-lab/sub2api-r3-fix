@@ -872,7 +872,10 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean; source
   if (!isDesktopViewport.value) return
   if (!accountSupportsBatchUsage(account)) return
 
-  const active = account.platform === 'anthropic' && options?.source === 'active'
+  const active = options?.source === 'active' && (
+    account.platform === 'anthropic' ||
+    (account.platform === 'openai' && account.type === 'oauth')
+  )
   const force = options?.force === true || active
   const cacheKey = account.id
   const key = String(cacheKey)

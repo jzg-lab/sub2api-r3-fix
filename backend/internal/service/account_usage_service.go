@@ -740,7 +740,13 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 				}
 			}
 		} else {
-			if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
+			updates, probeErr := s.probeOpenAICodexSnapshot(ctx, account)
+			// 静默吞错会让"额度不显示"无从排查(9/20 1093 实例):探测失败
+			// 至少留一条 WARN,不改变"失败即用旧快照"的语义。
+			if probeErr != nil {
+				slog.Warn("openai_codex_usage_probe_failed", "account_id", account.ID, "error", probeErr.Error())
+			}
+			if probeErr == nil && len(updates) > 0 {
 				mergeAccountExtra(account, updates)
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now

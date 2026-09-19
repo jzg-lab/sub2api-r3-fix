@@ -831,9 +831,9 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	if state.ProbeMode == "qualification" && account.ProxyID == nil &&
 		state.OriginalProxyID != nil &&
 		IsOpenAIBrowserOAuthAccount(account) {
-		// Browser OAuth 账号必须留在授权时的出口上。「绑过又丢」是证据损坏，
-		// 不是分配新 IP 的许可；从未绑过的新号（OriginalProxyID 为空）照常
-		// 落下方 FindOpenAIDowngradeMainProxy 自动分桶（r17b 裁定）。
+		// A browser OAuth account that was already bound must retain its
+		// authorization route. A genuinely fresh import has no original
+		// binding and continues into automatic bucket assignment below.
 		if account.Schedulable {
 			if err := r.accountRepo.SetSchedulable(ctx, account.ID, false); err != nil {
 				return err

@@ -130,6 +130,16 @@ describe('AccountsView usage refresh ownership', () => {
     expect(getBatchUsage).toHaveBeenCalledTimes(1)
   })
 
+  it('uses the single-account active API for an OpenAI refresh instead of the batch route', async () => {
+    mountView('openai')
+    await settle()
+    await wrapper.getComponent(AccountUsageCell).get('button').trigger('click')
+    await settle()
+    expect(getUsage).toHaveBeenCalledWith(current.id, 'active', true)
+    expect(getBatchUsage).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="quota"]').text()).toBe('73')
+  })
+
   it('does not allow a pending passive batch to overwrite the newer active result', async () => {
     const stale = deferred<ReturnType<typeof batch>>()
     getBatchUsage.mockReturnValueOnce(stale.promise)

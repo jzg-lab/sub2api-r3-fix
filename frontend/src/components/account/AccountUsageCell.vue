@@ -1351,6 +1351,10 @@ const copyValidationURL = async () => {
 const isAnthropicOAuthOrSetupToken = computed(() => {
   return props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')
 })
+const supportsActiveUsageQuery = computed(() => {
+  return isAnthropicOAuthOrSetupToken.value ||
+    (props.account.platform === 'openai' && props.account.type === 'oauth')
+})
 
 const requestParentBatchUsage = (options?: { force?: boolean; source?: 'active' | 'passive' }) => {
   if (!isBatchManaged.value || !shouldFetchUsage.value) return
@@ -1380,7 +1384,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     try {
       await requestParentBatchUsage({
         force: options?.bypassCache === true,
-        ...(isAnthropicOAuthOrSetupToken.value && options?.source
+        ...(supportsActiveUsageQuery.value && options?.source
           ? { source: options.source } : {})
       })
     } finally {
@@ -1669,6 +1673,25 @@ watch(() => [props.account.id, openAIUsageRefreshKey.value] as const, ([accountI
   _usageCache.delete(props.account.id)
   requestAutoLoad()
 })
+
+watch(
+  () => [props.account.id, props.account.platform, props.account.type, props.account.schedulable] as const,
+  ([accountID, platform, accountType, schedulable], [previousID, , , wasSchedulable]) => {
+    if (accountID !== previousID || wasSchedulable !== false || schedulable !== true) return
+    if (platform !== 'openai' || accountType !== 'oauth') return
+
+    if (isBatchManaged.value) {
+      requestParentBatchUsage({ force: true, source: 'active' })
+      return
+    }
+
+    _usageCache.delete(props.account.id)
+    loadUsage({ source: 'active', bypassCache: true }).catch((e) => {
+      console.error('Failed to refresh OpenAI usage after scheduling was enabled:', e)
+    })
+  },
+  { flush: 'post' }
+)
 
 watch(
   () => props.manualRefreshToken,
