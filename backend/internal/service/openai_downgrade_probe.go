@@ -407,6 +407,9 @@ const (
 	openAIDowngradeReplacementRetryBase   = 2 * time.Hour
 	openAIDowngradeReplacementRetryMax    = 24 * time.Hour
 	openAIDowngradeReplacementCountWindow = 7 * 24 * time.Hour
+	// 判死终态（r17x 选项A）防御性让位间隔：processState 兜底分支把误入的
+	// pending_replace 号排远，不参与正常调度节奏。
+	openAIDowngradeReplacedQuietSchedule = 7 * 24 * time.Hour
 )
 
 // OpenAIDowngradeReplaceEventCounter 是用于判死重试退避的窄接口能力。
@@ -855,9 +858,13 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStatePendingReplace {
-		// 判死不停探：静默期满后经 retryReplacement 换 IP 复活重试，
-		// 每失败一轮静默时间翻倍（2h 起，封顶 24h）。
-		return r.retryReplacement(ctx, account, state, now)
+		// 判死即终态（r17x 用户裁定 2026-09-21，选项A）：不再自动排探针。
+		// ListDue 已在 SQL 层排除 pending_replace，理论到不了这里；防御性
+		// 让位（NextProbeAt 推远）防止其它路径（RunOnce 直调/手动针竞态）
+		// 把判死号又拉回探测循环。救援唯一入口=ReenableOpenAIAccount。
+		state.NextProbeAt = now.Add(openAIDowngradeReplacedQuietSchedule)
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
 		state.ProbeMode != "qualification" {
@@ -1347,11 +1354,11 @@ func (r *OpenAIDowngradeProbeRunner) finishReplacement(
 		OpenAIDowngradeEventReplaceRequired, map[string]any{"swap_count_7d": state.SwapCount7d}); err != nil {
 		return err
 	}
-	// 指数退避：近 7 天每多一次判死，静默翻倍（2h/4h/8h/...，封顶 24h）。
+	// 判死即终态（r17x 选项A）：静默字段仅作展示层「何时死透」参考，
+	// NextProbeAt 已无调度语义（ListDue 排除 pending_replace）。散布保留——
+	// 防止极端路径下同批判死号形成同步节律。
 	silence := r.replacementRetrySilence(ctx, state.AccountID, now)
 	state.RecoveryDeadline = timePtr(now.Add(silence))
-	// NextProbeAt 在静默下界之上正向散布：同一轮判死的多个账号若不散布会在
-	// 同一微秒集体复活，形成可聚类的同步换桶突发。
 	state.NextProbeAt = now.Add(r.spread(silence))
 	return r.store.SaveOpenAIDowngradeState(ctx, state)
 }
@@ -1376,9 +1383,9 @@ func (r *OpenAIDowngradeProbeRunner) replacementRetrySilence(ctx context.Context
 	return silence
 }
 
-// retryReplacement 让判死账号在静默期满后重新获得救援机会：
-// Retry the current assigned route; historical swap budgets do not authorize a move.
-// 救活则经 finishRescue 重新上岗，失败则由 finishReplacement 安排下一轮翻倍静默。
+// retryReplacement 已废止（r17x 选项A，2026-09-21 用户裁定「判死即终态，
+// 不再自动检测，手动启用」）。判死号的救援唯一入口是 ReenableOpenAIAccount；
+// 本方法保留为占位防止旧测试/调用点编译断裂，语义上不可达。
 func (r *OpenAIDowngradeProbeRunner) retryReplacement(
 	ctx context.Context,
 	account *Account,

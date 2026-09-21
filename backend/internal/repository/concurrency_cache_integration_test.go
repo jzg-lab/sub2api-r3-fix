@@ -452,16 +452,22 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots() {
 
 	now, err := s.rawCache.redisUnixSeconds(s.ctx)
 	require.NoError(s.T(), err)
+	// r17z TTL 语义(2026-09-21 他机并发修复):启动清理只删 score 已过期成员。
+	// stale-* 成员=崩溃进程残留(score 早于 TTL 窗);otherproc-*=另一实例的
+	// 活槽位(score 新鲜,前缀非本进程)——必须存活,这是多实例共 Redis 的正确行为。
+	expiredScore := float64(now - 2*defaultSlotTTLMinutes*60)
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountKey,
-		redis.Z{Score: float64(now), Member: "oldproc-1"},
+		redis.Z{Score: expiredScore, Member: "stale-1"},
+		redis.Z{Score: float64(now), Member: "otherproc-1"},
 		redis.Z{Score: float64(now), Member: "keep-1"},
 	).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, userKey,
-		redis.Z{Score: float64(now), Member: "oldproc-2"},
+		redis.Z{Score: expiredScore, Member: "stale-2"},
+		redis.Z{Score: float64(now), Member: "otherproc-2"},
 		redis.Z{Score: float64(now), Member: "keep-2"},
 	).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, unindexedAccountKey,
-		redis.Z{Score: float64(now), Member: "oldproc-unindexed"},
+		redis.Z{Score: expiredScore, Member: "stale-unindexed"},
 	).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, apiKeyKey,
 		redis.Z{Score: float64(now), Member: "oldproc-3"},
@@ -483,11 +489,11 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots() {
 
 	accountMembers, err := s.rdb.ZRange(s.ctx, accountKey, 0, -1).Result()
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), []string{"keep-1"}, accountMembers)
+	require.ElementsMatch(s.T(), []string{"keep-1", "otherproc-1"}, accountMembers)
 
 	userMembers, err := s.rdb.ZRange(s.ctx, userKey, 0, -1).Result()
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), []string{"keep-2"}, userMembers)
+	require.ElementsMatch(s.T(), []string{"keep-2", "otherproc-2"}, userMembers)
 
 	// API Key 槽位（stats-only）不在启动清理范围内，靠分数裁剪与 key TTL 自愈。
 	apiKeyMembers, err := s.rdb.ZRange(s.ctx, apiKeyKey, 0, -1).Result()
@@ -500,9 +506,11 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots() {
 	_, err = s.rdb.Get(s.ctx, accountWaitKey).Result()
 	require.True(s.T(), errors.Is(err, redis.Nil))
 
+	// 未入索引的过期槽位：清理范围来自活跃索引，这里不受启动清理影响，
+	// 由常驻 worker 的 TTL 裁剪兜底。
 	unindexedMembers, err := s.rdb.ZRange(s.ctx, unindexedAccountKey, 0, -1).Result()
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), []string{"oldproc-unindexed"}, unindexedMembers)
+	require.Equal(s.T(), []string{"stale-unindexed"}, unindexedMembers)
 	_, err = s.rdb.Get(s.ctx, unindexedAccountWaitKey).Result()
 	require.NoError(s.T(), err)
 }
@@ -774,11 +782,13 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_ProcessesExpiredInd
 
 	now, err := s.rawCache.redisUnixSeconds(s.ctx)
 	require.NoError(s.T(), err)
+	// r17z:停机残留=socre 过期的槽位成员(重启后由 TTL 语义清掉)。
+	expiredScore := float64(now - 2*defaultSlotTTLMinutes*60)
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountKey,
-		redis.Z{Score: float64(now), Member: "oldproc-1"},
+		redis.Z{Score: expiredScore, Member: "stale-1"},
 	).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, userKey,
-		redis.Z{Score: float64(now), Member: "oldproc-2"},
+		redis.Z{Score: expiredScore, Member: "stale-2"},
 	).Err())
 	require.NoError(s.T(), s.rdb.Set(s.ctx, accountWaitKey, 4, time.Minute).Err())
 	// 索引 score 设为过去时刻，模拟长时间停机后索引已“过期”。
@@ -810,7 +820,7 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_ProcessesExpiredInd
 	require.ErrorIs(s.T(), err, redis.Nil)
 }
 
-func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_RemovesOldPrefixesAndWaitCounters() {
+func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_RemovesExpiredSlotsAndWaitCounters() {
 	// 预置迁移 marker，确保等待计数删除来自索引驱动路径而非一次性清扫。
 	require.NoError(s.T(), s.rdb.Set(s.ctx, legacyWaitSweepMarkerKey, "1", 0).Err())
 	accountID := int64(901)
@@ -822,14 +832,16 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_RemovesOldPrefixesA
 
 	now, err := s.rawCache.redisUnixSeconds(s.ctx)
 	require.NoError(s.T(), err)
+	// r17z TTL 语义:stale-*=过期残留(删);otherproc-*=他实例活槽位(留)。
+	expiredScore := float64(now - 2*defaultSlotTTLMinutes*60)
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountSlotKey,
-		redis.Z{Score: float64(now), Member: "oldproc-1"},
-		redis.Z{Score: float64(now), Member: "activeproc-1"},
+		redis.Z{Score: expiredScore, Member: "stale-1"},
+		redis.Z{Score: float64(now), Member: "otherproc-1"},
 	).Err())
 	require.NoError(s.T(), s.rdb.Expire(s.ctx, accountSlotKey, testSlotTTL).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, userSlotKey,
-		redis.Z{Score: float64(now), Member: "oldproc-2"},
-		redis.Z{Score: float64(now), Member: "activeproc-2"},
+		redis.Z{Score: expiredScore, Member: "stale-2"},
+		redis.Z{Score: float64(now), Member: "otherproc-2"},
 	).Err())
 	require.NoError(s.T(), s.rdb.Expire(s.ctx, userSlotKey, testSlotTTL).Err())
 	require.NoError(s.T(), s.rdb.Set(s.ctx, userWaitKey, 3, testSlotTTL).Err())
@@ -847,11 +859,11 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_RemovesOldPrefixesA
 
 	accountMembers, err := s.rdb.ZRange(s.ctx, accountSlotKey, 0, -1).Result()
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), []string{"activeproc-1"}, accountMembers)
+	require.Equal(s.T(), []string{"otherproc-1"}, accountMembers)
 
 	userMembers, err := s.rdb.ZRange(s.ctx, userSlotKey, 0, -1).Result()
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), []string{"activeproc-2"}, userMembers)
+	require.Equal(s.T(), []string{"otherproc-2"}, userMembers)
 
 	_, err = s.rdb.Get(s.ctx, userWaitKey).Result()
 	require.ErrorIs(s.T(), err, redis.Nil)
@@ -864,7 +876,9 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_DeletesEmptySlotKey
 	accountSlotKey := fmt.Sprintf("%s%d", accountSlotKeyPrefix, accountID)
 	now, err := s.rawCache.redisUnixSeconds(s.ctx)
 	require.NoError(s.T(), err)
-	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountSlotKey, redis.Z{Score: float64(now), Member: "oldproc-1"}).Err())
+	// r17z:唯一成员过期被清后,空槽位 key 整体删除。
+	expiredScore := float64(now - 2*defaultSlotTTLMinutes*60)
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountSlotKey, redis.Z{Score: expiredScore, Member: "stale-1"}).Err())
 	require.NoError(s.T(), s.rdb.Expire(s.ctx, accountSlotKey, testSlotTTL).Err())
 	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountActiveIndexKey, redis.Z{
 		Score:  float64(now + 60),

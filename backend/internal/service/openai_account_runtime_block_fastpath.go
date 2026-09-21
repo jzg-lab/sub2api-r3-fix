@@ -465,6 +465,16 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	if s == nil || !isOpenAIAccount(account) {
 		return false
 	}
+	// 无锁快路径(r17x E 项):真 blocked(未过期 time.Time)时直接返回,免掉
+	// per-account mutex。竞态分析:map 值是原子读写,写侧 blockAccountSchedulingLocked
+	// 的 CAS 只会把 blockUntil 单调扩大(或 Delete);读到 stale-true 的窗口 =
+	// 写侧 Store 尚未可见,持锁读同样读不到更新值——语义等价。快路径不做
+	// 过期清理(那需要锁内 Delete+Generation.Store),只在值确定活跃时短路。
+	if value, ok := s.openaiAccountRuntimeBlockUntil.Load(account.ID); ok {
+		if cooldownUntil, ok := value.(time.Time); ok && cooldownUntil.After(time.Now()) {
+			return true
+		}
+	}
 	mu := s.openAIAccountRuntimeBlockLock(account.ID)
 	mu.Lock()
 	defer mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -108,6 +109,11 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				AND a.deleted_at IS NULL
 				AND a.platform = 'openai' AND a.type = 'oauth'
 				AND a.parent_account_id IS NULL
+				-- 判死即终态（r17x 用户裁定 2026-09-21，选项A）：pending_replace
+				-- 不再自动排探针（原「永不放弃」指数退避复活重试废止），
+				-- 保留标签与证据历史，救援唯一入口=手动启用
+				-- （ReenableOpenAIAccount 走 qualification 1 针结业）。
+				AND s.state <> 'pending_replace'
 				AND NOT EXISTS (
 					SELECT 1 FROM openai_downgrade_probe_controls c
 					WHERE c.account_id = a.id AND c.manual_paused
@@ -684,28 +690,68 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIDowngradeDashboard(
 	}, nil
 }
 
+// openAIDowngradePurgeBatchSize 保留清理的分批上限：与 usage_logs 清理同思路
+//（dashboard_aggregation_repo.go），单批 DELETE 的锁持有时长与 WAL 量有界，
+// 避免大表首次清理时长时间阻塞探针写入。
+const openAIDowngradePurgeBatchSize = 5000
+
 // PurgeOpenAIDowngradeProbeHistory implements the P2-10 retention policy:
 // probe results older than resultsBefore and events older than eventsBefore
 // are deleted. Events are audit evidence and use a longer retention window.
+// 删除按 ctid 批量进行（r17x H 项），两张表独立分批直到删尽。
 func (r *openAIDowngradeProbeRepository) PurgeOpenAIDowngradeProbeHistory(
 	ctx context.Context,
 	resultsBefore, eventsBefore time.Time,
 ) (int64, int64, error) {
-	res, err := r.db.ExecContext(ctx, `
-		DELETE FROM openai_downgrade_probe_results WHERE created_at < $1
-	`, resultsBefore)
-	if err != nil {
-		return 0, 0, err
-	}
-	purgedResults, _ := res.RowsAffected()
-	res, err = r.db.ExecContext(ctx, `
-		DELETE FROM openai_downgrade_probe_events WHERE created_at < $1
-	`, eventsBefore)
+	purgedResults, err := purgeOpenAIDowngradeRowsBefore(ctx, r.db,
+		"openai_downgrade_probe_results", resultsBefore)
 	if err != nil {
 		return purgedResults, 0, err
 	}
-	purgedEvents, _ := res.RowsAffected()
+	purgedEvents, err := purgeOpenAIDowngradeRowsBefore(ctx, r.db,
+		"openai_downgrade_probe_events", eventsBefore)
+	if err != nil {
+		return purgedResults, 0, err
+	}
 	return purgedResults, purgedEvents, nil
+}
+
+// purgeOpenAIDowngradeRowsBefore 循环删除 table 中 created_at < before 的行，
+// 每批 openAIDowngradePurgeBatchSize 行。表名是编译期常量集，不做用户输入拼接。
+func purgeOpenAIDowngradeRowsBefore(
+	ctx context.Context,
+	db sqlExecutor,
+	table string,
+	before time.Time,
+) (int64, error) {
+	query := fmt.Sprintf(`
+		WITH victims AS (
+			SELECT ctid FROM %s
+			WHERE created_at < $1
+			ORDER BY created_at ASC
+			LIMIT $2
+		)
+		DELETE FROM %s
+		WHERE ctid IN (SELECT ctid FROM victims)
+	`, table, table)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		res, err := db.ExecContext(ctx, query, before.UTC(), openAIDowngradePurgeBatchSize)
+		if err != nil {
+			return total, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += affected
+		if affected < openAIDowngradePurgeBatchSize {
+			return total, nil
+		}
+	}
 }
 
 // CountOpenAIDowngradeEvents 统计某账号在指定时间点之后的某类事件数，

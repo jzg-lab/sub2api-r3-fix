@@ -2304,6 +2304,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerInGroup(
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
+	// 选号作用域 recheck memo(r17x A 项):单次选号内同账号的 DB 回源只做一次,
+	// 层间(sticky/L2/LoadMap/L3)与能力重试循环的重复 recheck 复用结果。
+	ctx = withOpenAIRecheckMemo(ctx)
 	return s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
 }
 

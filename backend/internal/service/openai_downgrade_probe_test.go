@@ -1641,8 +1641,14 @@ func TestOpenAIDowngradeProbeRejectsTerminalReplacementWithoutProxy(t *testing.T
 		AccountID: 1, State: OpenAIDowngradeStatePendingReplace,
 	}
 
-	require.ErrorContains(t, runner.processState(context.Background(), state, time.Now()), "proxy")
+	// r17x 选项A（2026-09-21 用户裁定「判死即终态」）：判死号 processState
+	// 不再走 retryReplacement/beginReprobe（原实现无 proxy 时报错），改为
+	// 防御性让位——不探针、排远 7 天、零 probe 调用。救援唯一入口=
+	// ReenableOpenAIAccount（见 TestReenableOpenAIAccount_*）。
+	require.NoError(t, runner.processState(context.Background(), state, time.Now()))
 	require.Zero(t, store.probeCalls)
+	require.True(t, state.NextProbeAt.After(time.Now().Add(6 * 24 * time.Hour)),
+		"判死号必须被排远(防御性让位),不是近刻重探")
 }
 
 func TestOpenAIDowngradeProbeTransportFailureDoesNotCountAsDegradation(t *testing.T) {

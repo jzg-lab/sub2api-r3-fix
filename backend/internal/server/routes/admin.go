@@ -465,6 +465,8 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.GET("/accounts/health", h.Admin.OpenAIProbeHealth.ListAccountHealth)
 		openai.GET("/accounts/:id/health", h.Admin.OpenAIProbeHealth.GetAccountHealth)
 		openai.POST("/accounts/:id/probe-now", h.Admin.OpenAIProbeHealth.TriggerProbeNow)
+		// 判死即终态（r17x 选项A 2026-09-21）：手动启用=唯一救援入口。
+		openai.POST("/accounts/:id/reenable", h.Admin.OpenAIProbeHealth.ReenableAccount)
 	}
 }
 

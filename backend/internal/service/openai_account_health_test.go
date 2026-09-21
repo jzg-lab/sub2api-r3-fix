@@ -232,13 +232,57 @@ func TestTriggerProbeNowDualPath(t *testing.T) {
 		"diagnostic path must not touch the state machine")
 	require.False(t, pausedAccount.Schedulable, "diagnostic path must not re-enable scheduling")
 
-	// 路径B 连点去重：NextProbeAt 已在过去（另一针刚打过/在飞）→ already_flying。
+	// 路径B 死排期不再让位（2026-09-21 生产 1131 修复）：manual_paused/停用号
+	// 的 NextProbeAt 一旦落在过去就永久冻结（ListDue 永不拾取重排），旧「已
+	// due 即让位」闸把死排期误读成「有针在飞」→ 每次主动检测都 409 already_
+	// flying 而实际零针在飞。修复后死排期照常打诊断针；并发叠针由 runMu 与
+	// 同出口 10 分钟节流兜底。
 	pausedStore.state.NextProbeAt = now.Add(-time.Minute)
 	res, err = pausedRunner.TriggerProbeNow(context.Background(), 92003)
 	require.NoError(t, err)
-	require.False(t, res.Accepted, "second click while flying must be rejected")
-	require.True(t, res.AlreadyFlying)
-	require.Equal(t, 1, pausedStore.probeCalls, "no extra probe on dedup")
+	require.True(t, res.Accepted, "frozen past schedule must not swallow the manual probe")
+	require.Equal(t, 2, pausedStore.probeCalls, "diagnostic probe must fire on frozen schedule")
+}
+
+// TestTriggerProbeNowManualPausedForcesDiagnosticPath manual_paused 号即使
+// schedulable=t 也必须走路径B（2026-09-21 修复#2）：ListDue 的 NOT EXISTS
+// manual_paused 闸排除它们——旧判定漏了这项，manual_paused+schedulable 的号
+// 走路径A 提前排期 = accepted 却永不打针的静默失效。
+func TestTriggerProbeNowManualPausedForcesDiagnosticPath(t *testing.T) {
+	now := time.Date(2026, 9, 21, 19, 0, 0, 0, time.UTC)
+	proxyID := int64(1)
+	future := now.Add(30 * time.Minute)
+	account := &Account{
+		ID: 95001, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, ProxyID: &proxyID,
+	}
+	store := &manualPausedControlStub{downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+		AccountID: 95001, State: OpenAIDowngradeStateOnDuty,
+		ProbeMode: "normal", NextProbeAt: future,
+	}}}
+	runner := NewOpenAIDowngradeProbeRunner(
+		store, &downgradeProbeAccountRepoStub{account: account}, nil, nil, nil, nil)
+	runner.now = func() time.Time { return now }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{TransportOK: true, AnswerCorrect: true, HTTPStatus: http.StatusOK}
+	}
+	res, err := runner.TriggerProbeNow(context.Background(), 95001)
+	require.NoError(t, err)
+	require.True(t, res.Accepted, "manual-paused account must take the diagnostic path")
+	require.True(t, res.ProbedNow)
+	require.Equal(t, 1, store.downgradeProbeStoreStub.probeCalls, "diagnostic probe must fire inline")
+	require.Equal(t, future, store.downgradeProbeStoreStub.state.NextProbeAt,
+		"diagnostic path must not touch the schedule")
+}
+
+// manualPausedControlStub 模拟 openai_downgrade_probe_controls.manual_paused=t
+//（CanRunOpenAIDowngradeProbe=false，镜像 ListDue 的 controls 闸联判）。
+type manualPausedControlStub struct {
+	*downgradeProbeStoreStub
+}
+
+func (s *manualPausedControlStub) CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error) {
+	return false, nil
 }
 
 // TestTriggerProbeNowExitThrottle 路径B 同出口节流（镜像 ListDue 10 分钟闸）：

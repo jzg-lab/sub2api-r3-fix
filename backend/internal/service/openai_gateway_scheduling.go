@@ -1761,31 +1761,48 @@ func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBBeforeProfit(ct
 		return account
 	}
 
+	// 选号作用域 memo(r17x A 项):单次选号内同(账号, requireCompact)的 DB 回源
+	// 结果复用。键含 requireCompact:selectBestAccount 调用点故意传 false,与
+	// 循环内真实值的过滤器语义不同。非选号入口(ctx 无 memo)零开销直通。
+	if memo := lookupOpenAIRecheckMemo(ctx); memo != nil {
+		if latest, hit := memo.get(account.ID, requireCompact); hit {
+			return latest
+		}
+	}
+
 	latest, err := s.accountRepo.GetByID(ctx, account.ID)
 	if err != nil || latest == nil {
-		return nil
+		return nil // 瞬时错误/行消失:不缓存,下次照旧回源重试
 	}
 	if !s.openAIAccountMatchesSchedulingGroup(latest, groupID) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if s.openAIGroupRequiresPrivacySet(ctx, groupID) && !latest.IsPrivacySet() {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if !isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx, latest, platform, requestedModel, requireCompact, requiredCapability) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if !parentHealthyForShadow(latest, s.parentAccountLookup(ctx)) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if s.isOpenAIAccountBlockedBySchedulingThreshold(ctx, latest) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
 	if s.isOpenAIProxyStreamQuarantined(ctx, latest) {
+		lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, nil)
 		return nil
 	}
+	lookupOpenAIRecheckMemo(ctx).put(account.ID, requireCompact, latest)
 	return latest
 }
 

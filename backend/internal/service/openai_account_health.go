@@ -144,6 +144,12 @@ var ErrOpenAIProbeAlreadyFlying = errors.New("openai probe already flying for ac
 var errOpenAIProbeNotEligible = infraerrors.BadRequest(
 	"OPENAI_PROBE_NOT_ELIGIBLE", "account is not probe-eligible")
 
+// errOpenAIReenableRequired 判死号（pending_replace）点了主动检测：探针
+// 已停（r17x 选项A「判死即终态」），语义正确的动作是手动启用。409 让前端
+// 区分「已死待启用」与普通检测失败。
+var errOpenAIReenableRequired = infraerrors.Conflict(
+	"OPENAI_REENABLE_REQUIRED", "account is dead (pending_replace); use reenable endpoint")
+
 // openAIDowngradeProbeExitThrottleWindow 同出口合成探针最小间隔（镜像
 // ListDue 的 10 分钟节流）；openAIDowngradeProbeExitThrottleRetryAfter 是
 // 被节流时给前端的建议重试等待。
@@ -247,13 +253,29 @@ func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accoun
 		// 已走 ErrAccountNotFound）。不烧上游请求，明确拒绝。
 		return nil, errOpenAIProbeNotEligible
 	}
-	// 路径判定（镜像 ListDue L123 闸门）：调度循环下一拍会不会拾取此号。
-	// manual_paused 在 ListDue 被排除；on_duty+非 schedulable+非
-	// qualification+非 error 同样被排除——都走路径B 同步诊断针。
-	schedulerWillPick := account.Schedulable ||
+	// 路径判定（镜像 ListDue 全部闸门）：调度循环下一拍会不会拾取此号。
+	// manual_paused 在 ListDue 被排除（NOT EXISTS 闸）——schedulable=t 也
+	// 拦不住，2026-09-21 修复：旧判定漏了这项，manual_paused+schedulable
+	// 的号会走路径A 提前排期，但 ListDue 永不拾取 = accepted 却静默失效。
+	// on_duty+非 schedulable+非 qualification+非 error 同样被排除——都走
+	// 路径B 同步诊断针。判死号（pending_replace）r17x 选项A 起也被 ListDue
+	// 排除：提前排期是静默失效，明确引导到手动启用（ReenableOpenAIAccount）。
+	if state.State == OpenAIDowngradeStatePendingReplace {
+		return nil, errOpenAIReenableRequired
+	}
+	manualPaused := false
+	if controls, ok := r.store.(OpenAIDowngradeProbeControlStore); ok {
+		// CanRunOpenAIDowngradeProbe = ListDue 的 controls/状态/expires 三道
+		// 闸联判（manual_paused + owned_error + auto_pause_on_expired）。
+		// 查询失败 FailOpen 视为未暂停（保持旧路径A 行为，不吞手动指令）。
+		if allowed, err := controls.CanRunOpenAIDowngradeProbe(ctx, accountID); err == nil {
+			manualPaused = !allowed
+		}
+	}
+	schedulerWillPick := !manualPaused && (account.Schedulable ||
 		state.State != OpenAIDowngradeStateOnDuty ||
 		state.ProbeMode == "qualification" ||
-		account.Status == StatusError
+		account.Status == StatusError)
 	if !schedulerWillPick {
 		res, err := r.triggerDiagnosticProbeNow(ctx, account, state, now)
 		if err == nil && res != nil && res.Accepted {
@@ -288,11 +310,12 @@ func (r *OpenAIDowngradeProbeRunner) triggerDiagnosticProbeNow(
 		return &TriggerProbeNowResult{Accepted: false, AlreadyFlying: true, QueuedAt: state.NextProbeAt}, nil
 	}
 	defer r.runMu.Unlock()
-	if !state.NextProbeAt.After(now) {
-		// 极端竞态：手动请求读到排期后、拿锁前，扫描循环恰好拾取了同号
-		//（ListDue 变更或号刚被复启）。让位防叠针。
-		return &TriggerProbeNowResult{Accepted: false, AlreadyFlying: true, QueuedAt: state.NextProbeAt}, nil
-	}
+	// 不再看 NextProbeAt 是否 due：路径B 的号（manual_paused/非调度）ListDue
+	// 永不拾取，排期一旦落在过去就永久冻结——旧「已 due 即让位」闸把死排期
+	// 误读成「有针在飞」，手动针被无限吞（2026-09-21 生产 1131 实锤：17:46
+	// 面板暂停后 17:42 的排期死冻，此后每次主动检测都 409 already_flying，
+	// 实际零针在飞）。与扫描循环的并发互斥由上面的 runMu.TryLock 完整承担
+	//（RunOnce 全程持锁），叠针另有同出口 10 分钟节流兜底。
 	if !r.respectExitIPThrottle(ctx, account, now) {
 		// 同出口 10 分钟节流（镜像 ListDue）：合成探针近距离出同一出口=
 		// 可聚类形态。手动指令也不破安全红线，提示稍后再试。
@@ -383,4 +406,114 @@ func OpenAIProbeEvidenceDegraded(ev *OpenAIProbeLastEvidence) bool {
 		return true
 	}
 	return ev.ReasoningTokens != nil && *ev.ReasoningTokens < OpenAIDowngradeFailureReasoningThreshold
+}
+
+// =============================================================================
+// 手动启用（相位A 补全，r17x 选项A 2026-09-21 用户裁定）
+//
+// 判死即终态后，判死号的救援唯一入口：清标签 → 资格认证模式 → 1 针通过
+// 即上岗（2026-09-15 裁定）。手动启用不直接复调度——先过认证针再上岗，
+// 防止把死透的号直接塞回流量池。
+// =============================================================================
+
+// errOpenAIReenableNotDead 只对判死号有意义：其它状态（熔断/在岗/认证中）
+// 的号本来就在状态机里自愈，手动启用是误操作。
+var errOpenAIReenableNotDead = infraerrors.BadRequest(
+	"OPENAI_REENABLE_NOT_DEAD", "account is not in pending_replace state")
+
+// errOpenAIReenablePaused 判死号同时处于 manual_paused（静置救援/暂停观察）：
+// reenable 不能替用户松刹车——认证针会被 ListDue 的 manual_paused 闸永远
+// 排除（静默失效），且静置中拉回探针节奏违反社区救援剧本（反复测试使
+// 惩罚窗升级）。409 引导前端提示「先解除暂停再手动启用」。
+var errOpenAIReenablePaused = infraerrors.Conflict(
+	"OPENAI_REENABLE_PAUSED", "account is manual-paused; unpause before reenable")
+
+// ReenableOpenAIAccountResult 手动启用结果。
+type ReenableOpenAIAccountResult struct {
+	AccountID   int64     `json:"account_id"`
+	ReenabledAt time.Time `json:"reenabled_at"`
+	NextProbeAt time.Time `json:"next_probe_at"`
+	// ProbeQueued: true = 认证针已排到近刻（下一拍扫描循环拾取）。
+	ProbeQueued bool `json:"probe_queued"`
+}
+
+// ReenableOpenAIAccount 手动启用判死号：状态回 qualification、清计数与
+// 降智痕迹、排近刻认证针。1 针通过即上岗（qualification 既有语义：
+// ConsecutiveSuccesses>=1 + IsQualificationPass → on_duty + SetSchedulable）。
+// 不重置配额/限流（auto-reset 纪律）；落审计事件供追溯。
+func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, accountID int64) (*ReenableOpenAIAccountResult, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("openai probe runner is not available")
+	}
+	if r.IsStopped() {
+		return nil, errors.New("openai probe runner is stopped")
+	}
+	now := r.now()
+	state, err := r.store.GetOpenAIDowngradeState(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, ErrAccountNotFound
+	}
+	if state.State != OpenAIDowngradeStatePendingReplace {
+		return nil, errOpenAIReenableNotDead
+	}
+	account, err := r.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if account == nil {
+		return nil, ErrAccountNotFound
+	}
+	if !isOpenAIDowngradeProbeAccountEligible(account, now) {
+		// 改平台/改类型/影子/过期：与 probe-now 同判——探针体系对其无意义。
+		return nil, errOpenAIProbeNotEligible
+	}
+	// manual_paused 是用户主动按下的刹车（静置救援/暂停观察），reenable 不得
+	// 替用户松开：认证针走 ListDue，其 NOT EXISTS manual_paused 闸会把
+	// qualification 号永远排除——reenable 后针永不打（静默失效）；且静置中
+	// 拉回探针节奏 = 自动打针，社区实证反复测试使惩罚窗阶梯升级。要救先恢复
+	// 启用（面板解除暂停），再点手动启用。
+	if controls, ok := r.store.(OpenAIDowngradeProbeControlStore); ok {
+		if allowed, err := controls.CanRunOpenAIDowngradeProbe(ctx, accountID); err == nil && !allowed {
+			return nil, errOpenAIReenablePaused
+		}
+	}
+
+	// 清标签回认证态：降智痕迹归零，但连败预置 1——结论针一击定生死
+	//（r17y 2026-09-21 用户裁定）：降智失败针把计数推到 2 直接走既有
+	// qualification_failed 判死分支，不再进资格循环反复打针（社区实证：
+	// 反复测试使惩罚窗升级 10min→30min→1h→4h）。通过针由 Apply 成功
+	// 分支清零计数后上岗，语义不变；无结论针（401/传输故障）计数不动、
+	// 5min 重试——传输故障不烧掉唯一一击。
+	state.State = OpenAIDowngradeStateOnDuty
+	state.ProbeMode = "qualification"
+	state.ConsecutiveFailures = 1
+	state.ConsecutiveSuccesses = 0
+	state.CircuitOpenedAt = nil
+	state.RecoveryDeadline = nil
+	state.FirstFailureAt = nil
+	state.Consecutive429s = 0
+	// 认证针排近刻（散布几分钟内），扫描循环下一拍拾取。qualification 态
+	// 不受 pending_replace 排除闸影响，ListDue 正常拾取。
+	state.NextProbeAt = now.Add(r.jitter(openAIDowngradeQualificationInterval))
+	state.UpdatedAt = now
+	if err := r.store.SaveOpenAIDowngradeState(ctx, state); err != nil {
+		return nil, err
+	}
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, accountID, state.CurrentProxyID,
+		"manual_reenable", map[string]any{
+			"from_state":   OpenAIDowngradeStatePendingReplace,
+			"to_mode":      "qualification",
+			"next_probeat": state.NextProbeAt.Format(time.RFC3339),
+		}); err != nil {
+		return nil, err
+	}
+	return &ReenableOpenAIAccountResult{
+		AccountID:   accountID,
+		ReenabledAt: now,
+		NextProbeAt: state.NextProbeAt,
+		ProbeQueued: true,
+	}, nil
 }

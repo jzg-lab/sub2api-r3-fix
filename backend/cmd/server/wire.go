@@ -129,6 +129,7 @@ func provideCleanup(
 	openAIOperations *service.OpenAIOperationsService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	concurrencyService *service.ConcurrencyService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -144,6 +145,12 @@ func provideCleanup(
 			{"OpenAIOperationsService", func() error {
 				if openAIOperations != nil {
 					openAIOperations.Stop()
+				}
+				return nil
+			}},
+			{"ConcurrencySlotCleanupWorker", func() error {
+				if concurrencyService != nil {
+					concurrencyService.StopSlotCleanupWorker()
 				}
 				return nil
 			}},

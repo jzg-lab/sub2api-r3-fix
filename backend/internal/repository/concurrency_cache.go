@@ -330,20 +330,22 @@ var (
 		return 1
 	`)
 
-	// startupCleanupSlotScript 清理单个槽位 key 中非当前进程前缀的成员，避免 Redis Cluster CROSSSLOT。
-	// KEYS[1] 是有序集合键，ARGV[1] 是当前进程前缀，ARGV[2] 是槽位 TTL。
+	// startupCleanupSlotScript 清理单个槽位 key 中已过期的成员，避免 Redis Cluster CROSSSLOT。
+	// KEYS[1] 是有序集合键，ARGV[1] 是当前进程前缀（保留活槽位用），ARGV[2] 是槽位 TTL。
+	// 2026-09-21 修复（他机并发故障根因）：旧版删除所有非当前进程前缀的成员——多实例
+	// 共用同一 Redis 时，一台重启会清光其它实例的活请求槽位，被清实例瞬间并发失控
+	// （超卖→上游 429/降智标记）。新版只删 score 已过 TTL 的成员（崩溃进程残留
+	// 恰好都是陈旧 score），他实例的活槽位（score 新鲜）原封不动。单实例部署行为
+	// 不变：单前缀下旧版删除的成员同样都是过期成员。
 	// 返回 {清除数量, 剩余成员数}，Go 侧据剩余数决定索引 member 去留，无需再回读槽位。
 	startupCleanupSlotScript = redis.NewScript(`
 		local key = KEYS[1]
 		local activePrefix = ARGV[1]
 		local slotTTL = tonumber(ARGV[2])
-		local removed = 0
-		local members = redis.call('ZRANGE', key, 0, -1)
-		for _, member in ipairs(members) do
-			if string.sub(member, 1, string.len(activePrefix)) ~= activePrefix then
-				removed = removed + redis.call('ZREM', key, member)
-			end
-		end
+		local timeResult = redis.call('TIME')
+		local now = tonumber(timeResult[1])
+		local expireBefore = now - slotTTL
+		local removed = redis.call('ZREMRANGEBYSCORE', key, '-inf', expireBefore)
 		local remaining = redis.call('ZCARD', key)
 		if remaining == 0 then
 			redis.call('DEL', key)

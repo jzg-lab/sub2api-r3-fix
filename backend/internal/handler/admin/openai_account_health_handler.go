@@ -86,3 +86,20 @@ func (h *OpenAIProbeHealthHandler) TriggerProbeNow(c *gin.Context) {
 	}
 	response.Success(c, result)
 }
+
+// ReenableAccount POST /api/v1/admin/openai/accounts/:id/reenable
+// 手动启用判死号（r17x 选项A）：清标签 → qualification 1 针结业 → 上岗。
+// 落 audit_logs（审计中间件自动记录 POST 变更类请求）。
+func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	result, err := h.runner.ReenableOpenAIAccount(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}

@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
@@ -39,6 +41,16 @@ const (
 	validatedHostTTL           = 30 * time.Second // DNS Rebinding 校验缓存 TTL
 )
 
+// 共享客户端池上限与回收（r17x G 项）：键含 ProxyURL，代理编辑/轮换会持续产生
+// 新键，旧实现只增不减。这里给出两条回收路径：超过上限按 LRU 驱逐最久未用；
+// 空闲超过 TTL 的条目在 GetClient 时机会式清扫。驱逐只关闭 idle 连接并从池中
+// 移除，调用方已持有的 *http.Client 仍可继续使用（in-flight 请求不受影响）。
+const (
+	maxSharedClients     = 256              // 池内客户端条目上限（LRU 驱逐）
+	sharedClientIdleTTL  = 30 * time.Minute // 条目空闲回收阈值
+	sharedClientSweepGap = 5 * time.Minute  // 机会式清扫的最小间隔
+)
+
 // Options 定义共享 HTTP 客户端的构建参数
 type Options struct {
 	ProxyURL              string        // 代理 URL（支持 http/https/socks5/socks5h）
@@ -54,39 +66,130 @@ type Options struct {
 	MaxConnsPerHost     int // 每主机最大连接数（默认 0 无限制）
 }
 
-// sharedClients 存储按配置参数缓存的 http.Client 实例
-var sharedClients sync.Map
+// sharedClientEntry 是池内条目：client 供复用，baseTransport 供驱逐时关闭
+// idle 连接（servertiming 包装层不透传 CloseIdleConnections，必须留原始引用）。
+type sharedClientEntry struct {
+	client        *http.Client
+	baseTransport *http.Transport
+	lastUsed      atomic.Int64 // unix nano
+}
+
+// clientPool 带上限与空闲回收的共享客户端池。Get 为热路径，读写都走
+// RWMutex；条目数与清扫用一把锁内的简单 map 实现，规模（上限 256）下
+// 开销可忽略。
+type clientPool struct {
+	mu        sync.RWMutex
+	entries   map[string]*sharedClientEntry
+	lastSwept time.Time
+}
+
+func newClientPool() *clientPool {
+	return &clientPool{entries: make(map[string]*sharedClientEntry)}
+}
+
+func (p *clientPool) get(key string) *http.Client {
+	p.mu.RLock()
+	entry, ok := p.entries[key]
+	p.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	entry.lastUsed.Store(time.Now().UnixNano())
+	return entry.client
+}
+
+func (p *clientPool) getOrBuild(key string, build func() (*http.Client, *http.Transport, error)) (*http.Client, error) {
+	if client := p.get(key); client != nil {
+		return client, nil
+	}
+	client, baseTransport, err := build()
+	if err != nil {
+		return nil, err
+	}
+	entry := &sharedClientEntry{client: client, baseTransport: baseTransport}
+	entry.lastUsed.Store(time.Now().UnixNano())
+	p.mu.Lock()
+	p.entries[key] = entry
+	overflow := len(p.entries) - maxSharedClients
+	if overflow > 0 {
+		p.evictLRULocked(overflow)
+	}
+	p.mu.Unlock()
+	return client, nil
+}
+
+// evictLRULocked 收缩池到上限内。驱逐是尽力而为：in-flight 请求所在的
+// client 仍被调用方持有，这里只关 idle 连接 + 移出池。sort.Slice 在锁内
+// 执行，但只在溢出时发生（频率 = 键基数变化率，不是请求率）。
+func (p *clientPool) evictLRULocked(n int) {
+	keys := make([]string, 0, len(p.entries))
+	for k := range p.entries {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return p.entries[keys[i]].lastUsed.Load() < p.entries[keys[j]].lastUsed.Load()
+	})
+	if n > len(keys) {
+		n = len(keys)
+	}
+	for _, key := range keys[:n] {
+		entry := p.entries[key]
+		delete(p.entries, key)
+		if entry != nil && entry.baseTransport != nil {
+			entry.baseTransport.CloseIdleConnections()
+		}
+	}
+}
+
+// sweepIdleLocked 清扫空闲过期的条目（调用方持写锁）。驱逐语义同 LRU：
+// 只关 idle 连接 + 移出池，调用方已持有的 client 继续可用。
+func (p *clientPool) sweepIdleLocked(now time.Time) {
+	for key, entry := range p.entries {
+		if now.Sub(time.Unix(0, entry.lastUsed.Load())) > sharedClientIdleTTL {
+			delete(p.entries, key)
+			if entry.baseTransport != nil {
+				entry.baseTransport.CloseIdleConnections()
+			}
+		}
+	}
+}
+
+var sharedClients = newClientPool()
 
 // 允许测试替换校验函数，生产默认指向真实实现。
 var validateResolvedIP = urlvalidator.ValidateResolvedIP
 
-// GetClient 返回共享的 HTTP 客户端实例
+// GetClient 返回共享的 HTTP 实例
 // 性能优化：相同配置复用同一客户端，避免重复创建 Transport
 // 安全说明：代理配置失败时直接返回错误，不会回退到直连，避免 IP 关联风险
 func GetClient(opts Options) (*http.Client, error) {
 	key := buildClientKey(opts)
-	if cached, ok := sharedClients.Load(key); ok {
-		if client, ok := cached.(*http.Client); ok {
-			return client, nil
-		}
+	if client := sharedClients.get(key); client != nil {
+		return client, nil
 	}
 
-	client, err := buildClient(opts)
+	client, err := sharedClients.getOrBuild(key, func() (*http.Client, *http.Transport, error) {
+		return buildClient(opts)
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	actual, _ := sharedClients.LoadOrStore(key, client)
-	if c, ok := actual.(*http.Client); ok {
-		return c, nil
+	// 机会式清扫：距上次清扫超过间隔才做，写锁内全量扫描（池上限 256，开销可忽略）。
+	sharedClients.mu.Lock()
+	if now := time.Now(); now.Sub(sharedClients.lastSwept) > sharedClientSweepGap {
+		sharedClients.sweepIdleLocked(now)
+		sharedClients.lastSwept = now
 	}
+	sharedClients.mu.Unlock()
+
 	return client, nil
 }
 
-func buildClient(opts Options) (*http.Client, error) {
+func buildClient(opts Options) (*http.Client, *http.Transport, error) {
 	transport, err := buildTransport(opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var rt http.RoundTripper = transport
@@ -97,7 +200,7 @@ func buildClient(opts Options) (*http.Client, error) {
 	return &http.Client{
 		Transport: rt,
 		Timeout:   opts.Timeout,
-	}, nil
+	}, transport, nil
 }
 
 func buildTransport(opts Options) (*http.Transport, error) {

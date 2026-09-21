@@ -235,6 +235,11 @@ type ConcurrencyService struct {
 	accountLoadCacheMu  sync.RWMutex
 	accountLoadCache    map[string]cachedAccountLoadBatch
 	accountLoadGroup    singleflight.Group
+
+	// slot cleanup worker 的停止通道（r17x I 项）：worker 原先
+	// for range ticker.C 永不退出，进程关闭时 goroutine 泄漏。
+	slotStopMu sync.Mutex
+	slotStopCh chan struct{}
 }
 
 type cachedAccountLoadBatch struct {
@@ -736,15 +741,43 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 		}
 	}
 
+	slotStopCh := make(chan struct{})
+	s.slotStopMu.Lock()
+	// 重复启动时先停旧 worker,与 Stop 的语义保持一致(先关旧通道再换新)。
+	if s.slotStopCh != nil {
+		close(s.slotStopCh)
+	}
+	s.slotStopCh = slotStopCh
+	s.slotStopMu.Unlock()
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		runCleanup()
-		for range ticker.C {
-			runCleanup()
+		for {
+			select {
+			case <-slotStopCh:
+				return
+			case <-ticker.C:
+				runCleanup()
+			}
 		}
 	}()
+}
+
+// StopSlotCleanupWorker 停止后台 slot cleanup worker（r17x I 项）。
+// 幂等;未启动过时是 no-op。
+func (s *ConcurrencyService) StopSlotCleanupWorker() {
+	if s == nil {
+		return
+	}
+	s.slotStopMu.Lock()
+	defer s.slotStopMu.Unlock()
+	if s.slotStopCh != nil {
+		close(s.slotStopCh)
+		s.slotStopCh = nil
+	}
 }
 
 // GetAccountConcurrencyBatch gets current concurrency counts for multiple accounts.
