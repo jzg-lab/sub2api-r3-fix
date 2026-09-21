@@ -461,6 +461,10 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.GET("/accounts/:id/quota", h.Admin.OpenAIOAuth.QueryQuota)
 		openai.POST("/accounts/:id/quota/refresh", h.Admin.OpenAIOAuth.RefreshQuota)
 		openai.POST("/accounts/:id/reset-quota", h.Admin.OpenAIOAuth.ResetQuota)
+		// 相位A（2026-09-21）：账号健康标签 + 主动检测。
+		openai.GET("/accounts/health", h.Admin.OpenAIProbeHealth.ListAccountHealth)
+		openai.GET("/accounts/:id/health", h.Admin.OpenAIProbeHealth.GetAccountHealth)
+		openai.POST("/accounts/:id/probe-now", h.Admin.OpenAIProbeHealth.TriggerProbeNow)
 	}
 }
 

@@ -137,7 +137,24 @@ func (s *openAIProbeStaging) SetSchedulable(_ context.Context, id int64, value b
 		qualifiedProxyID, qualified := OpenAIOAuthQualifiedProxyID(s.account.Extra)
 		if qualified {
 			if s.account.ProxyID == nil || qualifiedProxyID != *s.account.ProxyID {
-				return ErrOpenAIOAuthProxyMismatch
+				// 换票主线（r17u）：合格戳与现桶不一致时，若本 mutation 的
+				// 结果链证明探针已在现桶打出完整健康针（qualification-pass
+				// 级：传输OK+200+答对+rt 达标），视为「运营迁桶后现桶复检
+				// 合格」——放行并把合格戳随迁到现桶（复用 CompleteQualification
+				// 落账路径），而非 409 卡死恢复（生产实证：2026-09-21 动态
+				// 桶 332 恢复针被 409 回滚，332 白打）。无健康证据仍拒。
+				requalified := false
+				for _, result := range s.mutation.Results {
+					if result.IsQualificationPass() &&
+						sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) {
+						requalified = true
+						break
+					}
+				}
+				if !requalified {
+					return ErrOpenAIOAuthProxyMismatch
+				}
+				s.mutation.CompleteQualification = true
 			}
 		} else {
 			if _, exists := s.account.Extra[OpenAIOAuthQualifiedProxyExtraKey]; exists {
@@ -277,6 +294,35 @@ func (s *openAIProbeStaging) CountOpenAIDowngradeEvents(ctx context.Context, id 
 		}
 	}
 	return count, nil
+}
+
+// 票接口直通（r17u）：stagedRunner 把 runner.store 换成 staging 后，probe()
+// 的 `r.store.(OpenAICodexTicketStore)` 断言在 staging 上失败 → 采票静默
+// 跳过（生产实证：2026-09-21 动态桶 332 针多根，票表恒 0 行零日志）。
+// 票是顺带观察哨，不参与 staging 事务——直通底层真 store，主判定回滚
+// 不拖累票（采到的 332 票不因探针 commit 409 而丢）。
+func (s *openAIProbeStaging) UpsertOpenAICodexTicket(ctx context.Context, ticket *OpenAICodexTicket) error {
+	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
+	if !ok {
+		return nil
+	}
+	return ts.UpsertOpenAICodexTicket(ctx, ticket)
+}
+
+func (s *openAIProbeStaging) GetOpenAICodexTicket(ctx context.Context, accountID int64, model string) (*OpenAICodexTicket, error) {
+	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
+	if !ok {
+		return nil, nil
+	}
+	return ts.GetOpenAICodexTicket(ctx, accountID, model)
+}
+
+func (s *openAIProbeStaging) DeleteExpiredOpenAICodexTickets(ctx context.Context, now time.Time) (int64, error) {
+	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
+	if !ok {
+		return 0, nil
+	}
+	return ts.DeleteExpiredOpenAICodexTickets(ctx, now)
 }
 
 func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *OpenAIDowngradeProbeRunner {

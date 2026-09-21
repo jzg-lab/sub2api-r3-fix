@@ -610,3 +610,57 @@ func TestOpenAIProbeAtomicCommitRetriesOnceAfterNeutralGenerationBump(t *testing
 		require.Equal(t, 1, *probeRuns)
 	})
 }
+
+// r17u 回归：合格戳与现桶不一致（运营迁桶后）时，恢复路径不再被
+// OPENAI_OAUTH_PROXY_MISMATCH 409 卡死——现桶上有完整健康针即放行并
+// 把合格戳随迁到现桶；无健康证据仍拒。
+func TestOpenAIProbeStagingMismatchRequalifiedByCurrentBucketHealth(t *testing.T) {
+	now := time.Now()
+	currentProxy := int64(11)
+	rt := 1800
+	account := &Account{
+		ID: 1116, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, ProxyID: &currentProxy, UpdatedAt: now,
+		Extra: map[string]any{
+			OpenAIOAuthQualifiedProxyExtraKey: float64(6),
+		},
+	}
+	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
+	stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{AccountID: 1116})
+	stage.mutation.Results = []OpenAIDowngradeProbeResult{{
+		AccountID: 1116, ProxyID: &currentProxy, HTTPStatus: http.StatusOK,
+		TransportOK: true, AnswerCorrect: true, ReasoningTokens: &rt,
+	}}
+	require.NoError(t, stage.SetSchedulable(context.Background(), 1116, true))
+	require.True(t, stage.mutation.CompleteQualification, "healthy pass on current bucket must requalify the stamp")
+	require.NotNil(t, stage.mutation.Schedulable)
+	require.True(t, *stage.mutation.Schedulable)
+
+	// 无健康证据（只有失败结果）→ 仍 409。
+	stage2Account := &Account{
+		ID: 1116, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, ProxyID: &currentProxy, UpdatedAt: now,
+		Extra: map[string]any{
+			OpenAIOAuthQualifiedProxyExtraKey: float64(6),
+		},
+	}
+	stage2 := newOpenAIProbeStaging(runner, stage2Account, &OpenAIDowngradeProbeState{AccountID: 1116})
+	stage2.mutation.Results = []OpenAIDowngradeProbeResult{{
+		AccountID: 1116, ProxyID: &currentProxy, HTTPStatus: http.StatusOK,
+		TransportOK: true, AnswerCorrect: false, ReasoningTokens: &rt,
+	}}
+	require.ErrorIs(t, stage2.SetSchedulable(context.Background(), 1116, true), ErrOpenAIOAuthProxyMismatch)
+	require.False(t, stage2.mutation.CompleteQualification)
+}
+
+// r17u 回归：stagedRunner 采票直通——staging 必须实现 OpenAICodexTicketStore
+// （生产实证：断言失败 → 动态桶 332 针多根票表恒空零日志）。
+func TestOpenAIProbeStagingImplementsTicketStore(t *testing.T) {
+	var _ OpenAICodexTicketStore = (*openAIProbeStaging)(nil)
+	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
+	stage := newOpenAIProbeStaging(runner, &Account{ID: 1}, &OpenAIDowngradeProbeState{AccountID: 1})
+	staged := runner.stagedRunner(stage)
+	ts, ok := staged.store.(OpenAICodexTicketStore)
+	require.True(t, ok, "staged runner store must satisfy ticket store for probe-side harvest")
+	_ = ts
+}

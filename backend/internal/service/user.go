@@ -64,6 +64,10 @@ type User struct {
 	// 避免每请求查 DB。字段不持久化到数据库。
 	UserGroupRPMOverride *int
 
+	// UserGroupRPMOverrideChecked snapshot 已确认过 (user, group) override 的
+	// 存在与否（含"确认无"）。true 时 checkRPM 对 nil override 不再回源 DB。
+	UserGroupRPMOverrideChecked bool
+
 	APIKeys       []APIKey
 	Subscriptions []UserSubscription
 }

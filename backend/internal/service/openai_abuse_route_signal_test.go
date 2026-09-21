@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -347,4 +348,45 @@ func TestProbeDegradedWithoutTurnStateStillNeedsTwoStrikes(t *testing.T) {
 	require.Equal(t, 1, state.ConsecutiveFailures)
 	require.Empty(t, repo.schedulableCalls)
 	require.Empty(t, store.eventTypes)
+}
+
+// TestProbeDualSignalQualificationFirstStrikeGetsGracePeriod：qualification
+// 模式不注入双信号熔断（2026-09-21 裁定，1115/1116 案）：新号无历史基线，
+// 首针 356+答错可能是 IP 级暂态——连败走自然节奏，认证失败走既有
+// qualification_failed 判死分支（2 连败），不与双信号叠加一针判死。
+func TestProbeDualSignalQualificationFirstStrikeGetsGracePeriod(t *testing.T) {
+	const accountID = int64(91009)
+	proxyID := int64(1)
+	account := &Account{
+		ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, ProxyID: &proxyID,
+	}
+	store := &downgradeProbeStoreStub{}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	now := time.Date(2026, 9, 21, 0, 57, 0, 0, time.UTC)
+	runner.now = func() time.Time { return now }
+	runner.nextDelay = func() time.Duration { return time.Hour }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		// 1115 首针实况：200/答错/rt670/356。
+		return OpenAIDowngradeProbeResult{
+			TransportOK: true, AnswerCorrect: false,
+			ReasoningTokens: downgradeProbeIntPtr(670),
+			TurnStateLen:    356,
+			HTTPStatus:      http.StatusOK,
+		}
+	}
+	state := &OpenAIDowngradeProbeState{
+		AccountID: accountID, State: OpenAIDowngradeStateOnDuty,
+		ProbeMode: "qualification", CurrentProxyID: &proxyID,
+		OriginalProxyID: &proxyID, NextProbeAt: now,
+	}
+
+	require.NoError(t, runner.processState(context.Background(), state, now))
+	require.Equal(t, 1, state.ConsecutiveFailures,
+		"qualification first degraded strike must count naturally, not be pushed to circuit threshold")
+	require.NotEqual(t, OpenAIDowngradeStatePendingReplace, state.State,
+		"qualification must not be judged dead on a single dual-signal strike")
+	require.Contains(t, store.eventTypes, OpenAIDowngradeEventTurnStateDegraded,
+		"turn_state_degraded event must still be recorded (evidence preserved)")
 }

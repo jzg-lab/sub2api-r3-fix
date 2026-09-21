@@ -1006,11 +1006,16 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 			return err
 		}
 	}
-	dualSignalCircuit := turnStateDegraded && result.IsDegraded()
+	dualSignalCircuit := turnStateDegraded && result.IsDegraded() &&
+		state.ProbeMode != "qualification"
 	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
 	if dualSignalCircuit && !transition.Circuit && state.State == OpenAIDowngradeStateOnDuty {
 		// 首针即双信号：把连败计数推到熔断阈值，复用既有熔断路径（事件、
 		// 摘调度、冷却排期全部同款），不另起一套摘除逻辑。
+		// qualification 模式不注入（2026-09-21 裁定，1115/1116 案）：新号
+		// 无历史基线，首针即 356+答错可能是 IP 级暂态——连败走自然节奏
+		// （2 连败才熔断），认证失败也走 qualification_failed 既有判死分支，
+		// 不与双信号叠加。已上岗老号的降智首针照旧单针熔断。
 		state.ConsecutiveFailures = 2
 		transition = ApplyOpenAIDowngradeProbeResult(*state, result, now)
 	}
@@ -1719,10 +1724,15 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		return result
 	}
 	var proxyURL string
+	var bucketProxy *Proxy
 	if r.proxyRepo != nil {
 		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
+		if err == nil && r.proxyRepo != nil {
+			bucketProxy, _ = r.proxyRepo.GetByID(ctx, *account.ProxyID)
+		}
 	} else {
 		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
+		bucketProxy = account.Proxy
 	}
 	if err != nil {
 		// 出口硬闸：解析不出桶代理就不发探针。直连会把家用 IP 暴露给
@@ -1820,6 +1830,20 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 			"status_292", status292,
 			"current_turn_state_len", turnStateLen,
 			"codex_turn_state_len", codexTurnStateLen)
+	}
+	// 相位B（2026-09-21）：探针顺带采票——响应头本带 x-codex-turn-state，
+	// 零新增流量形态。仅 200 且长度过白名单（292/332 双口径）才入库；
+	// 任何失败只记日志，绝不影响探针主判定。采的是账号当前绑定的业务
+	// 出口上的票，出口指纹天然对齐（注入侧同指纹校验）。
+	if status == http.StatusOK {
+		if ticketStore, ok := r.store.(OpenAICodexTicketStore); ok {
+			harvestMode := OpenAICodexTicketHarvestProbe
+			if isOpenAIDynamicProxyBucket(bucketProxy) {
+				harvestMode = OpenAICodexTicketHarvestDynamic
+			}
+			HarvestOpenAICodexTicket(ctx, ticketStore, account.ID, account.ProxyID,
+				probeModel, extractOpenAICodexTurnState(respHeader), harvestMode, time.Now())
+		}
 	}
 	slog.Info("openai_probe_codex_turn_state_len",
 		"account_id", account.ID,

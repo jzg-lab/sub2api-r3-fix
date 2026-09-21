@@ -218,10 +218,37 @@ export default {
         groups: 'Groups',
         usageWindows: 'Usage Windows',
         proxy: 'Proxy',
+        health: 'Health',
         lastUsed: 'Last Used',
         createdAt: 'Created',
         expiresAt: 'Expires At',
         actions: 'Actions'
+      },
+      health: {
+        labels: {
+          normal: 'Normal',
+          review: 'Review',
+          problem: 'Problem',
+          rechecking: 'Rechecking',
+          rate_limited: 'Rate Limited',
+          paused: 'Paused',
+          enforcement: 'Enforcement',
+          qualification: 'Qualifying'
+        },
+        probeNow: 'Probe Now',
+        probeNowRunning: 'Probing…',
+        probeQueued: 'Queued — next scan runs it within ~1 minute',
+        probeDone: 'Probe finished — evidence row updated',
+        probeThrottled: 'This exit IP was probed recently — blocked to avoid a clusterable pattern. Retry in ~{minutes} minutes',
+        probeAlreadyFlying: 'A probe is already flying for this account',
+        probeFailed: 'Failed to trigger probe',
+        rateLimitedConfirm: 'Account {name} is currently rate-limited. A manual probe spends one upstream request and may hit another 429 deferral. Probe anyway?',
+        noProbe: 'No probe yet',
+        lastProbeTitle: 'Last probe: {time} · {model} · {mode}',
+        evidence: 'rt {rt} · {answer} · ts {ts}',
+        answerCorrect: 'correct',
+        answerWrong: 'wrong',
+        clickHint: 'Click a problem account for remediation actions'
       },
       schedulerScore: {
         baseShort: 'Base',

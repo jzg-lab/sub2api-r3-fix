@@ -276,19 +276,21 @@ func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.Schedul
 		return nil, false, nil
 	}
 
-	keys := make([]string, 0, len(ids))
-	lastUsedKeys := make([]string, 0, len(ids))
+	// meta 与 last_used 两键按 (meta, last_used) 交错排进同一批 MGET，
+	// 一轮取回（原来两轮 MGET 的 RTT 省一半）；下标偶数=meta，奇数=last_used。
+	interleaved := make([]string, 0, len(ids)*2)
 	for _, id := range ids {
-		keys = append(keys, schedulerAccountMetaKey(id))
-		lastUsedKeys = append(lastUsedKeys, schedulerLastUsedKey(id))
+		interleaved = append(interleaved, schedulerAccountMetaKey(id), schedulerLastUsedKey(id))
 	}
-	values, err := c.mgetChunked(ctx, keys)
+	combined, err := c.mgetChunked(ctx, interleaved)
 	if err != nil {
 		return nil, false, err
 	}
-	lastUsedValues, err := c.mgetChunked(ctx, lastUsedKeys)
-	if err != nil {
-		return nil, false, err
+	values := make([]any, len(ids))
+	lastUsedValues := make([]any, len(ids))
+	for i := 0; i < len(ids); i++ {
+		values[i] = combined[i*2]
+		lastUsedValues[i] = combined[i*2+1]
 	}
 
 	accounts := make([]*service.Account, 0, len(values))

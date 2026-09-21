@@ -182,6 +182,33 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 	return currentHash
 }
 
+// GenerateSessionHashAndSessionID 是 GenerateSessionHash + ExtractSessionID 的
+// 合并形态：两者都要先算 explicitOpenAIRequestSessionID（各扫一遍 header+body），
+// 调用方两个都要时用这一份，一次提取两个返回值。sessionID 返回的是
+// explicit 信号原值（与 ExtractSessionHash 语义一致），不做 Grok sticky 整形、
+// 也不做 content-seed 兜底——那两步只属于 sessionHash 侧。
+func (s *OpenAIGatewayService) GenerateSessionHashAndSessionID(c *gin.Context, body []byte) (string, string) {
+	if c == nil {
+		return "", ""
+	}
+
+	explicitID := explicitOpenAIRequestSessionID(c, body)
+
+	sessionID := explicitID
+	if sessionID == "" && len(body) > 0 {
+		sessionID = deriveOpenAIContentSessionSeed(body)
+	}
+	if sessionID != "" {
+		if isGrokRequestContext(c) {
+			sessionID = grokStickyAffinitySeed(sessionID, body)
+		}
+		currentHash, legacyHash := deriveOpenAISessionHashes(sessionID)
+		attachOpenAILegacySessionHashToGin(c, legacyHash)
+		return currentHash, explicitID
+	}
+	return "", explicitID
+}
+
 // grokStickyAffinitySeed scopes sticky routing by model without changing the
 // upstream prompt_cache_key written by applyGrokResponsesCacheIdentity.
 func grokStickyAffinitySeed(sessionID string, body []byte) string {
@@ -793,26 +820,29 @@ func openAICodexSnapshotStaleForPause(extra map[string]any, now time.Time) bool 
 // timestamp and falls back to codex_<window>_reset_after_seconds anchored at
 // codex_usage_updated_at, mirroring AccountUsageService's window-progress logic.
 func openAIQuotaWindowReset(extra map[string]any, window string, now time.Time) bool {
+	resetAt, ok := openAICodexWindowResetAt(extra, window)
+	return ok && !now.Before(resetAt)
+}
+
+// 绝对时间优先；相对倒计时必须锚定快照采样时间，不能随每次评分向后滑动。
+func openAICodexWindowResetAt(extra map[string]any, window string) (time.Time, bool) {
 	if len(extra) == 0 {
-		return false
+		return time.Time{}, false
 	}
 	if resetAtRaw, ok := extra["codex_"+window+"_reset_at"]; ok {
 		if resetAt, err := parseTime(fmt.Sprint(resetAtRaw)); err == nil {
-			return !now.Before(resetAt)
+			return resetAt, true
 		}
 	}
 	resetAfter := parseExtraInt(extra["codex_"+window+"_reset_after_seconds"])
 	if resetAfter <= 0 {
-		return false
+		return time.Time{}, false
 	}
-	base := now
-	if updatedRaw, ok := extra["codex_usage_updated_at"]; ok {
-		if updatedAt, err := parseTime(fmt.Sprint(updatedRaw)); err == nil {
-			base = updatedAt
-		}
+	updatedAt, err := parseTime(fmt.Sprint(extra["codex_usage_updated_at"]))
+	if err != nil {
+		return time.Time{}, false
 	}
-	resetAt := base.Add(time.Duration(resetAfter) * time.Second)
-	return !now.Before(resetAt)
+	return updatedAt.Add(time.Duration(resetAfter) * time.Second), true
 }
 
 func readOpenAIQuotaUsedPercent(extra map[string]any, window string) float64 {

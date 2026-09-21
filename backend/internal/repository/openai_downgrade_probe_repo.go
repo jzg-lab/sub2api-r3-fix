@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -196,6 +197,51 @@ func (r *openAIDowngradeProbeRepository) CanRunOpenAIDowngradeProbe(ctx context.
 	return allowed, err
 }
 
+// RecentProbeOnExitIP 同出口近窗合成探针判定（路径B 手动诊断针的节流闸，
+// 镜像 ListDue L128-146 两分支）：账号绑定的代理有 exit_ip → 查同 exit_ip
+// 近窗任意针；无 exit_ip → 查同 proxy 桶近窗任意针。探针结果表不含
+// account 维度过滤（同出口其它号的针也算节流信号）。
+func (r *openAIDowngradeProbeRepository) RecentProbeOnExitIP(
+	ctx context.Context,
+	accountID int64,
+	proxyID *int64,
+	since time.Time,
+) (bool, error) {
+	if proxyID == nil {
+		return false, nil
+	}
+	var hit bool
+	// 先取账号绑定代理的 exit_ip（无则按 proxy 桶查）。
+	var exitIP *string
+	err := scanSingleRow(ctx, r.db, `
+		SELECT p.exit_ip FROM proxies p WHERE p.id = $1
+	`, []any{*proxyID}, &exitIP)
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if exitIP != nil && strings.TrimSpace(*exitIP) != "" {
+		err = scanSingleRow(ctx, r.db, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM openai_downgrade_probe_results recent
+				JOIN proxies recent_proxy ON recent_proxy.id = recent.proxy_id
+				WHERE recent.created_at > $1
+					AND recent_proxy.exit_ip IS NOT NULL
+					AND TRIM(recent_proxy.exit_ip) = TRIM($2)
+			)
+		`, []any{since, strings.TrimSpace(*exitIP)}, &hit)
+		return hit, err
+	}
+	err = scanSingleRow(ctx, r.db, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM openai_downgrade_probe_results recent
+			WHERE recent.proxy_id = $1 AND recent.created_at > $2
+		)
+	`, []any{*proxyID, since}, &hit)
+	return hit, err
+}
+
 func (r *openAIDowngradeProbeRepository) SaveOpenAIDowngradeState(
 	ctx context.Context,
 	state *service.OpenAIDowngradeProbeState,
@@ -233,12 +279,13 @@ func (r *openAIDowngradeProbeRepository) RecordOpenAIDowngradeProbe(
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO openai_downgrade_probe_results
 			(account_id, proxy_id, mode, probe, transport_ok, answer_correct,
-			 reasoning_tokens, juice, latency_ms, http_status, error_message)
+			 reasoning_tokens, juice, latency_ms, http_status, error_message, turn_state_len)
 		VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'normal'), TRUE, $4, $5,
-			$6, $7, $8, NULLIF($9, 0), NULLIF($10, ''))
+			$6, $7, $8, NULLIF($9, 0), NULLIF($10, ''), $11)
 	`, result.AccountID, result.ProxyID, result.Mode, result.TransportOK,
 		result.AnswerCorrect, result.ReasoningTokens, result.Juice,
-		result.Latency.Milliseconds(), result.HTTPStatus, result.ErrorMessage)
+		result.Latency.Milliseconds(), result.HTTPStatus, result.ErrorMessage,
+		result.TurnStateLen)
 	return err
 }
 

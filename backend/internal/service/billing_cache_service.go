@@ -793,9 +793,13 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 	// ── 第一层：分组级检查（override 或 group.rpm_limit） ──
 	if group != nil {
 		// 解析 override：优先从 auth cache snapshot，nil 时回退 DB。
+		// snapshot 带 checked 标记（负缓存）时，nil 就是"已确认无 override"，
+		// 不再每请求回源；只有 unmarked 的 nil（snapshot 构建时查询失败/未查）才走 DB。
 		var override *int
 		if user.UserGroupRPMOverride != nil {
 			override = user.UserGroupRPMOverride
+		} else if user.UserGroupRPMOverrideChecked {
+			// 负缓存命中：snapshot 构建时已确认无 override。
 		} else if s.userGroupRateRepo != nil {
 			dbOverride, err := s.userGroupRateRepo.GetRPMOverrideByUserAndGroup(ctx, user.ID, group.ID)
 			if err != nil {

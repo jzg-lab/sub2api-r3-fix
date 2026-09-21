@@ -114,10 +114,37 @@ export default {
         groups: '分组',
         usageWindows: '用量窗口',
         proxy: '代理',
+        health: '健康',
         lastUsed: '最近使用',
         createdAt: '创建时间',
         expiresAt: '过期时间',
         actions: '操作'
+      },
+      health: {
+        labels: {
+          normal: '正常',
+          review: '待复核',
+          problem: '问题号',
+          rechecking: '复检中',
+          rate_limited: '限流中',
+          paused: '已暂停',
+          enforcement: '静置中',
+          qualification: '待认证'
+        },
+        probeNow: '主动检测',
+        probeNowRunning: '检测中…',
+        probeQueued: '已排队，下一拍执行（约 1 分钟内）',
+        probeDone: '检测完成，证据行已更新',
+        probeAlreadyFlying: '该账号已有探针在飞，无需重复触发',
+        probeThrottled: '同出口近期已有探针，为避免可聚类形态已拦截。约 {minutes} 分钟后再试',
+        probeFailed: '触发检测失败',
+        rateLimitedConfirm: '账号 {name} 正处于限流持有中。主动检测会烧一次上游请求额度，且结果可能继续吃 429 顺延。仍要检测吗？',
+        noProbe: '尚无探针记录',
+        lastProbeTitle: '最近一针：{time} · {model} · {mode}',
+        evidence: 'rt {rt} · {answer} · ts {ts}',
+        answerCorrect: '答对',
+        answerWrong: '答错',
+        clickHint: '问题号可点击查看处置入口'
       },
       schedulerScore: {
         baseShort: '普通',

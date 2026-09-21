@@ -502,13 +502,16 @@ type OpenAIGatewayService struct {
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 
-	openaiWSPoolOnce               sync.Once
-	openaiWSStateStoreOnce         sync.Once
-	openaiSchedulerOnce            sync.Once
-	openaiProxyStreamCircuitOnce   sync.Once
-	openaiWSPassthroughDialerOnce  sync.Once
-	openaiModelTransientOnce       sync.Once
-	agentIdentityTaskMu            sync.Mutex
+	openaiWSPoolOnce              sync.Once
+	openaiWSStateStoreOnce        sync.Once
+	openaiSchedulerOnce           sync.Once
+	openaiProxyStreamCircuitOnce  sync.Once
+	openaiWSPassthroughDialerOnce sync.Once
+	openaiModelTransientOnce      sync.Once
+	agentIdentityTaskMu           sync.Mutex
+	// codexTicketStore 相位B（2026-09-21）：x-codex-turn-state 活票注入，
+	// setter 注入（nil=功能关闭，FailOpen 原样透传）。
+	codexTicketStore               OpenAICodexTicketStore
 	openaiWSPool                   *openAIWSConnPool
 	openaiWSStateStore             OpenAIWSStateStore
 	openaiScheduler                OpenAIAccountScheduler
@@ -634,6 +637,14 @@ func NewOpenAIGatewayService(
 func (s *OpenAIGatewayService) SetTLSFingerprintProfileService(service *TLSFingerprintProfileService) {
 	if s != nil {
 		s.tlsFPProfileService = service
+	}
+}
+
+// SetCodexTicketStore 注入票表存取（相位B 换票打票体系）。nil 或未注入=
+// 活票注入整体关闭，转发链路行为与 r17n 完全一致。
+func (s *OpenAIGatewayService) SetCodexTicketStore(store OpenAICodexTicketStore) {
+	if s != nil {
+		s.codexTicketStore = store
 	}
 }
 

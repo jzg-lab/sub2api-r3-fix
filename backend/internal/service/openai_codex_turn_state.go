@@ -96,7 +96,20 @@ func extractOpenAICodexTurnState(upstream http.Header) string {
 	if upstream == nil {
 		return ""
 	}
-	return strings.TrimSpace(upstream.Get(openAICodexTurnStateHeader))
+	// 上游实测头键存在连字符/下划线两种形态（2026-09-21 生产差分定案：
+	// 长度观测的 EqualFold 归一化遍历命中 332，而 Get() 规范化键查找
+	// 空返→采票静默丢票、下行 relay 空）。与 openAIProbeCodexTurnStateLen
+	// 同款归一化遍历，双向容忍。
+	for name, values := range upstream {
+		if !strings.EqualFold(strings.ReplaceAll(name, "-", "_"), "x_codex_turn_state") {
+			continue
+		}
+		if len(values) > 0 {
+			return strings.TrimSpace(values[0])
+		}
+		break
+	}
+	return ""
 }
 
 // noteOpenAICodexTurnStateProvenance 记录（下游会话 → 铸造账号）。

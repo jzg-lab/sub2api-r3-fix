@@ -957,6 +957,64 @@ export async function resetOpenAIQuota(id: number): Promise<OpenAIQuotaResetResu
   return data
 }
 
+// =============================================================================
+// OpenAI 账号健康标签 + 主动检测（相位A，2026-09-21）
+// =============================================================================
+
+/** 最近一针证据行（人可自验标签没撒谎）。 */
+export interface OpenAIProbeLastEvidence {
+  at: string
+  mode: string
+  reasoning_tokens?: number | null
+  answer_correct: boolean
+  turn_state_len: number
+  http_status?: number
+  degraded: boolean
+}
+
+/** 单账号健康快照：探针状态机真值 + 最近一针实测，绝不读滞后的启用状态。 */
+export interface OpenAIAccountHealth {
+  account_id: number
+  state: string
+  probe_mode: string
+  schedulable: boolean
+  manual_paused: boolean
+  rate_limited: boolean
+  qualification: boolean
+  label: string
+  label_color: string
+  clickable: boolean
+  reason?: string
+  last_probe?: OpenAIProbeLastEvidence | null
+}
+
+/** 批量健康快照（账号列表页一次查齐）。 */
+export async function listOpenAIAccountHealth(ids: number[]): Promise<OpenAIAccountHealth[]> {
+  const { data } = await apiClient.get<OpenAIAccountHealth[]>('/admin/openai/accounts/health', {
+    params: { ids: ids.join(',') }
+  })
+  return data
+}
+
+export interface OpenAIProbeNowResult {
+  accepted: boolean
+  already_flying?: boolean
+  probed_now?: boolean
+  queued_at: string
+  retry_after_seconds?: number
+}
+
+/** 主动检测：手动针与调度针完全同构，连点去重（already_flying）。
+ * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。 */
+export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowResult> {
+  const { data } = await apiClient.post<OpenAIProbeNowResult>(
+    `/admin/openai/accounts/${id}/probe-now`,
+    undefined,
+    { timeout: 150000 }
+  )
+  return data
+}
+
 export interface SparkShadowCreatePayload {
   name?: string
   priority?: number
@@ -1094,6 +1152,8 @@ export const accountsAPI = {
   revertProxyFallback,
   refreshOpenAIQuota,
   resetOpenAIQuota,
+  listOpenAIAccountHealth,
+  triggerOpenAIProbeNow,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

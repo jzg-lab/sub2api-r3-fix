@@ -66,6 +66,13 @@ func openAIOAuthProxySnapshotURL(p *Proxy, proxyID *int64) (string, error) {
 	return p.URL(), nil
 }
 
+// isOpenAIDynamicProxyBucket 桶名约定判动态桶（换票主线：novproxy 轮换
+// 桶名 novproxy-dynamic-residential）。Proxy 实体无显式动态标志，桶名
+// 是面板可见、运营可控的唯一数据驱动判据；改名即失去动态票语义。
+func isOpenAIDynamicProxyBucket(p *Proxy) bool {
+	return p != nil && strings.Contains(strings.ToLower(p.Name), "dynamic")
+}
+
 // Guard the final network boundary, including plugin and pooled WS paths.
 // Snapshot validity does not attest the proxy's physical public IP.
 func validateOpenAIAccountProxyRoute(account *Account, route string) error {

@@ -300,6 +300,39 @@
               <span class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out" :class="[row.schedulable ? 'translate-x-4' : 'translate-x-0']" />
             </button>
           </template>
+          <template #cell-health="{ row }">
+            <div v-if="isOpenAIOAuthHealthAccount(row)" class="flex flex-col items-start gap-1">
+              <template v-if="accountHealthById[row.id]">
+                <button
+                  :class="['inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium', healthBadgeClass(accountHealthById[row.id])]"
+                  :title="healthBadgeTitle(accountHealthById[row.id])"
+                  @click="onHealthBadgeClick(accountHealthById[row.id])"
+                >
+                  <span :class="['h-1.5 w-1.5 rounded-full', healthDotClass(accountHealthById[row.id])]" />
+                  {{ t(`admin.accounts.health.labels.${accountHealthById[row.id].label}`) }}
+                </button>
+                <span
+                  v-if="accountHealthById[row.id].last_probe"
+                  class="max-w-[11rem] truncate font-mono text-[10px] leading-4 text-gray-500 dark:text-gray-400"
+                  :title="lastProbeTitle(accountHealthById[row.id])"
+                >
+                  {{ lastProbeEvidence(accountHealthById[row.id]) }}
+                </span>
+                <span v-else class="text-[10px] leading-4 text-gray-400 dark:text-dark-500">
+                  {{ t('admin.accounts.health.noProbe') }}
+                </span>
+              </template>
+              <span v-else-if="healthLoading" class="text-[10px] text-gray-400 dark:text-dark-500">…</span>
+              <button
+                class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
+                :disabled="probingAccounts.has(row.id)"
+                @click="handleProbeNow(row)"
+              >
+                {{ probingAccounts.has(row.id) ? t('admin.accounts.health.probeNowRunning') : t('admin.accounts.health.probeNow') }}
+              </button>
+            </div>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+          </template>
           <template #cell-today_stats="{ row }">
             <AccountTodayStatsCell
               :stats="todayStatsByAccountId[String(row.id)] ?? null"
@@ -476,6 +509,7 @@
     />
     <TempUnschedStatusModal :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
     <ConfirmDialog :show="showDeleteDialog" :title="t('admin.accounts.deleteAccount')" :message="t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })" :confirm-text="t('common.delete')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmDelete" @cancel="showDeleteDialog = false" />
+    <ConfirmDialog :show="showProbeConfirm" :title="t('admin.accounts.health.probeNow')" :message="t('admin.accounts.health.rateLimitedConfirm', { name: probingAcc?.name })" @confirm="confirmProbeNow" @cancel="showProbeConfirm = false" />
     <ConfirmDialog :show="showCreateShadowDialog" :title="t('admin.accounts.createSparkShadow')" :message="t('admin.accounts.createSparkShadowConfirm', { name: creatingShadowAcc?.name })" @confirm="confirmCreateSparkShadow" @cancel="showCreateShadowDialog = false" />
     <ConfirmDialog :show="showExportDataDialog" :title="t('admin.accounts.dataExport')" :message="t('admin.accounts.dataExportConfirmMessage')" :confirm-text="t('admin.accounts.dataExportConfirm')" :cancel-text="t('common.cancel')" @confirm="handleExportData" @cancel="showExportDataDialog = false">
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -540,6 +574,7 @@ import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
 import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
+import type { OpenAIAccountHealth } from '@/api/admin/accounts'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -645,6 +680,8 @@ const accountToolsDropdownStyle = computed(() => ({
   width: `${accountToolsDropdownPosition.width}px`
 }))
 const hiddenColumns = reactive<Set<string>>(new Set())
+// health 列默认显示(相位A 核心交付);老用户若已保存过列布局则尊重其布局,
+// 需手动在列选择器里开启。
 const DEFAULT_HIDDEN_COLUMNS = ['today_stats', 'proxy', 'notes', 'scheduler_score', 'rate_multiplier']
 const HIDDEN_COLUMNS_KEY = 'account-hidden-columns'
 // One-time migration: hide scheduler score for existing admins too, because showing it opt-ins to heavy backend scoring.
@@ -959,6 +996,157 @@ const refreshTodayStatsBatch = async () => {
   }
 }
 
+// =============================================================================
+// OpenAI 账号健康标签 + 主动检测（相位A，2026-09-21）
+// 数据哲学：标签=探针状态机真值+最近一针实测，绝不读滞后的启用状态
+// （9/20 批量 401 实战教训）。批量一次查齐；主动检测与调度针完全同构，
+// 连点去重（already_flying）；不重置任何配额状态。
+// =============================================================================
+const accountHealthById = ref<Record<number, OpenAIAccountHealth>>({})
+const healthLoading = ref(false)
+const healthReqSeq = ref(0)
+const probingAccounts = ref(new Set<number>())
+const showProbeConfirm = ref(false)
+const probingAcc = ref<Account | null>(null)
+
+const isOpenAIOAuthHealthAccount = (row: Account): boolean =>
+  row.platform === 'openai' && row.type === 'oauth'
+
+const refreshAccountHealthBatch = async () => {
+  if (hiddenColumns.has('health')) return
+  const openAIIDs = accounts.value
+    .filter(isOpenAIOAuthHealthAccount)
+    .map((account) => account.id)
+  const reqSeq = ++healthReqSeq.value
+  if (openAIIDs.length === 0) {
+    accountHealthById.value = {}
+    return
+  }
+  healthLoading.value = true
+  try {
+    const result = await adminAPI.accounts.listOpenAIAccountHealth(openAIIDs)
+    if (reqSeq !== healthReqSeq.value) return
+    const next: Record<number, OpenAIAccountHealth> = {}
+    for (const item of result) next[item.account_id] = item
+    accountHealthById.value = next
+  } catch (error) {
+    if (reqSeq !== healthReqSeq.value) return
+    console.error('Failed to load account health:', error)
+  } finally {
+    if (reqSeq === healthReqSeq.value) healthLoading.value = false
+  }
+}
+
+const healthBadgeClass = (health: OpenAIAccountHealth): string => {
+  switch (health.label_color) {
+    case 'green':
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    case 'orange':
+      return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300'
+    case 'red':
+      return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+    case 'blue':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+    case 'gray-red':
+      return 'bg-gray-100 text-red-700 dark:bg-dark-700 dark:text-red-400'
+    default:
+      return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
+  }
+}
+
+const healthDotClass = (health: OpenAIAccountHealth): string => {
+  switch (health.label_color) {
+    case 'green':
+      return 'bg-emerald-500'
+    case 'orange':
+      return 'bg-orange-500'
+    case 'red':
+      return 'bg-red-500'
+    case 'blue':
+      return 'bg-blue-500'
+    case 'gray-red':
+      return 'bg-red-400'
+    default:
+      return 'bg-gray-400'
+  }
+}
+
+const healthBadgeTitle = (health: OpenAIAccountHealth): string => {
+  const label = t(`admin.accounts.health.labels.${health.label}`)
+  if (!health.clickable) return label
+  return `${label} · ${t('admin.accounts.health.clickHint')}`
+}
+
+const lastProbeTitle = (health: OpenAIAccountHealth): string => {
+  const lp = health.last_probe
+  if (!lp) return ''
+  const model = lp.mode === 'sol_fallback' || lp.mode === 'sol_fallback_astra' ? 'gpt-5.6-sol' : 'gpt-6-astra'
+  return t('admin.accounts.health.lastProbeTitle', {
+    time: formatDateTime(lp.at),
+    model,
+    mode: lp.mode
+  })
+}
+
+const lastProbeEvidence = (health: OpenAIAccountHealth): string => {
+  const lp = health.last_probe
+  if (!lp) return ''
+  const rt = lp.reasoning_tokens != null ? String(lp.reasoning_tokens) : '—'
+  const ts = lp.turn_state_len > 0 ? String(lp.turn_state_len) : '—'
+  return t('admin.accounts.health.evidence', {
+    rt,
+    answer: lp.answer_correct
+      ? t('admin.accounts.health.answerCorrect')
+      : t('admin.accounts.health.answerWrong'),
+    ts
+  })
+}
+
+// 相位B 占位：问题号标签点击 → 打票处置入口（票表落地后接入）。
+const onHealthBadgeClick = (_health: OpenAIAccountHealth) => {}
+
+const handleProbeNow = async (row: Account) => {
+  if (probingAccounts.value.has(row.id)) return
+  // 限流号二次确认（spec 3.4）：会烧一次上游请求额度，且可能吃 429 顺延。
+  const health = accountHealthById.value[row.id]
+  if (health?.rate_limited) {
+    probingAcc.value = row
+    showProbeConfirm.value = true
+    return
+  }
+  await runProbeNow(row)
+}
+
+const confirmProbeNow = async () => {
+  showProbeConfirm.value = false
+  if (probingAcc.value) await runProbeNow(probingAcc.value)
+}
+
+const runProbeNow = async (row: Account) => {
+  if (probingAccounts.value.has(row.id)) return
+  probingAccounts.value = new Set(probingAccounts.value).add(row.id)
+  try {
+    const result = await adminAPI.accounts.triggerOpenAIProbeNow(row.id)
+    if (result.retry_after_seconds) {
+      appStore.showInfo(t('admin.accounts.health.probeThrottled', { minutes: Math.ceil(result.retry_after_seconds / 60) }))
+    } else if (result.already_flying) {
+      appStore.showInfo(t('admin.accounts.health.probeAlreadyFlying'))
+    } else if (result.probed_now) {
+      appStore.showSuccess(t('admin.accounts.health.probeDone'))
+    } else {
+      appStore.showSuccess(t('admin.accounts.health.probeQueued'))
+    }
+    // 同步诊断针当场落证据行，立即刷新可见；排队针约 1 分钟后自动刷新可见。
+    refreshAccountHealthBatch().catch(() => {})
+  } catch (error) {
+    appStore.showError(`${t('admin.accounts.health.probeFailed')}: ${extractApiErrorMessage(error)}`)
+  } finally {
+    const next = new Set(probingAccounts.value)
+    next.delete(row.id)
+    probingAccounts.value = next
+  }
+}
+
 const autoRefreshIntervalLabel = (sec: number) => {
   if (sec === 5) return t('admin.accounts.refreshInterval5s')
   if (sec === 10) return t('admin.accounts.refreshInterval10s')
@@ -1101,6 +1289,11 @@ const toggleColumn = (key: string) => {
       console.error('Failed to load account today stats after showing column:', error)
     })
   }
+  if (key === 'health' && wasHidden) {
+    refreshAccountHealthBatch().catch((error) => {
+      console.error('Failed to load account health after showing column:', error)
+    })
+  }
   if (key === 'scheduler_score') {
     // The server only returns scheduler scores when this column is visible, so reload the current page immediately.
     syncAccountListDerivedParams()
@@ -1221,6 +1414,9 @@ const load = async (options: AccountLoadOptions = {}) => {
     delete requestParams.lite
   }
   if (options.refreshTodayStats !== false) await refreshTodayStatsBatch()
+  refreshAccountHealthBatch().catch((error) => {
+    console.error('Failed to refresh account health:', error)
+  })
 }
 
 const reload = async () => {
@@ -1230,6 +1426,9 @@ const reload = async () => {
   pendingTodayStatsRefresh.value = false
   await baseReload()
   await refreshTodayStatsBatch()
+  refreshAccountHealthBatch().catch((error) => {
+    console.error('Failed to refresh account health:', error)
+  })
 }
 
 const buildUpstreamBillingRateFilters = () => {
@@ -1852,6 +2051,7 @@ const allColumns = computed(() => {
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
+    { key: 'health', label: t('admin.accounts.columns.health'), sortable: false },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
   if (!authStore.isSimpleMode) {

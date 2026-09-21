@@ -1394,6 +1394,14 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 客户端回带的 x-codex-turn-state 若已知由其他账号铸造（failover 换号），
 	// 剥离后再出站——异账号 blob 与本账号的（指纹收敛后）出站身份自相矛盾。
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
+	// 相位B（2026-09-21）：活票注入（保守版）——仅客户端已回带时，用本账号
+	// 本模型的活票（同业务出口、Fernet 内嵌时刻新鲜）替换回带值；无票/过期/
+	// 指纹不符一律原样放行（FailOpen）。未注入 ticketStore 时为彻底 no-op。
+	if s.codexTicketStore != nil {
+		if m, _, _ := extractOpenAIRequestMetaFromBody(body); m != "" {
+			maybeInjectOpenAICodexTicket(ctx, s.codexTicketStore, account, m, req.Header, time.Now())
+		}
+	}
 	if account.UsesOpenAICodexProtocol() {
 		compatMessagesBridge := isOpenAICompatMessagesBridgeContext(c) || isOpenAICompatMessagesBridgeBody(body)
 		// 清除客户端透传的 session 头，后续用隔离后的值重新设置，防止跨用户会话碰撞。

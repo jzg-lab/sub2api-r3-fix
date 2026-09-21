@@ -394,3 +394,34 @@ func TestBuildOpenAIWSHeaders_CarriesSessionBetaFeatures(t *testing.T) {
 	require.Empty(t, apiKeyHeaders.Get("x-codex-beta-features"),
 		"非 Codex 后端不注入")
 }
+
+// 2026-09-21 生产差分定案：上游头键存在连字符/下划线/小写多种形态，
+// Get() 规范化键查找对下划线形态 miss → 采票静默丢票、下行 relay 空。
+// 归一化遍历（ReplaceAll + EqualFold）三种形态都必须命中。
+func TestExtractOpenAICodexTurnState_HeaderKeyForms(t *testing.T) {
+	const value = "gAAAAAB-test-ticket-value"
+	forms := map[string]string{
+		"X-Codex-Turn-State":  "canonical",
+		"x-codex-turn-state":  "http2 lowercase",
+		"x_codex_turn_state":  "underscore (observed in production)",
+		"X_CODEX_TURN_STATE":  "underscore upper",
+	}
+	for key := range forms {
+		h := http.Header{}
+		h[key] = []string{value}
+		got := extractOpenAICodexTurnState(h)
+		require.Equal(t, value, got, "header key form %q must extract", key)
+	}
+}
+
+func TestExtractOpenAICodexTurnState_AbsentAndTrim(t *testing.T) {
+	require.Empty(t, extractOpenAICodexTurnState(nil))
+	require.Empty(t, extractOpenAICodexTurnState(http.Header{}))
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	require.Empty(t, extractOpenAICodexTurnState(h))
+	// 值两端空白要 Trim（与旧 Get+TrimSpace 行为一致）。
+	h2 := http.Header{}
+	h2["x_codex_turn_state"] = []string{"  padded  "}
+	require.Equal(t, "padded", extractOpenAICodexTurnState(h2))
+}

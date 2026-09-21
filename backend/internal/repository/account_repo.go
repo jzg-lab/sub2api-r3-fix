@@ -253,10 +253,44 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 	staged.AccountGroups = append([]service.AccountGroup(nil), groups...)
 	groupIDs := make([]int64, 0, len(groups))
 	if len(groups) > 0 {
+		// DB 侧 accounts_auto_bind_openai_pool_group AFTER INSERT 触发器会按
+		// plan_type 自动绑池组(K12/Team/Plus)。应用侧默认组(openai-default)经
+		// account_groups_prepare_pool_binding BEFORE 触发器改写成同一池组后,
+		// 与它撞 account_groups_pkey(生产实证: 2026-09-21 08:19 浏览器授权建号
+		// 500 duplicate key)。先读触发器已落的绑定,按触发器同款语义去重:
+		// ①请求组已被触发器绑定→跳过;②openai 账号插 openai-default 而池组
+		// 绑定已在场(BEFORE 触发器必然把 openai-default 改写成该池组)→跳过。
+		// 触发器落的池组 priority 带池语义(max+1),应用侧 i+1 不覆盖。
+		boundIDs, poolBound, err := openAIAccountTriggerBoundGroups(ctx, txClient, &staged)
+		if err != nil {
+			return err
+		}
+		defaultGroupIDs := make(map[int64]bool)
+		if staged.Platform == service.PlatformOpenAI && poolBound {
+			rewritable, gErr := txClient.Group.Query().
+				Where(dbgroup.Name("openai-default"), dbgroup.PlatformEQ(service.PlatformOpenAI)).
+				IDs(ctx)
+			if gErr != nil {
+				return gErr
+			}
+			for _, id := range rewritable {
+				defaultGroupIDs[id] = true
+			}
+		}
 		builders := make([]*dbent.AccountGroupCreate, 0, len(groups))
+		seen := make(map[int64]bool, len(groups))
 		for i := range staged.AccountGroups {
 			group := &staged.AccountGroups[i]
 			group.AccountID = staged.ID
+			if seen[group.GroupID] {
+				groupIDs = append(groupIDs, group.GroupID)
+				continue
+			}
+			seen[group.GroupID] = true
+			if boundIDs[group.GroupID] || defaultGroupIDs[group.GroupID] {
+				groupIDs = append(groupIDs, group.GroupID)
+				continue
+			}
 			groupIDs = append(groupIDs, group.GroupID)
 			builders = append(builders, txClient.AccountGroup.Create().
 				SetAccountID(staged.ID).
@@ -264,8 +298,10 @@ func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account
 				SetPriority(group.Priority),
 			)
 		}
-		if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
-			return err
+		if len(builders) > 0 {
+			if _, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	staged.GroupIDs = groupIDs
@@ -4165,4 +4201,60 @@ func (r *accountRepository) ListShadowsByParent(ctx context.Context, parentID in
 		out = append(out, accountEntityToService(m))
 	}
 	return out, nil
+}
+
+// isOpenAIPoolGroupName 判组名是否为 openai 托管池组(K12/Team/Plus)。与 DB 侧
+// sub2api_local_openai_pool_group_name / sub2api_local_auto_bind_openai_pool_group
+// 触发器的池组口径一致,用于建号绑组去重(触发器已绑池组时应用侧不再重放)。
+func isOpenAIPoolGroupName(name string) bool {
+	switch name {
+	case "K12", "Team", "Plus":
+		return true
+	}
+	return false
+}
+
+// openAIAccountTriggerBoundGroups 读取账号当前已落的 account_groups 绑定(建号
+// 事务内调用,捕获 AFTER INSERT 触发器自动绑的池组行)。返回组 id 集与「是否
+// 已绑 openai 托管池组」。池组名单与 DB 触发器同口径,见 isOpenAIPoolGroupName。
+func openAIAccountTriggerBoundGroups(ctx context.Context, client *dbent.Client, account *service.Account) (map[int64]bool, bool, error) {
+	if account == nil || account.ID <= 0 {
+		return nil, false, nil
+	}
+	rows, err := client.AccountGroup.Query().
+		Where(dbaccountgroup.AccountIDEQ(account.ID)).
+		All(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) == 0 {
+		return nil, false, nil
+	}
+	names, err := client.Group.Query().
+		Where(dbgroup.IDIn(groupIDsOf(rows)...)).
+		All(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	nameByID := make(map[int64]string, len(names))
+	for _, g := range names {
+		nameByID[g.ID] = g.Name
+	}
+	bound := make(map[int64]bool, len(rows))
+	poolBound := false
+	for _, row := range rows {
+		bound[row.GroupID] = true
+		if isOpenAIPoolGroupName(nameByID[row.GroupID]) {
+			poolBound = true
+		}
+	}
+	return bound, poolBound, nil
+}
+
+func groupIDsOf(rows []*dbent.AccountGroup) []int64 {
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.GroupID)
+	}
+	return ids
 }

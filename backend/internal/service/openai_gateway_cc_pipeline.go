@@ -32,14 +32,20 @@ import (
 // 调用方，属于有意保留的行为差异，不在此强行统一。
 
 // newUpstreamSSEScanner 构造读取上游 SSE 流的行扫描器，按配置放大单行上限。
-func (s *OpenAIGatewayService) newUpstreamSSEScanner(r io.Reader) *bufio.Scanner {
+// 初始 64KB 缓冲从 sseScannerBuf64KPool 借出（与 passthrough 路径同一池），
+// 返回的 release 必须在扫描器用尽后调用（defer 即可），负责把缓冲还池。
+// 行超过 64KB 时 scanner 会自扩并弃用借出的缓冲，release 对已弃用缓冲的
+// 归还仍然安全（sync.Pool 只要求不 double-put）。
+func (s *OpenAIGatewayService) newUpstreamSSEScanner(r io.Reader) (*bufio.Scanner, func()) {
 	scanner := bufio.NewScanner(r)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
-	return scanner
+	scanBuf := getSSEScannerBuf64K()
+	scanner.Buffer(scanBuf[:0], maxLineSize)
+	release := func() { putSSEScannerBuf64K(scanBuf) }
+	return scanner, release
 }
 
 // newStreamHeaderWriter 返回幂等的 SSE 响应头写入闭包：首次调用时透传过滤后的
@@ -262,7 +268,8 @@ func (s *OpenAIGatewayService) scanCCStream(
 ) ccStreamScanState {
 	var st ccStreamScanState
 
-	scanner := s.newUpstreamSSEScanner(resp.Body)
+	scanner, releaseScanBuf := s.newUpstreamSSEScanner(resp.Body)
+	defer releaseScanBuf()
 	for scanner.Scan() {
 		line := scanner.Text()
 		payload, ok := extractOpenAISSEDataLine(line)
