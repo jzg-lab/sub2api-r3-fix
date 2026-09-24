@@ -359,7 +359,12 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	candidate := *state
 	// A probe-owned authentication error can occur before a circuit opens.
 	// Requalify it on its current route instead of stranding an on_duty row.
-	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty {
+	// 打票线排除（2026-09-22 修正，1117 实证）：usage probe 的 401 会把
+	// 账号标 error，此分支把 probe_mode 抢改成 qualification，采票循环
+	// 被劫持。harvest 的 401 分诊（凭据失效→停打回原桶判死）在内层
+	// processState 的挂点执行，语义更强，不许被重认证覆盖。
+	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty &&
+		candidate.ProbeMode != "harvest" {
 		candidate.ConsecutiveSuccesses, candidate.ConsecutiveFailures = 0, 0
 		if candidate.ProbeMode == "sol_fallback" {
 			candidate.State = OpenAIDowngradeStateCircuitOpen
@@ -399,8 +404,51 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 		if runner.abuseSignal != nil {
 			openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(*runner.abuseSignal)
 		}
+		// committed && err != nil 只剩快照刷新失败（ErrOpenAIProbeSnapshotRefresh）：
+		// 提交已生效，错误照常上抛，让位分支不得介入。
+		return err
+	}
+	// 提交失败让位（2026-09-22 修正，1136 实证 740 针空打）：非 Stale 的
+	// 提交失败（409 保护闸/约束冲突等）此前原样上抛，state 不落库，
+	// next_probe_at 冻结在过去 → ListDue 每分钟捞出 → 每次都真发探针再
+	// 失败，形成「冻结+空打」死循环。真 store（非 staging）直接把该号
+	// 让位到 half-open 节奏（30 分钟起 spread），同 IP 队首不再被钉死；
+	// 日志照旧由调用方落（RunOnce process failed 行）。DB 瞬时错误同样
+	// 被让位吸收——一轮扫描晚 30 分钟自愈，远好于每分钟空打。
+	if yieldErr := r.yieldFailedCommit(ctx, state, now); yieldErr != nil {
+		// 让位本身失败（DB 不可用等）：保留原错误，让调用方看见。
+		return errors.Join(err, yieldErr)
 	}
 	return err
+}
+
+// yieldFailedCommit 提交失败后的让位重排：经真 store（r.store，非 staging）
+// 把 next_probe_at 推到 half-open 节奏。只动排期与计数器，不动
+// state/proxy——实质状态留待下轮在一致前提下重算。
+func (r *OpenAIDowngradeProbeRunner) yieldFailedCommit(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	now time.Time,
+) error {
+	if state == nil {
+		return nil
+	}
+	// 读回真库的当前行再让位：并发竞争者（他处已推进该号）不被覆盖。
+	fresh, err := r.store.GetOpenAIDowngradeState(ctx, state.AccountID)
+	if err != nil || fresh == nil {
+		return err
+	}
+	if !fresh.UpdatedAt.Equal(state.UpdatedAt) {
+		// 已被别处推进：让位交给那个赢家，不覆盖。
+		return nil
+	}
+	if !fresh.NextProbeAt.Before(now.Add(r.spread(openAIDowngradeHalfOpenInterval))) {
+		// 排期已在将来（含让位后重复失败到本分支）：不动。
+		return nil
+	}
+	fresh.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
+	fresh.UpdatedAt = now
+	return r.store.SaveOpenAIDowngradeState(ctx, fresh)
 }
 
 func (r *OpenAIDowngradeProbeRunner) armAbuseSignalAtomic(ctx context.Context, account *Account, state *OpenAIDowngradeProbeState, now time.Time) error {

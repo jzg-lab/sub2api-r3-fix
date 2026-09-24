@@ -103,3 +103,25 @@ func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 	}
 	response.Success(c, result)
 }
+
+// StartHarvest POST /api/v1/admin/openai/accounts/:id/harvest
+// 问题号转打票线（相位B 自动打票）：迁动态桶采票 → 采到回静态复检 →
+// 通过恢复上岗。落 audit_logs（审计中间件自动记录 POST 变更类请求）。
+func (h *OpenAIProbeHealthHandler) StartHarvest(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	state, err := h.runner.StartHarvestOpenAIAccount(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"account_id":    state.AccountID,
+		"probe_mode":    state.ProbeMode,
+		"next_probe_at": state.NextProbeAt,
+		"harvest_attempts": state.HarvestAttempts,
+	})
+}

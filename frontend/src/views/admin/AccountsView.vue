@@ -1006,6 +1006,8 @@ const accountHealthById = ref<Record<number, OpenAIAccountHealth>>({})
 const healthLoading = ref(false)
 const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
+// 打票线转线中的账号（防重复点击）。
+const harvestingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
 const probingAcc = ref<Account | null>(null)
 
@@ -1047,6 +1049,8 @@ const healthBadgeClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
     case 'blue':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+    case 'purple':
+      return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
     case 'gray-red':
       return 'bg-gray-100 text-red-700 dark:bg-dark-700 dark:text-red-400'
     default:
@@ -1064,6 +1068,8 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-500'
     case 'blue':
       return 'bg-blue-500'
+    case 'purple':
+      return 'bg-purple-500'
     case 'gray-red':
       return 'bg-red-400'
     default:
@@ -1093,17 +1099,45 @@ const lastProbeEvidence = (health: OpenAIAccountHealth): string => {
   if (!lp) return ''
   const rt = lp.reasoning_tokens != null ? String(lp.reasoning_tokens) : '—'
   const ts = lp.turn_state_len > 0 ? String(lp.turn_state_len) : '—'
+  let answer = t('admin.accounts.health.answerUnknown')
+  if (!lp.transport_ok) {
+    answer = t('admin.accounts.health.transportInterrupted')
+  } else if (lp.answer_correct === true) {
+    answer = t('admin.accounts.health.answerCorrect')
+  } else if (lp.answer_correct === false) {
+    answer = t('admin.accounts.health.answerWrong')
+  }
   return t('admin.accounts.health.evidence', {
+    age: formatRelativeTime(lp.at),
     rt,
-    answer: lp.answer_correct
-      ? t('admin.accounts.health.answerCorrect')
-      : t('admin.accounts.health.answerWrong'),
+    answer,
     ts
   })
 }
 
-// 相位B 占位：问题号标签点击 → 打票处置入口（票表落地后接入）。
-const onHealthBadgeClick = (_health: OpenAIAccountHealth) => {}
+// 相位B（2026-09-21）：问题号标签点击 → 转打票线（迁动态桶采票，
+// 采到回静态复检，复检通过恢复上岗）。
+const onHealthBadgeClick = (health: OpenAIAccountHealth) => {
+  if (!health.clickable) return
+  const row = accounts.value.find((a) => a.id === health.account_id)
+  if (!row) return
+  if (!confirm(t('admin.accounts.health.harvestConfirm', { name: row.name }))) return
+  harvestingAccount.value = row.id
+  adminAPI.accounts
+    .startOpenAIHarvest(row.id)
+    .then((result) => {
+      appStore.showSuccess(
+        t('admin.accounts.health.harvestStarted', { time: formatDateTime(result.next_probe_at) })
+      )
+      refreshAccountHealthBatch().catch(() => {})
+    })
+    .catch((error) => {
+      appStore.showError(`${t('admin.accounts.health.harvestFailed')}: ${extractApiErrorMessage(error)}`)
+    })
+    .finally(() => {
+      harvestingAccount.value = null
+    })
+}
 
 const handleProbeNow = async (row: Account) => {
   if (probingAccounts.value.has(row.id)) return

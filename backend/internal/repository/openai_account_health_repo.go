@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 // ListOpenAIProbeHealthSnapshots 批量健康快照聚合（相位A 健康标签数据源）。
@@ -32,6 +32,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			lp.at,
 			lp.mode,
 			lp.reasoning_tokens,
+			lp.transport_ok,
 			lp.answer_correct,
 			lp.turn_state_len,
 			lp.http_status
@@ -40,7 +41,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		LEFT JOIN openai_downgrade_probe_controls c ON c.account_id = a.id
 		LEFT JOIN LATERAL (
 			SELECT pr.created_at AS at, pr.mode, pr.reasoning_tokens,
-			       pr.answer_correct, pr.turn_state_len, pr.http_status
+			       pr.transport_ok, pr.answer_correct, pr.turn_state_len, pr.http_status
 			FROM openai_downgrade_probe_results pr
 			WHERE pr.account_id = a.id
 			ORDER BY pr.created_at DESC
@@ -62,13 +63,14 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		var lpAt *time.Time
 		var lpMode *string
 		var lpRT *int
+		var lpTransportOK *bool
 		var lpCorrect *bool
 		var lpLen *int
 		var lpStatus *int
 		if err := rows.Scan(
 			&snap.AccountID, &snap.State, &snap.ProbeMode, &snap.Schedulable,
 			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification,
-			&lpAt, &lpMode, &lpRT, &lpCorrect, &lpLen, &lpStatus,
+			&lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -77,14 +79,15 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			ev := &service.OpenAIProbeLastEvidence{
 				At:              *lpAt,
 				ReasoningTokens: lpRT,
+				AnswerCorrect:   lpCorrect,
 				TurnStateLen:    derefInt(lpLen),
 				HTTPStatus:      derefInt(lpStatus),
 			}
 			if lpMode != nil {
 				ev.Mode = *lpMode
 			}
-			if lpCorrect != nil {
-				ev.AnswerCorrect = *lpCorrect
+			if lpTransportOK != nil {
+				ev.TransportOK = *lpTransportOK
 			}
 			ev.Degraded = service.OpenAIProbeEvidenceDegraded(ev)
 			snap.LastProbe = ev

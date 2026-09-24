@@ -31,6 +31,157 @@ func seedLongProbeSchedule(t *testing.T, db *sql.DB, now time.Time, age time.Dur
 	require.NoError(t, err)
 }
 
+func seedInterruptedProbeWithSuccessfulTraffic(t *testing.T, db *sql.DB, now time.Time) {
+	t.Helper()
+	seedProbePostgres(t, db)
+	probeAt := now.Add(-10 * time.Minute)
+	_, err := db.Exec(`
+		UPDATE openai_downgrade_probe_states
+		SET last_probe_at=$1, next_probe_at=$2, updated_at=$1
+		WHERE account_id=7
+	`, probeAt, now.Add(90*time.Minute))
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO openai_downgrade_probe_results(
+			account_id, proxy_id, transport_ok, answer_correct, http_status,
+			error_message, created_at
+		) VALUES(7, 3, FALSE, NULL, 200, 'stream interrupted', $1)
+	`, probeAt)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO usage_logs(account_id, actual_cost, created_at)
+		VALUES(7, 0.01, $1)
+	`, probeAt.Add(time.Minute))
+	require.NoError(t, err)
+}
+
+func TestOpenAIInterruptedProbeRecheckArgumentsAndErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	repo := &openAIDowngradeProbeRepository{db: db}
+	ctx := context.Background()
+	now := time.Now()
+	_, err = repo.AccelerateOpenAIInterruptedProbeRechecks(ctx, now, 0)
+	require.Error(t, err)
+	_, err = repo.AccelerateOpenAIInterruptedProbeRechecks(ctx, time.Time{}, time.Minute)
+	require.Error(t, err)
+	failure := errors.New("write failed")
+	mock.ExpectExec("WITH candidates AS MATERIALIZED").WithArgs(now, float64(60)).
+		WillReturnError(failure)
+	count, err := repo.AccelerateOpenAIInterruptedProbeRechecks(ctx, now, time.Minute)
+	require.ErrorIs(t, err, failure)
+	require.Zero(t, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOpenAIInterruptedProbeRecheckPostgresAdoption(t *testing.T) {
+	db := newProbePostgres(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seedInterruptedProbeWithSuccessfulTraffic(t, db, now)
+	var accountBefore string
+	require.NoError(t, db.QueryRow("SELECT to_jsonb(a)::text FROM accounts a WHERE id=7").Scan(&accountBefore))
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	count, err := repo.AccelerateOpenAIInterruptedProbeRechecks(
+		context.Background(), now, time.Minute)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
+
+	state, err := repo.GetOpenAIDowngradeState(context.Background(), 7)
+	require.NoError(t, err)
+	require.True(t, state.NextProbeAt.Equal(now.Add(time.Minute)))
+	var accountAfter string
+	require.NoError(t, db.QueryRow("SELECT to_jsonb(a)::text FROM accounts a WHERE id=7").Scan(&accountAfter))
+	require.Equal(t, accountBefore, accountAfter, "recheck adoption must not change account state or routing")
+
+	var eventType, reason string
+	var previous, next time.Time
+	require.NoError(t, db.QueryRow(`
+		SELECT event_type, details->>'reason',
+			(details->>'previous_next_probe_at')::timestamptz,
+			(details->>'next_probe_at')::timestamptz
+		FROM openai_downgrade_probe_events WHERE account_id=7
+	`).Scan(&eventType, &reason, &previous, &next))
+	require.Equal(t, "real_traffic_recheck_armed", eventType)
+	require.Equal(t, "successful_real_traffic_after_interrupted_probe", reason)
+	require.True(t, previous.Equal(now.Add(90*time.Minute)))
+	require.True(t, next.Equal(state.NextProbeAt))
+
+	snapshot := probePostgresSnapshot(t, db)
+	count, err = repo.AccelerateOpenAIInterruptedProbeRechecks(
+		context.Background(), now.Add(10*time.Second), time.Minute)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Equal(t, snapshot, probePostgresSnapshot(t, db), "replay must not redraw or postpone the recheck")
+
+	due, err := repo.ListDueOpenAIDowngradeStates(context.Background(), state.NextProbeAt, 10)
+	require.NoError(t, err)
+	require.Len(t, due, 1, "the real due consumer must see the accelerated schedule")
+}
+
+func TestOpenAIInterruptedProbeRecheckPostgresEligibility(t *testing.T) {
+	for name, change := range map[string]string{
+		"no_traffic":        "DELETE FROM usage_logs",
+		"zero_cost":         "UPDATE usage_logs SET actual_cost=0",
+		"old_traffic":       "UPDATE usage_logs SET created_at=created_at-INTERVAL '20 minutes'",
+		"latest_completed":  "INSERT INTO openai_downgrade_probe_results(account_id,proxy_id,transport_ok,answer_correct,http_status) VALUES(7,3,TRUE,TRUE,200)",
+		"wrong_probe_route": "UPDATE openai_downgrade_probe_results SET proxy_id=4",
+		"new_account_route": "UPDATE accounts SET proxy_id=4",
+		"new_state_route":   "UPDATE openai_downgrade_probe_states SET current_proxy_id=4",
+		"manual_pause": `
+			UPDATE accounts SET schedulable=FALSE WHERE id=7;
+			INSERT INTO openai_downgrade_probe_controls(account_id,manual_paused)
+			VALUES(7,TRUE)
+		`,
+		"unschedulable":   "UPDATE accounts SET schedulable=FALSE",
+		"pending_replace": "UPDATE openai_downgrade_probe_states SET state='pending_replace'",
+		"qualification":   "UPDATE openai_downgrade_probe_states SET probe_mode='qualification'",
+		"disabled":        "UPDATE accounts SET status='disabled'",
+		"deleted":         "UPDATE accounts SET deleted_at=NOW()",
+		"expired":         "UPDATE accounts SET expires_at=NOW()-INTERVAL '1 minute'",
+		"shadow":          "UPDATE accounts SET parent_account_id=8",
+		"platform":        "UPDATE accounts SET platform='anthropic'",
+		"api_key":         "UPDATE accounts SET type='apikey'",
+		"already_soon":    "UPDATE openai_downgrade_probe_states SET next_probe_at=NOW()+INTERVAL '30 seconds'",
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := newProbePostgres(t)
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			seedInterruptedProbeWithSuccessfulTraffic(t, db, now)
+			_, err := db.Exec(change)
+			require.NoError(t, err)
+			before := probePostgresSnapshot(t, db)
+			repo := &openAIDowngradeProbeRepository{db: db}
+			count, err := repo.AccelerateOpenAIInterruptedProbeRechecks(
+				context.Background(), now, time.Minute)
+			require.NoError(t, err)
+			require.Zero(t, count)
+			require.Equal(t, before, probePostgresSnapshot(t, db))
+		})
+	}
+}
+
+func TestOpenAIInterruptedProbeRecheckPostgresRollback(t *testing.T) {
+	db := newProbePostgres(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seedInterruptedProbeWithSuccessfulTraffic(t, db, now)
+	_, err := db.Exec(`
+		CREATE FUNCTION reject_recheck_event() RETURNS trigger LANGUAGE plpgsql AS
+		$$ BEGIN RAISE EXCEPTION 'recheck event failed'; END $$;
+		CREATE TRIGGER reject_event BEFORE INSERT ON openai_downgrade_probe_events
+		FOR EACH ROW EXECUTE FUNCTION reject_recheck_event();
+	`)
+	require.NoError(t, err)
+	before := probePostgresSnapshot(t, db)
+	repo := &openAIDowngradeProbeRepository{db: db}
+	count, err := repo.AccelerateOpenAIInterruptedProbeRechecks(
+		context.Background(), now, time.Minute)
+	require.ErrorContains(t, err, "recheck event failed")
+	require.Zero(t, count)
+	require.Equal(t, before, probePostgresSnapshot(t, db))
+}
+
 func TestOpenAIProbeScheduleReconciliationArgumentsAndErrors(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

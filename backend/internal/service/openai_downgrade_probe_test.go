@@ -258,23 +258,38 @@ func (s *downgradeProbeStoreStub) ListOpenAIDowngradeAccountStats(context.Contex
 
 func downgradeProbeIntPtr(v int) *int { return &v }
 
-func TestApplyOpenAIDowngradeProbeResultRequiresTwoFailures(t *testing.T) {
-	state := OpenAIDowngradeProbeState{State: OpenAIDowngradeStateOnDuty}
+// 纯单针杀（2026-09-22 用户裁定，1143 弹跳形态实证）：normal 档任何一针
+// 降智证据当场熔断；qualification 新号线维持 2 连败（2026-09-21 裁定）。
+func TestApplyOpenAIDowngradeProbeResultSingleFailureCircuitsNormalMode(t *testing.T) {
+	// normal 档：首针降智即熔断。
+	state := OpenAIDowngradeProbeState{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal"}
 	failed := OpenAIDowngradeProbeResult{
 		TransportOK:     true,
 		AnswerCorrect:   false,
 		ReasoningTokens: downgradeProbeIntPtr(516),
 	}
+	single := ApplyOpenAIDowngradeProbeResult(state, failed, time.Now())
+	require.True(t, single.Circuit)
+	require.Equal(t, OpenAIDowngradeStateCircuitOpen, single.NextState)
+	require.Equal(t, OpenAIDowngradeEventCircuitOpen, single.EventType)
 
-	first := ApplyOpenAIDowngradeProbeResult(state, failed, time.Now())
-	require.False(t, first.Circuit)
-	require.Equal(t, OpenAIDowngradeStateOnDuty, first.NextState)
+	// qualification 新号线：首针失败不熔断（新号无历史基线，防 IP 级暂态误杀）。
+	qual := OpenAIDowngradeProbeState{State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification"}
+	firstQual := ApplyOpenAIDowngradeProbeResult(qual, failed, time.Now())
+	require.False(t, firstQual.Circuit)
+	require.Equal(t, OpenAIDowngradeStateOnDuty, firstQual.NextState)
 
-	state.ConsecutiveFailures = 1
-	second := ApplyOpenAIDowngradeProbeResult(state, failed, time.Now())
-	require.True(t, second.Circuit)
-	require.Equal(t, OpenAIDowngradeStateCircuitOpen, second.NextState)
-	require.Equal(t, OpenAIDowngradeEventCircuitOpen, second.EventType)
+	// qualification 2 连败仍判死（既有节奏不变）。
+	qual.ConsecutiveFailures = 1
+	secondQual := ApplyOpenAIDowngradeProbeResult(qual, failed, time.Now())
+	require.True(t, secondQual.Circuit)
+
+	// reprobe 档单针失败 → 判死（救不回的号快速进打票线）。
+	reprobe := OpenAIDowngradeProbeState{State: OpenAIDowngradeStateReprobe, ProbeMode: "normal"}
+	dead := ApplyOpenAIDowngradeProbeResult(reprobe, failed, time.Now())
+	require.True(t, dead.NeedsReplacement)
+	require.Equal(t, OpenAIDowngradeStatePendingReplace, dead.NextState)
+	require.Equal(t, OpenAIDowngradeEventReplaceRequired, dead.EventType)
 }
 
 func TestOpsServiceGetOpenAIDowngradeDashboardBuildsReadOnlySnapshot(t *testing.T) {
@@ -1639,15 +1654,15 @@ func TestOpenAIDowngradeProbeRejectsTerminalReplacementWithoutProxy(t *testing.T
 	}
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 1, State: OpenAIDowngradeStatePendingReplace,
+		ProbeMode: "normal",
 	}
 
-	// r17x 选项A（2026-09-21 用户裁定「判死即终态」）：判死号 processState
-	// 不再走 retryReplacement/beginReprobe（原实现无 proxy 时报错），改为
-	// 防御性让位——不探针、排远 7 天、零 probe 调用。救援唯一入口=
-	// ReenableOpenAIAccount（见 TestReenableOpenAIAccount_*）。
+	// 普通 pending_replace 不再走 retryReplacement/beginReprobe（原实现无
+	// proxy 时报错），而是防御性让位：不探针、排远 7 天、零 probe 调用。
+	// harvest 的显式救援例外由 TestPendingReplaceHarvestReachesProbePipeline 锁定。
 	require.NoError(t, runner.processState(context.Background(), state, time.Now()))
 	require.Zero(t, store.probeCalls)
-	require.True(t, state.NextProbeAt.After(time.Now().Add(6 * 24 * time.Hour)),
+	require.True(t, state.NextProbeAt.After(time.Now().Add(6*24*time.Hour)),
 		"判死号必须被排远(防御性让位),不是近刻重探")
 }
 

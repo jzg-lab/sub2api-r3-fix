@@ -443,6 +443,37 @@ export async function generateAuthUrl(
 }
 
 /**
+ * 授权浏览器直拉（方案A）：按授权会话弹出本机激活浏览器（带授权桶代理
+ * +授权链接+隔离配置）。后端由 SUB2API_AUTH_BROWSER_LAUNCHER 开门，未配置
+ * 时返回 503——前端提示改走手动 applet 路径。
+ */
+export async function launchAuthBrowser(
+  sessionId: string
+): Promise<{
+  launched: boolean
+  already_running: boolean
+  profile_tag: string
+  proxy_name: string
+  exit_ingress: string
+  auth_url: string
+  output: string
+}> {
+  const { data } = await apiClient.post<{
+    launched: boolean
+    already_running: boolean
+    profile_tag: string
+    proxy_name: string
+    exit_ingress: string
+    auth_url: string
+    output: string
+  }>('/admin/openai/launch-auth-browser', { session_id: sessionId }, {
+    // Allow the 5s preparation phase and 45s launcher deadline to return a result.
+    timeout: 60000
+  })
+  return data
+}
+
+/**
  * Exchange authorization code for tokens
  * @param endpoint - API endpoint path
  * @param exchangeData - Session ID, code, and optional proxy config
@@ -966,7 +997,8 @@ export interface OpenAIProbeLastEvidence {
   at: string
   mode: string
   reasoning_tokens?: number | null
-  answer_correct: boolean
+  transport_ok: boolean
+  answer_correct: boolean | null
   turn_state_len: number
   http_status?: number
   degraded: boolean
@@ -1011,6 +1043,23 @@ export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowR
     `/admin/openai/accounts/${id}/probe-now`,
     undefined,
     { timeout: 150000 }
+  )
+  return data
+}
+
+export interface OpenAIHarvestStartResult {
+  account_id: number
+  probe_mode: string
+  next_probe_at: string
+  harvest_attempts: number
+}
+
+/** 问题号转打票线（相位B）：迁动态桶采票循环，采到回静态复检。 */
+export async function startOpenAIHarvest(id: number): Promise<OpenAIHarvestStartResult> {
+  const { data } = await apiClient.post<OpenAIHarvestStartResult>(
+    `/admin/openai/accounts/${id}/harvest`,
+    undefined,
+    { timeout: 60000 }
   )
   return data
 }
@@ -1133,6 +1182,7 @@ export const accountsAPI = {
   syncUpstreamModels,
   syncUpstreamModelsPreview,
   generateAuthUrl,
+  launchAuthBrowser,
   exchangeCode,
   refreshOpenAIToken,
   batchCreate,
@@ -1154,6 +1204,7 @@ export const accountsAPI = {
   resetOpenAIQuota,
   listOpenAIAccountHealth,
   triggerOpenAIProbeNow,
+  startOpenAIHarvest,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

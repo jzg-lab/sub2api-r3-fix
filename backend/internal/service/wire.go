@@ -121,6 +121,20 @@ func ProvideOpenAIOAuthService(
 	return svc
 }
 
+// ProvideOpenAIAuthBrowserLauncher 授权浏览器直拉（方案A，2026-09-22）：
+// cfg.Gateway.AuthBrowserLauncher 为空 → 返回 nil（功能整体关闭）。
+func ProvideOpenAIAuthBrowserLauncher(
+	cfg *config.Config,
+	proxyRepo ProxyRepository,
+	authPendingIdentityService *AuthPendingIdentityService,
+) *OpenAIAuthBrowserLauncher {
+	return NewOpenAIAuthBrowserLauncher(
+		cfg,
+		NewPendingAuthOpenAIOAuthSessionStore(authPendingIdentityService),
+		proxyRepo,
+	)
+}
+
 func ProvideAccountService(accounts AccountRepository, groups GroupRepository, settings *SettingService) *AccountService {
 	svc := NewAccountService(accounts, groups)
 	svc.settings = settings

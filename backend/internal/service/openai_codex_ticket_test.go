@@ -95,14 +95,15 @@ func (s *codexTicketStoreStub) DeleteExpiredOpenAICodexTickets(_ context.Context
 }
 
 // TestHarvestOpenAICodexTicket 采集验收：健康长度+Fernet 时刻可解才入库；
-// 降级长度(356)拒收；坏票值拒收且不上抛。
+// 降级长度(356)拒收；坏票值拒收且不上抛；Cookie 对成套入库、空对降级。
 func TestHarvestOpenAICodexTicket(t *testing.T) {
 	store := &codexTicketStoreStub{}
 	now := time.Date(2026, 9, 21, 4, 0, 0, 0, time.UTC)
 	proxyID := int64(7)
 
 	healthy := buildCodexTicketValue(now.Add(-time.Minute), 332)
-	HarvestOpenAICodexTicket(context.Background(), store, 1115, &proxyID, "gpt-6-astra", healthy, OpenAICodexTicketHarvestProbe, now)
+	pair := "__cflb=cA; __oailb=oA"
+	HarvestOpenAICodexTicket(context.Background(), store, 1115, &proxyID, "gpt-6-astra", healthy, pair, OpenAICodexTicketHarvestProbe, now)
 	ticket := store.tickets[[2]string{"1115", "gpt-6-astra"}]
 	if ticket == nil {
 		t.Fatal("healthy 332 must be harvested")
@@ -110,16 +111,29 @@ func TestHarvestOpenAICodexTicket(t *testing.T) {
 	if ticket.ExitFingerprint != "proxy:7" {
 		t.Fatalf("exit fingerprint must bind proxy:7, got %s", ticket.ExitFingerprint)
 	}
+	if ticket.CookiePair != pair {
+		t.Fatalf("cookie pair must persist alongside the ticket, got %q", ticket.CookiePair)
+	}
 
 	degraded := buildCodexTicketValue(now.Add(-time.Minute), 356)
-	HarvestOpenAICodexTicket(context.Background(), store, 1116, &proxyID, "gpt-6-astra", degraded, OpenAICodexTicketHarvestProbe, now)
+	HarvestOpenAICodexTicket(context.Background(), store, 1116, &proxyID, "gpt-6-astra", degraded, pair, OpenAICodexTicketHarvestProbe, now)
 	if store.tickets[[2]string{"1116", "gpt-6-astra"}] != nil {
 		t.Fatal("degraded 356 must be rejected")
 	}
 
-	HarvestOpenAICodexTicket(context.Background(), store, 1117, &proxyID, "gpt-6-astra", "garbage!!", OpenAICodexTicketHarvestProbe, now)
+	HarvestOpenAICodexTicket(context.Background(), store, 1117, &proxyID, "gpt-6-astra", "garbage!!", pair, OpenAICodexTicketHarvestProbe, now)
 	if store.tickets[[2]string{"1117", "gpt-6-astra"}] != nil {
 		t.Fatal("malformed value must be rejected")
+	}
+
+	// 空对不阻断采票：票照入库，CookiePair 为空（注入侧自然降级）。
+	HarvestOpenAICodexTicket(context.Background(), store, 1118, &proxyID, "gpt-6-astra", healthy, "", OpenAICodexTicketHarvestProbe, now)
+	bare := store.tickets[[2]string{"1118", "gpt-6-astra"}]
+	if bare == nil {
+		t.Fatal("empty cookie pair must not block harvest")
+	}
+	if bare.CookiePair != "" {
+		t.Fatalf("empty pair must stay empty, got %q", bare.CookiePair)
 	}
 }
 
@@ -142,7 +156,7 @@ func TestMaybeInjectOpenAICodexTicket(t *testing.T) {
 
 	// 1) 未回带：不注入。
 	h := http.Header{}
-	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now)
+	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now, nil)
 	if h.Get(openAICodexTurnStateHeader) != "" {
 		t.Fatal("must not inject when client did not echo the header")
 	}
@@ -150,7 +164,7 @@ func TestMaybeInjectOpenAICodexTicket(t *testing.T) {
 	// 2) 已回带旧值：替换为活票。
 	h = http.Header{}
 	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
-	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now)
+	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now, nil)
 	if h.Get(openAICodexTurnStateHeader) != live {
 		t.Fatal("echoed stale value must be replaced with live ticket")
 	}
@@ -160,7 +174,7 @@ func TestMaybeInjectOpenAICodexTicket(t *testing.T) {
 	movedAccount := &Account{ID: 1115, ProxyID: &otherProxy}
 	h = http.Header{}
 	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
-	maybeInjectOpenAICodexTicket(context.Background(), store, movedAccount, "gpt-6-astra", h, now)
+	maybeInjectOpenAICodexTicket(context.Background(), store, movedAccount, "gpt-6-astra", h, now, nil)
 	if h.Get(openAICodexTurnStateHeader) != "client-echoed-old-value" {
 		t.Fatal("exit fingerprint mismatch must keep the echoed value (fail-open)")
 	}
@@ -177,9 +191,152 @@ func TestMaybeInjectOpenAICodexTicket(t *testing.T) {
 	}
 	h = http.Header{}
 	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
-	maybeInjectOpenAICodexTicket(context.Background(), staleStore, account, "gpt-6-astra", h, now)
+	maybeInjectOpenAICodexTicket(context.Background(), staleStore, account, "gpt-6-astra", h, now, nil)
 	if h.Get(openAICodexTurnStateHeader) != "client-echoed-old-value" {
 		t.Fatal("near-expiry ticket must not be injected")
+	}
+}
+
+// r17ae：换票同步注入 Cookie 对 + 不 clobber 认证 cookie + 无对降级。
+func TestMaybeInjectOpenAICodexTicketCookiePair(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	proxyID := int64(7)
+	account := &Account{ID: 1115, ProxyID: &proxyID}
+	pair := "__cflb=cB; __oailb=oB"
+	upsert := func(value, cookiePair string) *codexTicketStoreStub {
+		store := &codexTicketStoreStub{}
+		if err := store.UpsertOpenAICodexTicket(context.Background(), &OpenAICodexTicket{
+			AccountID: 1115, Model: "gpt-6-astra", TicketValue: value, TicketLen: len(value),
+			IssuedAt: now.Add(-30 * time.Minute), ExpiresAt: now.Add(30 * time.Minute),
+			ExitFingerprint: "proxy:7", HarvestedMode: OpenAICodexTicketHarvestProbe,
+			CookiePair: cookiePair,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	// 1) 带对活票 + 请求无 Cookie：换票同时注入 Cookie 对。
+	live := buildCodexTicketValue(now.Add(-30*time.Minute), 332)
+	h := http.Header{}
+	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
+	maybeInjectOpenAICodexTicket(context.Background(), upsert(live, pair), account, "gpt-6-astra", h, now, nil)
+	if h.Get(openAICodexTurnStateHeader) != live {
+		t.Fatal("ticket must be replaced")
+	}
+	if h.Get("Cookie") != pair {
+		t.Fatalf("cookie pair must ride along, got %q", h.Get("Cookie"))
+	}
+
+	// 2) 请求已携带认证 cookie：换票照换，Cookie 绝不 clobber。
+	authed := http.Header{}
+	authed.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
+	authed.Set("Cookie", "session=auth-token")
+	maybeInjectOpenAICodexTicket(context.Background(), upsert(live, pair), account, "gpt-6-astra", authed, now, nil)
+	if authed.Get(openAICodexTurnStateHeader) != live {
+		t.Fatal("ticket must still be replaced when auth cookie present")
+	}
+	if authed.Get("Cookie") != "session=auth-token" {
+		t.Fatalf("auth cookie must never be clobbered, got %q", authed.Get("Cookie"))
+	}
+
+	// 3) 无对旧票（r17ae 之前采的）：只注票不注 Cookie，FailOpen 降级。
+	bare := http.Header{}
+	bare.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
+	maybeInjectOpenAICodexTicket(context.Background(), upsert(live, ""), account, "gpt-6-astra", bare, now, nil)
+	if bare.Get(openAICodexTurnStateHeader) != live {
+		t.Fatal("ticket without pair must still be injected")
+	}
+	if bare.Get("Cookie") != "" {
+		t.Fatalf("no cookie header expected for pair-less ticket, got %q", bare.Get("Cookie"))
+	}
+}
+
+// r17ag 防回滚闸：票入库后账号又有真实流量 → 客户端回带值已被官方轮换
+// 推进，替换=把会话链回滚到过去（invalid_encrypted_content/312）→ 放行
+// 原值；票后无流量 → 库里票就是最新指针 → 正常替换。闸为 nil 时维持
+// r17ae 旧语义（无脑替换）。
+func TestMaybeInjectOpenAICodexTicketRollbackGuard(t *testing.T) {
+	now := time.Date(2026, 9, 22, 14, 0, 0, 0, time.UTC)
+	proxyID := int64(7)
+	account := &Account{ID: 1115, ProxyID: &proxyID}
+	ticketUpdated := now.Add(-20 * time.Minute)
+	store := &codexTicketStoreStub{}
+	live := buildCodexTicketValue(now.Add(-30*time.Minute), 332)
+	if err := store.UpsertOpenAICodexTicket(context.Background(), &OpenAICodexTicket{
+		AccountID: 1115, Model: "gpt-6-astra", TicketValue: live, TicketLen: 332,
+		IssuedAt: now.Add(-30 * time.Minute), ExpiresAt: now.Add(30 * time.Minute),
+		ExitFingerprint: "proxy:7", HarvestedMode: OpenAICodexTicketHarvestProbe,
+		UpdatedAt:       ticketUpdated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 票后有真实流量：放行回带值（防回滚）。
+	h := http.Header{}
+	h.Set(openAICodexTurnStateHeader, "client-echoed-newer-value")
+	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now,
+		func(context.Context, int64, time.Time) bool { return true })
+	if h.Get(openAICodexTurnStateHeader) != "client-echoed-newer-value" {
+		t.Fatal("chain advanced past ticket: echoed value must be kept (rollback guard)")
+	}
+
+	// 2) 票后无流量：库里票就是最新指针，正常替换。
+	h = http.Header{}
+	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
+	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now,
+		func(context.Context, int64, time.Time) bool { return false })
+	if h.Get(openAICodexTurnStateHeader) != live {
+		t.Fatal("no traffic since ticket: live ticket must replace the stale echo")
+	}
+
+	// 3) 闸 nil（未接线）：维持 r17ae 旧语义，替换不受影响。
+	h = http.Header{}
+	h.Set(openAICodexTurnStateHeader, "client-echoed-old-value")
+	maybeInjectOpenAICodexTicket(context.Background(), store, account, "gpt-6-astra", h, now, nil)
+	if h.Get(openAICodexTurnStateHeader) != live {
+		t.Fatal("nil guard must keep r17ae semantics (plain replace)")
+	}
+}
+
+// TestExtractOpenAICodexCookiePair 镜像 fenjue.py pair_from_set_cookie 语义：
+// 两者齐才成对；半对/脏值/空行不成对；属性段（Path 等）不碍事。
+func TestExtractOpenAICodexCookiePair(t *testing.T) {
+	// 齐对+带属性：摘值拼对。
+	got := ExtractOpenAICodexCookiePair([]string{
+		"__cflb=cA; Path=/; Secure; HttpOnly",
+		"__oailb=oA; Path=/",
+	})
+	if got != "__cflb=cA; __oailb=oA" {
+		t.Fatalf("full pair must compose, got %q", got)
+	}
+	// 顺序无关。
+	got = ExtractOpenAICodexCookiePair([]string{
+		"__oailb=oB; Path=/",
+		"__cflb=cB; Path=/",
+	})
+	if got != "__cflb=cB; __oailb=oB" {
+		t.Fatalf("order must be normalized, got %q", got)
+	}
+	// 半对（缺 __oailb）：不成对。
+	if got := ExtractOpenAICodexCookiePair([]string{"__cflb=cC; Path=/"}); got != "" {
+		t.Fatalf("half pair must be empty, got %q", got)
+	}
+	// 空值：不成对。
+	if got := ExtractOpenAICodexCookiePair([]string{"__cflb=; Path=/", "__oailb=oD"}); got != "" {
+		t.Fatalf("empty value must be rejected, got %q", got)
+	}
+	// 值带换行（头注入防御）：不成对。
+	if got := ExtractOpenAICodexCookiePair([]string{"__cflb=evil\r\nx: 1", "__oailb=oE"}); got != "" {
+		t.Fatalf("newline in value must be rejected, got %q", got)
+	}
+	// 无关 cookie 行在场：不影响。
+	if got := ExtractOpenAICodexCookiePair([]string{"other=1; Path=/", "", "__cflb=cF", "__oailb=oF"}); got != "__cflb=cF; __oailb=oF" {
+		t.Fatalf("unrelated lines must be ignored, got %q", got)
+	}
+	// 空入参。
+	if got := ExtractOpenAICodexCookiePair(nil); got != "" {
+		t.Fatalf("nil input must be empty, got %q", got)
 	}
 }
 

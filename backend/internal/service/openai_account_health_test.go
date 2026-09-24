@@ -14,105 +14,133 @@ func rtPtr(v int) *int { return &v }
 func TestLabelOpenAIAccountHealth(t *testing.T) {
 	// 9/21 用户批准的状态映射表（proposal 表格逐行）。
 	cases := []struct {
-		name     string
-		snap     OpenAIProbeHealthSnapshot
-		label    string
-		color    string
-		click    bool
-		reason   string
+		name   string
+		snap   OpenAIProbeHealthSnapshot
+		label  string
+		color  string
+		click  bool
+		reason string
 	}{
 		{
-			name:     "正常号: on_duty/normal + 最近一针健康",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: true, ReasoningTokens: rtPtr(1532), TurnStateLen: 332}},
-			label:    OpenAIHealthLabelNormal,
-			color:    OpenAIHealthColorGreen,
-			reason:   "on_duty",
+			name:   "正常号: on_duty/normal + 最近一针健康",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(true), ReasoningTokens: rtPtr(1532), TurnStateLen: 332}},
+			label:  OpenAIHealthLabelNormal,
+			color:  OpenAIHealthColorGreen,
+			reason: "on_duty",
 		},
 		{
-			name:     "待复核: on_duty/normal + 最近一针降智(答错)",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: false, ReasoningTokens: rtPtr(952), TurnStateLen: 356, Degraded: true}},
-			label:    OpenAIHealthLabelReview,
-			color:    OpenAIHealthColorOrange,
-			reason:   "last_probe_degraded",
+			name:   "待复核: on_duty/normal + 最近一针降智(答错)",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(false), ReasoningTokens: rtPtr(952), TurnStateLen: 356, Degraded: true}},
+			label:  OpenAIHealthLabelReview,
+			color:  OpenAIHealthColorOrange,
+			reason: "last_probe_degraded",
 		},
 		{
-			name:     "待复核: on_duty/normal + 答对但深截断 rt<800",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: true, ReasoningTokens: rtPtr(516), Degraded: true}},
-			label:    OpenAIHealthLabelReview,
-			color:    OpenAIHealthColorOrange,
-			reason:   "last_probe_degraded",
+			name:   "待复核: on_duty/normal + 答对但深截断 rt<800",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(true), ReasoningTokens: rtPtr(516), Degraded: true}},
+			label:  OpenAIHealthLabelReview,
+			color:  OpenAIHealthColorOrange,
+			reason: "last_probe_degraded",
 		},
 		{
-			name:     "r15e 中性: 1552截断指纹+答对=不判降智(只看rt)",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: true, ReasoningTokens: rtPtr(1552)}},
-			label:    OpenAIHealthLabelNormal,
-			color:    OpenAIHealthColorGreen,
-			reason:   "on_duty",
+			name:   "r15e 中性: 1552截断指纹+答对=不判降智(只看rt)",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(true), ReasoningTokens: rtPtr(1552)}},
+			label:  OpenAIHealthLabelNormal,
+			color:  OpenAIHealthColorGreen,
+			reason: "on_duty",
 		},
 		{
-			name:     "问题号: circuit_open 可点(相位B转打票线)",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateCircuitOpen, ProbeMode: "normal"},
-			label:    OpenAIHealthLabelProblem,
-			color:    OpenAIHealthColorRed,
-			click:    true,
-			reason:   "circuit_open",
+			name:   "问题号: circuit_open 可点(相位B转打票线)",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateCircuitOpen, ProbeMode: "normal"},
+			label:  OpenAIHealthLabelProblem,
+			color:  OpenAIHealthColorRed,
+			click:  true,
+			reason: "circuit_open",
 		},
 		{
-			name:     "复检中: reprobe",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateReprobe, ProbeMode: "normal"},
-			label:    OpenAIHealthLabelRechecking,
-			color:    OpenAIHealthColorBlue,
-			reason:   "reprobe/normal",
+			name:   "复检中: reprobe",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateReprobe, ProbeMode: "normal"},
+			label:  OpenAIHealthLabelRechecking,
+			color:  OpenAIHealthColorBlue,
+			reason: "reprobe/normal",
 		},
 		{
-			name:     "复检中: half_open",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateCircuitOpen, ProbeMode: "half_open"},
-			label:    OpenAIHealthLabelRechecking,
-			color:    OpenAIHealthColorBlue,
-			reason:   "circuit_open/half_open",
+			name:   "复检中: half_open",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateCircuitOpen, ProbeMode: "half_open"},
+			label:  OpenAIHealthLabelRechecking,
+			color:  OpenAIHealthColorBlue,
+			reason: "circuit_open/half_open",
 		},
 		{
-			name:     "问题号: pending_replace 判死退避 可点",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, ProbeMode: "normal"},
-			label:    OpenAIHealthLabelProblem,
-			color:    OpenAIHealthColorRed,
-			click:    true,
-			reason:   "pending_replace",
+			name:   "问题号: pending_replace 判死退避 可点",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, ProbeMode: "normal"},
+			label:  OpenAIHealthLabelProblem,
+			color:  OpenAIHealthColorRed,
+			click:  true,
+			reason: "pending_replace",
 		},
 		{
-			name:     "限流中: 优先于问题号(打票救不了额度)",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, RateLimitedAt: timePtr(time.Now().UTC())},
-			label:    OpenAIHealthLabelRateLimited,
-			color:    OpenAIHealthColorGray,
-			reason:   "rate_limited",
+			name:   "harvest overrides pending_replace",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, ProbeMode: "harvest"},
+			label:  OpenAIHealthLabelHarvesting,
+			color:  OpenAIHealthColorPurple,
+			reason: "harvest",
 		},
 		{
-			name:     "已暂停: manual_paused 最高优先",
-			snap:     OpenAIProbeHealthSnapshot{ManualPaused: true, State: OpenAIDowngradeStateCircuitOpen},
-			label:    OpenAIHealthLabelPaused,
-			color:    OpenAIHealthColorGray,
-			reason:   "manual_paused",
+			name:   "harvest overrides circuit_open",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateCircuitOpen, ProbeMode: "harvest"},
+			label:  OpenAIHealthLabelHarvesting,
+			color:  OpenAIHealthColorPurple,
+			reason: "harvest",
 		},
 		{
-			name:     "待认证: qualification",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification", Qualification: true},
-			label:    OpenAIHealthLabelQualification,
-			color:    OpenAIHealthColorGray,
-			reason:   "qualification",
+			name:   "rate limit still overrides harvest",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, ProbeMode: "harvest", RateLimitedAt: timePtr(time.Now().UTC())},
+			label:  OpenAIHealthLabelRateLimited,
+			color:  OpenAIHealthColorGray,
+			reason: "rate_limited",
 		},
 		{
-			name:     "无针记录的 on_duty 号=正常(空态由前端显未检测)",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal"},
-			label:    OpenAIHealthLabelNormal,
-			color:    OpenAIHealthColorGreen,
-			reason:   "on_duty",
+			name:   "manual pause still overrides harvest and rate limit",
+			snap:   OpenAIProbeHealthSnapshot{ManualPaused: true, State: OpenAIDowngradeStatePendingReplace, ProbeMode: "harvest", RateLimitedAt: timePtr(time.Now().UTC())},
+			label:  OpenAIHealthLabelPaused,
+			color:  OpenAIHealthColorGray,
+			reason: "manual_paused",
 		},
 		{
-			name:     "sol_fallback = 复检中",
-			snap:     OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback"},
-			label:    OpenAIHealthLabelRechecking,
-			color:    OpenAIHealthColorBlue,
-			reason:   "on_duty/sol_fallback",
+			name:   "限流中: 优先于问题号(打票救不了额度)",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, RateLimitedAt: timePtr(time.Now().UTC())},
+			label:  OpenAIHealthLabelRateLimited,
+			color:  OpenAIHealthColorGray,
+			reason: "rate_limited",
+		},
+		{
+			name:   "已暂停: manual_paused 最高优先",
+			snap:   OpenAIProbeHealthSnapshot{ManualPaused: true, State: OpenAIDowngradeStateCircuitOpen},
+			label:  OpenAIHealthLabelPaused,
+			color:  OpenAIHealthColorGray,
+			reason: "manual_paused",
+		},
+		{
+			name:   "待认证: qualification",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification", Qualification: true},
+			label:  OpenAIHealthLabelQualification,
+			color:  OpenAIHealthColorGray,
+			reason: "qualification",
+		},
+		{
+			name:   "无针记录的 on_duty 号=正常(空态由前端显未检测)",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal"},
+			label:  OpenAIHealthLabelNormal,
+			color:  OpenAIHealthColorGreen,
+			reason: "on_duty",
+		},
+		{
+			name:   "sol_fallback = 复检中",
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "sol_fallback"},
+			label:  OpenAIHealthLabelRechecking,
+			color:  OpenAIHealthColorBlue,
+			reason: "on_duty/sol_fallback",
 		},
 	}
 	for _, tc := range cases {
@@ -128,19 +156,24 @@ func TestLabelOpenAIAccountHealth(t *testing.T) {
 
 func TestOpenAIProbeEvidenceDegraded(t *testing.T) {
 	// 401/异常路径(HTTPStatus!=200)不算降智证据(与 IsDegraded 一致)。
-	ev := &OpenAIProbeLastEvidence{HTTPStatus: 401, AnswerCorrect: false}
+	ev := &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 401, AnswerCorrect: boolPtr(false)}
 	if OpenAIProbeEvidenceDegraded(ev) {
 		t.Fatal("401 must not be degraded evidence")
 	}
 	// 200+答错=降智。
-	ev = &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: false, ReasoningTokens: rtPtr(2000)}
+	ev = &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(false), ReasoningTokens: rtPtr(2000)}
 	if !OpenAIProbeEvidenceDegraded(ev) {
 		t.Fatal("200 wrong answer must be degraded evidence")
 	}
 	// 200+答对+rt>=800=健康。
-	ev = &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: true, ReasoningTokens: rtPtr(800)}
+	ev = &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(true), ReasoningTokens: rtPtr(800)}
 	if OpenAIProbeEvidenceDegraded(ev) {
 		t.Fatal("200 correct rt=800 must be healthy")
+	}
+	// 断流没有可判定答案，即使 HTTP 状态已经是 200，也不能挂成降智。
+	ev = &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: nil}
+	if OpenAIProbeEvidenceDegraded(ev) {
+		t.Fatal("transport interruption must be neutral evidence")
 	}
 }
 
@@ -276,7 +309,7 @@ func TestTriggerProbeNowManualPausedForcesDiagnosticPath(t *testing.T) {
 }
 
 // manualPausedControlStub 模拟 openai_downgrade_probe_controls.manual_paused=t
-//（CanRunOpenAIDowngradeProbe=false，镜像 ListDue 的 controls 闸联判）。
+// （CanRunOpenAIDowngradeProbe=false，镜像 ListDue 的 controls 闸联判）。
 type manualPausedControlStub struct {
 	*downgradeProbeStoreStub
 }
@@ -343,7 +376,7 @@ func (s *throttleProbeStoreStub) RecentProbeOnExitIP(
 }
 
 // TestTriggerProbeNowMissingStateEnsuresRow 从未被扫描 Ensure 过的暂停号
-//（无状态行）不再误报 ErrAccountNotFound，补行后走路径B 诊断。
+// （无状态行）不再误报 ErrAccountNotFound，补行后走路径B 诊断。
 func TestTriggerProbeNowMissingStateEnsuresRow(t *testing.T) {
 	now := time.Date(2026, 9, 21, 7, 0, 0, 0, time.UTC)
 	proxyID := int64(1)
@@ -364,4 +397,3 @@ func TestTriggerProbeNowMissingStateEnsuresRow(t *testing.T) {
 	require.True(t, res.ProbedNow)
 	require.Equal(t, 1, store.probeCalls)
 }
-

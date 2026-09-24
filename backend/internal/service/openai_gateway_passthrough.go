@@ -644,9 +644,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 剥离后再出站（openai_codex_turn_state.go）。
 	s.guardOpenAICodexTurnStateEcho(c, account, req.Header)
 	// 相位B（2026-09-21）：活票注入（保守版），同 forward 链路语义。
+	// r17ag 防回滚闸：票入库后有真实流量则放行回带值（链已前进，替换=回滚）。
 	if s.codexTicketStore != nil {
 		if m, _, _ := extractOpenAIRequestMetaFromBody(body); m != "" {
-			maybeInjectOpenAICodexTicket(ctx, s.codexTicketStore, account, m, req.Header, time.Now())
+			maybeInjectOpenAICodexTicket(ctx, s.codexTicketStore, account, m, req.Header, time.Now(), s.codexTicketTrafficSince)
 		}
 	}
 

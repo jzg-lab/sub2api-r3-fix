@@ -449,6 +449,44 @@ func TestSettingService_UpdateSettings_PaymentVisibleMethodsAndAdvancedScheduler
 	require.Equal(t, "4", repo.updates[SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky])
 }
 
+func TestSettingService_UpdateSettings_ClearsAdvancedSchedulerWeightOverrides(t *testing.T) {
+	repo := &settingUpdateRepoStub{}
+	svc := NewSettingService(repo, &config.Config{})
+
+	err := svc.UpdateSettings(context.Background(), &SystemSettings{
+		OpenAIAdvancedSchedulerEnabled:                true,
+		OpenAIAdvancedSchedulerLBTopK:                 "2",
+		OpenAIAdvancedSchedulerWeightPriority:         " ",
+		OpenAIAdvancedSchedulerWeightLoad:             "\t",
+		OpenAIAdvancedSchedulerWeightQueue:            "\n",
+		OpenAIAdvancedSchedulerWeightErrorRate:        "",
+		OpenAIAdvancedSchedulerWeightTTFT:             "  ",
+		OpenAIAdvancedSchedulerWeightReset:            "",
+		OpenAIAdvancedSchedulerWeightQuotaHeadroom:    " ",
+		OpenAIAdvancedSchedulerWeightUpstreamCost:     "\t",
+		OpenAIAdvancedSchedulerWeightPreviousResponse: "\n",
+		OpenAIAdvancedSchedulerWeightSessionSticky:    "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "true", repo.updates[openAIAdvancedSchedulerSettingKey])
+	require.Equal(t, "2", repo.updates[SettingKeyOpenAIAdvancedSchedulerLBTopK])
+
+	for _, key := range []string{
+		SettingKeyOpenAIAdvancedSchedulerWeightPriority,
+		SettingKeyOpenAIAdvancedSchedulerWeightLoad,
+		SettingKeyOpenAIAdvancedSchedulerWeightQueue,
+		SettingKeyOpenAIAdvancedSchedulerWeightErrorRate,
+		SettingKeyOpenAIAdvancedSchedulerWeightTTFT,
+		SettingKeyOpenAIAdvancedSchedulerWeightReset,
+		SettingKeyOpenAIAdvancedSchedulerWeightQuotaHeadroom,
+		SettingKeyOpenAIAdvancedSchedulerWeightUpstreamCost,
+		SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse,
+		SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky,
+	} {
+		require.Equal(t, "", repo.updates[key], key)
+	}
+}
+
 func TestSettingService_UpdateSettingsRejectsInvalidOpenAIOAuthSchedulingRateMultiplier(t *testing.T) {
 	repo := &settingUpdateRepoStub{}
 	svc := NewSettingService(repo, &config.Config{})

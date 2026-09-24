@@ -223,7 +223,8 @@ func TestAbuseRouteTurnStateRecheckSurvivesRestartAndThenResumesDeferral(t *test
 	require.NoError(t, runner.RunOnce(context.Background()))
 	require.Equal(t, 1, probes)
 	require.False(t, eventAt.IsZero())
-	require.True(t, repo.account.Schedulable, "a lone turn-state signal is not a circuit")
+	// 纯单针杀（2026-09-22 用户裁定）：356 单信号即熔断摘调度。
+	require.False(t, repo.account.Schedulable, "single-shot circuit must pull the account")
 
 	// Keep only committed state and events, just as after a service restart.
 	restarted := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
@@ -237,9 +238,17 @@ func TestAbuseRouteTurnStateRecheckSurvivesRestartAndThenResumesDeferral(t *test
 	now = store.state.NextProbeAt
 	require.NoError(t, restarted.RunOnce(context.Background()))
 	require.Equal(t, 2, probes, "recent traffic must not defer the committed short recheck")
-	now = store.state.NextProbeAt
-	require.NoError(t, restarted.RunOnce(context.Background()))
-	require.Equal(t, 2, probes, "a completed clean recheck must restore normal traffic deferral")
+	// 纯单针杀下 356 针已熔断：重启后 reprobe 恢复需 2 连胜。第二连胜针
+	//（probes=3）照打；恢复后 finishRescue 进 accelerated 盯防档（30min 窗
+	// 内 5min 级针，不走真实流量顺延——盯防优先于顺延），probes 继续走。
+	// 该测试验证的核心（356 事件驱动复查排期跨重启存活）已在 probes=2 处
+	// 断言完毕，后续节奏归 accelerated 档管辖。
+	for probes == 2 {
+		now = store.state.NextProbeAt
+		require.NoError(t, restarted.RunOnce(context.Background()))
+	}
+	require.Equal(t, 3, probes, "second clean recheck must complete the recovery streak")
+	require.Equal(t, OpenAIDowngradeStateOnDuty, store.state.State, "recovery must return the account on duty")
 }
 
 func TestAbuseRouteRecheckReadFailureDoesNotPublishDeferral(t *testing.T) {

@@ -11,9 +11,10 @@ import (
 
 type scheduleReconciliationStore struct {
 	downgradeProbeStoreStub
-	calls []string
-	now   time.Time
-	err   error
+	calls         []string
+	now           time.Time
+	reconcileErr  error
+	accelerateErr error
 }
 
 func (s *scheduleReconciliationStore) ReconcileOpenAIRateLimitProbeSchedules(
@@ -23,7 +24,17 @@ func (s *scheduleReconciliationStore) ReconcileOpenAIRateLimitProbeSchedules(
 	if !now.Equal(s.now) || interval != openAIDowngradeRateLimitRecheckInterval {
 		return 0, errors.New("unexpected sparse recheck policy")
 	}
-	return 1, s.err
+	return 1, s.reconcileErr
+}
+
+func (s *scheduleReconciliationStore) AccelerateOpenAIInterruptedProbeRechecks(
+	_ context.Context, now time.Time, delay time.Duration,
+) (int64, error) {
+	s.calls = append(s.calls, "accelerate")
+	if !now.Equal(s.now) || delay != openAIDowngradeInterruptedRecheck {
+		return 0, errors.New("unexpected interrupted recheck policy")
+	}
+	return 1, s.accelerateErr
 }
 
 func (s *scheduleReconciliationStore) ListDueOpenAIDowngradeStates(
@@ -34,21 +45,28 @@ func (s *scheduleReconciliationStore) ListDueOpenAIDowngradeStates(
 }
 
 func TestOpenAIProbeScheduleReconciliationRunOnce(t *testing.T) {
-	for _, failed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "success", true: "failure"}[failed], func(t *testing.T) {
+	for _, phase := range []string{"success", "reconcile_failure", "accelerate_failure"} {
+		t.Run(phase, func(t *testing.T) {
 			store := &scheduleReconciliationStore{now: time.Now()}
-			if failed {
-				store.err = errors.New("schedule commit failed")
+			switch phase {
+			case "reconcile_failure":
+				store.reconcileErr = errors.New("schedule commit failed")
+			case "accelerate_failure":
+				store.accelerateErr = errors.New("recheck commit failed")
 			}
 			runner := NewOpenAIDowngradeProbeRunner(store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
 			runner.now = func() time.Time { return store.now }
 			err := runner.RunOnce(context.Background())
-			if failed {
-				require.ErrorIs(t, err, store.err)
+			switch phase {
+			case "reconcile_failure":
+				require.ErrorIs(t, err, store.reconcileErr)
 				require.Equal(t, []string{"reconcile"}, store.calls)
-			} else {
+			case "accelerate_failure":
+				require.ErrorIs(t, err, store.accelerateErr)
+				require.Equal(t, []string{"reconcile", "accelerate"}, store.calls)
+			default:
 				require.NoError(t, err)
-				require.Equal(t, []string{"reconcile", "due"}, store.calls)
+				require.Equal(t, []string{"reconcile", "accelerate", "due"}, store.calls)
 			}
 		})
 	}

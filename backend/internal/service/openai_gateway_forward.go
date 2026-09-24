@@ -1397,9 +1397,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 相位B（2026-09-21）：活票注入（保守版）——仅客户端已回带时，用本账号
 	// 本模型的活票（同业务出口、Fernet 内嵌时刻新鲜）替换回带值；无票/过期/
 	// 指纹不符一律原样放行（FailOpen）。未注入 ticketStore 时为彻底 no-op。
+	// r17ag 防回滚闸：票入库后有真实流量则放行回带值（链已前进，替换=回滚）。
 	if s.codexTicketStore != nil {
 		if m, _, _ := extractOpenAIRequestMetaFromBody(body); m != "" {
-			maybeInjectOpenAICodexTicket(ctx, s.codexTicketStore, account, m, req.Header, time.Now())
+			maybeInjectOpenAICodexTicket(ctx, s.codexTicketStore, account, m, req.Header, time.Now(), s.codexTicketTrafficSince)
 		}
 	}
 	if account.UsesOpenAICodexProtocol() {

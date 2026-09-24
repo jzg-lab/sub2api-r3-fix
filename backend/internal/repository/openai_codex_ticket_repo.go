@@ -10,8 +10,14 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-// openai_codex_tickets 票表 CRUD（相位B）。TicketValue 敏感凭据：本层不做
-// 日志输出；导出/管理端查询一律走脱敏视图（管理端只回长度+时刻+指纹）。
+// openai_codex_tickets 票表 CRUD（相位B）。TicketValue / CookiePair 敏感
+// 凭据：本层不做日志输出；导出/管理端查询一律走脱敏视图（管理端只回
+// 长度+时刻+指纹，绝不回 Cookie 对）。
+
+// nullableString 空对落 NULL（列可空：旧票/未摘齐对的票无值）。
+func nullableString(s string) sql.NullString {
+	return sql.NullString{String: s, Valid: s != ""}
+}
 
 // NewOpenAICodexTicketStore 从探针 repo 取票能力窄视图（同一底层数据库）。
 // 票表与探针状态同库同 repo；gateway 侧注入用（探针侧经类型断言取得）。
@@ -27,8 +33,8 @@ func (r *openAIDowngradeProbeRepository) UpsertOpenAICodexTicket(
 	query := `
 		INSERT INTO openai_codex_tickets
 			(account_id, model, ticket_value, ticket_len, issued_at, expires_at,
-			 exit_fingerprint, harvested_mode, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
+			 exit_fingerprint, harvested_mode, cookie_pair, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
 		ON CONFLICT (account_id, model) DO UPDATE SET
 			ticket_value = EXCLUDED.ticket_value,
 			ticket_len = EXCLUDED.ticket_len,
@@ -36,11 +42,13 @@ func (r *openAIDowngradeProbeRepository) UpsertOpenAICodexTicket(
 			expires_at = EXCLUDED.expires_at,
 			exit_fingerprint = EXCLUDED.exit_fingerprint,
 			harvested_mode = EXCLUDED.harvested_mode,
+			cookie_pair = EXCLUDED.cookie_pair,
 			updated_at = now()
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		ticket.AccountID, ticket.Model, ticket.TicketValue, ticket.TicketLen,
-		ticket.IssuedAt, ticket.ExpiresAt, ticket.ExitFingerprint, ticket.HarvestedMode)
+		ticket.IssuedAt, ticket.ExpiresAt, ticket.ExitFingerprint, ticket.HarvestedMode,
+		nullableString(ticket.CookiePair))
 	return err
 }
 
@@ -49,7 +57,7 @@ func (r *openAIDowngradeProbeRepository) GetOpenAICodexTicket(
 ) (*service.OpenAICodexTicket, error) {
 	query := `
 		SELECT account_id, model, ticket_value, ticket_len, issued_at,
-		       expires_at, exit_fingerprint, harvested_mode, updated_at
+		       expires_at, exit_fingerprint, harvested_mode, cookie_pair, updated_at
 		FROM openai_codex_tickets
 		WHERE account_id = $1 AND model = $2
 	`
@@ -62,12 +70,14 @@ func (r *openAIDowngradeProbeRepository) GetOpenAICodexTicket(
 		return nil, rows.Err()
 	}
 	var ticket service.OpenAICodexTicket
+	var cookiePair sql.NullString
 	if err := rows.Scan(
 		&ticket.AccountID, &ticket.Model, &ticket.TicketValue, &ticket.TicketLen,
 		&ticket.IssuedAt, &ticket.ExpiresAt, &ticket.ExitFingerprint,
-		&ticket.HarvestedMode, &ticket.UpdatedAt); err != nil {
+		&ticket.HarvestedMode, &cookiePair, &ticket.UpdatedAt); err != nil {
 		return nil, err
 	}
+	ticket.CookiePair = cookiePair.String
 	return &ticket, rows.Err()
 }
 
@@ -80,7 +90,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAICodexTicketsByAccounts(
 	}
 	query := `
 		SELECT account_id, model, ticket_value, ticket_len, issued_at,
-		       expires_at, exit_fingerprint, harvested_mode, updated_at
+		       expires_at, exit_fingerprint, harvested_mode, cookie_pair, updated_at
 		FROM openai_codex_tickets
 		WHERE account_id = ANY($1)
 		ORDER BY account_id, model
@@ -93,12 +103,14 @@ func (r *openAIDowngradeProbeRepository) ListOpenAICodexTicketsByAccounts(
 	out := make([]service.OpenAICodexTicket, 0, len(accountIDs))
 	for rows.Next() {
 		var t service.OpenAICodexTicket
+		var cookiePair sql.NullString
 		if err := rows.Scan(
 			&t.AccountID, &t.Model, &t.TicketValue, &t.TicketLen,
 			&t.IssuedAt, &t.ExpiresAt, &t.ExitFingerprint,
-			&t.HarvestedMode, &t.UpdatedAt); err != nil {
+			&t.HarvestedMode, &cookiePair, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
+		t.CookiePair = cookiePair.String
 		out = append(out, t)
 	}
 	return out, rows.Err()

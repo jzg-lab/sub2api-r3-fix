@@ -47,6 +47,7 @@ const (
 	// 两者都只驱动「记事件 + 加速复查」，单信号不摘号。
 	OpenAIDowngradeEventTurnStateDegraded        = "turn_state_degraded"
 	OpenAIDowngradeEventRealTrafficModelMismatch = "real_traffic_model_mismatch"
+	OpenAIDowngradeEventRealTrafficRecheckArmed  = "real_traffic_recheck_armed"
 )
 
 const (
@@ -96,6 +97,7 @@ const (
 	openAIDowngradeRecentTrafficWindow = 15 * time.Minute
 	openAIDowngradeTrafficDeferral     = 45 * time.Minute
 	openAIDowngradeMaxTrafficDeferrals = 3
+	openAIDowngradeInterruptedRecheck  = time.Minute
 )
 
 var openAIDowngradeTruncationFingerprints = [...]int{516, 1034, 1552}
@@ -180,9 +182,23 @@ type OpenAIDowngradeProbeResult struct {
 	TurnStateLen int
 }
 
+func (r OpenAIDowngradeProbeResult) answerVerdict() any {
+	if !r.TransportOK {
+		return nil
+	}
+	return r.AnswerCorrect
+}
+
 func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
 	if !r.TransportOK || (r.HTTPStatus != 0 && r.HTTPStatus != http.StatusOK) {
 		return false
+	}
+	// 纯单针杀（2026-09-22 用户裁定）：降智态凭据长度（356±20）本身就是
+	// 降智证据——答对+高 rt 也不豁免（1143 实证：356 针后紧跟答对针，
+	// 治愈判据放行会在污染流量继续流的窗口里放走弹跳号）。无头（0）不算
+	//（401/异常路径本来就没头，不能当降智证据）。
+	if isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) {
+		return true
 	}
 	if !r.AnswerCorrect {
 		return true
@@ -214,7 +230,10 @@ func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
 		r.AnswerCorrect &&
 		r.ReasoningTokens != nil &&
 		*r.ReasoningTokens >= OpenAIDowngradeRecoveryReasoningMinimum &&
-		!isOpenAIDowngradeTruncationFingerprint(*r.ReasoningTokens)
+		!isOpenAIDowngradeTruncationFingerprint(*r.ReasoningTokens) &&
+		// 纯单针杀配套（2026-09-22）：恢复连胜必须来自健康凭据长度的针——
+		// 356 票在场就不是干净针，与 IsDegraded 的 356 判定互为镜像。
+		!isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen)
 }
 
 type OpenAIDowngradeProbeState struct {
@@ -236,7 +255,12 @@ type OpenAIDowngradeProbeState struct {
 	AstraConsecutiveFailures  int
 	AstraConsecutiveSuccesses int
 	AstraNextProbeAt          *time.Time
-	UpdatedAt                 time.Time
+	// 自动打票线（2026-09-21 相位B）：动态桶上的采票尝试计数。达到上限仍
+	// 无健康票 = 账号级降智，回 pending_replace（社区实证：账号级 312 永续
+	// = 换票无解，别硬打——"continuing is what escalated a 312 into a wall
+	// of 429s"）。
+	HarvestAttempts int
+	UpdatedAt       time.Time
 }
 
 type OpenAIDowngradeTransition struct {
@@ -296,8 +320,13 @@ func ApplyOpenAIDowngradeProbeResult(
 
 	state.ConsecutiveSuccesses = 0
 	state.ConsecutiveFailures++
+	// 纯单针杀（2026-09-22 用户裁定，1143 弹跳形态实证：换 IP→答对→快速
+	// 再降智，拖第二针毫无意义）：normal 档任何一针降智证据当场熔断。
+	// qualification 新号线不叠加（2026-09-21 裁定 1115/1116 案保持）：
+	// 新号无历史基线，首针失败走 qualification_failed 既有判死分支。
 	if state.State == OpenAIDowngradeStateOnDuty &&
-		state.ConsecutiveFailures >= 2 {
+		state.ProbeMode != "qualification" &&
+		state.ConsecutiveFailures >= 1 {
 		return OpenAIDowngradeTransition{
 			State:     state,
 			NextState: OpenAIDowngradeStateCircuitOpen,
@@ -307,12 +336,33 @@ func ApplyOpenAIDowngradeProbeResult(
 	}
 	if (state.State == OpenAIDowngradeStateCircuitOpen ||
 		state.State == OpenAIDowngradeStateReprobe) &&
-		state.ConsecutiveFailures >= 2 {
+		state.ProbeMode != "qualification" &&
+		state.ConsecutiveFailures >= 1 {
 		return OpenAIDowngradeTransition{
 			State:            state,
 			NextState:        OpenAIDowngradeStatePendingReplace,
 			NeedsReplacement: true,
 			EventType:        OpenAIDowngradeEventReplaceRequired,
+		}
+	}
+	// qualification 新号线维持 2 连败判死（既有节奏）。
+	if state.ConsecutiveFailures >= 2 {
+		if state.State == OpenAIDowngradeStateOnDuty {
+			return OpenAIDowngradeTransition{
+				State:     state,
+				NextState: OpenAIDowngradeStateCircuitOpen,
+				Circuit:   true,
+				EventType: OpenAIDowngradeEventCircuitOpen,
+			}
+		}
+		if state.State == OpenAIDowngradeStateCircuitOpen ||
+			state.State == OpenAIDowngradeStateReprobe {
+			return OpenAIDowngradeTransition{
+				State:            state,
+				NextState:        OpenAIDowngradeStatePendingReplace,
+				NeedsReplacement: true,
+				EventType:        OpenAIDowngradeEventReplaceRequired,
+			}
 		}
 	}
 
@@ -352,6 +402,13 @@ type OpenAIDowngradeGoneAccountStateCleaner interface {
 	DeleteOpenAIDowngradeStatesForGoneAccounts(ctx context.Context) (int64, error)
 }
 
+// OpenAIDowngradeInterruptedProbeRechecker is a narrow optional capability.
+// The real repository uses successful billable traffic after an interrupted
+// probe to shorten the next normal recheck without changing account state.
+type OpenAIDowngradeInterruptedProbeRechecker interface {
+	AccelerateOpenAIInterruptedProbeRechecks(context.Context, time.Time, time.Duration) (int64, error)
+}
+
 // OpenAIDowngradeStateDeleter 就地删除单个账号的探针状态。processState 在账号
 // 已被软删（GetByID → ErrAccountNotFound 哨兵）时调用：每日清理器要等 24h 周期，
 // 期间僵尸 state 钉死 ListDue 每 IP 分区的 rank-1，同桶活账号零探针
@@ -389,7 +446,11 @@ type OpenAIDowngradeRateLimitReleaser interface {
 // 由生成器本地真值现场算出，判分正则按题动态构造。
 
 const (
-	openAIDowngradeDefaultInterval     = 30 * time.Minute
+	// 常规档探针基准间隔（2026-09-22 用户裁定「上岗后探针频率不要那么高
+	// 免得废IP」）：单针杀上线后检测灵敏度不再依赖针次密度——一针见血，
+	// 常规节奏只服务「健康号的巡检」，拉长到 90 分钟基准（jitter 后 45-225
+	// 分钟），同桶号均摊到每天 ~10 针内，护 IP 信誉。
+	openAIDowngradeDefaultInterval     = 90 * time.Minute
 	openAIDowngradeHalfOpenInterval    = 30 * time.Minute
 	openAIDowngradeAcceleratedInterval = 5 * time.Minute
 	// P2-10 数据保留：results 是高频遥测留 30 天，events 是审计依据留 90 天，
@@ -410,6 +471,11 @@ const (
 	// 判死终态（r17x 选项A）防御性让位间隔：processState 兜底分支把误入的
 	// pending_replace 号排远，不参与正常调度节奏。
 	openAIDowngradeReplacedQuietSchedule = 7 * 24 * time.Hour
+	// 打票复活号观察窗（2026-09-22 用户裁定「通过打票复活的账号 频率就得
+	// 适当高一点」）：复活号弹性最差（刚从判死边缘捞回，弹跳概率高），
+	// 毕业后先进 accelerated 档（5min 级）盯防 2 小时，观察窗走完自然回
+	// 常规 90min 档。与 finishRescue 的 30min 窗区分：那是熔断救援的窗。
+	openAIDowngradeHarvestRevivalWatchWindow = 2 * time.Hour
 )
 
 // OpenAIDowngradeReplaceEventCounter 是用于判死重试退避的窄接口能力。
@@ -683,6 +749,20 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		if !isOpenAIDowngradeProbeAccountEligible(&account, now) || account.Status != StatusActive {
 			continue
 		}
+		// 自动救援钩子（2026-09-22「都让自动」）：判死号静默期满自动进
+		// 打票线。挂在 schedulable 闸之前——判死号 schedulable=false 会被
+		// 下面的 continue 提前跳出，钩子永远够不着。进线成功后
+		// probe_mode='harvest'，由下方 qualification/harvest 路径正常接管。
+		if deadState, err := r.store.GetOpenAIDowngradeState(ctx, account.ID); err == nil && deadState != nil &&
+			deadState.State == OpenAIDowngradeStatePendingReplace {
+			if hookErr := r.maybeAutoHarvestDead(ctx, deadState, now); hookErr != nil {
+				logger.LegacyPrintf("service.openai_downgrade_probe",
+					"[OpenAIDowngradeProbe] auto-harvest failed account=%d: %v", account.ID, hookErr)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
 		qualification := isOpenAIDowngradeQualificationCandidate(&account) ||
 			account.ProxyID == nil
 		if !account.Schedulable && !qualification {
@@ -742,6 +822,20 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if rechecker, ok := r.store.(OpenAIDowngradeInterruptedProbeRechecker); ok {
+		accelerated, err := rechecker.AccelerateOpenAIInterruptedProbeRechecks(
+			ctx, now, openAIDowngradeInterruptedRecheck)
+		if err != nil {
+			return err
+		}
+		if accelerated > 0 {
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] interrupted probes accelerated=%d", accelerated)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	due, err := r.store.ListDueOpenAIDowngradeStates(ctx, now, 100)
 	if err != nil {
 		return err
@@ -786,6 +880,10 @@ func isOpenAIDowngradeProbeStatusAllowed(status string, state *OpenAIDowngradePr
 		state.State == OpenAIDowngradeStateReprobe ||
 		state.State == OpenAIDowngradeStatePendingReplace ||
 		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "qualification") ||
+		// 打票线（2026-09-22 修正）：error 号在采票循环里必须继续被探测
+		// ——harvest 的 401 分诊（凭据失效→停打回原桶）正依赖探针把 401
+		// 带回来；被 status 闸拦掉的话循环空转、凭据死号永不落判死。
+		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "harvest") ||
 		state.ProbeMode == "sol_fallback"
 }
 
@@ -857,20 +955,23 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	if state.State == OpenAIDowngradeStatePendingReplace {
-		// 判死即终态（r17x 用户裁定 2026-09-21，选项A）：不再自动排探针。
-		// ListDue 已在 SQL 层排除 pending_replace，理论到不了这里；防御性
-		// 让位（NextProbeAt 推远）防止其它路径（RunOnce 直调/手动针竞态）
-		// 把判死号又拉回探测循环。救援唯一入口=ReenableOpenAIAccount。
+	if state.State == OpenAIDowngradeStatePendingReplace && state.ProbeMode != "harvest" {
+		// 普通判死态不再自动排探针。ListDue 已在 SQL 层排除
+		// pending_replace，理论到不了这里；防御性让位（NextProbeAt 推远）
+		// 防止其它路径把判死号又拉回普通探测循环。harvest 是显式救援态，
+		// 即使状态切换与调度并发留下 pending_replace，也必须继续完成采票针。
 		state.NextProbeAt = now.Add(openAIDowngradeReplacedQuietSchedule)
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
-		state.ProbeMode != "qualification" {
+		state.ProbeMode != "qualification" && state.ProbeMode != "harvest" {
 		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
 		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
 		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
+		// harvest 例外（2026-09-22 修正，1136 实证）：采票号进线时不设
+		// schedulable（问题号不接流量），但循环必须照常打针——不排除的话
+		// 每 30 分钟让位一次，永远打不了采票针。
 		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
@@ -996,10 +1097,18 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
 		return err
 	}
-	// 相位2（2026-09-20 用户批准）：响应侧 abuse 证据联动。turn_state_len 落
-	// 降智态（356±20）时记事件；与降智证据（IsDegraded）同针在场 = 双信号，
-	// 当场熔断——单证据仍走两连败防误杀（1020 间歇性先例）。单 356 不判死，
-	// 只把下一针排到加速复查节奏。
+	// 自动打票线（2026-09-21 相位B）：harvest 模式的针走独立分诊（采到票回
+	// 静态复检/账号级放弃/继续换IP），不进 Apply 常规迁移——连败计数对采票
+	// 针无意义（降级长度正是预期的「没采到」信号，不是惩罚证据）。
+	if state.ProbeMode == "harvest" {
+		if handled, err := r.processHarvest(ctx, state, &result, now); handled {
+			return err
+		}
+	}
+	// 相位2（2026-09-20 用户批准）+ 纯单针杀（2026-09-22 用户裁定）：
+	// turn_state_len 落降智态（356±20）时记事件；normal 档单 356 即熔断
+	// （1143 弹跳形态实证：换 IP→答对→快速再降智，等第二针只是放行污染
+	// 流量）。qualification 新号线不叠加（2026-09-21 裁定 1115/1116 案）。
 	turnStateDegraded := isOpenAIDowngradeTurnStateLenDegraded(result.TurnStateLen)
 	if turnStateDegraded {
 		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
@@ -1007,34 +1116,26 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 				"mode":             result.Mode,
 				"turn_state_len":   result.TurnStateLen,
 				"http_status":      result.HTTPStatus,
-				"answer_correct":   result.AnswerCorrect,
+				"transport_ok":     result.TransportOK,
+				"answer_correct":   result.answerVerdict(),
 				"reasoning_tokens": result.ReasoningTokens,
 			}); err != nil {
 			return err
 		}
 	}
-	dualSignalCircuit := turnStateDegraded && result.IsDegraded() &&
-		state.ProbeMode != "qualification"
+	singleShotCircuit := turnStateDegraded && state.ProbeMode == "normal" &&
+		state.State == OpenAIDowngradeStateOnDuty
 	transition := ApplyOpenAIDowngradeProbeResult(*state, result, now)
-	if dualSignalCircuit && !transition.Circuit && state.State == OpenAIDowngradeStateOnDuty {
-		// 首针即双信号：把连败计数推到熔断阈值，复用既有熔断路径（事件、
-		// 摘调度、冷却排期全部同款），不另起一套摘除逻辑。
-		// qualification 模式不注入（2026-09-21 裁定，1115/1116 案）：新号
-		// 无历史基线，首针即 356+答错可能是 IP 级暂态——连败走自然节奏
-		// （2 连败才熔断），认证失败也走 qualification_failed 既有判死分支，
-		// 不与双信号叠加。已上岗老号的降智首针照旧单针熔断。
-		state.ConsecutiveFailures = 2
+	if singleShotCircuit && !transition.Circuit {
+		// 单 356（答对也在场）：把连败计数推到熔断阈值，复用既有熔断路径
+		// （事件、摘调度、冷却排期全部同款），不另起一套摘除逻辑。
+		state.ConsecutiveFailures = 1
 		transition = ApplyOpenAIDowngradeProbeResult(*state, result, now)
 	}
 	*state = transition.State
 	state.LastProbeAt = &now
 	state.UpdatedAt = now
 	state.NextProbeAt = now.Add(r.nextDelay())
-	if turnStateDegraded && !dualSignalCircuit && state.ProbeMode == "normal" &&
-		state.State == OpenAIDowngradeStateOnDuty {
-		// 单 356：加速复查（jitter 后 2.5-7.5 分钟），双信号判定下一针即见分晓。
-		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeRateLimitedRetryInterval))
-	}
 	if state.ProbeMode == "qualification" && !transition.Circuit {
 		// 资格认证节奏：认证针按分钟级排（429 已在上方走同量级短周期）；
 		// 通过即解锁（r15h 起 1 针结业），此排期仅服务「未通过前的重试」
@@ -1671,6 +1772,11 @@ func (r *OpenAIDowngradeProbeRunner) hasPendingAbuseRecheck(ctx context.Context,
 	}
 	count, err = counter.CountOpenAIDowngradeEvents(
 		ctx, state.AccountID, OpenAIDowngradeEventTurnStateDegraded, since)
+	if err != nil || count > 0 {
+		return count > 0, err
+	}
+	count, err = counter.CountOpenAIDowngradeEvents(
+		ctx, state.AccountID, OpenAIDowngradeEventRealTrafficRecheckArmed, since)
 	return count > 0, err
 }
 
@@ -1842,6 +1948,8 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 	// 零新增流量形态。仅 200 且长度过白名单（292/332 双口径）才入库；
 	// 任何失败只记日志，绝不影响探针主判定。采的是账号当前绑定的业务
 	// 出口上的票，出口指纹天然对齐（注入侧同指纹校验）。
+	// r17ae：Set-Cookie 的 __cflb+__oailb 对成套入库（堵实例粘性缺口），
+	// 空对不阻断采票。
 	if status == http.StatusOK {
 		if ticketStore, ok := r.store.(OpenAICodexTicketStore); ok {
 			harvestMode := OpenAICodexTicketHarvestProbe
@@ -1849,7 +1957,9 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 				harvestMode = OpenAICodexTicketHarvestDynamic
 			}
 			HarvestOpenAICodexTicket(ctx, ticketStore, account.ID, account.ProxyID,
-				probeModel, extractOpenAICodexTurnState(respHeader), harvestMode, time.Now())
+				probeModel, extractOpenAICodexTurnState(respHeader),
+				ExtractOpenAICodexCookiePair(respHeader.Values("Set-Cookie")),
+				harvestMode, time.Now())
 		}
 	}
 	slog.Info("openai_probe_codex_turn_state_len",

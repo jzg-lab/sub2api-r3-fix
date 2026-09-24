@@ -144,6 +144,8 @@ var auditActionOverrides = map[string]string{
 	"POST /api/v1/admin/prompt-audit/events/delete-by-filter": "admin.prompt_audit.events.filter_delete",
 	// 相位A（2026-09-21）：主动检测手动针（spec 用户裁定：两手动动作落 audit）。
 	"POST /api/v1/admin/openai/accounts/:id/probe-now": "admin.openai_accounts.probe_now",
+	// 相位B（2026-09-21）：问题号转打票线（spec：两手动动作落 audit）。
+	"POST /api/v1/admin/openai/accounts/:id/harvest": "admin.openai_accounts.harvest",
 }
 
 // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。

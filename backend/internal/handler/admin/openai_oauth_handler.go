@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -22,6 +23,16 @@ type OpenAIOAuthHandler struct {
 	adminService       service.AdminService
 	quotaService       openAIQuotaService
 	rateLimitService   openAIAccountStateRecoverer
+	// authBrowserLauncher 授权浏览器直拉（方案A，2026-09-22）：nil=功能关闭
+	//（SUB2API_AUTH_BROWSER_LAUNCHER 未配置），接口返回明确错误而非 panic。
+	authBrowserLauncher *service.OpenAIAuthBrowserLauncher
+}
+
+// SetAuthBrowserLauncher 注入授权浏览器直拉服务（wire 装配，可空）。
+func (h *OpenAIOAuthHandler) SetAuthBrowserLauncher(l *service.OpenAIAuthBrowserLauncher) {
+	if h != nil {
+		h.authBrowserLauncher = l
+	}
 }
 
 type openAIQuotaService interface {
@@ -125,6 +136,42 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 		return
 	}
 
+	response.Success(c, result)
+}
+
+// OpenAILaunchAuthBrowserRequest 授权浏览器直拉（方案A，2026-09-22）：
+// session_id 用生成链接时前端已拿到的那份。
+type OpenAILaunchAuthBrowserRequest struct {
+	SessionID string `json:"session_id" binding:"required"`
+}
+
+// LaunchAuthBrowser 按授权会话弹出本机激活浏览器（带授权桶代理+授权链接）。
+// POST /api/v1/admin/openai/launch-auth-browser
+// 功能由 SUB2API_AUTH_BROWSER_LAUNCHER 环境变量开门；未配置时返回明确
+// 错误（前端可提示改走手动 applet 路径）。
+func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
+	if h.authBrowserLauncher == nil {
+		response.ErrorFrom(c, infraerrors.New(http.StatusServiceUnavailable,
+			"AUTH_BROWSER_LAUNCHER_DISABLED",
+			"auth browser launcher is not configured; set SUB2API_AUTH_BROWSER_LAUNCHER"))
+		return
+	}
+	var req OpenAILaunchAuthBrowserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorFrom(c, infraerrors.New(http.StatusBadRequest,
+			"AUTH_BROWSER_LAUNCH_INVALID_REQUEST", err.Error()))
+		return
+	}
+	// 5 秒只约束会话/代理准备阶段；启动脚本使用独立的有界 context，
+	// 但必须同步等到脚本退出后才能回报启动结果。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	result, err := h.authBrowserLauncher.Launch(ctx, req.SessionID)
+	if err != nil {
+		response.ErrorFrom(c, infraerrors.New(http.StatusInternalServerError,
+			"AUTH_BROWSER_LAUNCH_FAILED", err.Error()))
+		return
+	}
 	response.Success(c, result)
 }
 

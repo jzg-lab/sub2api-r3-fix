@@ -739,6 +739,24 @@
                       class="input flex-1 bg-gray-50 font-mono text-xs dark:bg-gray-700"
                     />
                     <button
+                      v-if="showAuthBrowserLaunch"
+                      type="button"
+                      class="btn btn-primary whitespace-nowrap text-xs"
+                      :class="{ 'cursor-not-allowed opacity-60': authBrowserLaunching }"
+                      :disabled="authBrowserLaunching"
+                      :aria-busy="authBrowserLaunching"
+                      title="Launch the activation browser with the bucket proxy bound to this authorization"
+                      @click="emit('launch-auth-browser')"
+                    >
+                      <Icon
+                        :name="authBrowserLaunching ? 'refresh' : 'externalLink'"
+                        size="sm"
+                        class="mr-1"
+                        :class="{ 'animate-spin': authBrowserLaunching }"
+                      />
+                      {{ authBrowserLaunching ? '正在启动…' : '弹出激活浏览器' }}
+                    </button>
+                    <button
                       type="button"
                       class="btn btn-secondary p-2"
                       title="Copy URL"
@@ -932,6 +950,10 @@ interface Props {
   initialEmailPassword?: string
   platform?: AccountPlatform // Platform type for different UI/text
   showProjectId?: boolean // New prop to control project ID visibility
+  /** 授权浏览器直拉（方案A）：授权链接生成后显示「弹出激活浏览器」按钮。 */
+  showAuthBrowserLaunch?: boolean
+  /** 授权浏览器启动请求正在提交，用于禁止重复点击。 */
+  authBrowserLaunching?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -947,6 +969,8 @@ const props = withDefaults(defineProps<Props>(), {
   showRefreshTokenOption: false,
   showMobileRefreshTokenOption: false,
   showSessionTokenOption: false,
+  showAuthBrowserLaunch: false,
+  authBrowserLaunching: false,
   showAccessTokenOption: false,
   showCodexSessionImportOption: false,
   showAgentIdentityOption: false,
@@ -973,6 +997,7 @@ const emit = defineEmits<{
   'import-sso': [content: string]
   'authorize-password': [emailPasswordInput: string]
   'update:inputMethod': [method: AuthInputMethod]
+  'launch-auth-browser': []
 }>()
 
 const { t } = useI18n()

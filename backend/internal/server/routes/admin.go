@@ -453,6 +453,9 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	openai := admin.Group("/openai")
 	{
 		openai.POST("/generate-auth-url", h.Admin.OpenAIOAuth.GenerateAuthURL)
+		// 授权浏览器直拉（方案A，2026-09-22）：session_id → 本机激活浏览器
+		// 弹窗（授权桶代理+授权链接）。SUB2API_AUTH_BROWSER_LAUNCHER 开门。
+		openai.POST("/launch-auth-browser", h.Admin.OpenAIOAuth.LaunchAuthBrowser)
 		openai.POST("/exchange-code", h.Admin.OpenAIOAuth.ExchangeCode)
 		openai.POST("/refresh-token", h.Admin.OpenAIOAuth.RefreshToken)
 		openai.POST("/accounts/:id/refresh", h.Admin.OpenAIOAuth.RefreshAccountToken)
@@ -467,6 +470,8 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.POST("/accounts/:id/probe-now", h.Admin.OpenAIProbeHealth.TriggerProbeNow)
 		// 判死即终态（r17x 选项A 2026-09-21）：手动启用=唯一救援入口。
 		openai.POST("/accounts/:id/reenable", h.Admin.OpenAIProbeHealth.ReenableAccount)
+		// 自动打票线（相位B 2026-09-21）：问题号转动态桶采票循环。
+		openai.POST("/accounts/:id/harvest", h.Admin.OpenAIProbeHealth.StartHarvest)
 	}
 }
 

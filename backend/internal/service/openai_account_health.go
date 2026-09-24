@@ -48,7 +48,8 @@ type OpenAIProbeLastEvidence struct {
 	At              time.Time `json:"at"`
 	Mode            string    `json:"mode"`
 	ReasoningTokens *int      `json:"reasoning_tokens,omitempty"`
-	AnswerCorrect   bool      `json:"answer_correct"`
+	TransportOK     bool      `json:"transport_ok"`
+	AnswerCorrect   *bool     `json:"answer_correct"`
 	TurnStateLen    int       `json:"turn_state_len"`
 	HTTPStatus      int       `json:"http_status,omitempty"`
 	Degraded        bool      `json:"degraded"`
@@ -64,6 +65,7 @@ const (
 	OpenAIHealthLabelPaused        = "paused"        // 已暂停 灰 不可点
 	OpenAIHealthLabelEnforcement   = "enforcement"   // 静置中 灰红（相位B执法型分型后启用）
 	OpenAIHealthLabelQualification = "qualification" // 待认证 灰
+	OpenAIHealthLabelHarvesting    = "harvesting"    // 打票中 紫（动态桶采票循环里）
 )
 
 // 标签颜色 token（前端映射到主题色）。
@@ -74,6 +76,7 @@ const (
 	OpenAIHealthColorBlue    = "blue"
 	OpenAIHealthColorGray    = "gray"
 	OpenAIHealthColorGrayRed = "gray-red"
+	OpenAIHealthColorPurple  = "purple"
 )
 
 // OpenAIProbeHealthSnapshot 聚合查询的一行输入。
@@ -96,7 +99,7 @@ type OpenAIProbeHealthLister interface {
 
 // LabelOpenAIAccountHealth 纯函数：状态映射表（proposal 表格逐行实现）。
 // 判定优先级自上而下（proposal 裁定）：
-// manual_paused > rate_limited > pending_replace > circuit_open >
+// manual_paused > rate_limited > harvest > pending_replace > circuit_open >
 // reprobe/half_open/sol_fallback > qualification > normal-健康/待复核。
 // normal-健康 vs 待复核的分界 = 最近一针降智布尔（r15e 截断+答对=中性）。
 // 静置中（enforcement）相位A 无数据源，恒不触发；相位B 分型落地后接入。
@@ -107,6 +110,11 @@ func LabelOpenAIAccountHealth(s OpenAIProbeHealthSnapshot) (label, color string,
 	if s.RateLimitedAt != nil && !s.RateLimitedAt.IsZero() {
 		// 限流中：额度耗尽打票救不了，不进打票线（用户裁定）。
 		return OpenAIHealthLabelRateLimited, OpenAIHealthColorGray, false, "rate_limited"
+	}
+	// 打票中（2026-09-21 自动打票线）：动态桶采票循环里，紫标签区分于
+	// 蓝色复检中——打票是救援动作，用户需要一眼看出这个号正在换票。
+	if s.ProbeMode == "harvest" {
+		return OpenAIHealthLabelHarvesting, OpenAIHealthColorPurple, false, "harvest"
 	}
 	if s.State == OpenAIDowngradeStatePendingReplace {
 		return OpenAIHealthLabelProblem, OpenAIHealthColorRed, true, "pending_replace"
@@ -154,13 +162,13 @@ var errOpenAIReenableRequired = infraerrors.Conflict(
 // ListDue 的 10 分钟节流）；openAIDowngradeProbeExitThrottleRetryAfter 是
 // 被节流时给前端的建议重试等待。
 const (
-	openAIDowngradeProbeExitThrottleWindow    = 10 * time.Minute
+	openAIDowngradeProbeExitThrottleWindow     = 10 * time.Minute
 	openAIDowngradeProbeExitThrottleRetryAfter = 10 * time.Minute
 )
 
 // OpenAIProbeExitThrottler 窄可选能力：同出口（exit_ip 或 proxy 桶）近窗是否
 // 已有合成探针。真实 repo 实现查询 probe_results；测试桩不实现则节流关闭
-//（手动诊断针仍受 runMu 叠针闸保护）。
+// （手动诊断针仍受 runMu 叠针闸保护）。
 type OpenAIProbeExitThrottler interface {
 	RecentProbeOnExitIP(ctx context.Context, accountID int64, proxyID *int64, within time.Time) (bool, error)
 }
@@ -199,14 +207,16 @@ type TriggerProbeNowResult struct {
 //
 // 双路径（2026-09-21 修复「暂停号静默失效」）：
 //
-//路径A 排期提前（调度循环会拾取的号）：schedulable、非 on_duty 态
+// 路径A 排期提前（调度循环会拾取的号）：schedulable、非 on_duty 态
+//
 //	（熔断/退避/重探——processState 有专门恢复路径）、qualification、
 //	status=error。把 state.NextProbeAt 提前到 now（仅当当前排期晚于 now——
 //	CAS 语义：已 due 或刚被另一手动请求提前的号直接返回 already_flying）。
 //	扫描循环 ≤1 分钟一拍拾取后走 processState 全链路。熔断冷却/判死退避中
 //	提前不等于赦免，状态机迁移语义分毫不动，2 连胜照旧。
 //
-//路径B 同步诊断针（ListDue 永不拾取的号）：manual_paused、面板停用/
+// 路径B 同步诊断针（ListDue 永不拾取的号）：manual_paused、面板停用/
+//
 //	非调度 on_duty 等。这些号提前排期是静默失效（ListDue 直接排除），
 //	改为当场 runProbe 同步打一针：只落 probe_results 证据行，不碰状态机、
 //	不改排期、不摘/复调度——诊断语义，与暂停号不参与调度的既有裁定一致。
@@ -214,7 +224,7 @@ type TriggerProbeNowResult struct {
 //
 // 判定镜像 ListDue L123 的闸门（on_duty 需 schedulable 或 qualification
 // 或 error），保证路径A 的号下一拍必被拾取。不重置任何配额/限流状态
-//（auto-reset 纪律）。手动针与调度针同构：同一 runProbe → probe 传输/
+// （auto-reset 纪律）。手动针与调度针同构：同一 runProbe → probe 传输/
 // 头/体/判定。
 func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accountID int64) (*TriggerProbeNowResult, error) {
 	if r == nil || r.store == nil {
@@ -399,10 +409,10 @@ func (r *OpenAIDowngradeProbeRunner) GetOpenAIAccountHealth(ctx context.Context,
 // 答对不判降智——指纹判定需要完整 result，状态机侧 ConsecutiveFailures 已
 // 承接；证据行只做展示层复核。非 200（401/429/异常）不构成降智证据。
 func OpenAIProbeEvidenceDegraded(ev *OpenAIProbeLastEvidence) bool {
-	if ev == nil || ev.HTTPStatus != 200 {
+	if ev == nil || !ev.TransportOK || ev.HTTPStatus != 200 || ev.AnswerCorrect == nil {
 		return false
 	}
-	if !ev.AnswerCorrect {
+	if !*ev.AnswerCorrect {
 		return true
 	}
 	return ev.ReasoningTokens != nil && *ev.ReasoningTokens < OpenAIDowngradeFailureReasoningThreshold

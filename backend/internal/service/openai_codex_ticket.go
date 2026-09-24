@@ -53,13 +53,19 @@ const (
 	OpenAICodexTicketHarvestRelay = "relay"
 )
 
+// openAICodexTicketCookieNames 铸票响应必须成对摘齐的 Set-Cookie 名
+//（fenjue.py 社区实证：__cflb+__oailb 两者缺一不可——Fernet 票钉在铸票的
+// 那台后端实例上，Cookie 对是路由回同一实例的信物，缺对会被负载均衡
+// 派去别家实例导致票失效）。固定顺序拼接成 Cookie 头值。
+var openAICodexTicketCookieNames = [...]string{"__cflb", "__oailb"}
+
 var (
 	errOpenAICodexTicketMalformed = errors.New("codex ticket malformed")
 	errOpenAICodexTicketBadVersion = errors.New("codex ticket version byte mismatch")
 )
 
-// OpenAICodexTicket 票行（repo ↔ service 契约）。TicketValue 敏感：
-// 只在采集/注入两端流动，绝不经手日志。
+// OpenAICodexTicket 票行（repo ↔ service 契约）。TicketValue / CookiePair
+// 敏感：只在采集/注入两端流动，绝不经手日志。
 type OpenAICodexTicket struct {
 	AccountID       int64
 	Model           string
@@ -69,7 +75,10 @@ type OpenAICodexTicket struct {
 	ExpiresAt       time.Time
 	ExitFingerprint string
 	HarvestedMode   string
-	UpdatedAt       time.Time
+	// CookiePair 铸票响应 Set-Cookie 摘出的 __cflb+__oailb 对（可空）。
+	// 空对=未摘齐（旧票/上游没发），注入侧自动降级为只注票不注 Cookie。
+	CookiePair string
+	UpdatedAt  time.Time
 }
 
 // OpenAICodexTicketStore 窄可选能力（与 HistoryCleaner 同模式）：只有真实
@@ -148,9 +157,48 @@ func codexTicketUsable(ticket *OpenAICodexTicket, now time.Time, exitFingerprint
 	return true
 }
 
+// ExtractOpenAICodexCookiePair 从铸票响应的 Set-Cookie 行摘 __cflb+__oailb 对
+//（镜像 fenjue.py pair_from_set_cookie）：两者必须齐才成对（缺任一返回空——
+// 半对不如不带，负载均衡见到残缺 Cookie 集照样派去别家实例）。值含换行或
+// 为空视为脏数据丢弃；固定 "__cflb=v; __oailb=v" 顺序拼成 Cookie 头值。
+// 返回值敏感：同 ticket_value 纪律，不进日志/遥测。
+func ExtractOpenAICodexCookiePair(setCookieValues []string) string {
+	if len(setCookieValues) == 0 {
+		return ""
+	}
+	found := make(map[string]string, len(openAICodexTicketCookieNames))
+	for _, line := range setCookieValues {
+		nv := strings.TrimSpace(strings.SplitN(line, ";", 2)[0])
+		name, value, ok := strings.Cut(nv, "=")
+		if !ok {
+			continue
+		}
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, "\r\n") {
+			continue
+		}
+		for _, want := range openAICodexTicketCookieNames {
+			if name == want {
+				found[name] = value
+			}
+		}
+	}
+	for _, name := range openAICodexTicketCookieNames {
+		if _, ok := found[name]; !ok {
+			return ""
+		}
+	}
+	parts := make([]string, 0, len(openAICodexTicketCookieNames))
+	for _, name := range openAICodexTicketCookieNames {
+		parts = append(parts, name+"="+found[name])
+	}
+	return strings.Join(parts, "; ")
+}
+
 // HarvestOpenAICodexTicket 探针顺带采票入口（零新增流量）：value 非空、
-// 长度过白名单、Fernet 签发时刻可解 → upsert 票表。任何失败只记日志，
-// 绝不影响探针主判定。
+// 长度过白名单、Fernet 签发时刻可解 → upsert 票表。cookiePair 是铸票响应
+// Set-Cookie 摘出的对（空对不阻断采票，票照入库——注入侧自然降级）。
+// 任何失败只记日志，绝不影响探针主判定。
 func HarvestOpenAICodexTicket(
 	ctx context.Context,
 	store OpenAICodexTicketStore,
@@ -158,6 +206,7 @@ func HarvestOpenAICodexTicket(
 	proxyID *int64,
 	model string,
 	value string,
+	cookiePair string,
 	harvestedMode string,
 	now time.Time,
 ) {
@@ -194,6 +243,7 @@ func HarvestOpenAICodexTicket(
 		ExpiresAt:       issuedAt.Add(openAICodexTicketTTL),
 		ExitFingerprint: exitFingerprint,
 		HarvestedMode:   harvestedMode,
+		CookiePair:      strings.TrimSpace(cookiePair),
 		UpdatedAt:       now,
 	}
 	if err := store.UpsertOpenAICodexTicket(ctx, ticket); err != nil {
@@ -204,7 +254,8 @@ func HarvestOpenAICodexTicket(
 	slog.Info("openai_codex_ticket_harvested",
 		"account_id", accountID, "model", model,
 		"len", len(value), "issued_at", issuedAt.Format(time.RFC3339),
-		"mode", OpenAICodexTicketHarvestProbe)
+		"mode", OpenAICodexTicketHarvestProbe,
+		"cookie_pair", ticket.CookiePair != "")
 }
 
 func int64ToString(v int64) string {
@@ -309,12 +360,26 @@ func ListOpenAICodexTicketStatus(
 	return out, nil
 }
 
+// openAICodexTicketTrafficSince 防回滚闸查询：账号自 since 时刻起是否又有
+// 真实推理流量（usage_logs 近窗）。nil = 闸禁用（测试/未接线时维持旧语义）。
+type openAICodexTicketTrafficSince func(ctx context.Context, accountID int64, since time.Time) bool
+
 // maybeInjectOpenAICodexTicket 保守注入（相位B）：仅当客户端已回带
 // x-codex-turn-state（sx120609 保守版：首请求不携带不注入）且票可用时，
 // 用桶内活票替换客户端回带值。替换语义=「同账号同模型的票换新」，与
 // guardOpenAICodexTurnStateEcho 的跨账号剥离互补：guard 先剥异账号值，
 // 此处再补本账号活票。任何不满足都原样放行（FailOpen，绝不阻断业务）。
 // 只在出站头构建临界区调用；查询失败静默降级为不注入。
+//
+// r17ae Cookie 对成套注入：换票时同步带回铸票响应摘的 __cflb+__oailb 对
+//（Fernet 票钉在铸票实例上，Cookie 对是路由回该实例的信物）。仅当票带
+// 非空 CookiePair 且请求未携带其它 Cookie 时整头替换——绝不 clobber
+// 认证 cookie；无对旧票自动降级为只注票（FailOpen 同哲学）。
+//
+// r17ag 防回滚闸（mracry 钉住文档对照）：官方每轮换新 turn-state，下一轮
+// 必须带返回值——票入库后该账号若又有真实流量，客户端回带值已被推到比
+// 库里票更新的位置，注入=把链回滚到过去（invalid_encrypted_content/312）。
+// 仅当票后无流量（库里票就是该账号最新指针）才允许替换。
 func maybeInjectOpenAICodexTicket(
 	ctx context.Context,
 	store OpenAICodexTicketStore,
@@ -322,6 +387,7 @@ func maybeInjectOpenAICodexTicket(
 	model string,
 	h http.Header,
 	now time.Time,
+	trafficSince openAICodexTicketTrafficSince,
 ) {
 	if store == nil || h == nil || account == nil || account.ID <= 0 {
 		return
@@ -335,7 +401,20 @@ func maybeInjectOpenAICodexTicket(
 	if ticket == nil || ticket.TicketValue == echoed {
 		return
 	}
+	// r17ag 防回滚闸：票入库后该账号又有真实流量 → 客户端回带值已被官方
+	// 轮换推到比库里票更新的位置，替换=回滚会话链（invalid_encrypted_content/
+	// 312）。放行原值（FailOpen）；查询失败同样放行（闸不阻断业务）。
+	if trafficSince != nil && trafficSince(ctx, account.ID, ticket.UpdatedAt) {
+		slog.Debug("openai_codex_ticket_inject_deferred_chain_advanced",
+			"account_id", account.ID, "model", model,
+			"ticket_updated_at", ticket.UpdatedAt.Format(time.RFC3339))
+		return
+	}
 	h.Set(openAICodexTurnStateHeader, ticket.TicketValue)
+	if pair := strings.TrimSpace(ticket.CookiePair); pair != "" &&
+		strings.TrimSpace(h.Get("Cookie")) == "" {
+		h.Set("Cookie", pair)
+	}
 	slog.Debug("openai_codex_ticket_injected",
 		"account_id", account.ID, "model", model, "len", ticket.TicketLen)
 }

@@ -206,9 +206,10 @@ func TestProbeRealTrafficMismatchSignalSkipsTrafficDeferralAndRecordsEvent(t *te
 	require.GreaterOrEqual(t, state.NextProbeAt.Sub(now), 22*time.Minute-time.Second)
 }
 
-// TestProbeTurnStateDegradedAloneRecordsEventAndAcceleratesRecheck：单 356
-// （无降智证据）只记事件 + 加速复查（2.5-7.5min），不摘号、不熔断。
-func TestProbeTurnStateDegradedAloneRecordsEventAndAcceleratesRecheck(t *testing.T) {
+// TestProbeTurnStateDegradedAloneCircuitsImmediately：纯单针杀
+// （2026-09-22 用户裁定）：normal 档单 356（答对也在场）记事件 + 当场熔断
+// 摘调度。qualification 新号线仍只记事件走自然节奏。
+func TestProbeTurnStateDegradedAloneCircuitsImmediately(t *testing.T) {
 	const accountID = int64(91006)
 	account := &Account{
 		ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -233,12 +234,13 @@ func TestProbeTurnStateDegradedAloneRecordsEventAndAcceleratesRecheck(t *testing
 	}
 
 	require.NoError(t, runner.processState(context.Background(), state, now))
-	require.Equal(t, []string{OpenAIDowngradeEventTurnStateDegraded}, store.eventTypes)
-	require.Equal(t, OpenAIDowngradeStateOnDuty, state.State, "single 356 must not circuit")
-	require.Empty(t, repo.schedulableCalls, "single 356 must not touch schedulable")
-	delay := state.NextProbeAt.Sub(now)
-	require.GreaterOrEqual(t, delay, 5*time.Minute/2-time.Second, "accelerated recheck floor 2.5min")
-	require.LessOrEqual(t, delay, 15*time.Minute/2+time.Second, "accelerated recheck cap 7.5min")
+	require.Equal(t, []string{
+		OpenAIDowngradeEventTurnStateDegraded,
+		OpenAIDowngradeEventCircuitOpen,
+	}, store.eventTypes)
+	require.Equal(t, OpenAIDowngradeStateCircuitOpen, state.State, "single 356 must circuit immediately")
+	require.Equal(t, []bool{false}, repo.schedulableCalls, "single 356 must pull the account out of scheduling")
+	require.NotNil(t, state.CircuitOpenedAt)
 }
 
 // TestProbeDualSignalTurnStateAndDegradedCircuitsImmediately：356 与降智证据
@@ -317,9 +319,47 @@ func TestProbeTurnStateHealthyLengthRecordsNoEvent(t *testing.T) {
 	}
 }
 
-// TestProbeDegradedWithoutTurnStateStillNeedsTwoStrikes：无 356 在场的降智
-// 证据仍走两连败防误杀（1020 间歇性先例），相位2不改变单证据语义。
-func TestProbeDegradedWithoutTurnStateStillNeedsTwoStrikes(t *testing.T) {
+func TestInterruptedProbeTurnStateEventKeepsVerdictUnknown(t *testing.T) {
+	const accountID = int64(91010)
+	account := &Account{
+		ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true,
+	}
+	store := &downgradeProbeStoreStub{}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	now := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	runner.now = func() time.Time { return now }
+	runner.nextDelay = func() time.Duration { return time.Hour }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{
+			TransportOK:   false,
+			AnswerCorrect: false,
+			TurnStateLen:  356,
+			HTTPStatus:    http.StatusOK,
+			ErrorMessage:  "probe response missing valid completion or reasoning usage",
+		}
+	}
+	state := &OpenAIDowngradeProbeState{
+		AccountID: accountID, State: OpenAIDowngradeStateOnDuty,
+		ProbeMode: "normal", NextProbeAt: now,
+	}
+
+	require.NoError(t, runner.processState(context.Background(), state, now))
+	require.Equal(t, []string{OpenAIDowngradeEventTurnStateDegraded}, store.eventTypes)
+	require.Len(t, store.eventDetails, 1)
+	require.Equal(t, false, store.eventDetails[0]["transport_ok"])
+	require.Contains(t, store.eventDetails[0], "answer_correct")
+	require.Nil(t, store.eventDetails[0]["answer_correct"],
+		"an interrupted stream has no judgeable answer verdict")
+	require.Equal(t, OpenAIDowngradeStateOnDuty, state.State)
+	require.Empty(t, repo.schedulableCalls)
+}
+
+// TestProbeDegradedWithoutTurnStateCircuitsOnFirstStrike：纯单针杀
+// （2026-09-22 用户裁定）：无 356 在场的降智证据（答错+低rt）也单针熔断
+// ——拖第二针只是放行污染流量继续流。
+func TestProbeDegradedWithoutTurnStateCircuitsOnFirstStrike(t *testing.T) {
 	const accountID = int64(91009)
 	account := &Account{
 		ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -343,11 +383,10 @@ func TestProbeDegradedWithoutTurnStateStillNeedsTwoStrikes(t *testing.T) {
 	}
 
 	require.NoError(t, runner.processState(context.Background(), state, now))
-	require.Equal(t, OpenAIDowngradeStateOnDuty, state.State,
-		"degraded evidence without turn-state must still require two strikes")
-	require.Equal(t, 1, state.ConsecutiveFailures)
-	require.Empty(t, repo.schedulableCalls)
-	require.Empty(t, store.eventTypes)
+	require.Equal(t, OpenAIDowngradeStateCircuitOpen, state.State,
+		"degraded evidence without turn-state must circuit on the first strike")
+	require.Equal(t, []bool{false}, repo.schedulableCalls)
+	require.Equal(t, []string{OpenAIDowngradeEventCircuitOpen}, store.eventTypes)
 }
 
 // TestProbeDualSignalQualificationFirstStrikeGetsGracePeriod：qualification

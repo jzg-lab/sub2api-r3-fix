@@ -34,7 +34,12 @@ func newProbePostgresWithOwnership(t *testing.T, ownership bool) *sql.DB {
 	if ownership {
 		migrations = append(migrations, "239_openai_probe_ownership.sql")
 	}
-	migrations = append(migrations, "240_openai_probe_rate_limit_streak.sql")
+	migrations = append(migrations,
+		"240_openai_probe_rate_limit_streak.sql",
+		"241_openai_probe_turn_state_len.sql",
+		"244_openai_probe_harvest_mode.sql",
+		"246_openai_probe_nullable_verdict.sql",
+	)
 	return newProbePostgresWithMigrations(t, migrations)
 }
 
@@ -90,6 +95,12 @@ func newProbePostgresWithMigrations(t *testing.T, migrations []string) *sql.DB {
 			expires_at TIMESTAMPTZ, rate_limited_at TIMESTAMPTZ,
 			rate_limit_reset_at TIMESTAMPTZ
 		);
+		CREATE TABLE usage_logs (
+			id BIGSERIAL PRIMARY KEY,
+			account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			actual_cost DECIMAL(20, 10) NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 	`)
 	require.NoError(t, err)
 	for _, name := range migrations {
@@ -141,6 +152,60 @@ func probePostgresSnapshot(t *testing.T, db *sql.DB) string {
 	`).Scan(&snapshot)
 	require.NoError(t, err)
 	return snapshot
+}
+
+func TestOpenAIProbeNullableVerdictMigrationAndWrites(t *testing.T) {
+	db := newProbePostgresWithMigrations(t, []string{
+		"237_openai_downgrade_probe.sql",
+		"239_openai_probe_ownership.sql",
+		"240_openai_probe_rate_limit_streak.sql",
+		"241_openai_probe_turn_state_len.sql",
+		"244_openai_probe_harvest_mode.sql",
+	})
+	seedProbePostgres(t, db)
+	_, err := db.Exec(`
+		INSERT INTO openai_downgrade_probe_results(
+			account_id, proxy_id, transport_ok, answer_correct, http_status
+		) VALUES(7, 3, FALSE, FALSE, 200)
+	`)
+	require.NoError(t, err)
+
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations",
+		"246_openai_probe_nullable_verdict.sql"))
+	require.NoError(t, err)
+	_, err = db.Exec(string(migration))
+	require.NoError(t, err)
+
+	var verdict sql.NullBool
+	require.NoError(t, db.QueryRow(`
+		SELECT answer_correct
+		FROM openai_downgrade_probe_results
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&verdict))
+	require.False(t, verdict.Valid, "historical interrupted probes must be backfilled to NULL")
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	proxyID := int64(3)
+	require.NoError(t, repo.RecordOpenAIDowngradeProbe(context.Background(),
+		&service.OpenAIDowngradeProbeResult{
+			AccountID: 7, ProxyID: &proxyID, TransportOK: false,
+			AnswerCorrect: false, HTTPStatus: 200, ErrorMessage: "stream interrupted",
+		}))
+	require.NoError(t, db.QueryRow(`
+		SELECT answer_correct
+		FROM openai_downgrade_probe_results
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&verdict))
+	require.False(t, verdict.Valid, "new interrupted probes must persist an unknown verdict")
+
+	_, err = db.Exec(`
+		INSERT INTO openai_downgrade_probe_results(
+			account_id, proxy_id, transport_ok, answer_correct, http_status
+		) VALUES(7, 3, FALSE, FALSE, 200)
+	`)
+	require.ErrorContains(t, err, "openai_downgrade_probe_results_verdict_check")
+	_, err = db.Exec(string(migration))
+	require.NoError(t, err, "the migration must remain idempotent")
 }
 
 func TestOpenAIProbePostgresRollbackAtEveryWriteBoundary(t *testing.T) {

@@ -664,3 +664,137 @@ func TestOpenAIProbeStagingImplementsTicketStore(t *testing.T) {
 	require.True(t, ok, "staged runner store must satisfy ticket store for probe-side harvest")
 	_ = ts
 }
+
+func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testing.T) {
+	now := time.Now()
+	homeID, dynID := int64(5), int64(11)
+	newBrowserAccount := func() *Account {
+		return &Account{
+			ID: 1136, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive, Schedulable: false, ProxyID: &dynID, UpdatedAt: now,
+			Extra: map[string]any{
+				OpenAIOAuthQualifiedProxyExtraKey: float64(homeID),
+				"email":                           "fixture@example.com",
+			},
+		}
+	}
+	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
+
+	t.Run("harvest_return_to_original_bucket_is_rejected", func(t *testing.T) {
+		account := newBrowserAccount()
+		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
+		})
+		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID),
+			ErrOpenAIOAuthProxyBindingProtected)
+		require.False(t, stage.mutation.ProxyChanged)
+	})
+
+	t.Run("harvest_to_other_static_bucket_still_rejected", func(t *testing.T) {
+		account := newBrowserAccount()
+		otherID := int64(7)
+		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
+		})
+		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &otherID),
+			ErrOpenAIOAuthProxyBindingProtected)
+		require.False(t, stage.mutation.ProxyChanged)
+	})
+
+	t.Run("non_harvest_mode_rejected", func(t *testing.T) {
+		account := newBrowserAccount()
+		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
+		})
+		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID),
+			ErrOpenAIOAuthProxyBindingProtected)
+		require.False(t, stage.mutation.ProxyChanged)
+	})
+}
+
+// 回归（2026-09-22，1136 实证）：提交失败（非 Stale）后必须让位重排，
+// next_probe_at 不再冻结在过去——否则 ListDue 每分钟捞出重探，形成
+// 「冻结+空打」循环（1136 被自己人的 409 打了 740 针）。
+func TestOpenAIProbeCommitFailureYieldsSchedule(t *testing.T) {
+	now := time.Date(2026, 9, 22, 5, 30, 0, 0, time.UTC)
+	proxyID := int64(11)
+	account := &Account{
+		ID: 1136, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, ProxyID: &proxyID, UpdatedAt: now.Add(-time.Hour),
+	}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	// 预置真库状态行：next_probe_at 在过去（冻结形态），UpdatedAt 与探针前提一致。
+	rowState := OpenAIDowngradeProbeState{
+		AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
+		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
+	}
+	base := &downgradeProbeStoreStub{state: &rowState}
+	store := &downgradeAtomicStoreStub{
+		downgradeProbeStoreStub: base, accountRepo: repo,
+		commitErr: ErrOpenAIOAuthProxyBindingProtected, // 模拟 409 保护闸
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	runner.probeFn = func(_ context.Context, _ *Account, _ string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{
+			AccountID: 1136, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
+			TransportOK: true, AnswerCorrect: false, ReasoningTokens: downgradeProbeIntPtr(665),
+		}
+	}
+	state := rowState
+	err := runner.processStateAtomic(context.Background(), &state, now)
+	require.ErrorIs(t, err, ErrOpenAIOAuthProxyBindingProtected)
+	require.Equal(t, 1, store.commits)
+	// 让位落真库：next_probe_at 推到 half-open 节奏（30 分钟起 spread）。
+	require.Equal(t, 1, base.saveCalls, "yield must persist via the live store")
+	require.NotNil(t, base.state)
+	require.True(t, base.state.NextProbeAt.After(now.Add(25*time.Minute)),
+		"yielded schedule must be ~30min out, got %v", base.state.NextProbeAt.Sub(now))
+	require.True(t, base.state.NextProbeAt.Before(now.Add(45*time.Minute)))
+	// 让位只动排期，不动 state/proxy 实质。
+	require.Equal(t, "harvest", base.state.ProbeMode)
+	require.Equal(t, proxyID, *base.state.CurrentProxyID)
+}
+
+// 回归（2026-09-22）：让位不得覆盖并发赢家的推进——状态行 UpdatedAt 已被
+// 他处推进时，让位跳过（不回写旧快照）。
+func TestOpenAIProbeCommitFailureYieldRespectsConcurrentAdvance(t *testing.T) {
+	now := time.Date(2026, 9, 22, 5, 30, 0, 0, time.UTC)
+	proxyID := int64(11)
+	account := &Account{
+		ID: 1137, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, ProxyID: &proxyID, UpdatedAt: now.Add(-time.Hour),
+	}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	rowState := OpenAIDowngradeProbeState{
+		AccountID: 1137, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
+		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
+	}
+	base := &downgradeProbeStoreStub{state: &rowState}
+	injected := errors.New("constraint violation")
+	store := &downgradeAtomicStoreStub{
+		downgradeProbeStoreStub: base, accountRepo: repo,
+		commitErr: injected,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	runner.probeFn = func(_ context.Context, _ *Account, _ string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{
+			AccountID: 1137, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
+			TransportOK: true, AnswerCorrect: true, ReasoningTokens: downgradeProbeIntPtr(1500),
+		}
+	}
+	state := rowState
+	// 提交失败后、让位读回前，竞争者推进了状态行。
+	advanced := rowState
+	advanced.UpdatedAt = now.Add(-30 * time.Second)
+	advanced.ConsecutiveSuccesses = 2
+	base.state = &advanced
+	err := runner.processStateAtomic(context.Background(), &state, now)
+	require.ErrorIs(t, err, injected)
+	require.Zero(t, base.saveCalls, "yield must not overwrite a concurrent advance")
+	require.Equal(t, advanced.UpdatedAt, base.state.UpdatedAt)
+}

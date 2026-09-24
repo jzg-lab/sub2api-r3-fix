@@ -51,7 +51,7 @@ func (r *openAIDowngradeProbeRepository) GetOpenAIDowngradeState(
 			circuit_opened_at, recovery_deadline, next_probe_at, swap_count_7d,
 			last_swap_at, last_probe_at,
 			astra_consecutive_failures, astra_consecutive_successes, astra_next_probe_at,
-			updated_at, consecutive_429s
+			updated_at, consecutive_429s, harvest_attempts
 		FROM openai_downgrade_probe_states
 		WHERE account_id = $1
 	`, []any{accountID},
@@ -61,7 +61,7 @@ func (r *openAIDowngradeProbeRepository) GetOpenAIDowngradeState(
 		&out.CircuitOpenedAt, &out.RecoveryDeadline, &out.NextProbeAt, &out.SwapCount7d,
 		&out.LastSwapAt, &out.LastProbeAt,
 		&out.AstraConsecutiveFailures, &out.AstraConsecutiveSuccesses, &out.AstraNextProbeAt,
-		&out.UpdatedAt, &out.Consecutive429s); err != nil {
+		&out.UpdatedAt, &out.Consecutive429s, &out.HarvestAttempts); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -84,7 +84,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				s.circuit_opened_at, s.recovery_deadline, s.next_probe_at, s.swap_count_7d,
 				s.last_swap_at, s.last_probe_at,
 				s.astra_consecutive_failures, s.astra_consecutive_successes, s.astra_next_probe_at,
-				s.updated_at, s.consecutive_429s,
+				s.updated_at, s.consecutive_429s, s.harvest_attempts,
 				CASE
 					WHEN p.exit_ip IS NOT NULL AND TRIM(p.exit_ip) <> ''
 						THEN 'ip:' || TRIM(p.exit_ip)
@@ -109,11 +109,10 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				AND a.deleted_at IS NULL
 				AND a.platform = 'openai' AND a.type = 'oauth'
 				AND a.parent_account_id IS NULL
-				-- 判死即终态（r17x 用户裁定 2026-09-21，选项A）：pending_replace
-				-- 不再自动排探针（原「永不放弃」指数退避复活重试废止），
-				-- 保留标签与证据历史，救援唯一入口=手动启用
-				-- （ReenableOpenAIAccount 走 qualification 1 针结业）。
-				AND s.state <> 'pending_replace'
+				-- 判死即终态（r17x 用户裁定 2026-09-21，选项A）：普通
+				-- pending_replace 不再自动排探针；harvest 是独立的短生命周期
+				-- 采票状态，必须继续进入探针分诊，才能完成凭据/限流收尾。
+				AND (s.state <> 'pending_replace' OR s.probe_mode = 'harvest')
 				AND NOT EXISTS (
 					SELECT 1 FROM openai_downgrade_probe_controls c
 					WHERE c.account_id = a.id AND c.manual_paused
@@ -126,9 +125,16 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 						SELECT 1 FROM openai_downgrade_probe_controls c
 						WHERE c.account_id = a.id AND c.owned_error = a.error_message
 					))
+					-- 打票线（2026-09-22 修正）：usage probe 的 401 会把采票中
+					-- 的号标 error，status 闸必须放行 harvest 号——401 分诊
+					--（凭据失效→停打回原桶）正依赖探针继续飞。
+					OR s.probe_mode = 'harvest'
 				)
 				AND (s.state <> 'on_duty' OR a.schedulable IS TRUE
-					OR s.probe_mode = 'qualification' OR a.status = 'error')
+					OR s.probe_mode = 'qualification' OR a.status = 'error'
+					-- 打票线（2026-09-21 相位B）：harvest 号采票循环必须持续被拾取
+					-- （动态桶每针换IP，不占静态出口的调度位）。
+					OR s.probe_mode = 'harvest')
 				AND (
 					a.proxy_id IS NULL
 					OR (
@@ -159,7 +165,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			circuit_opened_at, recovery_deadline, next_probe_at, swap_count_7d,
 			last_swap_at, last_probe_at,
 			astra_consecutive_failures, astra_consecutive_successes, astra_next_probe_at,
-			updated_at, consecutive_429s
+			updated_at, consecutive_429s, harvest_attempts
 		FROM due
 		WHERE probe_rank = 1
 		ORDER BY next_probe_at, account_id
@@ -179,7 +185,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			&item.CircuitOpenedAt, &item.RecoveryDeadline, &item.NextProbeAt, &item.SwapCount7d,
 			&item.LastSwapAt, &item.LastProbeAt,
 			&item.AstraConsecutiveFailures, &item.AstraConsecutiveSuccesses, &item.AstraNextProbeAt,
-			&item.UpdatedAt, &item.Consecutive429s,
+			&item.UpdatedAt, &item.Consecutive429s, &item.HarvestAttempts,
 		); err != nil {
 			return nil, err
 		}
@@ -196,7 +202,13 @@ func (r *openAIDowngradeProbeRepository) CanRunOpenAIDowngradeProbe(ctx context.
 			LEFT JOIN openai_downgrade_probe_controls c ON c.account_id = a.id
 			WHERE a.id = $1 AND a.deleted_at IS NULL AND a.platform = 'openai' AND a.type = 'oauth'
 				AND a.parent_account_id IS NULL AND COALESCE(c.manual_paused, FALSE) IS FALSE
-				AND (a.status = 'active' OR (a.status = 'error' AND c.owned_error = a.error_message))
+				AND (a.status = 'active' OR (a.status = 'error' AND c.owned_error = a.error_message)
+					-- 打票线（2026-09-22）：同 ListDue status 闸——usage probe
+					-- 401 标 error 的采票号必须继续可探测。
+					OR EXISTS (
+						SELECT 1 FROM openai_downgrade_probe_states s
+						WHERE s.account_id = a.id AND s.probe_mode = 'harvest'
+					))
 				AND (a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > NOW())
 		)
 	`, []any{accountID}, &allowed)
@@ -264,14 +276,15 @@ func (r *openAIDowngradeProbeRepository) SaveOpenAIDowngradeState(
 			next_probe_at = $11, swap_count_7d = $12, last_swap_at = $13,
 			last_probe_at = $14,
 			astra_consecutive_failures = $15, astra_consecutive_successes = $16,
-			astra_next_probe_at = $17, updated_at = $18, consecutive_429s = $19
+			astra_next_probe_at = $17, updated_at = $18, consecutive_429s = $19,
+			harvest_attempts = $20
 		WHERE account_id = $1
 	`, state.AccountID, state.State, state.OriginalProxyID, state.CurrentProxyID,
 		state.ProbeMode, state.ConsecutiveFailures, state.ConsecutiveSuccesses, state.FirstFailureAt,
 		state.CircuitOpenedAt, state.RecoveryDeadline, state.NextProbeAt, state.SwapCount7d,
 		state.LastSwapAt, state.LastProbeAt,
 		state.AstraConsecutiveFailures, state.AstraConsecutiveSuccesses, state.AstraNextProbeAt,
-		state.UpdatedAt, state.Consecutive429s)
+		state.UpdatedAt, state.Consecutive429s, state.HarvestAttempts)
 	return requireOpenAIProbeUpdatedRow(result, err)
 }
 
@@ -286,7 +299,8 @@ func (r *openAIDowngradeProbeRepository) RecordOpenAIDowngradeProbe(
 		INSERT INTO openai_downgrade_probe_results
 			(account_id, proxy_id, mode, probe, transport_ok, answer_correct,
 			 reasoning_tokens, juice, latency_ms, http_status, error_message, turn_state_len)
-		VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'normal'), TRUE, $4, $5,
+		VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'normal'), TRUE, $4,
+			CASE WHEN $4::boolean THEN $5::boolean ELSE NULL::boolean END,
 			$6, $7, $8, NULLIF($9, 0), NULLIF($10, ''), $11)
 	`, result.AccountID, result.ProxyID, result.Mode, result.TransportOK,
 		result.AnswerCorrect, result.ReasoningTokens, result.Juice,
@@ -457,6 +471,24 @@ func (r *openAIDowngradeProbeRepository) FindOpenAIDowngradeMainProxy(
 		ORDER BY p.bucket_risk_score ASC, room.n ASC, p.id
 		LIMIT 1
 	`, []any{openAIDowngradePerIPAccountCap})
+}
+
+// FindOpenAIDynamicHarvestBucket 找打票线动态桶（novproxy 系）：exit_ip 为
+// NULL 的桶=对自动分桶隐身（r15b 设计），正是动态桶的形态——静态桶全都有
+// exit_ip。FailClosed：找不到返回 nil（没有动态源就别打票）。
+func (r *openAIDowngradeProbeRepository) FindOpenAIDynamicHarvestBucket(
+	ctx context.Context,
+) (*int64, error) {
+	return r.scanProxyID(ctx, `
+		SELECT p.id
+		FROM proxies p
+		WHERE p.deleted_at IS NULL AND p.status = 'active'
+			AND p.bucket_enabled IS TRUE
+			AND (p.exit_ip IS NULL OR TRIM(p.exit_ip) = '')
+			AND p.name NOT LIKE 'sub2api-%'
+		ORDER BY p.id
+		LIMIT 1
+	`, []any{})
 }
 
 func (r *openAIDowngradeProbeRepository) FindOpenAIDowngradeEscapeProxy(
@@ -691,7 +723,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIDowngradeDashboard(
 }
 
 // openAIDowngradePurgeBatchSize 保留清理的分批上限：与 usage_logs 清理同思路
-//（dashboard_aggregation_repo.go），单批 DELETE 的锁持有时长与 WAL 量有界，
+// （dashboard_aggregation_repo.go），单批 DELETE 的锁持有时长与 WAL 量有界，
 // 避免大表首次清理时长时间阻塞探针写入。
 const openAIDowngradePurgeBatchSize = 5000
 

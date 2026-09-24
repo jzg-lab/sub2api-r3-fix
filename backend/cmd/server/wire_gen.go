@@ -175,7 +175,18 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// 默认不接线：上游 2026-09-19 前后修复了 292 票跨账号重放，同账号换新
 	// 票是否存活未知，待动态IP实测。启用=取消下一行注释+重启（约5分钟），
 	// 关闭=恢复注释，两向都是这一行。
-	openAIGatewayService.SetCodexTicketStore(repository.NewOpenAICodexTicketStore(db))
+	// 2026-09-23 注入下线（r17ai）：9/22-23 一日 15 号中途降智（健康首针→
+	// 真实流量进场 ~1 分钟内 mismatch 风暴→复核针 356），注入是 r11 后唯一
+	// 新增的对真实流量出站头改写，且 9/21 已定案 turn-state 注入被官方定性
+	// anti-abuse。采票观察哨（探针侧）不受影响——它经 staging 类型断言取票
+	// 能力，与本行无关。恢复注入=取消下一行注释。
+	// openAIGatewayService.SetCodexTicketStore(repository.NewOpenAICodexTicketStore(db))
+	// r17ag 防回滚闸：票入库后账号又有真实流量 → 放行回带值（官方轮换已把
+	// 链推到票前头，替换=回滚会话链 → invalid_encrypted_content/312）。
+	openAIGatewayService.SetCodexTicketTrafficSince(func(ctx context.Context, accountID int64, since time.Time) bool {
+		logs, _, err := usageLogRepository.ListByAccountAndTimeRange(ctx, accountID, since, time.Now())
+		return err == nil && len(logs) > 0
+	})
 	openAIDowngradeProbe := service.ProvideOpenAIDowngradeProbeRunner(openAIDowngradeProbeRepository, accountRepository, proxyRepository, openAITokenProvider, httpUpstream, tlsFingerprintProfileService, usageLogRepository)
 	opsService := service.ProvideOpsService(opsRepository, settingRepository, configConfig, accountRepository, userRepository, concurrencyService, gatewayService, openAIGatewayService, geminiMessagesCompatService, antigravityGatewayService, opsSystemLogSink, openAIDowngradeProbeRepository, settingService, authCacheInvalidationWorker, apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, opsService, settingService)
@@ -229,6 +240,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	backupHandler := admin.NewBackupHandler(backupService, userService, imageStorageSettingService)
 	oAuthHandler := admin.NewOAuthHandler(oAuthService)
 	openAIOAuthHandler := admin.NewOpenAIOAuthHandler(openAIOAuthService, adminService, openAIQuotaService, rateLimitService)
+	openAIOAuthHandler.SetAuthBrowserLauncher(service.ProvideOpenAIAuthBrowserLauncher(configConfig, proxyRepository, authPendingIdentityService))
 	geminiOAuthHandler := admin.NewGeminiOAuthHandler(geminiOAuthService)
 	antigravityOAuthHandler := admin.NewAntigravityOAuthHandler(antigravityOAuthService)
 	tokenRefreshService := service.ProvideTokenRefreshService(accountRepository, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, compositeTokenCacheInvalidator, schedulerCache, configConfig, tempUnschedCache, privacyClientFactory, proxyRepository, oAuthRefreshAPI, openAIGatewayService)

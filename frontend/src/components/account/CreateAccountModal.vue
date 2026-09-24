@@ -3478,6 +3478,9 @@
         :show-email-password-option="false"
         :show-manual-option="true"
         :initial-input-method="'manual'"
+        :show-auth-browser-launch="form.platform === 'openai'"
+        :auth-browser-launching="authBrowserLaunching"
+        @launch-auth-browser="handleLaunchAuthBrowser"
         :platform="form.platform"
         :show-project-id="geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
@@ -5747,6 +5750,35 @@ const handleGenerateUrl = async () => {
     await grokOAuth.generateAuthUrl(form.proxy_id)
   } else {
     await oauth.generateAuthUrl(addMethod.value, form.proxy_id)
+  }
+}
+
+// 授权浏览器直拉（方案A）：后端读授权会话绑定的桶 → 本机 launch.sh →
+// Chrome 带桶代理+授权链接弹窗。失败（未配置/会话过期/链路断）走提示，
+// 手动 applet 路径不受影响。
+const authBrowserLaunching = ref(false)
+const handleLaunchAuthBrowser = async () => {
+  const sessionId = openaiOAuth.sessionId.value
+  if (!sessionId) {
+    appStore.showError('授权会话缺失，请先重新生成授权链接')
+    return
+  }
+  if (authBrowserLaunching.value) return
+  authBrowserLaunching.value = true
+  try {
+    const result = await adminAPI.accounts.launchAuthBrowser(sessionId)
+    if (result.already_running) {
+      appStore.showSuccess('激活浏览器正在启动，请勿重复点击')
+    } else if (result.launched) {
+      appStore.showSuccess(`激活浏览器已启动（${result.proxy_name}），请在弹出的窗口完成 Google 登录`)
+    } else {
+      appStore.showError(`激活浏览器启动失败：${result.output || '未知原因'}`)
+    }
+  } catch (err: any) {
+    const detail = err?.response?.data?.message || err?.message || String(err)
+    appStore.showError(`弹出激活浏览器失败：${detail}`)
+  } finally {
+    authBrowserLaunching.value = false
   }
 }
 

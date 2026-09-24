@@ -512,6 +512,9 @@ type OpenAIGatewayService struct {
 	// codexTicketStore 相位B（2026-09-21）：x-codex-turn-state 活票注入，
 	// setter 注入（nil=功能关闭，FailOpen 原样透传）。
 	codexTicketStore               OpenAICodexTicketStore
+	// codexTicketTrafficSince r17ag 防回滚闸：票入库后账号又有真实流量则
+	// 放行客户端回带值（usage_logs 近窗查询）。nil=闸禁用（旧语义）。
+	codexTicketTrafficSince        openAICodexTicketTrafficSince
 	openaiWSPool                   *openAIWSConnPool
 	openaiWSStateStore             OpenAIWSStateStore
 	openaiScheduler                OpenAIAccountScheduler
@@ -645,6 +648,15 @@ func (s *OpenAIGatewayService) SetTLSFingerprintProfileService(service *TLSFinge
 func (s *OpenAIGatewayService) SetCodexTicketStore(store OpenAICodexTicketStore) {
 	if s != nil {
 		s.codexTicketStore = store
+	}
+}
+
+// SetCodexTicketTrafficSince r17ag 防回滚闸接线：注入前查 usage_logs——
+// 票入库后账号又有真实流量 → 官方轮换已把回带值推到票前头，替换=回滚
+// 会话链。nil=闸禁用（维持 r17ae 旧语义，测试默认态）。
+func (s *OpenAIGatewayService) SetCodexTicketTrafficSince(fn openAICodexTicketTrafficSince) {
+	if s != nil {
+		s.codexTicketTrafficSince = fn
 	}
 }
 

@@ -946,6 +946,10 @@ const (
 
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
+	// AuthBrowserLauncher 授权浏览器直拉（2026-09-22 方案A）：指向本机
+	// launch.sh 的绝对路径；非空才启用管理端 launch-auth-browser 接口。
+	// 环境变量 SUB2API_AUTH_BROWSER_LAUNCHER / 配置键 gateway.auth_browser_launcher。
+	AuthBrowserLauncher string `mapstructure:"auth_browser_launcher"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
@@ -1795,6 +1799,11 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
+	}
+	// 授权浏览器直拉（方案A）：SUB2API_AUTH_BROWSER_LAUNCHER 指到本机
+	// launch.sh 才启用；未设=接口 404 级关闭（不绑死部署机路径）。
+	if err := viper.BindEnv("gateway.auth_browser_launcher", "SUB2API_AUTH_BROWSER_LAUNCHER"); err != nil {
+		return nil, fmt.Errorf("bind SUB2API_AUTH_BROWSER_LAUNCHER: %w", err)
 	}
 
 	// 默认值
