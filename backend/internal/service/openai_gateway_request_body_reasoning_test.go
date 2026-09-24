@@ -8,6 +8,45 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestNormalizeOpenAIResponsesReasoningModeGPT6(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-sol","reasoning":{"mode":"adaptive","effort":"high"},"temperature":0.7,"top_p":0.8,"top_logprobs":5,"logprobs":true,"include":["message.output_text.logprobs","reasoning.encrypted_content"]}`)
+
+	normalized, changed, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6-sol")
+
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "adaptive", gjson.GetBytes(normalized, "reasoning.mode").String())
+	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning.effort").String())
+	require.False(t, gjson.GetBytes(normalized, "temperature").Exists())
+	require.False(t, gjson.GetBytes(normalized, "top_p").Exists())
+	require.False(t, gjson.GetBytes(normalized, "top_logprobs").Exists())
+	require.False(t, gjson.GetBytes(normalized, "logprobs").Exists())
+	require.Equal(t, "reasoning.encrypted_content", gjson.GetBytes(normalized, "include.0").String())
+}
+
+func TestNormalizeOpenAIResponsesReasoningModeGPT6NonePreservesSampling(t *testing.T) {
+	body := []byte(`{"model":"gpt-6-luna","reasoning":{"mode":"fast","effort":"none"},"temperature":0.7,"top_p":0.8}`)
+
+	normalized, changed, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6-luna")
+
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.JSONEq(t, string(body), string(normalized))
+	require.Equal(t, "none", normalizeOpenAIReasoningEffortForModel("none", "gpt-6-luna"))
+	require.Equal(t, "max", normalizeOpenAIReasoningEffortForModel("max", "gpt-6-sol"))
+}
+
+func TestNormalizeOpenAIResponsesReasoningModeLegacyStillStripsMode(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-sol","reasoning":{"mode":"pro"}}`)
+
+	normalized, changed, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-5.6-sol")
+
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.False(t, gjson.GetBytes(normalized, "reasoning.mode").Exists())
+	require.Equal(t, "max", gjson.GetBytes(normalized, "reasoning.effort").String())
+}
+
 func TestTrimOpenAIEncryptedReasoningItems_ContentNull(t *testing.T) {
 	reqBody := map[string]any{
 		"model": "grok-4.5",

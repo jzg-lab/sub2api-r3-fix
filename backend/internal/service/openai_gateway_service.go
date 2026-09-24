@@ -272,6 +272,7 @@ type OpenAIUsage struct {
 	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 	InputTokens              int `json:"input_tokens"`
 	ImageInputTokens         int `json:"image_input_tokens,omitempty"`
+	ImageCacheReadTokens     int `json:"image_cache_read_tokens,omitempty"`
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
@@ -511,7 +512,7 @@ type OpenAIGatewayService struct {
 	agentIdentityTaskMu           sync.Mutex
 	// codexTicketStore 相位B（2026-09-21）：x-codex-turn-state 活票注入，
 	// setter 注入（nil=功能关闭，FailOpen 原样透传）。
-	codexTicketStore               OpenAICodexTicketStore
+	codexTicketStore OpenAICodexTicketStore
 	// codexTicketTrafficSince r17ag 防回滚闸：票入库后账号又有真实流量则
 	// 放行客户端回带值（usage_logs 近窗查询）。nil=闸禁用（旧语义）。
 	codexTicketTrafficSince        openAICodexTicketTrafficSince

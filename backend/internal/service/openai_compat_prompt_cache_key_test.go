@@ -26,6 +26,28 @@ func TestShouldAutoInjectPromptCacheKeyForCompat(t *testing.T) {
 	require.False(t, shouldAutoInjectPromptCacheKeyForCompat("gpt-4o"))
 }
 
+func TestGPT6CompatCacheIdentity(t *testing.T) {
+	for _, model := range []string{
+		"gpt-6",
+		"gpt-6-astra",
+		"openai/GPT_6_ASTRA",
+		"gpt-6-sol",
+		"openai/gpt-6-luna",
+		"gpt-6-sol-max",
+	} {
+		require.True(t, shouldAutoInjectPromptCacheKeyForCompat(model), model)
+	}
+	for _, model := range []string{
+		"gpt-6-terra",
+		"gpt-6-sol-preview",
+		"gpt-6-solitude",
+		"gpt-6-luna-preview",
+		"gpt-4o",
+	} {
+		require.False(t, shouldAutoInjectPromptCacheKeyForCompat(model), model)
+	}
+}
+
 func TestDeriveCompatPromptCacheKey_StableAcrossLaterTurns(t *testing.T) {
 	base := &apicompat.ChatCompletionsRequest{
 		Model: "gpt-5.4",

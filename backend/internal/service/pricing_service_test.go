@@ -386,6 +386,66 @@ func TestDefaultPricingIncludesOfficialGPT56Rates(t *testing.T) {
 	}
 }
 
+func TestDefaultPricingIncludesGPT6SolLunaImage25AndClaudeOpus55(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	pricingSvc := &PricingService{}
+	pricingData, err := pricingSvc.parsePricingData(body)
+	require.NoError(t, err)
+
+	textModels := []struct {
+		model                             string
+		provider                          string
+		input, cached, cacheWrite, output float64
+	}{
+		{model: "gpt-6-sol", provider: "openai", input: 2e-6, cached: 0.2e-6, cacheWrite: 2.5e-6, output: 10e-6},
+		{model: "gpt-6-luna", provider: "openai", input: 0.1e-6, cached: 0.01e-6, cacheWrite: 0.125e-6, output: 0.5e-6},
+		{model: "claude-opus-5-5", provider: "anthropic", input: 4e-6, cached: 0.2e-6, cacheWrite: 5e-6, output: 20e-6},
+	}
+	for _, tt := range textModels {
+		t.Run(tt.model, func(t *testing.T) {
+			pricing := pricingData[tt.model]
+			require.NotNil(t, pricing)
+			require.Equal(t, tt.provider, pricing.LiteLLMProvider)
+			require.Equal(t, "chat", pricing.Mode)
+			require.InDelta(t, tt.input, pricing.InputCostPerToken, 1e-12)
+			require.InDelta(t, tt.cached, pricing.CacheReadInputTokenCost, 1e-12)
+			require.InDelta(t, tt.cacheWrite, pricing.CacheCreationInputTokenCost, 1e-12)
+			require.InDelta(t, tt.output, pricing.OutputCostPerToken, 1e-12)
+			require.True(t, pricing.SupportsPromptCaching)
+		})
+	}
+
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		pricing := pricingData[model]
+		require.True(t, pricing.SupportsServiceTier, model)
+		require.Equal(t, 272000, pricing.LongContextInputTokenThreshold, model)
+		require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplier, 1e-12, model)
+		require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12, model)
+		require.Positive(t, pricing.InputCostPerTokenPriority, model)
+		require.Positive(t, pricing.OutputCostPerTokenPriority, model)
+	}
+
+	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"} {
+		pricing := pricingData[model]
+		require.NotNil(t, pricing)
+		require.Equal(t, "openai", pricing.LiteLLMProvider)
+		require.Equal(t, "image_generation", pricing.Mode)
+		require.InDelta(t, 5e-6, pricing.InputCostPerToken, 1e-12)
+		require.InDelta(t, 8e-6, pricing.InputCostPerImageToken, 1e-12)
+		require.InDelta(t, 30e-6, pricing.OutputCostPerImageToken, 1e-12)
+		require.True(t, pricing.SupportsPromptCaching)
+		require.False(t, pricing.TokenPricingAbsent)
+	}
+
+	var rawCatalog map[string]map[string]any
+	require.NoError(t, json.Unmarshal(body, &rawCatalog))
+	require.Equal(t, float64(1_050_000), rawCatalog["gpt-6-sol"]["context_window"])
+	require.Equal(t, float64(1_050_000), rawCatalog["gpt-6-luna"]["context_window"])
+	require.Equal(t, float64(1_000_000), rawCatalog["claude-opus-5-5"]["max_input_tokens"])
+}
+
 func TestGPT56DedicatedFallbacksUseOfficialRates(t *testing.T) {
 	tests := []struct {
 		model                             string

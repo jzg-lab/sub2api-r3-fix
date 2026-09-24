@@ -24,6 +24,7 @@ var effortFamilies = []struct {
 	{family: "claude-opus-4-7", levels: effortLowMediumHighXHighMax},
 	{family: "claude-opus-4-6", levels: effortLowMediumHighMax},
 	{family: "claude-opus-4-5", levels: effortLowMediumHigh},
+	{family: "claude-opus-5-5", levels: effortLowMediumHighXHighMax},
 	{family: "claude-opus-5", levels: effortLowMediumHighXHighMax},
 }
 
@@ -37,6 +38,10 @@ func EffortLevelsForModel(model string) []string {
 		}
 	}
 	return nil
+}
+
+func IsOpus55(model string) bool {
+	return normalizeEffortModelID(model) == "claude-opus-5-5"
 }
 
 func normalizeEffortModelID(model string) string {

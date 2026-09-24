@@ -7,8 +7,21 @@ import (
 )
 
 func TestNormalizeKnownOpenAICodexModelGPT6Astra(t *testing.T) {
-	for _, model := range []string{"gpt-6-astra", "openai/gpt-6-astra", "gpt-6", "openai/gpt-6"} {
+	for _, model := range []string{"gpt-6-astra", "openai/gpt-6-astra", "OPENAI/GPT-6_ASTRA", "gpt-6", "openai/gpt-6"} {
 		require.Equal(t, "gpt-6-astra", normalizeKnownOpenAICodexModel(model))
+	}
+}
+
+func TestNormalizeKnownOpenAICodexModelGPT6SolLuna(t *testing.T) {
+	tests := map[string]string{
+		"gpt-6-sol":                          "gpt-6-sol",
+		"openai/GPT_6_SOL":                   "gpt-6-sol",
+		"gpt-6-sol-max":                      "gpt-6-sol",
+		"gpt-6-luna":                         "gpt-6-luna",
+		"provider/gpt-6-luna-openai-compact": "gpt-6-luna",
+	}
+	for input, expected := range tests {
+		require.Equal(t, expected, normalizeKnownOpenAICodexModel(input), input)
 	}
 }
 

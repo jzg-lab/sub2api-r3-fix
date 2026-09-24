@@ -99,19 +99,20 @@ func TestSyncBillingHeaderVersion_RecomputesSuffixAndIsIdempotent(t *testing.T) 
 
 func TestEffectiveBillingUserAgent(t *testing.T) {
 	fp := &Fingerprint{UserAgent: "claude-cli/2.9.0 (external, cli)", ClientID: "cid"}
-	require.Equal(t, claude.DefaultHeaders["User-Agent"],
-		effectiveBillingUserAgent("oauth", true, fp),
+	mimicUA := claude.DefaultUserAgent()
+	require.Equal(t, mimicUA,
+		effectiveBillingUserAgent(mimicUA, "oauth", true, fp),
 		"mimicry 覆写后的 wire UA 是默认 UA，billing 必须对齐它而非缓存指纹")
-	require.Equal(t, claude.DefaultHeaders["User-Agent"],
-		effectiveBillingUserAgent("oauth", true, nil),
+	require.Equal(t, mimicUA,
+		effectiveBillingUserAgent(mimicUA, "oauth", true, nil),
 		"无指纹时 mimicry 仍会覆写 UA，billing 仍须取默认 UA")
 	require.Equal(t, "claude-cli/2.9.0 (external, cli)",
-		effectiveBillingUserAgent("oauth", false, fp),
+		effectiveBillingUserAgent(mimicUA, "oauth", false, fp),
 		"透传路径取缓存指纹 UA")
 	require.Equal(t, "claude-cli/2.9.0 (external, cli)",
-		effectiveBillingUserAgent("api_key", true, fp),
+		effectiveBillingUserAgent(mimicUA, "api_key", true, fp),
 		"mimicry 只作用于 oauth 账号")
-	require.Empty(t, effectiveBillingUserAgent("oauth", false, nil),
+	require.Empty(t, effectiveBillingUserAgent(mimicUA, "oauth", false, nil),
 		"透传 + 无指纹：无实际生效 UA，调用方应跳过 sync")
 }
 
@@ -169,7 +170,7 @@ func TestBuildOAuthRequest_BillingMatchesWireUserAgent(t *testing.T) {
 				defer func() { require.NoError(t, req.Body.Close()) }()
 				wantUA := cachedUA
 				if tc.mimic {
-					wantUA = claude.DefaultHeaders["User-Agent"]
+					wantUA = claude.DefaultHeaders()["User-Agent"]
 				}
 				require.Equal(t, wantUA, getHeaderRaw(req.Header, "User-Agent"))
 				version := ExtractCLIVersion(wantUA)

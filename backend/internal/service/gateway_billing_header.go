@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -17,17 +16,12 @@ var ccVersionInBillingRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+`)
 // fingerprint suffix (X.Y.Z.fff, 3 hex chars)。
 var ccVersionWithFingerprintInBillingRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+\.[0-9a-fA-F]{3}\b`)
 
-// effectiveBillingUserAgent 返回 billing attribution block 的 cc_version 应当对齐的
-// "实际生效" User-Agent。（上游 v0.2.6 移植）
-//
-// 为什么不能直接用 fingerprint.UserAgent：OAuth 账号开 mimicClaudeCode 时，后续
-// applyClaudeCodeMimicHeaders 会把 UA 强制覆写成 claude.DefaultHeaders["User-Agent"]，
-// 覆写发生在 syncBillingHeaderVersion 之后——甚至在没有指纹（fingerprint == nil）时
-// 也会发生。若 billing 侧只认 fingerprint.UserAgent，wire 上是默认 UA、body 里却是
-// 旧指纹版本，头体版本不一致正是上游判第三方的信号之一。
-func effectiveBillingUserAgent(tokenType string, mimicClaudeCode bool, fingerprint *Fingerprint) string {
+// effectiveBillingUserAgent 选择写进 x-anthropic-billing-header 的 User-Agent。
+// OAuth mimicry 强制使用调用方传入的请求级快照，保证 cc_version 与出站头严格一致；
+// 其余情况使用账号指纹 UA。
+func effectiveBillingUserAgent(mimicUserAgent, tokenType string, mimicClaudeCode bool, fingerprint *Fingerprint) string {
 	if tokenType == "oauth" && mimicClaudeCode {
-		return claude.DefaultHeaders["User-Agent"]
+		return mimicUserAgent
 	}
 	if fingerprint == nil {
 		return ""

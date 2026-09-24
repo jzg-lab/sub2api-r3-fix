@@ -20,6 +20,28 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestGPT6RawChatCompletionsRequiresResponses(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "openai/gpt-6-luna"} {
+		require.True(t, gpt6RawChatCompletionsRequiresResponses(
+			[]byte(`{"tools":[{"type":"function","function":{"name":"lookup"}}],"reasoning_effort":"high"}`),
+			model,
+		))
+		require.True(t, gpt6RawChatCompletionsRequiresResponses(
+			[]byte(`{"functions":[{"name":"lookup"}]}`),
+			model,
+		))
+		require.False(t, gpt6RawChatCompletionsRequiresResponses(
+			[]byte(`{"tools":[{"type":"function","function":{"name":"lookup"}}],"reasoning_effort":"none"}`),
+			model,
+		))
+		require.False(t, gpt6RawChatCompletionsRequiresResponses([]byte(`{"reasoning_effort":"high"}`), model))
+	}
+	require.False(t, gpt6RawChatCompletionsRequiresResponses(
+		[]byte(`{"tools":[{"type":"function","function":{"name":"lookup"}}],"reasoning_effort":"high"}`),
+		"gpt-6-astra",
+	))
+}
+
 func TestBuildOpenAIChatCompletionsURL(t *testing.T) {
 	t.Parallel()
 

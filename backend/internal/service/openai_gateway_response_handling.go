@@ -1232,6 +1232,9 @@ func mergeOpenAIUsageNonZero(dst *OpenAIUsage, src OpenAIUsage) {
 	if src.ImageInputTokens > 0 {
 		dst.ImageInputTokens = src.ImageInputTokens
 	}
+	if src.ImageCacheReadTokens > 0 {
+		dst.ImageCacheReadTokens = src.ImageCacheReadTokens
+	}
 	if src.OutputTokens > 0 {
 		dst.OutputTokens = src.OutputTokens
 	}
@@ -1251,7 +1254,7 @@ func mergeOpenAIUsageNonZero(dst *OpenAIUsage, src OpenAIUsage) {
 
 func openAIUsageHasTokens(usage *OpenAIUsage) bool {
 	return usage != nil && (usage.InputTokens > 0 || usage.ImageInputTokens > 0 ||
-		usage.OutputTokens > 0 || usage.CacheCreationInputTokens > 0 ||
+		usage.ImageCacheReadTokens > 0 || usage.OutputTokens > 0 || usage.CacheCreationInputTokens > 0 ||
 		usage.CacheReadInputTokens > 0 || usage.ImageOutputTokens > 0)
 }
 

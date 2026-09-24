@@ -706,6 +706,31 @@ func TestChatCompletionsToResponses_TemperaturePreservedForNonReasoningModel(t *
 	assert.InDelta(t, 0.7, *resp.TopP, 1e-9)
 }
 
+func TestChatCompletionsToResponses_GPT6SamplingAndCacheFields(t *testing.T) {
+	temperature := 0.7
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		for _, effort := range []string{"", "none", "medium", "max"} {
+			out, err := ChatCompletionsToResponses(&ChatCompletionsRequest{
+				Model:              model,
+				ReasoningEffort:    effort,
+				Temperature:        &temperature,
+				TopP:               &temperature,
+				PromptCacheOptions: json.RawMessage(`{"mode":"explicit","ttl":"30m"}`),
+				Messages:           []ChatMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+			})
+			require.NoError(t, err)
+			if effort == "none" {
+				require.NotNil(t, out.Temperature)
+				require.NotNil(t, out.TopP)
+			} else {
+				require.Nil(t, out.Temperature)
+				require.Nil(t, out.TopP)
+			}
+			require.JSONEq(t, `{"mode":"explicit","ttl":"30m"}`, string(out.PromptCacheOptions))
+		}
+	}
+}
+
 func TestChatCompletionsToResponses_AssistantWithTextAndToolCalls(t *testing.T) {
 	req := &ChatCompletionsRequest{
 		Model: "gpt-4o",
