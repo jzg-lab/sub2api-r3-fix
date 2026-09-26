@@ -224,6 +224,21 @@ func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
 		*r.ReasoningTokens >= OpenAIDowngradeFailureReasoningThreshold
 }
 
+// IsSuspectMiss r17al 滑误嫌疑针：答错但推理预算满血（rt≥恢复下限 1400）
+// 且无 356 票。2026-09-26 统计定案：two_dim 随机题对健康号固有 ~18% 滑误率
+// （rt1000-2000 带 52/296 答错；1187 rt4142 答错为全库唯一高 rt 孤例），而
+// 降智执法的形态学是低 rt（131:11）+ 356 票——执法削推理预算，不污染推理
+// 质量。嫌疑针不单针杀：清连胜 + 快复检（分钟级），两连错才熔断；铁证形态
+// （356 票/低 rt/截断指纹答对）的单针杀纪律不变（见 Apply 分层）。
+func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
+	return r.TransportOK &&
+		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
+		!r.AnswerCorrect &&
+		!isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) &&
+		r.ReasoningTokens != nil &&
+		*r.ReasoningTokens >= OpenAIDowngradeRecoveryReasoningMinimum
+}
+
 func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
 	return r.TransportOK &&
 		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
@@ -321,12 +336,19 @@ func ApplyOpenAIDowngradeProbeResult(
 	state.ConsecutiveSuccesses = 0
 	state.ConsecutiveFailures++
 	// 纯单针杀（2026-09-22 用户裁定，1143 弹跳形态实证：换 IP→答对→快速
-	// 再降智，拖第二针毫无意义）：normal 档任何一针降智证据当场熔断。
+	// 再降智，拖第二针毫无意义）：normal 档任何一针**铁证**降智当场熔断。
 	// qualification 新号线不叠加（2026-09-21 裁定 1115/1116 案保持）：
 	// 新号无历史基线，首针失败走 qualification_failed 既有判死分支。
+	// r17al 滑误分层（2026-09-26 1187 案）：满血答错（IsSuspectMiss）是
+	// 嫌疑不是铁证——铁证单针杀保留，嫌疑针两连错才熔断（下方通用
+	// ConsecutiveFailures>=2 分支自然涵盖）。误杀率从 ~18%（题库固有
+	// 滑误率）压到 ~3%（滑误独立近似），代价=真降智号多活一个分钟级
+	// 快复检窗口（processState 侧对嫌疑针按 suspectRecheckInterval 快排）。
+	hardEvidence := !result.IsSuspectMiss()
 	if state.State == OpenAIDowngradeStateOnDuty &&
 		state.ProbeMode != "qualification" &&
-		state.ConsecutiveFailures >= 1 {
+		state.ConsecutiveFailures >= 1 &&
+		(hardEvidence || state.ConsecutiveFailures >= 2) {
 		return OpenAIDowngradeTransition{
 			State:     state,
 			NextState: OpenAIDowngradeStateCircuitOpen,
@@ -337,7 +359,8 @@ func ApplyOpenAIDowngradeProbeResult(
 	if (state.State == OpenAIDowngradeStateCircuitOpen ||
 		state.State == OpenAIDowngradeStateReprobe) &&
 		state.ProbeMode != "qualification" &&
-		state.ConsecutiveFailures >= 1 {
+		state.ConsecutiveFailures >= 1 &&
+		(hardEvidence || state.ConsecutiveFailures >= 2) {
 		return OpenAIDowngradeTransition{
 			State:            state,
 			NextState:        OpenAIDowngradeStatePendingReplace,
@@ -1145,6 +1168,16 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	if state.ProbeMode == "accelerated" && state.RecoveryDeadline != nil &&
 		now.Before(*state.RecoveryDeadline) {
 		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeAcceleratedInterval))
+	}
+	// r17al 滑误嫌疑针快复检：未熔断未判死的嫌疑针按分钟级快排，把「冤枉
+	// 一个健康号的摘调度窗口」从常规节奏压到分钟级；复检答对即清败洗白，
+	// 再错（任何形态）按两连熔断。qualification 档本身已是 5min 节奏，
+	// 不叠加。
+	if !transition.Circuit && !transition.NeedsReplacement &&
+		result.IsSuspectMiss() &&
+		state.ProbeMode == "normal" &&
+		state.State == OpenAIDowngradeStateOnDuty {
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeSuspectRecheckInterval))
 	}
 	if state.ProbeMode == "qualification" && result.IsQualificationPass() &&
 		state.ConsecutiveSuccesses >= 1 {
@@ -1993,6 +2026,9 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		slog.With("account_id", account.ID, "mode", mode).
 			Warn("openai_probe_parse_failed_forensics", openAIProbeParseFailureFields(responseBody)...)
 	}
+	// r17al：每针留档（题目+期望答案+判定+响应尾）。失败只记日志，不影响
+	// 探针主判定。
+	archiveOpenAIDowngradeProbe(account.ID, mode, question, &result, responseBody)
 	return result
 }
 
