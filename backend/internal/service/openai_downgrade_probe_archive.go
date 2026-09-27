@@ -20,6 +20,10 @@ const (
 	openAIDowngradeSuspectRecheckInterval = 5 * time.Minute
 	// openAIDowngradeArchiveResponseCap 响应留档截断上限（保尾）。
 	openAIDowngradeArchiveResponseCap = 8 << 10
+	// openAIDowngradeArchiveAnswerCap 答案全文留档截断上限（保尾：判分文本
+	// 的结论几乎总在末段）。r17am：答案文本经判分内核单独提取，不再依赖
+	// 响应尾（终态 usage 记录霸占尾部，9/28 复盘实证答案几乎总被截掉）。
+	openAIDowngradeArchiveAnswerCap = 2 << 10
 )
 
 var openAIDowngradeArchiveMu sync.Mutex
@@ -31,6 +35,10 @@ type openAIDowngradeProbeArchiveEntry struct {
 	Domain          string `json:"domain"`
 	QuestionText    string `json:"question_text"`
 	AnswerDisplay   string `json:"answer_display"`
+	// AnswerText 模型答案全文（判分内核提取，r17am）：答错定性第一证据——
+	// 「数字看错」还是「完全胡说」一眼可判，不再依赖被 usage 记录截断的
+	// 响应尾。
+	AnswerText      string `json:"answer_text,omitempty"`
 	AnswerCorrect   bool   `json:"answer_correct"`
 	TransportOK     bool   `json:"transport_ok"`
 	HTTPStatus      int    `json:"http_status"`
@@ -62,6 +70,10 @@ func archiveOpenAIDowngradeProbe(accountID int64, mode string,
 	if len(tail) > openAIDowngradeArchiveResponseCap {
 		tail = tail[len(tail)-openAIDowngradeArchiveResponseCap:]
 	}
+	answerText := result.gradedText
+	if len(answerText) > openAIDowngradeArchiveAnswerCap {
+		answerText = answerText[len(answerText)-openAIDowngradeArchiveAnswerCap:]
+	}
 	entry := openAIDowngradeProbeArchiveEntry{
 		At:              time.Now().Format(time.RFC3339),
 		AccountID:       accountID,
@@ -69,6 +81,7 @@ func archiveOpenAIDowngradeProbe(accountID int64, mode string,
 		Domain:          question.Domain,
 		QuestionText:    question.Text,
 		AnswerDisplay:   question.AnswerDisplay,
+		AnswerText:      answerText,
 		AnswerCorrect:   result.AnswerCorrect,
 		TransportOK:     result.TransportOK,
 		HTTPStatus:      result.HTTPStatus,

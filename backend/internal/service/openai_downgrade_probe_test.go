@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -543,6 +545,96 @@ func TestParseOpenAIDowngradeProbeResponseAcceptsItemDoneDelivery(t *testing.T) 
 	require.False(t, correct)
 	require.Nil(t, tokens)
 	require.Nil(t, juice)
+}
+
+// TestParseOpenAIDowngradeProbeCompletionReturnsAnswerText（r17am 留档配套）：
+// 判分无关内核必须返回与判分所用的同一份答案全文——条目终文 / 终态回显 /
+// legacy delta 三种交付形态都要拿到文本；一切结构失败路径统一空文本。
+// 此前留档只存响应尾 8KB，终态 usage 记录霸占尾部，答案文本几乎总被截掉
+// （9/28 团灭复盘实证），答错定性只能靠 rt 侧写。
+func TestParseOpenAIDowngradeProbeCompletionReturnsAnswerText(t *testing.T) {
+	itemDone := []byte(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"错答 7\"}]}}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"reasoning_tokens\":516}}}\n\n")
+	text, tokens, _ := parseOpenAIDowngradeProbeCompletion(itemDone)
+	require.Equal(t, "错答 7\n", text)
+	require.NotNil(t, tokens)
+
+	legacyEcho := []byte(
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是21\"}]}],\"usage\":{\"reasoning_tokens\":1992}}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(legacyEcho)
+	require.Equal(t, "答案是21\n", text)
+	require.NotNil(t, tokens)
+
+	legacyDelta := []byte("event: response.output_text.delta\n" +
+		"data: {\"delta\":\"答案是21\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"usage\":{\"reasoning_tokens\":1992}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(legacyDelta)
+	require.Equal(t, "答案是21", text)
+	require.NotNil(t, tokens)
+
+	// 无终态：空文本 + 零计数（与 wrapper 的 false,nil,nil 同形）。
+	noTerminal := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是21\"}]}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(noTerminal)
+	require.Empty(t, text)
+	require.Nil(t, tokens)
+}
+
+// TestApplyResponseGradedTextAndArchiveAnswerText（r17am）：applyResponse 把
+// 判分文本收进 gradedText；留档 JSONL 落 answer_text 字段。nil 判分正则的
+// 拒收语义保持（TransportOK=false，gradedText 空）。
+func TestApplyResponseGradedTextAndArchiveAnswerText(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"错答 7\"}]}}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"reasoning_tokens\":675}}}\n\n")
+
+	result := OpenAIDowngradeProbeResult{HTTPStatus: 200}
+	result.applyResponse(sseBody, openAIDowngradeNumericAnswerPattern(21))
+	require.True(t, result.TransportOK)
+	require.False(t, result.AnswerCorrect)
+	require.Equal(t, "错答 7\n", result.gradedText)
+
+	// nil 正则 = 拒收：不产出可判定结果（r17f 教训回归）。
+	nilPattern := OpenAIDowngradeProbeResult{HTTPStatus: 200}
+	nilPattern.applyResponse(sseBody, nil)
+	require.False(t, nilPattern.TransportOK)
+	require.Nil(t, nilPattern.ReasoningTokens)
+	require.Empty(t, nilPattern.gradedText)
+
+	// 留档全链：answer_text 进 JSONL，超长保尾。
+	dir := t.TempDir()
+	t.Setenv("SUB2API_PROBE_ARCHIVE_DIR", dir)
+	question := openAIDowngradeProbeQuestion{
+		Domain: "candy", Text: "糖果题面", AnswerDisplay: "21",
+		AnswerPattern: openAIDowngradeNumericAnswerPattern(21),
+	}
+	archiveOpenAIDowngradeProbe(1195, "normal", question, &result, sseBody)
+	archiveOpenAIDowngradeProbe(1194, "normal", question, &result, sseBody)
+
+	raw, err := os.ReadFile(filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	require.Len(t, lines, 2)
+	var entry openAIDowngradeProbeArchiveEntry
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &entry))
+	require.Equal(t, int64(1194), entry.AccountID)
+	require.Equal(t, "错答 7\n", entry.AnswerText)
+	require.False(t, entry.AnswerCorrect)
+	require.Contains(t, entry.ResponseTail, "response.completed")
+
+	// 超长答案保尾截断（结论在末段）。
+	longAnswer := strings.Repeat("前段废话", 1024) + "最终答案 7"
+	longResult := OpenAIDowngradeProbeResult{HTTPStatus: 200, TransportOK: true}
+	longResult.gradedText = longAnswer
+	archiveOpenAIDowngradeProbe(1193, "normal", question, &longResult, nil)
+	raw, err = os.ReadFile(filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &entry))
+	require.Equal(t, int64(1193), entry.AccountID)
+	require.LessOrEqual(t, len(entry.AnswerText), openAIDowngradeArchiveAnswerCap)
+	require.Contains(t, entry.AnswerText, "最终答案 7")
 }
 
 func TestOpenAIProbeTurnStateSignal(t *testing.T) {

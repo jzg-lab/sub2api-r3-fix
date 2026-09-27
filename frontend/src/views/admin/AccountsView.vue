@@ -287,6 +287,15 @@
               </div>
             </div>
           </template>
+          <template #cell-workspace="{ row }">
+            <!-- r17am：workspace（chatgpt_account_id）短码展示。同色点=同空间，
+                 连坐归因一眼可判；悬停看全 ID 与席位数。 -->
+            <div v-if="workspaceIdOf(row)" class="flex items-center gap-1.5" :title="workspaceTitle(row)">
+              <span :class="['h-2 w-2 flex-shrink-0 rounded-full', workspaceDotClass(row)]" />
+              <span class="font-mono text-xs text-gray-600 dark:text-gray-300">{{ workspaceShortId(row) }}</span>
+            </div>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+          </template>
           <template #cell-capacity="{ row }">
             <AccountCapacityCell :account="row" />
           </template>
@@ -323,7 +332,20 @@
                 </span>
               </template>
               <span v-else-if="healthLoading" class="text-[10px] text-gray-400 dark:text-dark-500">…</span>
+              <!-- 判死号（pending_replace）唯一救援入口 = 手动启用（r17am）：
+                   主动检测会被判死闸 409（OPENAI_REENABLE_REQUIRED），打票线对
+                   浏览器 OAuth 号被路由保护拒绝——两条老路都是死胡同。 -->
               <button
+                v-if="accountHealthById[row.id]?.state === 'pending_replace'"
+                class="rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-500/10"
+                :disabled="reenablingAccount === row.id || accountHealthById[row.id]?.manual_paused"
+                :title="accountHealthById[row.id]?.manual_paused ? t('admin.accounts.health.reenablePausedHint') : t('admin.accounts.health.reenableHint')"
+                @click="handleReenable(row)"
+              >
+                {{ reenablingAccount === row.id ? t('admin.accounts.health.reenableRunning') : t('admin.accounts.health.reenable') }}
+              </button>
+              <button
+                v-else
                 class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
                 :disabled="probingAccounts.has(row.id)"
                 @click="handleProbeNow(row)"
@@ -1008,6 +1030,8 @@ const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
 // 打票线转线中的账号（防重复点击）。
 const harvestingAccount = ref<number | null>(null)
+// 判死号手动启用中的账号（防重复点击，r17am）。
+const reenablingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
 const probingAcc = ref<Account | null>(null)
 
@@ -1117,10 +1141,16 @@ const lastProbeEvidence = (health: OpenAIAccountHealth): string => {
 
 // 相位B（2026-09-21）：问题号标签点击 → 转打票线（迁动态桶采票，
 // 采到回静态复检，复检通过恢复上岗）。
+// r17am：判死号（pending_replace）标签点击改道手动启用——打票线对浏览器
+// OAuth 号被路由保护拒绝，启用针才是唯一活路。
 const onHealthBadgeClick = (health: OpenAIAccountHealth) => {
   if (!health.clickable) return
   const row = accounts.value.find((a) => a.id === health.account_id)
   if (!row) return
+  if (health.state === 'pending_replace') {
+    handleReenable(row)
+    return
+  }
   if (!confirm(t('admin.accounts.health.harvestConfirm', { name: row.name }))) return
   harvestingAccount.value = row.id
   adminAPI.accounts
@@ -1179,6 +1209,34 @@ const runProbeNow = async (row: Account) => {
     next.delete(row.id)
     probingAccounts.value = next
   }
+}
+
+// r17am：判死号手动启用。原生 confirm 与打票线同款（危险动作二次确认）；
+// 暂停号前置拦截（后端也会 409 OPENAI_REENABLE_PAUSED，前端先给人话提示）。
+const handleReenable = (row: Account) => {
+  if (reenablingAccount.value !== null) return
+  const health = accountHealthById.value[row.id]
+  if (health?.manual_paused) {
+    appStore.showWarning(t('admin.accounts.health.reenablePausedHint'))
+    return
+  }
+  if (health && health.state !== 'pending_replace') return
+  if (!confirm(t('admin.accounts.health.reenableConfirm', { name: row.name }))) return
+  reenablingAccount.value = row.id
+  adminAPI.accounts
+    .reenableOpenAIAccount(row.id)
+    .then((result) => {
+      appStore.showSuccess(
+        t('admin.accounts.health.reenableStarted', { time: formatDateTime(result.next_probe_at) })
+      )
+      refreshAccountHealthBatch().catch(() => {})
+    })
+    .catch((error) => {
+      appStore.showError(`${t('admin.accounts.health.reenableFailed')}: ${extractApiErrorMessage(error)}`)
+    })
+    .finally(() => {
+      reenablingAccount.value = null
+    })
 }
 
 const autoRefreshIntervalLabel = (sec: number) => {
@@ -1982,6 +2040,54 @@ function getOpenAIAuthMode(row: any): string | undefined {
   return typeof authMode === 'string' && authMode.trim() ? authMode : undefined
 }
 
+// =============================================================================
+// workspace 列辅助（r17am）：chatgpt_account_id 非敏感凭据（不在脱敏清单，
+// row.credentials 直达），短码+8 色哈希点做肉眼分组。影子号回退母号空间。
+// =============================================================================
+const WORKSPACE_DOT_CLASSES = [
+  'bg-rose-500',
+  'bg-orange-500',
+  'bg-amber-500',
+  'bg-emerald-500',
+  'bg-teal-500',
+  'bg-blue-500',
+  'bg-violet-500',
+  'bg-pink-500'
+] as const
+
+function workspaceIdOf(row: any): string {
+  if (!row || row.platform !== 'openai') return ''
+  const own = row.credentials?.chatgpt_account_id
+  if (typeof own === 'string' && own.trim()) return own.trim()
+  const parent = row.parent_chatgpt_account_id
+  return typeof parent === 'string' && parent.trim() ? parent.trim() : ''
+}
+
+function workspaceShortId(row: any): string {
+  const id = workspaceIdOf(row)
+  return id ? id.slice(-8) : ''
+}
+
+function workspaceDotClass(row: any): string {
+  const id = workspaceIdOf(row)
+  if (!id) return 'bg-gray-400'
+  let hash = 0
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return WORKSPACE_DOT_CLASSES[hash % WORKSPACE_DOT_CLASSES.length]
+}
+
+function workspaceTitle(row: any): string {
+  const id = workspaceIdOf(row)
+  if (!id) return ''
+  const seats = Number(row.extra?.seat_count)
+  const seatText = Number.isFinite(seats) && seats > 0
+    ? t('admin.accounts.workspaceTitle', { count: seats })
+    : ''
+  return seatText ? `${id} · ${seatText}` : id
+}
+
 // Antigravity 订阅等级辅助函数
 function getAntigravityTierFromRow(row: any): string | null {
   if (row.platform !== 'antigravity') return null
@@ -2082,6 +2188,9 @@ const allColumns = computed(() => {
     { key: 'name', label: t('admin.accounts.columns.name'), sortable: true },
     { key: 'id', label: t('admin.accounts.columns.id'), sortable: true },
     { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
+    // r17am：workspace 列——chatgpt_account_id 短码+哈希色点，供连坐案
+    // （1187/1192-1195）肉眼分组归因。数据已在 row.credentials，纯前端列。
+    { key: 'workspace', label: t('admin.accounts.columns.workspace'), sortable: false },
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },

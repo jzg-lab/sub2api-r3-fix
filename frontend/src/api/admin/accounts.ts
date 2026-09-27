@@ -1047,6 +1047,25 @@ export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowR
   return data
 }
 
+export interface OpenAIReenableResult {
+  account_id: number
+  reenabled_at: string
+  next_probe_at: string
+  /** true = 认证针已排到近刻（下一拍扫描循环拾取）。 */
+  probe_queued: boolean
+}
+
+/** 手动启用判死号（pending_replace 专属，r17am 面板入口）：清标签回认证态，
+ * 认证针 1 针结业（答对即上岗）；结论针答错当场打回判死（一击退出，r17y），
+ * 无结论针（401/传输故障）5 分钟重试不烧唯一一击。不重置配额/限流。
+ * 暂停号会被拒（OPENAI_REENABLE_PAUSED）：先解除暂停再启用。 */
+export async function reenableOpenAIAccount(id: number): Promise<OpenAIReenableResult> {
+  const { data } = await apiClient.post<OpenAIReenableResult>(
+    `/admin/openai/accounts/${id}/reenable`
+  )
+  return data
+}
+
 export interface OpenAIHarvestStartResult {
   account_id: number
   probe_mode: string
@@ -1204,6 +1223,7 @@ export const accountsAPI = {
   resetOpenAIQuota,
   listOpenAIAccountHealth,
   triggerOpenAIProbeNow,
+  reenableOpenAIAccount,
   startOpenAIHarvest,
   createSparkShadow,
   getUpstreamBillingProbeSettings,

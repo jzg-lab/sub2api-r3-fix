@@ -180,6 +180,9 @@ type OpenAIDowngradeProbeResult struct {
 	// 零误报）。相位2：356 记事件 + 加速复查；与降智证据同针在场时双信号
 	// 熔断（2026-09-20 用户批准）。
 	TurnStateLen int
+	// gradedText 是该针判分所用的模型答案全文（applyResponse 填充；仅留档
+	// 层读取——unexported 对 encoding/json 与仓库层不可见，绝不入库）。
+	gradedText string
 }
 
 func (r OpenAIDowngradeProbeResult) answerVerdict() any {
@@ -2102,7 +2105,16 @@ func openAIProbeCodexTurnStateLen(header http.Header) int {
 }
 
 func (r *OpenAIDowngradeProbeResult) applyResponse(body []byte, answerPattern *regexp.Regexp) {
-	r.AnswerCorrect, r.ReasoningTokens, r.Juice = parseOpenAIDowngradeProbeResponse(body, answerPattern)
+	text, reasoningTokens, juice := parseOpenAIDowngradeProbeCompletion(body)
+	if answerPattern == nil {
+		// nil 判分正则 = 拒收（与 parseOpenAIDowngradeProbeResponse 首行同形）：
+		// 不产出可判定结果，零计数。
+		text, reasoningTokens, juice = "", nil, nil
+	}
+	r.gradedText = text
+	r.AnswerCorrect = text != "" && answerPattern.MatchString(text)
+	r.ReasoningTokens = reasoningTokens
+	r.Juice = juice
 	// An incomplete body is not a wrong answer. Keep it out of all votes.
 	r.TransportOK = r.ReasoningTokens != nil
 	r.ErrorMessage = ""
@@ -2417,10 +2429,25 @@ func shouldRetryOpenAIDowngradeStreamProbe(status int, body []byte) bool {
 
 // parseOpenAIDowngradeProbeResponse 按该针题目专属的期望答案正则判分；
 // 正则由题域生成器构造（数字带边界 / 星期X 字面），见
-// openai_downgrade_probe_questions.go。
+// openai_downgrade_probe_questions.go。nil 正则 = 拒收（判分依赖缺席，
+// 与结构失败同形：false + 零计数）。
 func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp) (bool, *int, *int) {
-	if answerPattern == nil || len(body) > openAIDowngradeProbeMaxBodyBytes {
+	text, reasoningTokens, juice := parseOpenAIDowngradeProbeCompletion(body)
+	if answerPattern == nil || text == "" {
 		return false, nil, nil
+	}
+	return answerPattern.MatchString(text), reasoningTokens, juice
+}
+
+// parseOpenAIDowngradeProbeCompletion 是 parseOpenAIDowngradeProbeResponse 的
+// 判分无关内核（r17am）：解析 SSE / 终态 JSON，返回模型答案全文与用量计数。
+// 结构损坏、无 usage、无 reasoning 计数、答案文本为空等一切失败路径统一
+// 返回空文本——空文本即「无法判定」。留档层（probe-archive）直接调用本函数
+// 拿答案全文，不再依赖响应尾截断（终态 usage 记录霸占尾部，答案文本几乎
+// 总被截掉——9/28 事故复盘实证）。
+func parseOpenAIDowngradeProbeCompletion(body []byte) (string, *int, *int) {
+	if len(body) > openAIDowngradeProbeMaxBodyBytes {
+		return "", nil, nil
 	}
 	decode := func(data []byte) (map[string]any, bool) {
 		decoder := json.NewDecoder(bytes.NewReader(data))
@@ -2531,7 +2558,7 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 		for _, line := range strings.Split(strings.TrimSuffix(stream, "\n"), "\n") {
 			if line == "" {
 				if !consume() {
-					return false, nil, nil
+					return "", nil, nil
 				}
 				eventName, dataLines = "", nil
 				continue
@@ -2546,28 +2573,28 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 			}
 		}
 		if completion == nil || len(dataLines) != 0 {
-			return false, nil, nil
+			return "", nil, nil
 		}
 	}
 	if value, exists := completion["response"]; isJSON && exists {
 		nested, ok := value.(map[string]any)
 		if !ok || completion["type"] != "response.completed" {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		completion = nested
 	}
 	if kind, exists := completion["type"]; exists && kind != "response" && kind != "response.completed" {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if status, exists := completion["status"]; exists && status != "completed" {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if completion["error"] != nil || completion["incomplete_details"] != nil {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	usage, ok := completion["usage"].(map[string]any)
 	if !ok {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	// Do not search output, metadata or echoed input for usage counters.
 	var reasoningTokens, juice *int
@@ -2575,25 +2602,25 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 	if value, exists := usage["output_tokens_details"]; exists {
 		details, ok = value.(map[string]any)
 		if !ok {
-			return false, nil, nil
+			return "", nil, nil
 		}
 	}
 	for _, counters := range []map[string]any{usage, details} {
 		if value, exists := counters["reasoning_tokens"]; exists {
 			n, valid := jsonNumberAsInt(value)
 			if !valid || (reasoningTokens != nil && *reasoningTokens != n) {
-				return false, nil, nil
+				return "", nil, nil
 			}
 			reasoningTokens = &n
 		}
 	}
 	if reasoningTokens == nil {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if value, exists := usage["juice"]; exists {
 		n, valid := jsonNumberAsInt(value)
 		if !valid {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		juice = &n
 	}
@@ -2602,16 +2629,16 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 	if value, exists := completion["output"]; exists {
 		output, ok := value.([]any)
 		if !ok {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		terminalOutputEmpty = len(output) == 0
 		for _, value := range output {
 			item, ok := value.(map[string]any)
 			if !ok {
-				return false, nil, nil
+				return "", nil, nil
 			}
 			if !appendOpenAIProbeItemOutputText(&text, item) {
-				return false, nil, nil
+				return "", nil, nil
 			}
 		}
 	}
@@ -2626,9 +2653,9 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 		text.WriteString(deltas.String())
 	}
 	if strings.TrimSpace(text.String()) == "" {
-		return false, nil, nil
+		return "", nil, nil
 	}
-	return answerPattern != nil && answerPattern.MatchString(text.String()), reasoningTokens, juice
+	return text.String(), reasoningTokens, juice
 }
 
 // appendOpenAIProbeItemOutputText 按终态 output 数组同款规则走查单个输出条目：
