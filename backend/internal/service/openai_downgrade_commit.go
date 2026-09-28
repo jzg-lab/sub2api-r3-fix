@@ -63,6 +63,13 @@ type OpenAIDowngradeProbeControlStore interface {
 	CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error)
 }
 
+// OpenAIDowngradeProbeUnpauseStore 专用解暂停能力（r17an）：只清 manual_paused
+// 刹车，不动 schedulable——避开「开调度解暂停=死号直回流量池」的暗雷
+// （流量调度器只看 schedulable，不看判死状态）。
+type OpenAIDowngradeProbeUnpauseStore interface {
+	ClearOpenAIDowngradeManualPause(context.Context, int64) (bool, error)
+}
+
 func (m *OpenAIDowngradeMutation) ChangesAccount() bool {
 	return m.ProxyChanged || m.Schedulable != nil || m.CompleteQualification || m.FallbackMode != nil ||
 		m.RateLimitResetAt != nil || m.RateLimitClear != nil || m.ErrorMessage != nil || m.RecoverOwnedError

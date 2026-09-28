@@ -154,7 +154,8 @@ var errOpenAIProbeNotEligible = infraerrors.BadRequest(
 
 // errOpenAIReenableRequired 判死号（pending_replace）点了主动检测：探针
 // 已停（r17x 选项A「判死即终态」），语义正确的动作是手动启用。409 让前端
-// 区分「已死待启用」与普通检测失败。
+// 区分「已死待启用」与普通检测失败。r17an 起普通判死号改走诊断针，只有
+// harvest 态判死号（采票线收尾，runProbe 走采票模板）仍走此 409。
 var errOpenAIReenableRequired = infraerrors.Conflict(
 	"OPENAI_REENABLE_REQUIRED", "account is dead (pending_replace); use reenable endpoint")
 
@@ -269,7 +270,18 @@ func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accoun
 	// 的号会走路径A 提前排期，但 ListDue 永不拾取 = accepted 却静默失效。
 	// on_duty+非 schedulable+非 qualification+非 error 同样被排除——都走
 	// 路径B 同步诊断针。判死号（pending_replace）r17x 选项A 起也被 ListDue
-	// 排除：提前排期是静默失效，明确引导到手动启用（ReenableOpenAIAccount）。
+	// 排除：提前排期是静默失效。r17an（2026-09-28 用户裁定「被判死的号也要
+	// 可以主动检测」）：普通判死号改走路径B 同步诊断针——只落证据行，不动
+	// 状态机/排期/调度；判死语义不变，复活唯一入口仍是 ReenableOpenAIAccount
+	// 的认证针。harvest 态判死号（采票线收尾）保持 409：mode=harvest 的
+	// runProbe 走采票请求模板，不属于糖题诊断。
+	if state.State == OpenAIDowngradeStatePendingReplace && state.ProbeMode != "harvest" {
+		res, err := r.triggerDiagnosticProbeNow(ctx, account, state, now)
+		if err == nil && res != nil && res.Accepted {
+			res.ProbedNow = true
+		}
+		return res, err
+	}
 	if state.State == OpenAIDowngradeStatePendingReplace {
 		return nil, errOpenAIReenableRequired
 	}
@@ -431,12 +443,21 @@ func OpenAIProbeEvidenceDegraded(ev *OpenAIProbeLastEvidence) bool {
 var errOpenAIReenableNotDead = infraerrors.BadRequest(
 	"OPENAI_REENABLE_NOT_DEAD", "account is not in pending_replace state")
 
-// errOpenAIReenablePaused 判死号同时处于 manual_paused（静置救援/暂停观察）：
-// reenable 不能替用户松刹车——认证针会被 ListDue 的 manual_paused 闸永远
-// 排除（静默失效），且静置中拉回探针节奏违反社区救援剧本（反复测试使
-// 惩罚窗升级）。409 引导前端提示「先解除暂停再手动启用」。
+// errOpenAIReenablePaused 判死号同时处于 manual_paused（静置救援/暂停观察）
+// 且未带 unpause：认证针会被 ListDue 的 manual_paused 闸永远排除（静默
+// 失效），且静置中拉回探针节奏违反社区救援剧本（反复测试使惩罚窗升级）。
+// r17an（2026-09-28 用户裁定「被判死的号也可以手动启用」）：显式带
+// unpause 的请求解除刹车继续走认证针——刹车语义保留（默认不松），但
+// 出路打通：解除动作独立留审计事件，不再是面板上无处可解的死锁
+// （面板「停用调度」开关与 manual_paused 是影子同步，文案互不指认）。
 var errOpenAIReenablePaused = infraerrors.Conflict(
-	"OPENAI_REENABLE_PAUSED", "account is manual-paused; unpause before reenable")
+	"OPENAI_REENABLE_PAUSED", "account is manual-paused; retry with unpause")
+
+// errOpenAIReenableBlocked 解除暂停后仍被 CanRun 其它闸挡住（status 闸/
+// 过期自动暂停/影子号等）：这时强行 reenable 会静默失效（ListDue 同闸
+// 永不拾取），必须明确拒绝并引导人工排查，与「paused」区分开。
+var errOpenAIReenableBlocked = infraerrors.Conflict(
+	"OPENAI_REENABLE_BLOCKED", "account still not probe-runnable after unpause (status/expired gate)")
 
 // ReenableOpenAIAccountResult 手动启用结果。
 type ReenableOpenAIAccountResult struct {
@@ -445,13 +466,19 @@ type ReenableOpenAIAccountResult struct {
 	NextProbeAt time.Time `json:"next_probe_at"`
 	// ProbeQueued: true = 认证针已排到近刻（下一拍扫描循环拾取）。
 	ProbeQueued bool `json:"probe_queued"`
+	// Unpaused: true = 本次请求实际解除了 manual_paused 刹车（本来就没
+	// 暂停时为 false，不是错误）。
+	Unpaused bool `json:"unpaused"`
 }
 
 // ReenableOpenAIAccount 手动启用判死号：状态回 qualification、清计数与
 // 降智痕迹、排近刻认证针。1 针通过即上岗（qualification 既有语义：
 // ConsecutiveSuccesses>=1 + IsQualificationPass → on_duty + SetSchedulable）。
 // 不重置配额/限流（auto-reset 纪律）；落审计事件供追溯。
-func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, accountID int64) (*ReenableOpenAIAccountResult, error) {
+// unpause=true（r17an 2026-09-28 用户裁定）：manual_paused 刹车由本请求
+// 显式解除——专用解暂停只清 manual_paused 不动 schedulable（开调度解暂停
+// 会把死号直回流量池），解除动作独立落 manual_unpause 审计事件。
+func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, accountID int64, unpause bool) (*ReenableOpenAIAccountResult, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("openai probe runner is not available")
 	}
@@ -480,14 +507,42 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 		// 改平台/改类型/影子/过期：与 probe-now 同判——探针体系对其无意义。
 		return nil, errOpenAIProbeNotEligible
 	}
-	// manual_paused 是用户主动按下的刹车（静置救援/暂停观察），reenable 不得
-	// 替用户松开：认证针走 ListDue，其 NOT EXISTS manual_paused 闸会把
-	// qualification 号永远排除——reenable 后针永不打（静默失效）；且静置中
-	// 拉回探针节奏 = 自动打针，社区实证反复测试使惩罚窗阶梯升级。要救先恢复
-	// 启用（面板解除暂停），再点手动启用。
+	// manual_paused 是用户主动按下的刹车（静置救援/暂停观察）。r17an 前的
+	// 死锁：面板「停用调度」开关与 manual_paused 影子同步（文案互不指认），
+	// 判死+暂停号在面板上无路可走。r17an：显式 unpause 解除刹车——用户
+	// 主动点击的复合动作（解除暂停→认证针），不是系统自动打针；默认不带
+	// unpause 仍 409，刹车语义对 API 调用方保留。解除后复检 CanRun：
+	// 其它闸（status/过期/影子）仍挡着就明确拒绝，绝不静默失效。
+	unpaused := false
 	if controls, ok := r.store.(OpenAIDowngradeProbeControlStore); ok {
 		if allowed, err := controls.CanRunOpenAIDowngradeProbe(ctx, accountID); err == nil && !allowed {
-			return nil, errOpenAIReenablePaused
+			if !unpause {
+				return nil, errOpenAIReenablePaused
+			}
+			if unpauser, ok := r.store.(OpenAIDowngradeProbeUnpauseStore); ok {
+				cleared, err := unpauser.ClearOpenAIDowngradeManualPause(ctx, accountID)
+				if err != nil {
+					return nil, err
+				}
+				unpaused = cleared
+			}
+			if !unpaused {
+				// 没有 manual_paused 可清（或存储不支持解暂停）：挡路的是
+				// CanRun 的其它闸——按 paused 语义报错引导排查。
+				return nil, errOpenAIReenablePaused
+			}
+			if allowed, err := controls.CanRunOpenAIDowngradeProbe(ctx, accountID); err != nil || !allowed {
+				// 刹车已解但其它闸仍挡：认证针会被 ListDue 同闸排除
+				//（静默失效），明确拒绝。查询失败也拒绝（fail-closed）。
+				return nil, errOpenAIReenableBlocked
+			}
+			if err := r.store.AppendOpenAIDowngradeEvent(ctx, accountID, state.CurrentProxyID,
+				"manual_unpause", map[string]any{
+					"via":  "reenable",
+					"why":  "dead-account rescue (r17an user ruling 2026-09-28)",
+				}); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -517,6 +572,7 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 			"from_state":   OpenAIDowngradeStatePendingReplace,
 			"to_mode":      "qualification",
 			"next_probeat": state.NextProbeAt.Format(time.RFC3339),
+			"unpaused":     unpaused,
 		}); err != nil {
 		return nil, err
 	}
@@ -525,5 +581,6 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 		ReenabledAt: now,
 		NextProbeAt: state.NextProbeAt,
 		ProbeQueued: true,
+		Unpaused:    unpaused,
 	}, nil
 }

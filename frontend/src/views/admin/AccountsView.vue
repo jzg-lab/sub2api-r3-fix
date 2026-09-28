@@ -332,21 +332,23 @@
                 </span>
               </template>
               <span v-else-if="healthLoading" class="text-[10px] text-gray-400 dark:text-dark-500">…</span>
-              <!-- 判死号（pending_replace）唯一救援入口 = 手动启用（r17am）：
-                   主动检测会被判死闸 409（OPENAI_REENABLE_REQUIRED），打票线对
-                   浏览器 OAuth 号被路由保护拒绝——两条老路都是死胡同。 -->
+              <!-- r17an（2026-09-28 用户裁定「被判死的号也要可以主动检测、可以
+                   手动启用」）：判死号（pending_replace）双入口——
+                   ① 重新启用 = 复活唯一入口（认证针 1 针结业；静置暂停随请求
+                      显式解除，专用解暂停不动 schedulable）；
+                   ② 主动检测 = 诊断针（只落证据行不动状态机），满足「看看号
+                      回来没有」；harvest 态判死号后端仍 409。 -->
               <button
                 v-if="accountHealthById[row.id]?.state === 'pending_replace'"
                 class="rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-500/10"
-                :disabled="reenablingAccount === row.id || accountHealthById[row.id]?.manual_paused"
+                :disabled="reenablingAccount === row.id"
                 :title="accountHealthById[row.id]?.manual_paused ? t('admin.accounts.health.reenablePausedHint') : t('admin.accounts.health.reenableHint')"
                 @click="handleReenable(row)"
               >
                 {{ reenablingAccount === row.id ? t('admin.accounts.health.reenableRunning') : t('admin.accounts.health.reenable') }}
               </button>
               <button
-                v-else
-                class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
+                class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
                 :disabled="probingAccounts.has(row.id)"
                 @click="handleProbeNow(row)"
               >
@@ -596,7 +598,7 @@ import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
 import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
-import type { OpenAIAccountHealth } from '@/api/admin/accounts'
+import type { OpenAIAccountHealth, OpenAIProbeLastEvidence } from '@/api/admin/accounts'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -1171,12 +1173,17 @@ const onHealthBadgeClick = (health: OpenAIAccountHealth) => {
 
 const handleProbeNow = async (row: Account) => {
   if (probingAccounts.value.has(row.id)) return
-  // 限流号二次确认（spec 3.4）：会烧一次上游请求额度，且可能吃 429 顺延。
   const health = accountHealthById.value[row.id]
+  // 限流号二次确认（spec 3.4）：会烧一次上游请求额度，且可能吃 429 顺延。
   if (health?.rate_limited) {
     probingAcc.value = row
     showProbeConfirm.value = true
     return
+  }
+  // r17an：判死号诊断针二次确认——只落证据不复活，但反复测试可能使
+  // 惩罚窗升级（社区救援剧本），烧一次上游请求前先说清楚。
+  if (health?.state === 'pending_replace') {
+    if (!confirm(t('admin.accounts.health.probeDeadConfirm', { name: row.name }))) return
   }
   await runProbeNow(row)
 }
@@ -1211,25 +1218,30 @@ const runProbeNow = async (row: Account) => {
   }
 }
 
-// r17am：判死号手动启用。原生 confirm 与打票线同款（危险动作二次确认）；
-// 暂停号前置拦截（后端也会 409 OPENAI_REENABLE_PAUSED，前端先给人话提示）。
+// r17am：判死号手动启用。r17an（2026-09-28 用户裁定）：静置暂停不再前置
+// 拦截——unpause=true 随请求显式解除刹车（专用解暂停不动 schedulable），
+// 确认文案对暂停号说明「将一并解除静置」；后端解除+启用各落审计事件。
 const handleReenable = (row: Account) => {
   if (reenablingAccount.value !== null) return
   const health = accountHealthById.value[row.id]
-  if (health?.manual_paused) {
-    appStore.showWarning(t('admin.accounts.health.reenablePausedHint'))
-    return
-  }
   if (health && health.state !== 'pending_replace') return
-  if (!confirm(t('admin.accounts.health.reenableConfirm', { name: row.name }))) return
+  const confirmKey = health?.manual_paused
+    ? 'admin.accounts.health.reenablePausedConfirm'
+    : 'admin.accounts.health.reenableConfirm'
+  if (!confirm(t(confirmKey, { name: row.name }))) return
   reenablingAccount.value = row.id
+  const paused = !!health?.manual_paused
   adminAPI.accounts
-    .reenableOpenAIAccount(row.id)
+    .reenableOpenAIAccount(row.id, true)
     .then((result) => {
+      if (paused || result.unpaused) {
+        appStore.showSuccess(t('admin.accounts.health.reenableUnpaused'))
+      }
       appStore.showSuccess(
         t('admin.accounts.health.reenableStarted', { time: formatDateTime(result.next_probe_at) })
       )
       refreshAccountHealthBatch().catch(() => {})
+      watchReenableOutcome(row.id, new Date(result.reenabled_at))
     })
     .catch((error) => {
       appStore.showError(`${t('admin.accounts.health.reenableFailed')}: ${extractApiErrorMessage(error)}`)
@@ -1237,6 +1249,79 @@ const handleReenable = (row: Account) => {
     .finally(() => {
       reenablingAccount.value = null
     })
+}
+
+// r17an：重新启用结果监视——reenable API 只报「针已排」，认证针异步落地
+// （jitter ≤10min + 扫描拍 ≤1min + 针程 ≤2min）。旧体验里答错回死完全
+// 静默（9/28 06:13 三号回死毫无感知 → 13:29 删号的直接原因）。这里盯到
+// 出结果为止：上岗弹通过，答错弹失败+证据（rt/票长），20s 一拍、15min
+// 封顶自动撤岗；无结论针（401/传输）继续盯 5min 重试。
+interface ReenableWatcher {
+  timer: number
+  reenabledAt: number
+  polls: number
+}
+const reenableWatchers = new Map<number, ReenableWatcher>()
+const REENABLE_WATCH_INTERVAL_MS = 20000
+const REENABLE_WATCH_MAX_POLLS = 45
+
+const reenableEvidenceText = (probe: OpenAIProbeLastEvidence | null | undefined): string => {
+  if (!probe) return ''
+  if (!probe.transport_ok) return t('admin.accounts.health.reenableEvidenceTransport')
+  if (probe.answer_correct === false) {
+    return t('admin.accounts.health.reenableEvidenceWrong', {
+      rt: probe.reasoning_tokens ?? '?',
+      ts: probe.turn_state_len || '?',
+    })
+  }
+  return t('admin.accounts.health.reenableEvidenceOther', { status: probe.http_status ?? '?' })
+}
+
+const stopReenableWatch = (accountId: number) => {
+  const watcher = reenableWatchers.get(accountId)
+  if (watcher) {
+    window.clearInterval(watcher.timer)
+    reenableWatchers.delete(accountId)
+  }
+}
+
+const watchReenableOutcome = (accountId: number, reenabledAt: Date) => {
+  stopReenableWatch(accountId)
+  const watcher: ReenableWatcher = { timer: 0, reenabledAt: reenabledAt.getTime(), polls: 0 }
+  watcher.timer = window.setInterval(async () => {
+    watcher.polls += 1
+    if (watcher.polls > REENABLE_WATCH_MAX_POLLS) {
+      stopReenableWatch(accountId)
+      return
+    }
+    let health: OpenAIAccountHealth | undefined
+    try {
+      ;[health] = await adminAPI.accounts.listOpenAIAccountHealth([accountId])
+    } catch {
+      return // 网络抖动：下一拍再试
+    }
+    if (!health) return
+    const probeAt = health.last_probe ? new Date(health.last_probe.at).getTime() : 0
+    if (probeAt <= watcher.reenabledAt) return // 还是启用前的旧针，继续等
+    const name = accounts.value.find((a) => a.id === accountId)?.name ?? String(accountId)
+    if (health.state === 'pending_replace') {
+      // 认证针结论=失败：一击退出回判死（r17y），把证据说给人听。
+      appStore.showError(t('admin.accounts.health.reenableProbeFailed', {
+        name,
+        evidence: reenableEvidenceText(health.last_probe),
+      }))
+      stopReenableWatch(accountId)
+      refreshAccountHealthBatch().catch(() => {})
+    } else if (health.state === 'on_duty' && health.probe_mode === 'normal') {
+      // 认证针通过：上岗+复调度，行数据也该刷新。
+      appStore.showSuccess(t('admin.accounts.health.reenableProbePassed', { name }))
+      stopReenableWatch(accountId)
+      refreshAccountHealthBatch().catch(() => {})
+      refreshAccountsIncrementally().catch(() => {})
+    }
+    // 其它（qualification 重试中/无结论 5min 重试）：继续盯
+  }, REENABLE_WATCH_INTERVAL_MS)
+  reenableWatchers.set(accountId, watcher)
 }
 
 const autoRefreshIntervalLabel = (sec: number) => {
@@ -2978,6 +3063,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  for (const accountId of reenableWatchers.keys()) stopReenableWatch(accountId)
   upstreamBillingRateAbortController?.abort()
   invalidateBatchedUsageRequests()
   window.removeEventListener('scroll', handleScroll, true)

@@ -1037,7 +1037,9 @@ export interface OpenAIProbeNowResult {
 }
 
 /** 主动检测：手动针与调度针完全同构，连点去重（already_flying）。
- * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。 */
+ * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。
+ * r17an：判死号（pending_replace 普通）同样走同步诊断针——只落证据行，
+ * 不动状态机；harvest 态判死号仍 409。 */
 export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowResult> {
   const { data } = await apiClient.post<OpenAIProbeNowResult>(
     `/admin/openai/accounts/${id}/probe-now`,
@@ -1053,15 +1055,21 @@ export interface OpenAIReenableResult {
   next_probe_at: string
   /** true = 认证针已排到近刻（下一拍扫描循环拾取）。 */
   probe_queued: boolean
+  /** true = 本次请求实际解除了 manual_paused 刹车（r17an）。 */
+  unpaused?: boolean
 }
 
 /** 手动启用判死号（pending_replace 专属，r17am 面板入口）：清标签回认证态，
  * 认证针 1 针结业（答对即上岗）；结论针答错当场打回判死（一击退出，r17y），
  * 无结论针（401/传输故障）5 分钟重试不烧唯一一击。不重置配额/限流。
- * 暂停号会被拒（OPENAI_REENABLE_PAUSED）：先解除暂停再启用。 */
-export async function reenableOpenAIAccount(id: number): Promise<OpenAIReenableResult> {
+ * unpause=true（r17an）：随请求解除 manual_paused 静置刹车（专用解暂停，
+ * 不动 schedulable），解除动作独立落 manual_unpause 审计事件；不带则暂停号
+ * 仍被拒（OPENAI_REENABLE_PAUSED）。 */
+export async function reenableOpenAIAccount(id: number, unpause = false): Promise<OpenAIReenableResult> {
   const { data } = await apiClient.post<OpenAIReenableResult>(
-    `/admin/openai/accounts/${id}/reenable`
+    `/admin/openai/accounts/${id}/reenable`,
+    undefined,
+    { params: unpause ? { unpause: 'true' } : undefined }
   )
   return data
 }

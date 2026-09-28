@@ -215,6 +215,27 @@ func (r *openAIDowngradeProbeRepository) CanRunOpenAIDowngradeProbe(ctx context.
 	return allowed, err
 }
 
+// ClearOpenAIDowngradeManualPause 专用解暂停（r17an 2026-09-28 用户裁定）：
+// 只清 manual_paused 刹车，不动 schedulable——区别于面板「停用调度」开关的
+// 影子同步（account_repo 侧 manual_paused=!schedulable）。走那条路解暂停会把
+// 死号直接塞回流量池（流量调度器只看 schedulable，不看判死状态）。返回
+// 是否真的清除（false=本来就没暂停，或号没有 controls 行）。
+func (r *openAIDowngradeProbeRepository) ClearOpenAIDowngradeManualPause(ctx context.Context, accountID int64) (bool, error) {
+	tag, err := r.db.ExecContext(ctx, `
+		UPDATE openai_downgrade_probe_controls
+		SET manual_paused = FALSE, updated_at = clock_timestamp()
+		WHERE account_id = $1 AND manual_paused IS TRUE
+	`, accountID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := tag.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 // RecentProbeOnExitIP 同出口近窗合成探针判定（路径B 手动诊断针的节流闸，
 // 镜像 ListDue L128-146 两分支）：账号绑定的代理有 exit_ip → 查同 exit_ip
 // 近窗任意针；无 exit_ip → 查同 proxy 桶近窗任意针。探针结果表不含

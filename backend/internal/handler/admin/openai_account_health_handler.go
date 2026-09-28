@@ -87,8 +87,10 @@ func (h *OpenAIProbeHealthHandler) TriggerProbeNow(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// ReenableAccount POST /api/v1/admin/openai/accounts/:id/reenable
+// ReenableAccount POST /api/v1/admin/openai/accounts/:id/reenable?unpause=true
 // 手动启用判死号（r17x 选项A）：清标签 → qualification 1 针结业 → 上岗。
+// unpause=true（r17an）：manual_paused 刹车随本请求显式解除（专用解暂停，
+// 不动 schedulable），解除动作独立落 manual_unpause 审计事件。
 // 落 audit_logs（审计中间件自动记录 POST 变更类请求）。
 func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -96,7 +98,8 @@ func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 		response.BadRequest(c, "invalid account id")
 		return
 	}
-	result, err := h.runner.ReenableOpenAIAccount(c.Request.Context(), id)
+	unpause := c.Query("unpause") == "true" || c.Query("unpause") == "1"
+	result, err := h.runner.ReenableOpenAIAccount(c.Request.Context(), id, unpause)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
