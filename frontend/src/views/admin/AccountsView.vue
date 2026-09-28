@@ -559,6 +559,7 @@ import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
+import { createOpenAIReenableLifecycle } from '@/composables/openAIReenableLifecycle'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
@@ -1231,9 +1232,11 @@ const handleReenable = (row: Account) => {
   if (!confirm(t(confirmKey, { name: row.name }))) return
   reenablingAccount.value = row.id
   const paused = !!health?.manual_paused
-  adminAPI.accounts
-    .reenableOpenAIAccount(row.id, true)
-    .then((result) => {
+  void reenableLifecycle.runRequest({
+    accountId: row.id,
+    execute: () => adminAPI.accounts.reenableOpenAIAccount(row.id, true),
+    getReenabledAt: (result) => new Date(result.reenabled_at).getTime(),
+    onSuccess: (result) => {
       if (paused || result.unpaused) {
         appStore.showSuccess(t('admin.accounts.health.reenableUnpaused'))
       }
@@ -1241,14 +1244,14 @@ const handleReenable = (row: Account) => {
         t('admin.accounts.health.reenableStarted', { time: formatDateTime(result.next_probe_at) })
       )
       refreshAccountHealthBatch().catch(() => {})
-      watchReenableOutcome(row.id, new Date(result.reenabled_at))
-    })
-    .catch((error) => {
+    },
+    onError: (error) => {
       appStore.showError(`${t('admin.accounts.health.reenableFailed')}: ${extractApiErrorMessage(error)}`)
-    })
-    .finally(() => {
+    },
+    onFinally: () => {
       reenablingAccount.value = null
-    })
+    },
+  })
 }
 
 // r17an：重新启用结果监视——reenable API 只报「针已排」，认证针异步落地
@@ -1256,14 +1259,8 @@ const handleReenable = (row: Account) => {
 // 静默（9/28 06:13 三号回死毫无感知 → 13:29 删号的直接原因）。这里盯到
 // 出结果为止：上岗弹通过，答错弹失败+证据（rt/票长），20s 一拍、15min
 // 封顶自动撤岗；无结论针（401/传输）继续盯 5min 重试。
-interface ReenableWatcher {
-  timer: number
-  reenabledAt: number
-  polls: number
-}
-const reenableWatchers = new Map<number, ReenableWatcher>()
 const REENABLE_WATCH_INTERVAL_MS = 20000
-const REENABLE_WATCH_MAX_POLLS = 45
+const REENABLE_WATCH_DEADLINE_MS = 15 * 60 * 1000
 
 const reenableEvidenceText = (probe: OpenAIProbeLastEvidence | null | undefined): string => {
   if (!probe) return ''
@@ -1277,52 +1274,36 @@ const reenableEvidenceText = (probe: OpenAIProbeLastEvidence | null | undefined)
   return t('admin.accounts.health.reenableEvidenceOther', { status: probe.http_status ?? '?' })
 }
 
-const stopReenableWatch = (accountId: number) => {
-  const watcher = reenableWatchers.get(accountId)
-  if (watcher) {
-    window.clearInterval(watcher.timer)
-    reenableWatchers.delete(accountId)
-  }
-}
-
-const watchReenableOutcome = (accountId: number, reenabledAt: Date) => {
-  stopReenableWatch(accountId)
-  const watcher: ReenableWatcher = { timer: 0, reenabledAt: reenabledAt.getTime(), polls: 0 }
-  watcher.timer = window.setInterval(async () => {
-    watcher.polls += 1
-    if (watcher.polls > REENABLE_WATCH_MAX_POLLS) {
-      stopReenableWatch(accountId)
-      return
-    }
-    let health: OpenAIAccountHealth | undefined
-    try {
-      ;[health] = await adminAPI.accounts.listOpenAIAccountHealth([accountId])
-    } catch {
-      return // 网络抖动：下一拍再试
-    }
-    if (!health) return
-    const probeAt = health.last_probe ? new Date(health.last_probe.at).getTime() : 0
-    if (probeAt <= watcher.reenabledAt) return // 还是启用前的旧针，继续等
+const reenableLifecycle = createOpenAIReenableLifecycle<OpenAIAccountHealth>({
+  intervalMs: REENABLE_WATCH_INTERVAL_MS,
+  deadlineMs: REENABLE_WATCH_DEADLINE_MS,
+  fetchHealth: async (accountId) => {
+    const [health] = await adminAPI.accounts.listOpenAIAccountHealth([accountId])
+    return health
+  },
+  getProbeAt: (health) => health.last_probe ? new Date(health.last_probe.at).getTime() : 0,
+  classify: (health) => {
+    if (health.state === 'pending_replace') return 'failed'
+    if (health.state === 'on_duty' && health.probe_mode === 'normal') return 'passed'
+    return null
+  },
+  onOutcome: (accountId, outcome, health) => {
     const name = accounts.value.find((a) => a.id === accountId)?.name ?? String(accountId)
-    if (health.state === 'pending_replace') {
+    if (outcome === 'failed') {
       // 认证针结论=失败：一击退出回判死（r17y），把证据说给人听。
       appStore.showError(t('admin.accounts.health.reenableProbeFailed', {
         name,
         evidence: reenableEvidenceText(health.last_probe),
       }))
-      stopReenableWatch(accountId)
       refreshAccountHealthBatch().catch(() => {})
-    } else if (health.state === 'on_duty' && health.probe_mode === 'normal') {
+    } else {
       // 认证针通过：上岗+复调度，行数据也该刷新。
       appStore.showSuccess(t('admin.accounts.health.reenableProbePassed', { name }))
-      stopReenableWatch(accountId)
       refreshAccountHealthBatch().catch(() => {})
       refreshAccountsIncrementally().catch(() => {})
     }
-    // 其它（qualification 重试中/无结论 5min 重试）：继续盯
-  }, REENABLE_WATCH_INTERVAL_MS)
-  reenableWatchers.set(accountId, watcher)
-}
+  },
+})
 
 const autoRefreshIntervalLabel = (sec: number) => {
   if (sec === 5) return t('admin.accounts.refreshInterval5s')
@@ -3063,7 +3044,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  for (const accountId of reenableWatchers.keys()) stopReenableWatch(accountId)
+  reenableLifecycle.dispose()
   upstreamBillingRateAbortController?.abort()
   invalidateBatchedUsageRequests()
   window.removeEventListener('scroll', handleScroll, true)

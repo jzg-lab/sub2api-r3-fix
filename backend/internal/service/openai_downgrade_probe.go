@@ -1962,6 +1962,12 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 	// 上游已实测拒绝非流式（HTTP 400 "Stream must be set to true"），
 	// 因此第一针直接走流式；非流式仅作为历史兼容路径保留在重试逻辑里。
 	status, respHeader, responseBody, requestErr := requestProbe(true)
+	// Once a request attempt has been made, archive exactly one final outcome.
+	// The archive contains only the fixed error class and response tail, never
+	// the request, credential, or raw transport error.
+	defer func() {
+		archiveOpenAIDowngradeProbe(account.ID, mode, question, &result, responseBody)
+	}()
 	result.Latency = time.Since(started)
 	failureStage := "probe transport failed: "
 	if requestErr == nil && shouldRetryOpenAIDowngradeStreamProbe(status, responseBody) {
@@ -2029,9 +2035,6 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		slog.With("account_id", account.ID, "mode", mode).
 			Warn("openai_probe_parse_failed_forensics", openAIProbeParseFailureFields(responseBody)...)
 	}
-	// r17al：每针留档（题目+期望答案+判定+响应尾）。失败只记日志，不影响
-	// 探针主判定。
-	archiveOpenAIDowngradeProbe(account.ID, mode, question, &result, responseBody)
 	return result
 }
 

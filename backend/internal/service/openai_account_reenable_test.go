@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -15,20 +16,58 @@ import (
 // 问题号打标签后不再自动检测;手动启用是唯一救援入口。
 // 本文件钉「判死即终态 + 手动启用」语义。
 
+type accountReenableStoreStub struct {
+	*downgradeProbeStoreStub
+	allowed      bool
+	controlErr   error
+	commitErr    error
+	unpaused     bool
+	commits      int
+	observed     *OpenAIAccountReenableMutation
+	beforeCommit func()
+}
+
+func (s *accountReenableStoreStub) CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error) {
+	return s.allowed, s.controlErr
+}
+
+func (s *accountReenableStoreStub) CommitOpenAIAccountReenable(
+	_ context.Context,
+	mutation *OpenAIAccountReenableMutation,
+) (bool, error) {
+	s.commits++
+	s.observed = mutation
+	if s.beforeCommit != nil {
+		s.beforeCommit()
+	}
+	if s.commitErr != nil {
+		return false, s.commitErr
+	}
+	state := *mutation.State
+	s.state = &state
+	return s.unpaused, nil
+}
+
 // 判死号手动启用:清标签回 qualification、计数归零、排近刻认证针。
 func TestReenableOpenAIAccount_FromPendingReplace(t *testing.T) {
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	accountUpdatedAt := now.Add(-2 * time.Hour)
+	stateUpdatedAt := now.Add(-time.Hour)
 	account := &Account{
 		ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-		Status: StatusActive, Schedulable: false,
+		Status: StatusActive, Schedulable: false, UpdatedAt: accountUpdatedAt,
 	}
-	store := &downgradeProbeStoreStub{}
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+		allowed:                 true,
+	}
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 	runner.now = func() time.Time { return now }
 	store.state = &OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
 		ConsecutiveFailures: 3, ConsecutiveSuccesses: 1, Consecutive429s: 2,
+		UpdatedAt: stateUpdatedAt,
 	}
 
 	result, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
@@ -47,9 +86,96 @@ func TestReenableOpenAIAccount_FromPendingReplace(t *testing.T) {
 	require.True(t, store.state.NextProbeAt.After(now))
 	require.True(t, store.state.NextProbeAt.Before(now.Add(10*time.Minute)))
 	// 审计事件落地(桩记录在 eventTypes/eventDetails)
-	require.Equal(t, 1, store.eventCalls)
-	require.Equal(t, "manual_reenable", store.eventTypes[0])
-	require.Equal(t, OpenAIDowngradeStatePendingReplace, store.eventDetails[0]["from_state"])
+	require.Equal(t, 1, store.commits)
+	require.NotNil(t, store.observed)
+	require.Equal(t, stateUpdatedAt, store.observed.ExpectedStateUpdatedAt)
+	require.Equal(t, accountUpdatedAt, store.observed.ExpectedAccountUpdatedAt)
+	require.Zero(t, store.eventCalls, "service must not publish events outside the transaction")
+}
+
+func TestReenableOpenAIAccount_ControlErrorFailsClosed(t *testing.T) {
+	controlErr := errors.New("control read failed")
+	state := &OpenAIDowngradeProbeState{
+		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
+	}
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: state},
+		controlErr:              controlErr,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store,
+		&downgradeProbeAccountRepoStub{account: &Account{
+			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive,
+		}}, nil, nil, nil, nil)
+
+	_, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
+	require.ErrorIs(t, err, controlErr)
+	require.Zero(t, store.commits)
+	require.Same(t, state, store.state)
+	require.Equal(t, OpenAIDowngradeStatePendingReplace, store.state.State)
+}
+
+func TestReenableOpenAIAccount_RequiresAtomicStore(t *testing.T) {
+	store := &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
+	}}
+	runner := NewOpenAIDowngradeProbeRunner(store,
+		&downgradeProbeAccountRepoStub{account: &Account{
+			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive,
+		}}, nil, nil, nil, nil)
+
+	_, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
+	require.ErrorIs(t, err, ErrOpenAIProbeAtomicStore)
+	require.Equal(t, OpenAIDowngradeStatePendingReplace, store.state.State)
+	require.Zero(t, store.saveCalls)
+}
+
+func TestReenableOpenAIAccount_StaleCommitPreservesOriginalState(t *testing.T) {
+	state := &OpenAIDowngradeProbeState{
+		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
+		ConsecutiveFailures: 3,
+	}
+	before := *state
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: state},
+		allowed:                 true,
+		commitErr:               ErrOpenAIProbeStale,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store,
+		&downgradeProbeAccountRepoStub{account: &Account{
+			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive,
+		}}, nil, nil, nil, nil)
+
+	_, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
+	require.ErrorIs(t, err, ErrOpenAIProbeStale)
+	require.Equal(t, before, *state)
+	require.Equal(t, before, *store.state)
+	require.NotSame(t, state, store.observed.State)
+}
+
+func TestReenableOpenAIAccount_ReplayDoesNotOverwriteWinner(t *testing.T) {
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
+		}},
+		allowed: true,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store,
+		&downgradeProbeAccountRepoStub{account: &Account{
+			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive,
+		}}, nil, nil, nil, nil)
+
+	_, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
+	require.NoError(t, err)
+	winner := *store.state
+
+	_, err = runner.ReenableOpenAIAccount(context.Background(), 7, false)
+	require.ErrorIs(t, err, errOpenAIReenableNotDead)
+	require.Equal(t, 1, store.commits)
+	require.Equal(t, winner, *store.state)
 }
 
 // 非判死号手动启用:明确拒绝(它们本来就在状态机里自愈)。
@@ -60,7 +186,10 @@ func TestReenableOpenAIAccount_RejectsNonDeadStates(t *testing.T) {
 		OpenAIDowngradeStateCircuitOpen,
 		OpenAIDowngradeStateReprobe,
 	} {
-		store := &downgradeProbeStoreStub{}
+		store := &accountReenableStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+			allowed:                 true,
+		}
 		store.state = &OpenAIDowngradeProbeState{AccountID: 7, State: state}
 		runner := NewOpenAIDowngradeProbeRunner(store,
 			&downgradeProbeAccountRepoStub{account: &Account{
@@ -133,7 +262,10 @@ func TestTriggerProbeNow_HarvestDeadStillReenableRequired(t *testing.T) {
 
 // 状态不存在的号:账号不存在哨兵。
 func TestReenableOpenAIAccount_NoStateNotFound(t *testing.T) {
-	runner := NewOpenAIDowngradeProbeRunner(&downgradeProbeStoreStub{},
+	runner := NewOpenAIDowngradeProbeRunner(&accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+		allowed:                 true,
+	},
 		&downgradeProbeAccountRepoStub{account: nil}, nil, nil, nil, nil)
 	_, err := runner.ReenableOpenAIAccount(context.Background(), 99, false)
 	require.ErrorIs(t, err, ErrAccountNotFound)
@@ -144,10 +276,13 @@ func TestReenableOpenAIAccount_NoStateNotFound(t *testing.T) {
 // 闸会把认证针永远排除(静默失效),且静置中自动打针违反社区救援剧本。
 func TestReenableOpenAIAccount_RejectsManualPaused(t *testing.T) {
 	now := time.Date(2026, 9, 21, 19, 30, 0, 0, time.UTC)
-	store := &manualPausedControlStub{downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
-		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
-		ConsecutiveFailures: 3,
-	}}}
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
+			ConsecutiveFailures: 3,
+		}},
+		commitErr: ErrOpenAIReenablePaused,
+	}
 	runner := NewOpenAIDowngradeProbeRunner(store,
 		&downgradeProbeAccountRepoStub{account: &Account{
 			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -158,27 +293,8 @@ func TestReenableOpenAIAccount_RejectsManualPaused(t *testing.T) {
 	_, err := runner.ReenableOpenAIAccount(context.Background(), 7, false)
 	require.ErrorIs(t, err, errOpenAIReenablePaused)
 	// 状态没被动:仍是判死终态
-	require.Equal(t, OpenAIDowngradeStatePendingReplace, store.downgradeProbeStoreStub.state.State)
-}
-
-// unpausableControlStub 模拟「manual_paused 刹车 + 专用解暂停」:Clear 后
-// CanRun 放行;blockAfterClear=true 模拟其它闸(status/过期)仍挡。
-type unpausableControlStub struct {
-	*downgradeProbeStoreStub
-	cleared         bool
-	blockAfterClear bool
-}
-
-func (s *unpausableControlStub) CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error) {
-	if !s.cleared {
-		return false, nil // manual_paused 挡着
-	}
-	return !s.blockAfterClear, nil
-}
-
-func (s *unpausableControlStub) ClearOpenAIDowngradeManualPause(_ context.Context, _ int64) (bool, error) {
-	s.cleared = true
-	return true, nil
+	require.Equal(t, OpenAIDowngradeStatePendingReplace, store.state.State)
+	require.Equal(t, 1, store.commits)
 }
 
 // r17an(2026-09-28 用户裁定):显式 unpause 的 reenable 解除刹车继续走认证针
@@ -186,12 +302,13 @@ func (s *unpausableControlStub) ClearOpenAIDowngradeManualPause(_ context.Contex
 // 各落一条审计事件。
 func TestReenableOpenAIAccount_UnpauseClearsBrake(t *testing.T) {
 	now := time.Date(2026, 9, 28, 14, 0, 0, 0, time.UTC)
-	store := &unpausableControlStub{downgradeProbeStoreStub: &downgradeProbeStoreStub{
-		state: &OpenAIDowngradeProbeState{
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
 			AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
 			ConsecutiveFailures: 3,
-		},
-	}}
+		}},
+		unpaused: true,
+	}
 	runner := NewOpenAIDowngradeProbeRunner(store,
 		&downgradeProbeAccountRepoStub{account: &Account{
 			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -204,13 +321,8 @@ func TestReenableOpenAIAccount_UnpauseClearsBrake(t *testing.T) {
 	require.NotNil(t, result)
 	require.True(t, result.Unpaused)
 	require.True(t, result.ProbeQueued)
-	require.True(t, store.cleared, "brake must be released")
-	// 解除+启用两条审计事件,顺序:先 manual_unpause 后 manual_reenable
-	require.Equal(t, 2, store.eventCalls)
-	require.Equal(t, "manual_unpause", store.eventTypes[0])
-	require.Equal(t, "reenable", store.eventDetails[0]["via"])
-	require.Equal(t, "manual_reenable", store.eventTypes[1])
-	require.Equal(t, true, store.eventDetails[1]["unpaused"])
+	require.True(t, store.observed.Unpause)
+	require.Zero(t, store.eventCalls, "repository owns both audit events")
 	// 认证态就位(r17y 一击退出预置不变)
 	require.Equal(t, OpenAIDowngradeStateOnDuty, store.state.State)
 	require.Equal(t, "qualification", store.state.ProbeMode)
@@ -221,12 +333,12 @@ func TestReenableOpenAIAccount_UnpauseClearsBrake(t *testing.T) {
 // (ListDue 同闸会把认证针永远排除)。
 func TestReenableOpenAIAccount_UnpauseStillBlocked(t *testing.T) {
 	now := time.Date(2026, 9, 28, 14, 0, 0, 0, time.UTC)
-	store := &unpausableControlStub{downgradeProbeStoreStub: &downgradeProbeStoreStub{
-		state: &OpenAIDowngradeProbeState{
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
 			AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
-		},
-	}}
-	store.blockAfterClear = true
+		}},
+		commitErr: ErrOpenAIReenableBlocked,
+	}
 	runner := NewOpenAIDowngradeProbeRunner(store,
 		&downgradeProbeAccountRepoStub{account: &Account{
 			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -264,8 +376,8 @@ func TestReenableQualificationSingleStrike(t *testing.T) {
 	// reenable 落下的状态(ReenableOpenAIAccount 的输出形态)
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStateOnDuty,
-		ProbeMode: "qualification",
-		CurrentProxyID:       &proxyID,
+		ProbeMode:           "qualification",
+		CurrentProxyID:      &proxyID,
 		ConsecutiveFailures: 1, // r17y 预置
 		NextProbeAt:         now,
 	}
@@ -305,8 +417,8 @@ func TestReenableQualificationSinglePass(t *testing.T) {
 	}
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStateOnDuty,
-		ProbeMode: "qualification",
-		CurrentProxyID:       &proxyID,
+		ProbeMode:           "qualification",
+		CurrentProxyID:      &proxyID,
 		ConsecutiveFailures: 1, // r17y 预置
 		NextProbeAt:         now,
 	}
@@ -325,7 +437,7 @@ func TestReenableQualificationInconclusiveKeepsStrike(t *testing.T) {
 	proxyID := int64(5)
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 7, State: OpenAIDowngradeStateOnDuty,
-		ProbeMode: "qualification",
+		ProbeMode:           "qualification",
 		CurrentProxyID:      &proxyID,
 		ConsecutiveFailures: 1,
 		NextProbeAt:         now,

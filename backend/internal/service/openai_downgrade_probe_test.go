@@ -28,6 +28,7 @@ type downgradeProbeAccountRepoStub struct {
 	listByPlatformFn  func(context.Context, string) ([]Account, error)
 	getByIDFn         func(context.Context, int64) (*Account, error)
 	account           *Account
+	getByIDCalls      int
 	getByIDErr        error
 	schedulableErr    error
 	schedulableCalls  []bool
@@ -74,6 +75,7 @@ func (s *downgradeProbeAccountRepoStub) ListByPlatform(ctx context.Context, plat
 }
 
 func (s *downgradeProbeAccountRepoStub) GetByID(ctx context.Context, id int64) (*Account, error) {
+	s.getByIDCalls++
 	if s.getByIDFn != nil {
 		return s.getByIDFn(ctx, id)
 	}
@@ -129,10 +131,13 @@ type downgradeProbeStoreStub struct {
 	reconcileFn    func(context.Context, time.Time, time.Duration) (int64, error)
 	listDueFn      func(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error)
 	eventCountFn   func(context.Context, int64, string, time.Time) (int, error)
+	getStateFn     func(context.Context, int64) (*OpenAIDowngradeProbeState, error)
 	state          *OpenAIDowngradeProbeState
 	ensureNextAt   time.Time
+	ensureCalls    int
 	due            []OpenAIDowngradeProbeState
 	saveCalls      int
+	getStateCalls  int
 	probeCalls     int
 	probeResults   []OpenAIDowngradeProbeResult
 	eventCalls     int
@@ -156,6 +161,7 @@ type downgradeProbeStoreStub struct {
 func (s *downgradeProbeStoreStub) EnsureOpenAIDowngradeState(
 	ctx context.Context, accountID int64, proxyID *int64, nextAt time.Time,
 ) (*OpenAIDowngradeProbeState, error) {
+	s.ensureCalls++
 	if s.ensureFn != nil {
 		return s.ensureFn(ctx, accountID, proxyID, nextAt)
 	}
@@ -210,7 +216,11 @@ func (s *downgradeProbeStoreStub) RecordOpenAIDowngradeProbe(_ context.Context, 
 
 // GetOpenAIDowngradeState 供代际失配重试(retryStaleCommit)读取新鲜状态行:
 // 未预置 state 时返回 nil,重试按"状态行不可用"让位。
-func (s *downgradeProbeStoreStub) GetOpenAIDowngradeState(context.Context, int64) (*OpenAIDowngradeProbeState, error) {
+func (s *downgradeProbeStoreStub) GetOpenAIDowngradeState(ctx context.Context, accountID int64) (*OpenAIDowngradeProbeState, error) {
+	s.getStateCalls++
+	if s.getStateFn != nil {
+		return s.getStateFn(ctx, accountID)
+	}
 	return s.state, nil
 }
 

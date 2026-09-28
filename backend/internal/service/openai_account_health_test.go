@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -10,6 +11,33 @@ import (
 )
 
 func rtPtr(v int) *int { return &v }
+
+type triggerProbeStoreStub struct {
+	*downgradeProbeStoreStub
+	allowed     bool
+	controlErr  error
+	commitErr   error
+	commitCalls int
+	observed    *OpenAIDowngradeMutation
+}
+
+func (s *triggerProbeStoreStub) CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error) {
+	return s.allowed, s.controlErr
+}
+
+func (s *triggerProbeStoreStub) CommitOpenAIDowngradeMutation(
+	_ context.Context,
+	mutation *OpenAIDowngradeMutation,
+) error {
+	s.commitCalls++
+	s.observed = mutation
+	if s.commitErr != nil {
+		return s.commitErr
+	}
+	state := *mutation.State
+	s.state = &state
+	return nil
+}
 
 func TestLabelOpenAIAccountHealth(t *testing.T) {
 	// 9/21 用户批准的状态映射表（proposal 表格逐行）。
@@ -154,6 +182,227 @@ func TestLabelOpenAIAccountHealth(t *testing.T) {
 	}
 }
 
+func TestTriggerProbeNowPathADoesNotUseGlobalRunLock(t *testing.T) {
+	now := time.Date(2026, 9, 28, 21, 0, 0, 0, time.UTC)
+	accountUpdatedAt := now.Add(-2 * time.Minute)
+	stateUpdatedAt := now.Add(-time.Minute)
+	store := &triggerProbeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 101, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: stateUpdatedAt,
+		}},
+		allowed: true,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store,
+		&downgradeProbeAccountRepoStub{account: &Account{
+			ID: 101, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive, Schedulable: true, UpdatedAt: accountUpdatedAt,
+		}}, nil, nil, nil, nil)
+	runner.now = func() time.Time { return now }
+
+	runner.runMu.Lock() // another account's RunOnce scan owns the global lock
+	defer runner.runMu.Unlock()
+
+	result, err := runner.TriggerProbeNow(context.Background(), 101)
+	require.NoError(t, err)
+	require.True(t, result.Accepted)
+	require.False(t, result.AlreadyFlying)
+	require.Equal(t, 1, store.commitCalls)
+	require.Equal(t, now, store.state.NextProbeAt)
+	require.Zero(t, store.probeCalls)
+}
+
+func TestTriggerProbeNowPathBUsesGlobalRunLock(t *testing.T) {
+	now := time.Date(2026, 9, 28, 21, 5, 0, 0, time.UTC)
+	store := &triggerProbeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 102, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: now.Add(-time.Minute),
+		}},
+		allowed: true,
+	}
+	repo := &downgradeProbeAccountRepoStub{account: &Account{
+		ID: 102, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, UpdatedAt: now.Add(-2 * time.Minute),
+	}}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	runner.now = func() time.Time { return now }
+
+	runner.runMu.Lock()
+	result, err := runner.TriggerProbeNow(context.Background(), 102)
+	runner.runMu.Unlock()
+
+	require.NoError(t, err)
+	require.False(t, result.Accepted)
+	require.True(t, result.AlreadyFlying)
+	require.Zero(t, store.probeCalls)
+	require.Equal(t, 1, store.getStateCalls, "locked path B must not start a fresh read")
+	require.Equal(t, 1, repo.getByIDCalls)
+}
+
+func TestTriggerProbeNowPathBRejectsStaleSnapshots(t *testing.T) {
+	now := time.Date(2026, 9, 28, 21, 10, 0, 0, time.UTC)
+	stateUpdatedAt := now.Add(-time.Minute)
+	accountUpdatedAt := now.Add(-2 * time.Minute)
+
+	t.Run("state_generation", func(t *testing.T) {
+		initial := &OpenAIDowngradeProbeState{
+			AccountID: 103, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: stateUpdatedAt,
+		}
+		fresh := *initial
+		fresh.UpdatedAt = now
+		store := &triggerProbeStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+			allowed:                 true,
+		}
+		calls := 0
+		store.getStateFn = func(context.Context, int64) (*OpenAIDowngradeProbeState, error) {
+			calls++
+			if calls == 1 {
+				return initial, nil
+			}
+			return &fresh, nil
+		}
+		repo := &downgradeProbeAccountRepoStub{account: &Account{
+			ID: 103, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive, Schedulable: false, UpdatedAt: accountUpdatedAt,
+		}}
+		runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+		runner.now = func() time.Time { return now }
+
+		_, err := runner.TriggerProbeNow(context.Background(), 103)
+		require.ErrorIs(t, err, ErrOpenAIProbeStale)
+		require.Zero(t, store.probeCalls)
+		require.Equal(t, 2, store.getStateCalls)
+		require.Equal(t, 2, repo.getByIDCalls)
+	})
+
+	t.Run("account_generation", func(t *testing.T) {
+		state := &OpenAIDowngradeProbeState{
+			AccountID: 104, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: stateUpdatedAt,
+		}
+		store := &triggerProbeStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{state: state},
+			allowed:                 true,
+		}
+		initial := &Account{
+			ID: 104, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+			Status: StatusActive, Schedulable: false, UpdatedAt: accountUpdatedAt,
+		}
+		fresh := *initial
+		fresh.UpdatedAt = now
+		repo := &downgradeProbeAccountRepoStub{}
+		repo.getByIDFn = func(context.Context, int64) (*Account, error) {
+			if repo.getByIDCalls == 1 {
+				return initial, nil
+			}
+			return &fresh, nil
+		}
+		runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+		runner.now = func() time.Time { return now }
+
+		_, err := runner.TriggerProbeNow(context.Background(), 104)
+		require.ErrorIs(t, err, ErrOpenAIProbeStale)
+		require.Zero(t, store.probeCalls)
+		require.Equal(t, 2, store.getStateCalls)
+		require.Equal(t, 2, repo.getByIDCalls)
+	})
+}
+
+func TestTriggerProbeNowPathAControlErrorAndReplay(t *testing.T) {
+	now := time.Date(2026, 9, 28, 21, 15, 0, 0, time.UTC)
+	state := &OpenAIDowngradeProbeState{
+		AccountID: 105, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+		NextProbeAt: now.Add(time.Hour), UpdatedAt: now.Add(-time.Minute),
+	}
+	account := &Account{
+		ID: 105, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, UpdatedAt: now.Add(-2 * time.Minute),
+	}
+
+	t.Run("control_error", func(t *testing.T) {
+		controlErr := errors.New("control read failed")
+		store := &triggerProbeStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{state: state},
+			controlErr:              controlErr,
+		}
+		runner := NewOpenAIDowngradeProbeRunner(store,
+			&downgradeProbeAccountRepoStub{account: account}, nil, nil, nil, nil)
+		runner.now = func() time.Time { return now }
+
+		_, err := runner.TriggerProbeNow(context.Background(), 105)
+		require.ErrorIs(t, err, controlErr)
+		require.Zero(t, store.commitCalls)
+		require.Equal(t, now.Add(time.Hour), state.NextProbeAt)
+	})
+
+	t.Run("replay", func(t *testing.T) {
+		stateCopy := *state
+		store := &triggerProbeStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &stateCopy},
+			allowed:                 true,
+		}
+		runner := NewOpenAIDowngradeProbeRunner(store,
+			&downgradeProbeAccountRepoStub{account: account}, nil, nil, nil, nil)
+		runner.now = func() time.Time { return now }
+
+		first, err := runner.TriggerProbeNow(context.Background(), 105)
+		require.NoError(t, err)
+		require.True(t, first.Accepted)
+		second, err := runner.TriggerProbeNow(context.Background(), 105)
+		require.NoError(t, err)
+		require.False(t, second.Accepted)
+		require.True(t, second.AlreadyFlying)
+		require.Equal(t, 1, store.commitCalls)
+	})
+
+	t.Run("stale_commit", func(t *testing.T) {
+		stateCopy := *state
+		store := &triggerProbeStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &stateCopy},
+			allowed:                 true,
+			commitErr:               ErrOpenAIProbeStale,
+		}
+		runner := NewOpenAIDowngradeProbeRunner(store,
+			&downgradeProbeAccountRepoStub{account: account}, nil, nil, nil, nil)
+		runner.now = func() time.Time { return now }
+
+		_, err := runner.TriggerProbeNow(context.Background(), 105)
+		require.ErrorIs(t, err, ErrOpenAIProbeStale)
+		require.Equal(t, 1, store.commitCalls)
+		require.Equal(t, now.Add(time.Hour), store.state.NextProbeAt)
+	})
+}
+
+func TestTriggerProbeNowDiagnosticAuthenticationFailureIsEvidenceOnly(t *testing.T) {
+	now := time.Date(2026, 9, 28, 21, 20, 0, 0, time.UTC)
+	store := &triggerProbeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 106, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+			NextProbeAt: now.Add(time.Hour), UpdatedAt: now.Add(-time.Minute),
+		}},
+		allowed: true,
+	}
+	repo := &downgradeProbeAccountRepoStub{account: &Account{
+		ID: 106, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: false, UpdatedAt: now.Add(-2 * time.Minute),
+	}}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	runner.now = func() time.Time { return now }
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{AccountID: 106, HTTPStatus: http.StatusUnauthorized}
+	}
+
+	result, err := runner.TriggerProbeNow(context.Background(), 106)
+	require.NoError(t, err)
+	require.True(t, result.Accepted)
+	require.True(t, result.ProbedNow)
+	require.Len(t, store.probeResults, 1)
+	require.Empty(t, repo.errorMessages, "diagnostic probes must not mutate account error state")
+}
+
 func TestOpenAIProbeEvidenceDegraded(t *testing.T) {
 	// 401/异常路径(HTTPStatus!=200)不算降智证据(与 IsDegraded 一致)。
 	ev := &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 401, AnswerCorrect: boolPtr(false)}
@@ -203,10 +452,13 @@ func TestTriggerProbeNowDualPath(t *testing.T) {
 		ID: 92001, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: true, ProxyID: &proxyID,
 	}
-	schedStore := &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
-		AccountID: 92001, State: OpenAIDowngradeStateOnDuty,
-		ProbeMode: "normal", NextProbeAt: future,
-	}}
+	schedStore := &triggerProbeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 92001, State: OpenAIDowngradeStateOnDuty,
+			ProbeMode: "normal", NextProbeAt: future,
+		}},
+		allowed: true,
+	}
 	runner := NewOpenAIDowngradeProbeRunner(
 		schedStore, &downgradeProbeAccountRepoStub{account: schedAccount}, nil, nil, nil, nil)
 	runner.now = func() time.Time { return now }
@@ -222,10 +474,13 @@ func TestTriggerProbeNowDualPath(t *testing.T) {
 		ID: 92002, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: false, ProxyID: &proxyID,
 	}
-	circuitStore := &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
-		AccountID: 92002, State: OpenAIDowngradeStateCircuitOpen,
-		ProbeMode: "half_open", NextProbeAt: future,
-	}}
+	circuitStore := &triggerProbeStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 92002, State: OpenAIDowngradeStateCircuitOpen,
+			ProbeMode: "half_open", NextProbeAt: future,
+		}},
+		allowed: true,
+	}
 	circuitRunner := NewOpenAIDowngradeProbeRunner(
 		circuitStore, &downgradeProbeAccountRepoStub{account: circuitAccount}, nil, nil, nil, nil)
 	circuitRunner.now = func() time.Time { return now }
@@ -395,5 +650,63 @@ func TestTriggerProbeNowMissingStateEnsuresRow(t *testing.T) {
 	require.NoError(t, err, "missing state row must be ensured, not 404")
 	require.True(t, res.Accepted)
 	require.True(t, res.ProbedNow)
+	require.Equal(t, 1, store.ensureCalls)
 	require.Equal(t, 1, store.probeCalls)
+}
+
+func TestTriggerProbeNowIneligibleMissingStateHasNoSideEffects(t *testing.T) {
+	now := time.Date(2026, 9, 28, 14, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Minute)
+	parentID := int64(11)
+	cases := []struct {
+		name    string
+		account *Account
+	}{
+		{
+			name: "non_openai",
+			account: &Account{
+				ID: 95001, Platform: PlatformAnthropic, Type: AccountTypeOAuth,
+				Status: StatusActive,
+			},
+		},
+		{
+			name: "non_oauth",
+			account: &Account{
+				ID: 95001, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Status: StatusActive,
+			},
+		},
+		{
+			name: "shadow",
+			account: &Account{
+				ID: 95001, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, ParentAccountID: &parentID,
+			},
+		},
+		{
+			name: "expired",
+			account: &Account{
+				ID: 95001, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, AutoPauseOnExpired: true, ExpiresAt: &expired,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &triggerProbeStoreStub{
+				downgradeProbeStoreStub: &downgradeProbeStoreStub{},
+				allowed:                 true,
+			}
+			runner := NewOpenAIDowngradeProbeRunner(
+				store, &downgradeProbeAccountRepoStub{account: tc.account}, nil, nil, nil, nil)
+			runner.now = func() time.Time { return now }
+
+			_, err := runner.TriggerProbeNow(context.Background(), tc.account.ID)
+			require.ErrorIs(t, err, errOpenAIProbeNotEligible)
+			require.Zero(t, store.ensureCalls)
+			require.Zero(t, store.probeCalls)
+			require.Zero(t, store.commitCalls)
+			require.Nil(t, store.state)
+		})
+	}
 }

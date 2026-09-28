@@ -14,6 +14,9 @@ var (
 	ErrOpenAIProbeControlStore    = errors.New("OpenAI probe control store unavailable")
 	ErrOpenAIProbeSnapshotStore   = errors.New("OpenAI probe account snapshot writer unavailable")
 	ErrOpenAIProbeSnapshotRefresh = errors.New("OpenAI probe committed; account snapshot refresh failed")
+	ErrOpenAIReenableNotDead      = errors.New("OpenAI account is not pending replacement")
+	ErrOpenAIReenablePaused       = errors.New("OpenAI account is manual-paused")
+	ErrOpenAIReenableBlocked      = errors.New("OpenAI account is not probe-runnable")
 )
 
 // A probe does network work without locks, then commits only if both database
@@ -55,19 +58,32 @@ type OpenAIDowngradeAtomicStore interface {
 	CommitOpenAIDowngradeMutation(context.Context, *OpenAIDowngradeMutation) error
 }
 
+// OpenAIAccountReenableMutation is the narrow transaction contract for
+// dead-account rescue. The repository rechecks the captured account and state
+// generations, eligibility, ownership and manual-pause gate before changing
+// anything.
+type OpenAIAccountReenableMutation struct {
+	AccountID                int64
+	ExpectedAccountUpdatedAt time.Time
+	ExpectedStateUpdatedAt   time.Time
+	ExpectedProxyID          *int64
+	ExpectedStatus           string
+	ExpectedSchedulable      bool
+	Unpause                  bool
+	ReenabledAt              time.Time
+	State                    *OpenAIDowngradeProbeState
+}
+
+type OpenAIAccountReenableStore interface {
+	CommitOpenAIAccountReenable(context.Context, *OpenAIAccountReenableMutation) (bool, error)
+}
+
 type OpenAIDowngradeAccountSnapshotStore interface {
 	SyncOpenAIDowngradeAccountSnapshot(context.Context, int64) error
 }
 
 type OpenAIDowngradeProbeControlStore interface {
 	CanRunOpenAIDowngradeProbe(context.Context, int64) (bool, error)
-}
-
-// OpenAIDowngradeProbeUnpauseStore 专用解暂停能力（r17an）：只清 manual_paused
-// 刹车，不动 schedulable——避开「开调度解暂停=死号直回流量池」的暗雷
-// （流量调度器只看 schedulable，不看判死状态）。
-type OpenAIDowngradeProbeUnpauseStore interface {
-	ClearOpenAIDowngradeManualPause(context.Context, int64) (bool, error)
 }
 
 func (m *OpenAIDowngradeMutation) ChangesAccount() bool {
