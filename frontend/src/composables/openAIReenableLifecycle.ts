@@ -36,9 +36,9 @@ export const createOpenAIReenableLifecycle = <Health>(
   const setTimer = options.setTimer ?? setTimeout
   const clearTimer = options.clearTimer ?? clearTimeout
   const watchers = new Map<number, OpenAIReenableWatcher>()
+  const requests = new Map<number, symbol>()
   let disposed = false
   let nextGeneration = 0
-  let requestGeneration = 0
 
   const isCurrent = (watcher: OpenAIReenableWatcher): boolean => {
     const current = watchers.get(watcher.accountId)
@@ -123,8 +123,9 @@ export const createOpenAIReenableLifecycle = <Health>(
 
   const runRequest = async <Result>(request: OpenAIReenableRequest<Result>): Promise<void> => {
     if (disposed) return
-    const generation = ++requestGeneration
-    const isRequestCurrent = () => !disposed && generation === requestGeneration
+    const generation = Symbol()
+    requests.set(request.accountId, generation)
+    const isRequestCurrent = () => !disposed && requests.get(request.accountId) === generation
     try {
       const result = await request.execute()
       if (!isRequestCurrent()) return
@@ -134,14 +135,21 @@ export const createOpenAIReenableLifecycle = <Health>(
     } catch (error) {
       if (isRequestCurrent()) request.onError(error)
     } finally {
-      if (isRequestCurrent()) request.onFinally()
+      if (isRequestCurrent()) {
+        try {
+          request.onFinally()
+        } finally {
+          // The callback may have started another request for this account.
+          if (isRequestCurrent()) requests.delete(request.accountId)
+        }
+      }
     }
   }
 
   const dispose = () => {
     if (disposed) return
     disposed = true
-    requestGeneration += 1
+    requests.clear()
     for (const accountId of [...watchers.keys()]) {
       stopWatcher(accountId)
     }
