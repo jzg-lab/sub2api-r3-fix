@@ -50,9 +50,13 @@ func reenableCommitFixture() *service.OpenAIAccountReenableMutation {
 }
 
 func validReenableAccountRow(mutation *service.OpenAIAccountReenableMutation) reenableAccountRow {
+	var proxyID any
+	if mutation.ExpectedProxyID != nil {
+		proxyID = *mutation.ExpectedProxyID
+	}
 	return reenableAccountRow{
 		updatedAt:       mutation.ExpectedAccountUpdatedAt,
-		proxyID:         *mutation.ExpectedProxyID,
+		proxyID:         proxyID,
 		status:          mutation.ExpectedStatus,
 		schedulable:     mutation.ExpectedSchedulable,
 		platform:        service.PlatformOpenAI,
@@ -219,18 +223,30 @@ func TestOpenAIAccountReenableCommitRollsBackAtEveryBoundary(t *testing.T) {
 }
 
 func TestOpenAIAccountReenableCommitRejectsStaleGeneration(t *testing.T) {
-	for _, changed := range []string{"account", "state"} {
+	for _, changed := range []string{"account", "state", "proxy_added", "proxy_removed", "proxy_changed", "status", "schedulable"} {
 		t.Run(changed, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			defer db.Close()
 
 			mutation := reenableCommitFixture()
+			if changed == "proxy_added" {
+				mutation.ExpectedProxyID = nil
+			}
 			before := *mutation.State
 			mock.ExpectBegin()
 			accountRow := validReenableAccountRow(mutation)
-			if changed == "account" {
+			switch changed {
+			case "account":
 				accountRow.updatedAt = accountRow.updatedAt.Add(time.Second)
+			case "proxy_added", "proxy_changed":
+				accountRow.proxyID = int64(4)
+			case "proxy_removed":
+				accountRow.proxyID = nil
+			case "status":
+				accountRow.status = service.StatusDisabled
+			case "schedulable":
+				accountRow.schedulable = !mutation.ExpectedSchedulable
 			}
 			expectReenableAccountLock(mock, mutation, accountRow)
 			if changed == "state" {
@@ -249,6 +265,87 @@ func TestOpenAIAccountReenableCommitRejectsStaleGeneration(t *testing.T) {
 			require.Equal(t, before, *mutation.State)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
+	}
+}
+
+func TestOpenAIAccountReenableCommitAcceptsNoProxyOrControlRow(t *testing.T) {
+	for _, missingControl := range []bool{false, true} {
+		t.Run(map[bool]string{false: "existing_control", true: "missing_control"}[missingControl], func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+
+			mutation := reenableCommitFixture()
+			mutation.ExpectedProxyID = nil
+			mutation.State.CurrentProxyID = nil
+			mutation.State.OriginalProxyID = nil
+			mock.ExpectBegin()
+			expectReenableAccountLock(mock, mutation, validReenableAccountRow(mutation))
+			control := expectReenableControlLock(mock, mutation.AccountID, false, nil)
+			if missingControl {
+				control.WillReturnError(sql.ErrNoRows)
+			}
+			expectReenableStateLock(mock, mutation, mutation.ExpectedStateUpdatedAt, service.OpenAIDowngradeStatePendingReplace)
+			mock.ExpectExec(`INSERT INTO openai_downgrade_probe_events`).
+				WithArgs(mutation.AccountID, nil, "manual_reenable", sqlmock.AnyArg()).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(`UPDATE openai_downgrade_probe_states`).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+
+			repo := &openAIDowngradeProbeRepository{db: db}
+			unpaused, err := repo.CommitOpenAIAccountReenable(context.Background(), mutation)
+
+			require.NoError(t, err)
+			require.False(t, unpaused)
+			require.Nil(t, mutation.State.CurrentProxyID)
+			require.True(t, mutation.State.UpdatedAt.After(mutation.ExpectedStateUpdatedAt))
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestOpenAIAccountReenableCommitRejectsLostWrites(t *testing.T) {
+	for _, boundary := range []string{"clear_pause", "state_write"} {
+		for _, rowCount := range []int64{0, 2} {
+			t.Run(boundary+"/"+map[int64]string{0: "no_rows", 2: "multiple_rows"}[rowCount], func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer db.Close()
+
+				mutation := reenableCommitFixture()
+				mutation.Unpause = true
+				before := *mutation.State
+				mock.ExpectBegin()
+				expectReenableAccountLock(mock, mutation, validReenableAccountRow(mutation))
+				expectReenableControlLock(mock, mutation.AccountID, true, nil)
+				expectReenableStateLock(mock, mutation, mutation.ExpectedStateUpdatedAt, service.OpenAIDowngradeStatePendingReplace)
+				clearRows := int64(1)
+				if boundary == "clear_pause" {
+					clearRows = rowCount
+				}
+				mock.ExpectExec(`UPDATE openai_downgrade_probe_controls`).
+					WithArgs(mutation.AccountID).
+					WillReturnResult(sqlmock.NewResult(0, clearRows))
+				if boundary == "state_write" {
+					mock.ExpectExec(`INSERT INTO openai_downgrade_probe_events`).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+					mock.ExpectExec(`INSERT INTO openai_downgrade_probe_events`).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+					mock.ExpectExec(`UPDATE openai_downgrade_probe_states`).
+						WillReturnResult(sqlmock.NewResult(0, rowCount))
+				}
+				mock.ExpectRollback()
+
+				repo := &openAIDowngradeProbeRepository{db: db}
+				unpaused, err := repo.CommitOpenAIAccountReenable(context.Background(), mutation)
+
+				require.ErrorIs(t, err, service.ErrOpenAIProbeStale)
+				require.False(t, unpaused)
+				require.Equal(t, before, *mutation.State)
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
 	}
 }
 
