@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,39 @@ func (r *openAIChatStreamReadErrorCloser) Read(p []byte) (int, error) {
 
 func (r *openAIChatStreamReadErrorCloser) Close() error { return nil }
 
+type openAIChatBlockingReadCloser struct {
+	payload      []byte
+	offset       int
+	closed       chan struct{}
+	readDone     chan struct{}
+	closeOnce    sync.Once
+	readDoneOnce sync.Once
+}
+
+func newOpenAIChatBlockingReadCloser(payload []byte) *openAIChatBlockingReadCloser {
+	return &openAIChatBlockingReadCloser{
+		payload:  payload,
+		closed:   make(chan struct{}),
+		readDone: make(chan struct{}),
+	}
+}
+
+func (r *openAIChatBlockingReadCloser) Read(p []byte) (int, error) {
+	if r.offset < len(r.payload) {
+		n := copy(p, r.payload[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	<-r.closed
+	r.readDoneOnce.Do(func() { close(r.readDone) })
+	return 0, io.EOF
+}
+
+func (r *openAIChatBlockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
+}
+
 func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 
 	rec := httptest.NewRecorder()
@@ -86,6 +120,120 @@ func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 	require.Equal(t, "Upstream HTTP/2 stream failed", message)
 	require.NotContains(t, message, "stream ID")
 	require.NotContains(t, message, "INTERNAL_ERROR")
+}
+
+func TestHandleChatStreamingResponse_TimeoutClosesBlockingUpstreamBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	body := newOpenAIChatBlockingReadCloser(nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       body,
+	}
+	svc := &OpenAIGatewayService{cfg: &config.Config{
+		Gateway: config.GatewayConfig{
+			StreamDataIntervalTimeout: 1,
+			MaxLineSize:               defaultMaxLineSize,
+		},
+	}}
+
+	result, err := svc.handleChatStreamingResponse(
+		resp,
+		c,
+		&Account{ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI},
+		"gpt-5.6-sol",
+		"gpt-5.6-sol",
+		"gpt-5.6-sol",
+		time.Now(),
+		0,
+	)
+
+	require.ErrorContains(t, err, "stream data interval timeout")
+	require.NotNil(t, result)
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("stream timeout returned without closing the blocking upstream body")
+	}
+	select {
+	case <-body.readDone:
+	case <-time.After(time.Second):
+		t.Fatal("scanner read remained blocked after the streaming handler returned")
+	}
+}
+
+func TestHandleChatStreamingResponse_TerminalEventClosesConcurrentUpstreamReaders(t *testing.T) {
+	const workers = 24
+	upstreamBody := []byte(strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_pool","model":"gpt-5.6-sol"}}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"ok"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_pool","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+		"",
+		"",
+	}, "\n"))
+
+	type callResult struct {
+		result *OpenAIForwardResult
+		err    error
+		body   *openAIChatBlockingReadCloser
+	}
+	results := make(chan callResult, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			body := newOpenAIChatBlockingReadCloser(upstreamBody)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       body,
+			}
+			svc := &OpenAIGatewayService{cfg: &config.Config{
+				Gateway: config.GatewayConfig{
+					StreamKeepaliveInterval: 1,
+					MaxLineSize:             defaultMaxLineSize,
+				},
+			}}
+			result, err := svc.handleChatStreamingResponse(
+				resp,
+				c,
+				&Account{ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI},
+				"gpt-5.6-sol",
+				"gpt-5.6-sol",
+				"gpt-5.6-sol",
+				time.Now(),
+				0,
+			)
+			results <- callResult{result: result, err: err, body: body}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	for call := range results {
+		require.NoError(t, call.err)
+		require.NotNil(t, call.result)
+		select {
+		case <-call.body.closed:
+		default:
+			t.Fatal("terminal event returned without closing the still-open upstream body")
+		}
+		select {
+		case <-call.body.readDone:
+		case <-time.After(time.Second):
+			t.Fatal("scanner read remained blocked after terminal-event return")
+		}
+	}
 }
 
 func TestNormalizeResponsesRequestServiceTier(t *testing.T) {
