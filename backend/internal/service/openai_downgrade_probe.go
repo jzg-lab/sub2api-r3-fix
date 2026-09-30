@@ -48,6 +48,14 @@ const (
 	OpenAIDowngradeEventTurnStateDegraded        = "turn_state_degraded"
 	OpenAIDowngradeEventRealTrafficModelMismatch = "real_traffic_model_mismatch"
 	OpenAIDowngradeEventRealTrafficRecheckArmed  = "real_traffic_recheck_armed"
+	// 探针 auth 两振出局（r17aq，自 r17ap 移植）：401/403 不再一击判死。
+	// strike = 首次连击暂停调度；terminal = 达阈值 SetError；cleared =
+	// 非 auth 上游应答证明凭据被接受，自动解暂停；skipped_state_changed =
+	// 探针在飞窗内账号被人工/并发改动，结果只记遥测不进状态机。
+	OpenAIDowngradeEventProbeAuthStrike   = "probe_auth_strike"
+	OpenAIDowngradeEventProbeAuthTerminal = "probe_auth_terminal"
+	OpenAIDowngradeEventProbeAuthCleared  = "probe_auth_cleared"
+	OpenAIDowngradeEventProbeSkippedStale = "probe_skipped_state_changed"
 )
 
 const (
@@ -66,6 +74,11 @@ const (
 	openAIDowngradeSolFallbackExtraKey       = "openai_downgrade_sol_fallback"
 	openAIDowngradeProbeProxyMinInterval     = 10 * time.Minute
 	openAIDowngradeSolFallbackInterval       = 2 * time.Hour
+	// 探针 auth 两振出局（r17aq）：401/403 常是桶 IP 的瞬态旗而非账号死刑。
+	// 第一次连击只暂停调度；连续达 OpenAIDowngradeAuthStrikeThreshold 次才
+	// SetError，期间按分钟级快复检拿结论。
+	OpenAIDowngradeAuthStrikeThreshold = 2
+	openAIDowngradeAuthRetryInterval   = 10 * time.Minute
 	// 429 是「现在判不了」而非健康信号：被限流的账号若按常规 15-45 分钟排期，
 	// 整个忙时段都可能拿不到一针结论性探测，真实降智窗口被无限拉长。
 	// 限流后按短周期重探（经 jitter 后 2.5-7.5 分钟），尽快拿回结论。
@@ -270,6 +283,7 @@ type OpenAIDowngradeProbeState struct {
 	SwapCount7d               int
 	LastSwapAt                *time.Time
 	LastProbeAt               *time.Time
+	AuthConsecutiveFailures   int
 	AstraConsecutiveFailures  int
 	AstraConsecutiveSuccesses int
 	AstraNextProbeAt          *time.Time
@@ -279,6 +293,46 @@ type OpenAIDowngradeProbeState struct {
 	// of 429s"）。
 	HarvestAttempts int
 	UpdatedAt       time.Time
+}
+
+// OpenAI proxy outcome kinds feed the per-proxy outcome statistics table
+// (proxy_outcome_stats), which auto-syncs proxies.bucket_risk_score.
+const (
+	OpenAIProxyOutcomeSuccess      = "success"
+	OpenAIProxyOutcomeDegraded     = "degraded"
+	OpenAIProxyOutcomeAuthError    = "auth_error"
+	OpenAIProxyOutcomeNetworkError = "network_error"
+	OpenAIProxyOutcomeInconclusive = "inconclusive"
+)
+
+// ClassifyOpenAIDowngradeProxyOutcome buckets one probe result into a
+// proxy-attributable outcome kind. Failures that happened before any proxy
+// contact (token unavailable, missing local dependencies) and non-auth
+// upstream rejections (429/5xx) are inconclusive: they say nothing about the
+// bucket and must not move its risk score.
+func ClassifyOpenAIDowngradeProxyOutcome(result *OpenAIDowngradeProbeResult) string {
+	if result == nil {
+		return OpenAIProxyOutcomeInconclusive
+	}
+	switch {
+	case result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden:
+		return OpenAIProxyOutcomeAuthError
+	case !result.TransportOK:
+		if result.HTTPStatus != 0 {
+			return OpenAIProxyOutcomeInconclusive
+		}
+		if strings.Contains(result.ErrorMessage, "token") ||
+			strings.Contains(result.ErrorMessage, "dependencies") {
+			return OpenAIProxyOutcomeInconclusive
+		}
+		return OpenAIProxyOutcomeNetworkError
+	case result.IsDegraded():
+		return OpenAIProxyOutcomeDegraded
+	case result.IsRecovered():
+		return OpenAIProxyOutcomeSuccess
+	default:
+		return OpenAIProxyOutcomeInconclusive
+	}
 }
 
 type OpenAIDowngradeTransition struct {
@@ -991,13 +1045,17 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
-		state.ProbeMode != "qualification" && state.ProbeMode != "harvest" {
+		state.ProbeMode != "qualification" && state.ProbeMode != "harvest" &&
+		state.AuthConsecutiveFailures == 0 {
 		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
 		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
 		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
 		// harvest 例外（2026-09-22 修正，1136 实证）：采票号进线时不设
 		// schedulable（问题号不接流量），但循环必须照常打针——不排除的话
 		// 每 30 分钟让位一次，永远打不了采票针。
+		// auth 一振暂停豁免（r17aq）：schedulable=false 是探针自己落的，
+		// 只有后续探针能洗白（非 auth 应答）或毕业到 error（二振）；
+		// 不豁免 = 暂停号永不再被探，死锁。
 		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
@@ -1116,8 +1174,8 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		r.deferCounts[state.AccountID] = 0
 	}
 
-	result := r.runProbe(ctx, account, state.ProbeMode)
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, state.ProbeMode, now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1235,6 +1293,12 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.RecoveryDeadline = nil
 		state.ProbeMode = "normal"
 	}
+	if state.AuthConsecutiveFailures > 0 &&
+		state.NextProbeAt.After(now.Add(openAIDowngradeAuthRetryInterval)) {
+		// auth 暂停 limbo 里的无结论针：保持分钟级快复检节奏，不吃常规
+		// 15-75 分钟排期。
+		state.NextProbeAt = now.Add(openAIDowngradeAuthRetryInterval)
+	}
 	return r.store.SaveOpenAIDowngradeState(ctx, state)
 }
 
@@ -1244,8 +1308,8 @@ func (r *OpenAIDowngradeProbeRunner) processReprobe(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "reprobe")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "reprobe", now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1283,8 +1347,8 @@ func (r *OpenAIDowngradeProbeRunner) processHalfOpen(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "half_open")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "half_open", now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1338,8 +1402,8 @@ func (r *OpenAIDowngradeProbeRunner) startSolFallback(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "sol_fallback")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "sol_fallback", now)
+	if stop {
 		return err
 	}
 	// Preserve the pending model track across an inconclusive attempt/restart.
@@ -1390,8 +1454,8 @@ func (r *OpenAIDowngradeProbeRunner) processSolFallback(
 	if astraDue {
 		mode = "sol_fallback_astra"
 	}
-	result := r.runProbe(ctx, account, mode)
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, mode, now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1840,14 +1904,180 @@ func (r *OpenAIDowngradeProbeRunner) runProbe(ctx context.Context, account *Acco
 	return result
 }
 
-func (r *OpenAIDowngradeProbeRunner) recordProbeResult(ctx context.Context, result *OpenAIDowngradeProbeResult) error {
-	if err := r.store.RecordOpenAIDowngradeProbe(ctx, result); err != nil {
+// openAIProbeAccountUnchanged reports whether the admin-visible scheduling
+// surface of the account still matches the snapshot taken before the probe
+// spent up to two minutes in flight. Only the three fields that corrupt
+// state-machine attribution are compared: proxy binding, the schedulable
+// switch and lifecycle status. Cosmetic edits (name, Extra knobs) are
+// deliberately excluded — the probe outcome stays valid for attribution —
+// because comparing Extra would also break on this runner's own sol-fallback
+// Extra writes within the same tick.
+func openAIProbeAccountUnchanged(before, after *Account) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	return before.Status == after.Status &&
+		before.Schedulable == after.Schedulable &&
+		sameOpenAIProbeProxy(before.ProxyID, after.ProxyID)
+}
+
+// probeAccountFresh re-reads the account after an in-flight probe and reports
+// whether the pre-probe snapshot is still the scheduling truth.
+func (r *OpenAIDowngradeProbeRunner) probeAccountFresh(
+	ctx context.Context,
+	account *Account,
+) (bool, error) {
+	fresh, err := r.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return false, err
+	}
+	return openAIProbeAccountUnchanged(account, fresh), nil
+}
+
+// skipStaleProbeResult parks a probe result whose account changed mid-flight.
+// Telemetry was already recorded; every counter, transition and account
+// mutation is dropped so the next due run re-evaluates from the admin's
+// current truth instead of a stale snapshot.
+func (r *OpenAIDowngradeProbeRunner) skipStaleProbeResult(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) error {
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	state.NextProbeAt = now.Add(r.nextDelay())
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventProbeSkippedStale, map[string]any{
+			"http_status": result.HTTPStatus,
+			"mode":        result.Mode,
+		}); err != nil {
 		return err
 	}
-	if result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden {
-		return r.accountRepo.SetError(ctx, result.AccountID, "OpenAI probe authentication failed")
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// applyOpenAIProbeAuthPolicy is the degrade-not-kill policy for probe
+// authentication failures. The first consecutive 401/403 puts the account
+// into auth-strike limbo: scheduling is paused and a fast recheck runs in
+// openAIDowngradeAuthRetryInterval. Limbo exits three ways:
+//   - another auth strike reaches OpenAIDowngradeAuthStrikeThreshold and the
+//     account graduates to error status (stop=true);
+//   - any upstream answer that is not 401/403 proves the credentials were
+//     accepted, so the pause is cleared and the normal state machine runs;
+//   - a no-answer result (network/token) proves nothing: limbo persists and
+//     the fast recheck cadence is kept.
+//
+// stop=true means the caller must not run the degradation state machine for
+// this result.
+func (r *OpenAIDowngradeProbeRunner) applyOpenAIProbeAuthPolicy(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) (bool, error) {
+	isAuthFailure := !result.TransportOK &&
+		(result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden)
+	if !isAuthFailure {
+		if state.AuthConsecutiveFailures == 0 {
+			return false, nil
+		}
+		reachedUpstream := result.TransportOK ||
+			(result.HTTPStatus != 0 &&
+				result.HTTPStatus != http.StatusUnauthorized &&
+				result.HTTPStatus != http.StatusForbidden)
+		if !reachedUpstream {
+			return false, nil
+		}
+		// The upstream accepted the credentials: clear the strike pause. The
+		// unconditional re-enable deliberately favors auto-recovery over
+		// preserving a pause that was ours to begin with.
+		state.AuthConsecutiveFailures = 0
+		state.LastProbeAt = &now
+		state.UpdatedAt = now
+		if account.Status == StatusActive && !account.Schedulable {
+			if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+				return true, err
+			}
+		}
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventProbeAuthCleared, map[string]any{
+				"http_status": result.HTTPStatus,
+			}); err != nil {
+			return true, err
+		}
+		return false, r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	return nil
+	state.AuthConsecutiveFailures++
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if state.AuthConsecutiveFailures >= OpenAIDowngradeAuthStrikeThreshold {
+		if err := r.accountRepo.SetError(ctx, account.ID, "OpenAI probe authentication failed"); err != nil {
+			return true, err
+		}
+		state.AuthConsecutiveFailures = 0
+		state.NextProbeAt = now.Add(openAIDowngradeReplacementWindow)
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventProbeAuthTerminal, map[string]any{
+				"http_status": result.HTTPStatus,
+			}); err != nil {
+			return true, err
+		}
+		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+		return true, err
+	}
+	state.NextProbeAt = now.Add(openAIDowngradeAuthRetryInterval)
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventProbeAuthStrike, map[string]any{
+			"http_status": result.HTTPStatus,
+			"strikes":     state.AuthConsecutiveFailures,
+		}); err != nil {
+		return true, err
+	}
+	return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// runProbeRecorded is the single guarded entry point for executing one probe:
+// it records telemetry, verifies the account did not change during the
+// in-flight window, then applies the auth-failure policy. stop=true means
+// the caller must not apply further state-machine transitions; err carries
+// the store failure when present.
+func (r *OpenAIDowngradeProbeRunner) runProbeRecorded(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	mode string,
+	now time.Time,
+) (result OpenAIDowngradeProbeResult, stop bool, err error) {
+	result = r.runProbe(ctx, account, mode)
+	if err := r.store.RecordOpenAIDowngradeProbe(ctx, &result); err != nil {
+		return result, true, err
+	}
+	fresh, err := r.probeAccountFresh(ctx, account)
+	if err != nil {
+		return result, true, err
+	}
+	if !fresh {
+		return result, true, r.skipStaleProbeResult(ctx, state, result, now)
+	}
+	authStopped, err := r.applyOpenAIProbeAuthPolicy(ctx, account, state, result, now)
+	if err != nil {
+		return result, true, err
+	}
+	if authStopped {
+		return result, true, nil
+	}
+	return result, false, nil
+}
+
+// recordProbeResult 只落遥测行。401/403 的降级不杀策略在状态机侧
+// （applyOpenAIProbeAuthPolicy，经 runProbeRecorded）——记录入口不再直接
+// SetError，诊断针（只落证据行不动状态机）复用本入口也安全。
+func (r *OpenAIDowngradeProbeRunner) recordProbeResult(ctx context.Context, result *OpenAIDowngradeProbeResult) error {
+	return r.store.RecordOpenAIDowngradeProbe(ctx, result)
 }
 
 func (r *OpenAIDowngradeProbeRunner) probe(

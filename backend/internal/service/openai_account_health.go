@@ -303,7 +303,10 @@ func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accoun
 	schedulerWillPick := !manualPaused && (account.Schedulable ||
 		state.State != OpenAIDowngradeStateOnDuty ||
 		state.ProbeMode == "qualification" ||
-		account.Status == StatusError)
+		account.Status == StatusError ||
+		// auth 一振暂停（r17aq）：schedulable=false 是探针落的，镜像
+		// ListDue 豁免，手动针走路径 A 全状态机（洗白/毕业）。
+		state.AuthConsecutiveFailures > 0)
 	if !schedulerWillPick {
 		res, err := r.triggerDiagnosticProbeNow(ctx, account, state, now)
 		if err == nil && res != nil && res.Accepted {
@@ -386,7 +389,9 @@ func (r *OpenAIDowngradeProbeRunner) triggerDiagnosticProbeNow(
 		allowed && (freshAccount.Schedulable ||
 		freshState.State != OpenAIDowngradeStateOnDuty ||
 		freshState.ProbeMode == "qualification" ||
-		freshAccount.Status == StatusError)
+		freshAccount.Status == StatusError ||
+		// auth 一振暂停（r17aq）：与路径 A 判定镜像，limbo 号由调度器拾取。
+		freshState.AuthConsecutiveFailures > 0)
 	if schedulerWillPick {
 		return nil, errOpenAIProbeGenerationChanged.WithCause(ErrOpenAIProbeStale)
 	}

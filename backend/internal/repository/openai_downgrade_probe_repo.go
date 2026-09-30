@@ -49,7 +49,7 @@ func (r *openAIDowngradeProbeRepository) GetOpenAIDowngradeState(
 			probe_mode,
 			consecutive_failures, consecutive_successes, first_failure_at,
 			circuit_opened_at, recovery_deadline, next_probe_at, swap_count_7d,
-			last_swap_at, last_probe_at,
+			last_swap_at, last_probe_at, auth_consecutive_failures,
 			astra_consecutive_failures, astra_consecutive_successes, astra_next_probe_at,
 			updated_at, consecutive_429s, harvest_attempts
 		FROM openai_downgrade_probe_states
@@ -59,7 +59,7 @@ func (r *openAIDowngradeProbeRepository) GetOpenAIDowngradeState(
 		&out.ProbeMode,
 		&out.ConsecutiveFailures, &out.ConsecutiveSuccesses, &out.FirstFailureAt,
 		&out.CircuitOpenedAt, &out.RecoveryDeadline, &out.NextProbeAt, &out.SwapCount7d,
-		&out.LastSwapAt, &out.LastProbeAt,
+		&out.LastSwapAt, &out.LastProbeAt, &out.AuthConsecutiveFailures,
 		&out.AstraConsecutiveFailures, &out.AstraConsecutiveSuccesses, &out.AstraNextProbeAt,
 		&out.UpdatedAt, &out.Consecutive429s, &out.HarvestAttempts); err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				s.probe_mode,
 				s.consecutive_failures, s.consecutive_successes, s.first_failure_at,
 				s.circuit_opened_at, s.recovery_deadline, s.next_probe_at, s.swap_count_7d,
-				s.last_swap_at, s.last_probe_at,
+				s.last_swap_at, s.last_probe_at, s.auth_consecutive_failures,
 				s.astra_consecutive_failures, s.astra_consecutive_successes, s.astra_next_probe_at,
 				s.updated_at, s.consecutive_429s, s.harvest_attempts,
 				CASE
@@ -134,7 +134,10 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 					OR s.probe_mode = 'qualification' OR a.status = 'error'
 					-- 打票线（2026-09-21 相位B）：harvest 号采票循环必须持续被拾取
 					-- （动态桶每针换IP，不占静态出口的调度位）。
-					OR s.probe_mode = 'harvest')
+					OR s.probe_mode = 'harvest'
+					-- auth 一振暂停（r17aq）：schedulable=false 是探针落的，必须
+					-- 继续被拾取才能洗白/毕业，否则暂停号永不再探=死锁。
+					OR s.auth_consecutive_failures > 0)
 				AND (
 					a.proxy_id IS NULL
 					OR (
@@ -163,7 +166,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			probe_mode,
 			consecutive_failures, consecutive_successes, first_failure_at,
 			circuit_opened_at, recovery_deadline, next_probe_at, swap_count_7d,
-			last_swap_at, last_probe_at,
+			last_swap_at, last_probe_at, auth_consecutive_failures,
 			astra_consecutive_failures, astra_consecutive_successes, astra_next_probe_at,
 			updated_at, consecutive_429s, harvest_attempts
 		FROM due
@@ -183,7 +186,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			&item.ProbeMode,
 			&item.ConsecutiveFailures, &item.ConsecutiveSuccesses, &item.FirstFailureAt,
 			&item.CircuitOpenedAt, &item.RecoveryDeadline, &item.NextProbeAt, &item.SwapCount7d,
-			&item.LastSwapAt, &item.LastProbeAt,
+			&item.LastSwapAt, &item.LastProbeAt, &item.AuthConsecutiveFailures,
 			&item.AstraConsecutiveFailures, &item.AstraConsecutiveSuccesses, &item.AstraNextProbeAt,
 			&item.UpdatedAt, &item.Consecutive429s, &item.HarvestAttempts,
 		); err != nil {
@@ -274,15 +277,15 @@ func (r *openAIDowngradeProbeRepository) SaveOpenAIDowngradeState(
 			consecutive_failures = $6, consecutive_successes = $7,
 			first_failure_at = $8, circuit_opened_at = $9, recovery_deadline = $10,
 			next_probe_at = $11, swap_count_7d = $12, last_swap_at = $13,
-			last_probe_at = $14,
-			astra_consecutive_failures = $15, astra_consecutive_successes = $16,
-			astra_next_probe_at = $17, updated_at = $18, consecutive_429s = $19,
-			harvest_attempts = $20
+			last_probe_at = $14, auth_consecutive_failures = $15,
+			astra_consecutive_failures = $16, astra_consecutive_successes = $17,
+			astra_next_probe_at = $18, updated_at = $19, consecutive_429s = $20,
+			harvest_attempts = $21
 		WHERE account_id = $1
 	`, state.AccountID, state.State, state.OriginalProxyID, state.CurrentProxyID,
 		state.ProbeMode, state.ConsecutiveFailures, state.ConsecutiveSuccesses, state.FirstFailureAt,
 		state.CircuitOpenedAt, state.RecoveryDeadline, state.NextProbeAt, state.SwapCount7d,
-		state.LastSwapAt, state.LastProbeAt,
+		state.LastSwapAt, state.LastProbeAt, state.AuthConsecutiveFailures,
 		state.AstraConsecutiveFailures, state.AstraConsecutiveSuccesses, state.AstraNextProbeAt,
 		state.UpdatedAt, state.Consecutive429s, state.HarvestAttempts)
 	return requireOpenAIProbeUpdatedRow(result, err)
@@ -306,7 +309,15 @@ func (r *openAIDowngradeProbeRepository) RecordOpenAIDowngradeProbe(
 		result.AnswerCorrect, result.ReasoningTokens, result.Juice,
 		result.Latency.Milliseconds(), result.HTTPStatus, result.ErrorMessage,
 		result.TurnStateLen)
-	return err
+	if err != nil {
+		return err
+	}
+	// The raw result row is the source of truth; the per-proxy aggregate is
+	// derived telemetry, so a missing proxy binding simply skips aggregation.
+	if result.ProxyID == nil {
+		return nil
+	}
+	return r.upsertProxyOutcomeStats(ctx, *result.ProxyID, result)
 }
 
 func (r *openAIDowngradeProbeRepository) AppendOpenAIDowngradeEvent(
