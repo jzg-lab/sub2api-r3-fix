@@ -15,7 +15,6 @@ import (
 
 func newTurnStateTestContext(t *testing.T, apiKeyID int64, sessionID string) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -356,7 +355,6 @@ func TestApplyOpenAICodexBetaFeatures(t *testing.T) {
 // build_websocket_headers 复用 build_responses_headers（client.rs），
 // 两侧不一致还会让预热连接与实际请求落进不同的连接池兼容分桶。
 func TestBuildOpenAIWSHeaders_CarriesSessionBetaFeatures(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{}
 	decision := OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}
 
@@ -401,10 +399,10 @@ func TestBuildOpenAIWSHeaders_CarriesSessionBetaFeatures(t *testing.T) {
 func TestExtractOpenAICodexTurnState_HeaderKeyForms(t *testing.T) {
 	const value = "gAAAAAB-test-ticket-value"
 	forms := map[string]string{
-		"X-Codex-Turn-State":  "canonical",
-		"x-codex-turn-state":  "http2 lowercase",
-		"x_codex_turn_state":  "underscore (observed in production)",
-		"X_CODEX_TURN_STATE":  "underscore upper",
+		"X-Codex-Turn-State": "canonical",
+		"x-codex-turn-state": "http2 lowercase",
+		"x_codex_turn_state": "underscore (observed in production)",
+		"X_CODEX_TURN_STATE": "underscore upper",
 	}
 	for key := range forms {
 		h := http.Header{}

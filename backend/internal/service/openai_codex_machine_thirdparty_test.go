@@ -32,7 +32,6 @@ const testMachineThirdPartyAPIKeyID int64 = 7
 // machineThirdPartyRequest 构造一次非 Codex 下游请求：无 session-id / thread-id / x-codex-* 头。
 func machineThirdPartyRequest(t *testing.T, path, body string, apiKeyID int64, headers map[string]string) (*gin.Context, []byte) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
@@ -274,7 +273,6 @@ func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 
 func machineThirdPartyBridgeContext(t *testing.T, path, body string, apiKeyID int64) *gin.Context {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
@@ -408,7 +406,6 @@ func machineThirdPartyWSAssertPayload(t *testing.T, payloadJSON string, account 
 
 // 客户端 WS 入口 ctx_pool：非 Codex 下游握手 + 两帧。
 func TestCodexMachineChain_WSIngress_ThirdParty_CtxPool(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cfg := machineWSIngressPoolConfig()
 	captureConn := &openAIWSCaptureConn{
 		events: [][]byte{
@@ -456,7 +453,6 @@ func TestCodexMachineChain_WSIngress_ThirdParty_CtxPool(t *testing.T) {
 
 // 客户端 WS 入口 http_bridge：每帧一个 HTTP 请求，出站头与帧 body 都是第三方形态。
 func TestCodexMachineChain_WSIngress_ThirdParty_HTTPBridge(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cfg := machineWSIngressPoolConfig()
 	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
 	cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
@@ -503,7 +499,6 @@ func TestCodexMachineChain_WSIngress_ThirdParty_HTTPBridge(t *testing.T) {
 
 // 客户端 WS 入口 passthrough：握手头 + 首帧（主 goroutine）+ 后续帧（relay filter）。
 func TestCodexMachineChain_WSIngress_ThirdParty_Passthrough(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cfg := passthroughLifecycleConfig()
 	cfg.Gateway.OpenAIWS.OAuthEnabled = true
 	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 3

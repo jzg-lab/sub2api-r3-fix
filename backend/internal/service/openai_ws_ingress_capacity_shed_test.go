@@ -31,7 +31,6 @@ func (r *openAIWSIngressCapacityShedRepo) UpdateExtra(context.Context, int64, ma
 
 // WebSocket ingress preserves capacity and authorization error classifications.
 func TestProxyResponsesWebSocketFromClient_PreservesCapacityShedCodeForClient(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name           string

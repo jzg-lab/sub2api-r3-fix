@@ -64,7 +64,6 @@ func newMachineWSChainAccount(t *testing.T, id int64, seed string) *Account {
 }
 
 func TestCodexMachineChain_WSv2_RootWindow_I1_I4_I5(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 	tm := machineChainTurnMetadata(root, root, root+":0", "")
 
@@ -144,7 +143,6 @@ func TestCodexMachineChain_WSv2_RootWindow_I1_I4_I5(t *testing.T) {
 
 // I1（子 Agent，WS）：只换 thread；parent' == 根窗口 thread'；x-openai-subagent 透传到握手头。
 func TestCodexMachineChain_WSv2_SubagentWindow_I1(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 	child := testMachineChainChild
 

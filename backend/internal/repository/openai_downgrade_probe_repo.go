@@ -298,6 +298,27 @@ func (r *openAIDowngradeProbeRepository) RecordOpenAIDowngradeProbe(
 	if result == nil {
 		return nil
 	}
+	if beginner, ok := r.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	}); ok {
+		tx, err := beginner.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		transactionRepo := &openAIDowngradeProbeRepository{db: tx}
+		if err := transactionRepo.recordOpenAIDowngradeProbe(ctx, result); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	return r.recordOpenAIDowngradeProbe(ctx, result)
+}
+
+func (r *openAIDowngradeProbeRepository) recordOpenAIDowngradeProbe(
+	ctx context.Context,
+	result *service.OpenAIDowngradeProbeResult,
+) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO openai_downgrade_probe_results
 			(account_id, proxy_id, mode, probe, transport_ok, answer_correct,

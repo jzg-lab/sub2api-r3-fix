@@ -21,7 +21,6 @@ const compactProbeSSESuccessBody = "data: {\"type\":\"response.output_item.done\
 	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"output\":[]}}\n\n"
 
 func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersistsSupport(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -84,7 +83,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuthSuccessPersi
 }
 
 func TestAccountTestService_TestAccountConnection_OpenAICompactOAuth404MarksUnsupported(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -129,7 +127,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactOAuth404MarksUnsu
 }
 
 func TestAccountTestService_TestAccountConnection_OpenAICompactAPIKeyUsesNativeResponsesPath(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -180,7 +177,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactAPIKeyUsesNativeR
 }
 
 func TestAccountTestService_TestAccountConnection_OpenAICompactAPIKeyDefaultBaseURLUsesResponsesPath(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -221,7 +217,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactAPIKeyDefaultBase
 }
 
 func TestAccountTestService_TestAccountConnection_OpenAICompact2xxWithoutItemMarksUnsupported(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -271,7 +266,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompact2xxWithoutItemMar
 // 探测与真实转发走同一 /responses 端点，出站身份必须与真实 Codex 同构：
 // session/thread 为 UUID、携带 x-codex-installation-id（收敛账号用收敛值）。
 func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatchesRealTraffic(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{
@@ -330,7 +324,6 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 // native v2 body 同样先构造 prompt_cache_key + client_metadata（含内嵌 turn
 // metadata）的真实形态，再由 machine sink 整体假名化。
 func TestAccountTestService_TestAccountConnection_OpenAICompactProbeMachineModeIdentity(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	updateCalls := make(chan map[string]any, 1)
 	account := Account{

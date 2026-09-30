@@ -126,6 +126,61 @@ func TestOpenAIProbePostgresMigrationFailureAndResume(t *testing.T) {
 	require.Equal(t, 3, count, "resume must retain 238 and apply only missing migrations")
 }
 
+func TestOpenAIProbeAuthStrikesMigrationFreshAndLegacyReplay(t *testing.T) {
+	authStrikes, err := os.ReadFile(filepath.Join("..", "..", "migrations",
+		"247_probe_auth_strikes.sql"))
+	require.NoError(t, err)
+
+	t.Run("fresh_database_orders_dependency_first", func(t *testing.T) {
+		db := newProbePostgresWithMigrations(t, nil)
+		probeBase, readErr := os.ReadFile(filepath.Join("..", "..", "migrations",
+			"237_openai_downgrade_probe.sql"))
+		require.NoError(t, readErr)
+		pending := fstest.MapFS{
+			"237_openai_downgrade_probe.sql": &fstest.MapFile{Data: probeBase},
+			"247_probe_auth_strikes.sql":     &fstest.MapFile{Data: authStrikes},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, applyMigrationsFS(ctx, db, pending))
+
+		var exists bool
+		require.NoError(t, db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema=current_schema()
+					AND table_name='openai_downgrade_probe_states'
+					AND column_name='auth_consecutive_failures'
+			)
+		`).Scan(&exists))
+		require.True(t, exists)
+	})
+
+	t.Run("legacy_filename_upgrade_is_idempotent", func(t *testing.T) {
+		db := newProbePostgresWithMigrations(t, []string{
+			"237_openai_downgrade_probe.sql",
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, applyMigrationsFS(ctx, db, fstest.MapFS{
+			"228_probe_auth_strikes.sql": &fstest.MapFile{Data: authStrikes},
+		}))
+		require.NoError(t, applyMigrationsFS(ctx, db, fstest.MapFS{
+			"247_probe_auth_strikes.sql": &fstest.MapFile{Data: authStrikes},
+		}))
+		require.NoError(t, applyMigrationsFS(ctx, db, fstest.MapFS{
+			"247_probe_auth_strikes.sql": &fstest.MapFile{Data: authStrikes},
+		}))
+
+		var applied int
+		require.NoError(t, db.QueryRow(`
+			SELECT COUNT(*) FROM schema_migrations
+			WHERE filename IN ('228_probe_auth_strikes.sql', '247_probe_auth_strikes.sql')
+		`).Scan(&applied))
+		require.Equal(t, 2, applied)
+	})
+}
+
 func TestOpenAIProbePostgresMigrationLegacyWriterBoundary(t *testing.T) {
 	db, pending := newProbeUpgradePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

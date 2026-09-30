@@ -191,7 +191,6 @@ func machineWSIngressPoolConfig() *config.Config {
 // 走默认 ctx_pool）：两个 turn 的握手头 + payload 假名一致。
 func runMachineWSIngressPoolCase(t *testing.T, accountID int64, ingressMode string) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 
 	cfg := machineWSIngressPoolConfig()
@@ -285,7 +284,6 @@ func machineWSIngressSSEResponse(responseID string) *http.Response {
 // 出站头由构造器内的 staged 头 sink 改写，body 只经入口 parseClientPayload 的 raw sink
 // （构造器不再改 body）；断言两者是同一份假名 P 且不出现二次假名化 P(P(x))。
 func TestCodexMachineChain_WSIngress_HTTPBridge_TwoTurns(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 
 	cfg := machineWSIngressPoolConfig()
@@ -370,7 +368,6 @@ func (d *machineWSIngressHeaderCaptureDialer) headers() http.Header {
 
 // passthrough 入站模式：首帧（主 goroutine）与后续帧（relay filter）都经 body sink，两 turn 假名一致。
 func TestCodexMachineChain_WSIngress_Passthrough_TwoTurns(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 
 	cfg := passthroughLifecycleConfig()
@@ -429,7 +426,6 @@ func TestCodexMachineChain_WSIngress_Passthrough_TwoTurns(t *testing.T) {
 // off 模式：入口不 stage，不做本地指纹收敛；官方账号 namespace 仍对握手头和
 // payload 身份做凭据级隔离。
 func TestCodexMachineChain_WSIngress_OffModeUsesAccountNamespace(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	root := testMachineChainRoot
 
 	cfg := passthroughLifecycleConfig()

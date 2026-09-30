@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -137,6 +138,51 @@ func TestDowngradeDueQueryErrorsAndEmptyResult(t *testing.T) {
 				}
 			}
 			require.Empty(t, result)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestRecordOpenAIDowngradeProbeIsAtomicWithDerivedStats(t *testing.T) {
+	injected := errors.New("derived stats unavailable")
+	proxyID := int64(3)
+	result := &service.OpenAIDowngradeProbeResult{
+		AccountID: 7,
+		ProxyID:   &proxyID,
+	}
+
+	for _, failure := range []string{"stats_upsert", "score_sync", "success"} {
+		t.Run(failure, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+
+			mock.ExpectBegin()
+			mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			stats := mock.ExpectExec("INSERT INTO proxy_outcome_stats")
+			if failure == "stats_upsert" {
+				stats.WillReturnError(injected)
+				mock.ExpectRollback()
+			} else {
+				stats.WillReturnResult(sqlmock.NewResult(1, 1))
+				score := mock.ExpectExec("UPDATE proxies p")
+				if failure == "score_sync" {
+					score.WillReturnError(injected)
+					mock.ExpectRollback()
+				} else {
+					score.WillReturnResult(sqlmock.NewResult(0, 1))
+					mock.ExpectCommit()
+				}
+			}
+
+			repo := &openAIDowngradeProbeRepository{db: db}
+			recordErr := repo.RecordOpenAIDowngradeProbe(context.Background(), result)
+			if failure == "success" {
+				require.NoError(t, recordErr)
+			} else {
+				require.ErrorIs(t, recordErr, injected)
+			}
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

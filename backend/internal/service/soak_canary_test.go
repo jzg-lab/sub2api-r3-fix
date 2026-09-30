@@ -270,8 +270,6 @@ func TestSoakCanaryMachineWindow(t *testing.T) {
 	}
 	outPath := os.Getenv("SOAK_OUT")
 
-	gin.SetMode(gin.TestMode)
-
 	// 窗口 0..N-2 为根窗口（thread:n 的 :0），最后一个为子 Agent 窗口。
 	base, _ := uuid.Parse("01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a")
 	windows := make([]*soakWindow, 0, windowsN)

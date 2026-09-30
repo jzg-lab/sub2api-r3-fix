@@ -78,7 +78,6 @@ func TestStreamFailedEventCapacityShedRetriesOnSameAccount(t *testing.T) {
 }
 
 func TestCapacityShedCapsSameAccountRetryToOne(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{}
 	err := svc.newOpenAIStreamFailoverErrorWithModel(
 		nil,
@@ -155,7 +154,6 @@ func TestOpenAIStreamErrorFrameDoesNotStartClientOutput(t *testing.T) {
 }
 
 func TestOpenAIStreamMetadataPreambleAndMessageOnlyOverloadFailOver(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	largeMetadata := strings.Repeat("x", 16*1024)
 	stream := strings.Join([]string{
 		"event: response.created",
@@ -222,7 +220,6 @@ func TestOpenAIStreamMetadataPreambleAndMessageOnlyOverloadFailOver(t *testing.T
 // 回归用例（真实上游降载序列）：created → in_progress → error 帧 → response.failed。
 // 期望仍然走 pre-output failover（同账号重试 + 请求级瞬时标记），且不向客户端写出任何字节。
 func TestOpenAIStreamCapacityShedErrorFramePrecedingFailedStillFailsOver(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	}
@@ -265,7 +262,6 @@ func TestOpenAIStreamCapacityShedErrorFramePrecedingFailedStillFailsOver(t *test
 // 这样客户端快速进入明确的容量错误终态，不会把同一过载请求继续放大成
 // 多轮 server_error 客户端重试。消息与错误码都保留。
 func TestOpenAIStreamCapacityShedAfterOutputPreservesCodeForClient(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	logSink, restore := captureStructuredLog(t)
 	defer restore()
 	cfg := &config.Config{
