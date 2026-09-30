@@ -39,6 +39,10 @@ func newProbePostgresWithOwnership(t *testing.T, ownership bool) *sql.DB {
 		"241_openai_probe_turn_state_len.sql",
 		"244_openai_probe_harvest_mode.sql",
 		"246_openai_probe_nullable_verdict.sql",
+		// r17aq：RecordOpenAIDowngradeProbe 落账后同步聚合 proxy_outcome_stats；
+		// Save 写 auth_consecutive_failures 列。
+		"227_proxy_outcome_stats.sql",
+		"228_probe_auth_strikes.sql",
 	)
 	return newProbePostgresWithMigrations(t, migrations)
 }

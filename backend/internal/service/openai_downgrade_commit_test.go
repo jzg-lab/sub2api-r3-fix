@@ -506,6 +506,9 @@ func TestOpenAIProbeAuthenticationFailureIsStaged(t *testing.T) {
 			state := &OpenAIDowngradeProbeState{
 				AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
 				CurrentProxyID: &proxyID, OriginalProxyID: &proxyID, UpdatedAt: now,
+				// r17aq：401/403 两振出局——预置一振，本针即终端振，
+				// SetError 仍只经 staging 落（不直击活账号）。
+				AuthConsecutiveFailures: 1,
 			}
 			before := *state
 			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
@@ -518,10 +521,40 @@ func TestOpenAIProbeAuthenticationFailureIsStaged(t *testing.T) {
 			require.Empty(t, repo.schedulableCalls)
 			require.Zero(t, base.probeCalls)
 			require.Equal(t, "OpenAI probe authentication failed", *store.observed.ErrorMessage)
-			require.NotNil(t, store.observed.Schedulable)
-			require.False(t, *store.observed.Schedulable)
 		})
 	}
+}
+
+// TestOpenAIProbeAuthStrikePauseIsStaged 回归 r17aq auth 两振出局的原子路径：
+// 首振只暂停调度（SetSchedulable(false) 经 staging），绝不直击活账号。
+func TestOpenAIProbeAuthStrikePauseIsStaged(t *testing.T) {
+	now := time.Now()
+	proxyID := int64(3)
+	account := &Account{
+		ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, ProxyID: &proxyID, UpdatedAt: now,
+	}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	base := &downgradeProbeStoreStub{}
+	store := &downgradeAtomicStoreStub{downgradeProbeStoreStub: base, commitErr: ErrOpenAIProbeStale}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	state := &OpenAIDowngradeProbeState{
+		AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+		CurrentProxyID: &proxyID, OriginalProxyID: &proxyID, UpdatedAt: now,
+	}
+	before := *state
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{AccountID: 7, ProxyID: &proxyID, HTTPStatus: http.StatusUnauthorized}
+	}
+	require.ErrorIs(t, runner.processStateAtomic(context.Background(), state, now), ErrOpenAIProbeStale)
+	require.Equal(t, before, *state)
+	require.Equal(t, StatusActive, account.Status, "first strike must not kill")
+	require.True(t, account.Schedulable, "staged pause must not touch the live account")
+	require.Empty(t, repo.schedulableCalls)
+	require.Zero(t, base.probeCalls)
+	require.Nil(t, store.observed.ErrorMessage, "first strike stages a pause, not an error")
+	require.NotNil(t, store.observed.Schedulable)
+	require.False(t, *store.observed.Schedulable)
 }
 
 // TestOpenAIProbeAtomicCommitRetriesOnceAfterNeutralGenerationBump 回归

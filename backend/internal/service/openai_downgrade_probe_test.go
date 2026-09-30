@@ -1087,11 +1087,9 @@ func TestOpenAIDowngradeProbeBodyFailurePreservesHTTPEvidence(t *testing.T) {
 			store := runner.store.(*downgradeProbeStoreStub)
 			require.Equal(t, []OpenAIDowngradeProbeResult{result}, store.probeResults)
 			repo := runner.accountRepo.(*downgradeProbeAccountRepoStub)
-			if tc.status == http.StatusUnauthorized || tc.status == http.StatusForbidden {
-				require.Equal(t, []string{"OpenAI probe authentication failed"}, repo.errorMessages)
-			} else {
-				require.Empty(t, repo.errorMessages)
-			}
+			// r17aq：401/403 不再在记录入口一击 SetError——降级不杀策略在
+			// 状态机侧（applyOpenAIProbeAuthPolicy），记录路径零生命周期副作用。
+			require.Empty(t, repo.errorMessages)
 			state := &OpenAIDowngradeProbeState{
 				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 				ConsecutiveFailures: 1, ConsecutiveSuccesses: 3,
@@ -2961,7 +2959,10 @@ func TestProbeFirstSolFallback429DefersWithoutReplacement(t *testing.T) {
 	for _, withReset := range []bool{false, true} {
 		t.Run(map[bool]string{false: "generic", true: "explicit_reset"}[withReset], func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
-			repo := &downgradeProbeAccountRepoStub{}
+			// r17aq：runProbeRecorded 在针后 GetByID 复读账号做新鲜度守卫，
+			// stub 必须回同一个账号，否则结果被当 stale 丢弃。
+			solAccount := &Account{ID: 1}
+			repo := &downgradeProbeAccountRepoStub{account: solAccount}
 			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 			resetAt := now.Add(time.Hour)
 			runner.probeFn = func(_ context.Context, _ *Account, mode string) OpenAIDowngradeProbeResult {
@@ -2977,7 +2978,7 @@ func TestProbeFirstSolFallback429DefersWithoutReplacement(t *testing.T) {
 				AccountID: 1, State: OpenAIDowngradeStateReprobe, ProbeMode: "normal",
 				ConsecutiveFailures: 2, ConsecutiveSuccesses: 1, NextProbeAt: now,
 			}
-			require.NoError(t, runner.startSolFallback(context.Background(), &Account{ID: 1}, state, now))
+			require.NoError(t, runner.startSolFallback(context.Background(), solAccount, state, now))
 			require.Equal(t, OpenAIDowngradeStateReprobe, state.State)
 			require.Equal(t, "sol_fallback", state.ProbeMode)
 			require.Equal(t, 2, state.ConsecutiveFailures)
@@ -3010,7 +3011,9 @@ func TestProbeFirstSolFallbackInconclusiveDoesNotReplace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
-			repo := &downgradeProbeAccountRepoStub{}
+			// 同上：新鲜度守卫要求 GetByID 能回同一账号。
+			solAccount := &Account{ID: 1}
+			repo := &downgradeProbeAccountRepoStub{account: solAccount}
 			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
 				return tc.result
@@ -3019,7 +3022,7 @@ func TestProbeFirstSolFallbackInconclusiveDoesNotReplace(t *testing.T) {
 				AccountID: 1, State: OpenAIDowngradeStateReprobe,
 				ConsecutiveFailures: 2, NextProbeAt: now,
 			}
-			require.NoError(t, runner.startSolFallback(context.Background(), &Account{ID: 1}, state, now))
+			require.NoError(t, runner.startSolFallback(context.Background(), solAccount, state, now))
 			require.Equal(t, OpenAIDowngradeStateReprobe, state.State)
 			require.Equal(t, "sol_fallback", state.ProbeMode)
 			require.False(t, state.NextProbeAt.Before(now.Add(openAIDowngradeProbeProxyMinInterval)))

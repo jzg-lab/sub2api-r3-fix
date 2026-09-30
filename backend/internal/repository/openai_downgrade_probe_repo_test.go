@@ -14,7 +14,7 @@ import (
 func downgradeDueColumns() []string {
 	return strings.Fields(`account_id state original_proxy_id current_proxy_id probe_mode
 		consecutive_failures consecutive_successes first_failure_at circuit_opened_at recovery_deadline
-		next_probe_at swap_count_7d last_swap_at last_probe_at astra_consecutive_failures
+		next_probe_at swap_count_7d last_swap_at last_probe_at auth_consecutive_failures astra_consecutive_failures
 		astra_consecutive_successes astra_next_probe_at updated_at consecutive_429s harvest_attempts`)
 }
 
@@ -36,6 +36,9 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 			"a.status = 'active' OR (a.status = 'error' AND EXISTS",
 			"WHERE c.account_id = a.id AND c.owned_error = a.error_message",
 			"s.state <> 'on_duty' OR a.schedulable IS TRUE OR s.probe_mode = 'qualification' OR a.status = 'error'",
+			// r17aq：auth 一振暂停（schedulable=false 是探针落的）必须继续
+			// 被 ListDue 拾取，否则暂停号永不再探=死锁。
+			"OR s.auth_consecutive_failures > 0",
 		} {
 			require.Contains(t, dueQuery, predicate, "ineligible rows must not occupy an IP rank")
 		}
@@ -58,7 +61,7 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		}
 		rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
 			int64(12), "on_duty", int64(3), int64(4), "qualification", 1, 2,
-			nil, nil, nil, now, 1, nil, now, 0, 0, nil, now, 5, 0)
+			nil, nil, nil, now, 1, nil, now, 0, 0, 0, nil, now, 5, 0)
 		mock.ExpectQuery("due").WithArgs(now, expectedLimit).WillReturnRows(rows).RowsWillBeClosed()
 		result, queryErr := repo.ListDueOpenAIDowngradeStates(context.Background(), now, limit)
 		require.NoError(t, queryErr)
@@ -90,7 +93,7 @@ func TestDowngradeDueQuerySelectsHarvestPendingReplaceOnly(t *testing.T) {
 	repo := &openAIDowngradeProbeRepository{db: db}
 	rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
 		int64(21), "pending_replace", nil, nil, "harvest", 0, 0,
-		nil, nil, nil, now, 0, nil, now, 0, 0, nil, now, 0, 1)
+		nil, nil, nil, now, 0, nil, now, 0, 0, 0, nil, now, 0, 1)
 	mock.ExpectQuery("due").WithArgs(now, 10).WillReturnRows(rows).RowsWillBeClosed()
 
 	result, queryErr := repo.ListDueOpenAIDowngradeStates(context.Background(), now, 10)
@@ -119,7 +122,7 @@ func TestDowngradeDueQueryErrorsAndEmptyResult(t *testing.T) {
 				expectation.WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(1)).RowsWillBeClosed()
 			case "iterate":
 				rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
-					1, "on_duty", nil, nil, "normal", 0, 0, nil, nil, nil, now, 0, nil, nil, 0, 0, nil, now, 0, 0)
+					1, "on_duty", nil, nil, "normal", 0, 0, nil, nil, nil, now, 0, nil, nil, 0, 0, 0, nil, now, 0, 0)
 				expectation.WillReturnRows(rows.RowError(0, dbErr)).RowsWillBeClosed()
 			default:
 				expectation.WillReturnRows(sqlmock.NewRows(downgradeDueColumns())).RowsWillBeClosed()
