@@ -25,6 +25,9 @@ const (
 	OpenAIDowngradeEventRescueGraduated = "rescue_graduated"
 	// OpenAIDowngradeEventRescueSuspected 疑似账号级（插件连错进退避）自动撤调度。
 	OpenAIDowngradeEventRescueSuspected = "rescue_suspected_account"
+	// OpenAIDowngradeEventRescueRecovered 疑似账号级回暖（退避期满复探过针）
+	// 恢复调度，或插件状态丢失（重启）后的陈旧撤调恢复。
+	OpenAIDowngradeEventRescueRecovered = "rescue_recovered"
 
 	// 救治区触发源（rescue_entered.details.trigger）。
 	OpenAIRescueTriggerAuto      = "auto"
@@ -110,7 +113,10 @@ type OpenAIRescueLane struct {
 	seed func(ctx context.Context, accountID int64) error
 	// probeStates 批量探针状态源（对账清扫用）；nil 时清扫不补进新号。
 	probeStates func(ctx context.Context, accountIDs []int64) (map[int64]string, error)
-	now         func() time.Time
+	// bridge 插件桥状态源（task 3.5 撤调/恢复的数据依据）；nil 时清扫不碰
+	// 调度撤复（标签照常由健康列表计算，只是不自动撤）。
+	bridge func(ctx context.Context) *PluginBridgeStatus
+	now    func() time.Time
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -453,6 +459,15 @@ func (l *OpenAIRescueLane) SetProbeStateSource(
 	l.probeStates = fn
 }
 
+// SetBridgeSource 注入插件桥状态源（真实现 = PluginManager.BridgeStatus，
+// 与健康列表同源）。未注入时清扫不做撤调/恢复（3.5 语义退化为只标签）。
+func (l *OpenAIRescueLane) SetBridgeSource(fn func(ctx context.Context) *PluginBridgeStatus) {
+	if l == nil {
+		return
+	}
+	l.bridge = fn
+}
+
 // Start 启动对账清扫循环（自 Provider 调用；与探针 runner 同生命周期）。
 // 循环体每轮重读配置：开关未开时按间隔空转（3.8 settings 热更新即生效）。
 func (l *OpenAIRescueLane) Start() {
@@ -490,13 +505,14 @@ func (l *OpenAIRescueLane) sweepLoop() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		entered, healed, err := l.RunReconcileSweep(ctx)
+		entered, healed, withdrawn, err := l.RunReconcileSweep(ctx)
 		cancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("openai_rescue_sweep_failed", "error", err)
 		}
-		if entered > 0 || healed > 0 {
-			slog.Info("openai_rescue_sweep_done", "entered", entered, "healed", healed)
+		if entered > 0 || healed > 0 || withdrawn > 0 {
+			slog.Info("openai_rescue_sweep_done",
+				"entered", entered, "healed", healed, "withdrawn", withdrawn)
 		}
 	}
 }
@@ -507,30 +523,44 @@ func (l *OpenAIRescueLane) sweepLoop() {
 //     未持有 → EnterRescue{trigger: reconcile}
 //   - 自愈：标记在场（已入区）但救治组绑定丢失或调度未开（标记-first 崩溃
 //     窗口）→ 补绑/补开。疑似账号级撤调标记在场时不复活调度（3.5 语义）。
-func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, healed int, err error) {
+//   - 撤调/恢复（task 3.5）：在区账号按插件桥证据——in_backoff → 撤调度+
+//     疑似标记+事件（幂等：标记在场不重撤）；疑似标记在场且回暖（退避后
+//     新过针）或插件状态丢失（账号从桥消失）→ 清标记+恢复调度+事件。
+//     桥缺席/解析失败 → 不碰调度撤复（无证据不动状态机）。
+func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, healed, withdrawn int, err error) {
 	if l == nil {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 	cfg := l.config()
 	if !cfg.Enabled || cfg.GroupID <= 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 	now := l.now()
 	accounts, err := l.accounts.ListByPlatform(ctx, PlatformOpenAI)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
+	}
+	// 桥证据：拿到 PluginBridgeStatus（含离线时的最近成功缓存）才有 per-账号
+	// 证据；prober==nil（空/坏 JSON）按无证据处理（只做自愈，不撤不恢复）。
+	var prober *OpenAIPluginBridgeProber
+	haveBridge := false
+	if l.bridge != nil {
+		if bridge := l.bridge(ctx); bridge != nil {
+			prober = ParseOpenAIPluginBridgeProber(bridge.StatusJSON)
+			haveBridge = true
+		}
 	}
 	var candidateIDs []int64
 	for i := range accounts {
 		if err := ctx.Err(); err != nil {
-			return entered, healed, err
+			return entered, healed, withdrawn, err
 		}
 		account := &accounts[i]
 		if !isOpenAIDowngradeProbeAccountEligible(account, now) {
 			continue
 		}
 		if GetOpenAIRescueLaneMarker(account) != nil {
-			// 已入区：自愈检查（绑定/调度），不重复入区。
+			// 已入区：绑定自愈 + 撤调/恢复（桥证据），不重复入区。
 			bindingOK := false
 			for _, id := range account.GroupIDs {
 				if id == cfg.GroupID {
@@ -544,6 +574,28 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 						"account_id", account.ID, "error", err)
 				} else {
 					healed++
+				}
+			}
+			if haveBridge {
+				var bridgeAccount *OpenAIPluginBridgeAccount
+				if prober != nil {
+					bridgeAccount = prober.Accounts[account.ID]
+				}
+				// 撤调优先于调度自愈：连错进退避的号先停烧额度。
+				if bridgeAccount != nil && bridgeAccount.InBackoff && !GetOpenAIRescueSuspected(account) {
+					if l.withdrawScheduling(ctx, account, bridgeAccount) {
+						withdrawn++
+					}
+					continue
+				}
+				if GetOpenAIRescueSuspected(account) {
+					if recovered, basis := rescueLaneRecoveryEvidence(bridgeAccount); recovered {
+						if l.restoreScheduling(ctx, account, bridgeAccount, basis) {
+							healed++
+						}
+					}
+					// 无回暖证据：维持撤调（有意状态，不是崩溃残留）。
+					continue
 				}
 			}
 			if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
@@ -566,11 +618,11 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		candidateIDs = append(candidateIDs, account.ID)
 	}
 	if len(candidateIDs) == 0 || l.probeStates == nil {
-		return entered, healed, nil
+		return entered, healed, withdrawn, nil
 	}
 	states, err := l.probeStates(ctx, candidateIDs)
 	if err != nil {
-		return entered, healed, err
+		return entered, healed, withdrawn, err
 	}
 	for _, id := range candidateIDs {
 		if states[id] != OpenAIDowngradeStatePendingReplace {
@@ -585,5 +637,93 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		}
 		entered++
 	}
-	return entered, healed, nil
+	return entered, healed, withdrawn, nil
+}
+
+// rescueLaneRecoveryEvidence 疑似撤调的回暖证据裁决（纯函数）：
+//   - bridgeAccount==nil：账号从桥消失 = 插件状态丢失（重启/清罐），撤调
+//     依据已不存在，按陈旧撤调恢复——否则永钉死；
+//   - 退避进门时插件把连过清零：consecutive_passes>0 = 退避期满后的新过针
+//     （suspect 旗标随 pass 清除）→ 真回暖；
+//   - 退避中/仍标记 suspect/尚无新过针 → 无证据，维持撤调等下一轮。
+func rescueLaneRecoveryEvidence(bridgeAccount *OpenAIPluginBridgeAccount) (bool, string) {
+	if bridgeAccount == nil {
+		return true, "plugin_state_lost"
+	}
+	if bridgeAccount.InBackoff || bridgeAccount.SuspectAccountLevel {
+		return false, ""
+	}
+	if bridgeAccount.ConsecutivePasses > 0 {
+		return true, "plugin_pass"
+	}
+	return false, ""
+}
+
+// withdrawScheduling 疑似账号级撤调度（proposal 出口表：连错进退避→停烧
+// 额度）：撤调度 → 疑似标记 → 事件。前一步失败不写后一步（下轮整组重试），
+// 保证「撤了调度必有标记」的不变式（标记在场=调度已撤）。
+func (l *OpenAIRescueLane) withdrawScheduling(
+	ctx context.Context, account *Account, bridgeAccount *OpenAIPluginBridgeAccount,
+) bool {
+	if err := l.accounts.SetSchedulable(ctx, account.ID, false); err != nil {
+		slog.Warn("openai_rescue_withdraw_sched_failed",
+			"account_id", account.ID, "error", err)
+		return false
+	}
+	if err := l.accounts.UpdateExtra(ctx, account.ID, map[string]any{
+		openAIRescueSuspectedExtraKey: true,
+	}); err != nil {
+		slog.Warn("openai_rescue_withdraw_mark_failed",
+			"account_id", account.ID, "error", err)
+		return false
+	}
+	if l.events != nil {
+		details := map[string]any{
+			"trigger":      "plugin_backoff",
+			"consec_fails": bridgeAccount.ConsecFails,
+		}
+		if !bridgeAccount.BackoffUntil.IsZero() {
+			details["backoff_until"] = bridgeAccount.BackoffUntil.UTC().Format(time.RFC3339)
+		}
+		if err := l.events.AppendOpenAIDowngradeEvent(ctx, account.ID, account.ProxyID,
+			OpenAIDowngradeEventRescueSuspected, details); err != nil {
+			slog.Warn("openai_rescue_withdraw_event_failed",
+				"account_id", account.ID, "error", err)
+		}
+	}
+	slog.Info("openai_rescue_withdrawn",
+		"account_id", account.ID, "consec_fails", bridgeAccount.ConsecFails)
+	return true
+}
+
+// restoreScheduling 疑似撤调的回暖恢复：清疑似标记 → 恢复调度 → 事件
+// （basis=plugin_pass 真回暖 / plugin_state_lost 插件状态丢失兜底）。
+func (l *OpenAIRescueLane) restoreScheduling(
+	ctx context.Context, account *Account, bridgeAccount *OpenAIPluginBridgeAccount, basis string,
+) bool {
+	if err := l.accounts.UpdateExtra(ctx, account.ID, map[string]any{
+		openAIRescueSuspectedExtraKey: false,
+	}); err != nil {
+		slog.Warn("openai_rescue_restore_mark_failed",
+			"account_id", account.ID, "error", err)
+		return false
+	}
+	if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
+		slog.Warn("openai_rescue_restore_sched_failed",
+			"account_id", account.ID, "error", err)
+		return false
+	}
+	if l.events != nil {
+		details := map[string]any{"basis": basis}
+		if bridgeAccount != nil {
+			details["consecutive_passes"] = bridgeAccount.ConsecutivePasses
+		}
+		if err := l.events.AppendOpenAIDowngradeEvent(ctx, account.ID, account.ProxyID,
+			OpenAIDowngradeEventRescueRecovered, details); err != nil {
+			slog.Warn("openai_rescue_restore_event_failed",
+				"account_id", account.ID, "error", err)
+		}
+	}
+	slog.Info("openai_rescue_restored", "account_id", account.ID, "basis", basis)
+	return true
 }

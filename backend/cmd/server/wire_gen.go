@@ -246,6 +246,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 			return states, nil
 		})
 	}
+	// 撤调/恢复桥证据（task 3.5）：与插件桥缓存同源（30s 轮询 + 离线沿用
+	// 最近成功缓存）；清扫据此撤调度/回暖恢复。
+	openAIRescueLane.SetBridgeSource(pluginManager.BridgeStatus)
 	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)

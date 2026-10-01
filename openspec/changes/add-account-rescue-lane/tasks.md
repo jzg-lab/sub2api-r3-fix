@@ -93,7 +93,17 @@
       ListOpenAIAccountHealth 组装时覆盖标签+挂 Rescue 注记（悬停：救治时长/连过/连错/
       退避到期/毕业阈值/plugin_offline）；paused 与 rate_limited 优先于救治标签；
       无桥/桥离线→救治中+plugin_offline 注记（调度语义不变）。12 用例）
-- [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
+- [x] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
+      （r17ax：挂 5min 清扫同一轮，桥证据驱动（SetBridgeSource=PluginManager.
+      BridgeStatus 同源，离线沿用最近成功缓存）。撤调：在区+桥 in_backoff+无疑似
+      标记→SetSchedulable(false)+openai_rescue_suspected 标记+事件 rescue_
+      suspected_account{consec_fails,backoff_until}，次序保证「撤了调度必有标记」
+      不变式，幂等不重撤；恢复：疑似标记在场+回暖证据（rescueLaneRecoveryEvidence
+      纯函数：账号从桥消失=plugin_state_lost 插件重启兜底防永钉死 / 退避期满
+      in_backoff=false+suspect 清+连过>0=plugin_pass——退避进门连过已清零,>0 即
+      新过针）→清标记+恢复调度+事件 rescue_recovered{basis}；无证据维持撤调
+      （不是崩溃残留）。桥缺席/解析失败不碰调度撤复。RunReconcileSweep 签名
+      扩为 entered/healed/withdrawn 三计数。7 新用例）
 - [ ] 3.6 转正后处理：reenable 通过后用快照 BindGroups 改绑回原池组（真实组 id，不用
        openai-default）+ 打复活标记（Extra rescued_at 永久 + 复活次数+1；不清除不重置）
 - [ ] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
