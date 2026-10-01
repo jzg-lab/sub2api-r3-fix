@@ -17,17 +17,49 @@ import (
 // 触碰的四个方法；变更即时反映到内存账号，模拟 DB 读己之写。
 type rescueLaneRepo struct {
 	AccountRepository
-	account   *Account
+	account *Account
+	// roster 清扫用多号名册（非空时 ListByPlatform/GetByID 按 ID 走它，
+	// 空时退单号快路径——既有转换用例不改造）。
+	roster    []Account
 	getErr    error
+	listErr   error
+	listCalls int
 	calls     []string
 	binds     [][]int64
 	extraSets []map[string]any
 	schedSets []bool
 }
 
-func (r *rescueLaneRepo) GetByID(context.Context, int64) (*Account, error) {
+// resolve 定位变更目标：名册优先按 ID 找，缺省退单号快路径。
+func (r *rescueLaneRepo) resolve(id int64) *Account {
+	for i := range r.roster {
+		if r.roster[i].ID == id {
+			return &r.roster[i]
+		}
+	}
+	return r.account
+}
+
+func (r *rescueLaneRepo) ListByPlatform(_ context.Context, _ string) ([]Account, error) {
+	r.listCalls++
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	out := make([]Account, len(r.roster))
+	copy(out, r.roster)
+	return out, nil
+}
+
+func (r *rescueLaneRepo) GetByID(_ context.Context, id int64) (*Account, error) {
 	if r.getErr != nil {
 		return nil, r.getErr
+	}
+	if len(r.roster) > 0 {
+		if target := r.resolve(id); target != nil {
+			clone := *target
+			return &clone, nil
+		}
+		return nil, errors.New("account not found")
 	}
 	if r.account == nil {
 		return nil, errors.New("account not found")
@@ -36,32 +68,44 @@ func (r *rescueLaneRepo) GetByID(context.Context, int64) (*Account, error) {
 	return &clone, nil
 }
 
-func (r *rescueLaneRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
+func (r *rescueLaneRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
 	r.calls = append(r.calls, "extra")
 	r.extraSets = append(r.extraSets, updates)
-	if r.account.Extra == nil {
-		r.account.Extra = map[string]any{}
+	target := r.resolve(id)
+	if target == nil {
+		return errors.New("account not found")
+	}
+	if target.Extra == nil {
+		target.Extra = map[string]any{}
 	}
 	for k, v := range updates {
-		r.account.Extra[k] = v
+		target.Extra[k] = v
 	}
 	return nil
 }
 
-func (r *rescueLaneRepo) BindGroups(_ context.Context, _ int64, groupIDs []int64) error {
+func (r *rescueLaneRepo) BindGroups(_ context.Context, id int64, groupIDs []int64) error {
 	r.calls = append(r.calls, "bind")
 	recorded := append([]int64(nil), groupIDs...)
 	r.binds = append(r.binds, recorded)
+	target := r.resolve(id)
+	if target == nil {
+		return errors.New("account not found")
+	}
 	// 真实通道是删光重插 + priority 重写为 i+1；桩模拟其可观察副产物。
-	r.account.GroupIDs = recorded
-	r.account.Priority = 1
+	target.GroupIDs = recorded
+	target.Priority = 1
 	return nil
 }
 
-func (r *rescueLaneRepo) SetSchedulable(_ context.Context, _ int64, enabled bool) error {
+func (r *rescueLaneRepo) SetSchedulable(_ context.Context, id int64, enabled bool) error {
 	r.calls = append(r.calls, "sched")
 	r.schedSets = append(r.schedSets, enabled)
-	r.account.Schedulable = enabled
+	target := r.resolve(id)
+	if target == nil {
+		return errors.New("account not found")
+	}
+	target.Schedulable = enabled
 	return nil
 }
 
@@ -406,9 +450,9 @@ func TestMaybeAutoEnterRescueGateMatrix(t *testing.T) {
 		return NewOpenAIRescueLane(repo, sink, func() OpenAIRescueLaneConfig { return cfg }, nil)
 	}
 	cases := []struct {
-		name    string
-		enabled bool
-		mutation *OpenAIDowngradeMutation
+		name      string
+		enabled   bool
+		mutation  *OpenAIDowngradeMutation
 		wantBinds int
 	}{
 		{"开关关→零调用（上线默认态）", false, rescueLanePendingMutation(clean), 0},
@@ -438,4 +482,169 @@ func TestMaybeAutoEnterRescueNilSafety(t *testing.T) {
 	lane.MaybeAutoEnterRescue(context.Background(), rescueLanePendingMutation(), nil)
 	live := newRescueLaneTestLane(&rescueLaneRepo{account: rescueLaneTestAccount()}, &rescueLaneSink{})
 	live.MaybeAutoEnterRescue(context.Background(), nil, nil)
+}
+
+// rescueLaneApplyMarker 以 JSON 往返形态打救治区标记（与 DB 读写形态一致）。
+func rescueLaneApplyMarker(t *testing.T, account *Account, marker OpenAIRescueLaneMarker) {
+	t.Helper()
+	raw, err := json.Marshal(rescueLaneMarkerExtraValue(marker))
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	var round map[string]any
+	if err := json.Unmarshal(raw, &round); err != nil {
+		t.Fatalf("unmarshal marker: %v", err)
+	}
+	account.Extra[openAIRescueLaneExtraKey] = round
+}
+
+// ---------- 对账清扫（task 3.3） ----------
+
+func rescueLaneSweepAccount(id int64) *Account {
+	account := rescueLaneTestAccount()
+	account.ID = id
+	account.Status = StatusActive
+	return account
+}
+
+func TestRunReconcileSweepHealsMarkedAccount(t *testing.T) {
+	account := rescueLaneSweepAccount(51)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+	})
+	// 标记-first 崩溃窗残留：救治组绑定丢失 + 调度未开。
+	account.GroupIDs = []int64{3}
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 2 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/2/nil", entered, healed, err)
+	}
+	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 99 {
+		t.Fatalf("binds=%v, want rebind to rescue group 99", repo.binds)
+	}
+	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
+		t.Fatalf("schedSets=%v, want [true]", repo.schedSets)
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("heal must not emit events, got %d", len(sink.events))
+	}
+}
+
+func TestRunReconcileSweepDoesNotResurrectSuspected(t *testing.T) {
+	account := rescueLaneSweepAccount(52)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+	})
+	// 疑似账号级撤调（task 3.5 写入）：有意状态，清扫不得复活调度。
+	account.Extra[openAIRescueSuspectedExtraKey] = true
+	account.GroupIDs = []int64{99}
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（疑似撤调不是崩溃残留）", repo.schedSets)
+	}
+}
+
+func TestRunReconcileSweepEntersPendingReplaceCandidate(t *testing.T) {
+	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(53)}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]string, error) {
+		states := make(map[int64]string, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIDowngradeStatePendingReplace
+		}
+		return states, nil
+	})
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 1 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 1/0/nil", entered, healed, err)
+	}
+	if GetOpenAIRescueLaneMarker(&repo.roster[0]) == nil {
+		t.Fatalf("marker missing after sweep enter")
+	}
+	if len(repo.binds) != 1 || repo.binds[0][0] != 99 {
+		t.Fatalf("binds=%v, want bind to rescue group 99", repo.binds)
+	}
+	if len(sink.events) != 1 || sink.events[0].details["trigger"] != OpenAIRescueTriggerReconcile {
+		t.Fatalf("events=%+v, want one rescue_entered{trigger:reconcile}", sink.events)
+	}
+}
+
+func TestRunReconcileSweepSkipsIneligibleCandidates(t *testing.T) {
+	authDead := rescueLaneSweepAccount(54)
+	authDead.Status = StatusError // 凭据死（auth 两振 SetError）
+	rateHeld := rescueLaneSweepAccount(55)
+	reset := time.Now().Add(time.Hour)
+	rateHeld.RateLimitResetAt = &reset // 429 持有中
+	onDuty := rescueLaneSweepAccount(56)
+	repo := &rescueLaneRepo{roster: []Account{*authDead, *rateHeld, *onDuty}}
+	var asked []int64
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]string, error) {
+		asked = append(asked, ids...)
+		states := make(map[int64]string, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIDowngradeStateOnDuty
+		}
+		return states, nil
+	})
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	// 凭据死与限流持有不进候选；只有 in-service 号被问探针状态。
+	if len(asked) != 1 || asked[0] != 56 {
+		t.Fatalf("probeStates asked=%v, want [56]", asked)
+	}
+	if len(repo.extraSets) != 0 || len(repo.binds) != 0 {
+		t.Fatalf("no mutation expected, extraSets=%d binds=%d", len(repo.extraSets), len(repo.binds))
+	}
+}
+
+func TestRunReconcileSweepWithoutStateSourceSkipsEntering(t *testing.T) {
+	// wire 断言失败降级态：无状态源 → 清扫只做标记侧自愈，不补进新号。
+	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(57)}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	if len(repo.extraSets) != 0 || len(repo.binds) != 0 {
+		t.Fatalf("no mutation expected without probe state source")
+	}
+}
+
+func TestRunReconcileSweepDisabledIsNoOp(t *testing.T) {
+	cfg := rescueLaneEnabledConfig()
+	cfg.Enabled = false
+	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(58)}}
+	lane := NewOpenAIRescueLane(repo, &rescueLaneSink{}, func() OpenAIRescueLaneConfig { return cfg }, nil)
+
+	entered, healed, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	if repo.listCalls != 0 {
+		t.Fatalf("listCalls=%d, want 0（开关关连名单都不拉）", repo.listCalls)
+	}
 }

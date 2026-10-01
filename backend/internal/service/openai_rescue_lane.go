@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -107,7 +108,14 @@ type OpenAIRescueLane struct {
 	// seed 种子流量载体 = TestAccountConnection service 直调（Phase 0.1 定案）。
 	// nil 时跳过种子（插件探针自愈等第一笔真实流量再起）。
 	seed func(ctx context.Context, accountID int64) error
-	now  func() time.Time
+	// probeStates 批量探针状态源（对账清扫用）；nil 时清扫不补进新号。
+	probeStates func(ctx context.Context, accountIDs []int64) (map[int64]string, error)
+	now         func() time.Time
+
+	startOnce sync.Once
+	stopOnce  sync.Once
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 // NewOpenAIRescueLane 构造编排器；config/seed 允许 nil（缺省关/无种子）。
@@ -123,6 +131,8 @@ func NewOpenAIRescueLane(
 		config:   config,
 		seed:     seed,
 		now:      time.Now,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
 	}
 	if lane.config == nil {
 		lane.config = DefaultOpenAIRescueLaneConfig
@@ -384,4 +394,175 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 		}
 	}
 	return nil
+}
+
+// ---------- 对账清扫（task 3.3：周期扫描够格未进区→补进；标记-first 崩溃窗自愈） ----------
+
+// openAIRescueSuspectedExtraKey 疑似账号级撤调标记（task 3.5 写入；清扫侧
+// 只读）。在场时清扫不得复活调度——撤调是插件 backoff 证据下的有意状态，
+// 不是崩溃残留。
+const openAIRescueSuspectedExtraKey = "openai_rescue_suspected"
+
+// GetOpenAIRescueSuspected 账号是否处于救治区疑似账号级撤调态（容错读）。
+func GetOpenAIRescueSuspected(account *Account) bool {
+	if account == nil || len(account.Extra) == 0 {
+		return false
+	}
+	value, ok := account.Extra[openAIRescueSuspectedExtraKey]
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	}
+	return false
+}
+
+// SetProbeStateSource 注入批量探针状态源（真实现 = 探针仓库的健康快照批量
+// 查询）。未注入时清扫只做标记侧自愈，不补进新号（自动钩子照常工作）。
+func (l *OpenAIRescueLane) SetProbeStateSource(
+	fn func(ctx context.Context, accountIDs []int64) (map[int64]string, error),
+) {
+	if l == nil {
+		return
+	}
+	l.probeStates = fn
+}
+
+// Start 启动对账清扫循环（自 Provider 调用；与探针 runner 同生命周期）。
+// 循环体每轮重读配置：开关未开时按间隔空转（3.8 settings 热更新即生效）。
+func (l *OpenAIRescueLane) Start() {
+	if l == nil {
+		return
+	}
+	l.startOnce.Do(func() {
+		go l.sweepLoop()
+	})
+}
+
+// Stop 终止清扫循环（清理件调用；幂等）。
+func (l *OpenAIRescueLane) Stop() {
+	if l == nil {
+		return
+	}
+	l.stopOnce.Do(func() {
+		close(l.stopCh)
+	})
+}
+
+func (l *OpenAIRescueLane) sweepLoop() {
+	defer close(l.doneCh)
+	for {
+		interval := l.config().ReconcileInterval
+		if interval <= 0 {
+			interval = openAIRescueDefaultReconcileInterval
+		}
+		// 正向散布（1.0x-1.25x）：清扫是周期性批量动作，固定整点会与探针
+		// 扫描、其它清理器形成可观察的同步节律。
+		wait := time.Duration(float64(interval) * (1 + 0.25*probeRandomFloat()))
+		select {
+		case <-time.After(wait):
+		case <-l.stopCh:
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		entered, healed, err := l.RunReconcileSweep(ctx)
+		cancel()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("openai_rescue_sweep_failed", "error", err)
+		}
+		if entered > 0 || healed > 0 {
+			slog.Info("openai_rescue_sweep_done", "entered", entered, "healed", healed)
+		}
+	}
+}
+
+// RunReconcileSweep 一轮对账清扫（公开以便测试与启动确定性检查）：
+//   - 补进：OpenAI 平台、资格通过、status=active（auth 两振出局走 SetError，
+//     status!=active 天然排除凭据死）、无标记、探针态=pending_replace、限流
+//     未持有 → EnterRescue{trigger: reconcile}
+//   - 自愈：标记在场（已入区）但救治组绑定丢失或调度未开（标记-first 崩溃
+//     窗口）→ 补绑/补开。疑似账号级撤调标记在场时不复活调度（3.5 语义）。
+func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, healed int, err error) {
+	if l == nil {
+		return 0, 0, nil
+	}
+	cfg := l.config()
+	if !cfg.Enabled || cfg.GroupID <= 0 {
+		return 0, 0, nil
+	}
+	now := l.now()
+	accounts, err := l.accounts.ListByPlatform(ctx, PlatformOpenAI)
+	if err != nil {
+		return 0, 0, err
+	}
+	var candidateIDs []int64
+	for i := range accounts {
+		if err := ctx.Err(); err != nil {
+			return entered, healed, err
+		}
+		account := &accounts[i]
+		if !isOpenAIDowngradeProbeAccountEligible(account, now) {
+			continue
+		}
+		if GetOpenAIRescueLaneMarker(account) != nil {
+			// 已入区：自愈检查（绑定/调度），不重复入区。
+			bindingOK := false
+			for _, id := range account.GroupIDs {
+				if id == cfg.GroupID {
+					bindingOK = true
+					break
+				}
+			}
+			if !bindingOK {
+				if err := l.accounts.BindGroups(ctx, account.ID, []int64{cfg.GroupID}); err != nil {
+					slog.Warn("openai_rescue_sweep_heal_bind_failed",
+						"account_id", account.ID, "error", err)
+				} else {
+					healed++
+				}
+			}
+			if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
+				if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
+					slog.Warn("openai_rescue_sweep_heal_sched_failed",
+						"account_id", account.ID, "error", err)
+				} else {
+					healed++
+				}
+			}
+			continue
+		}
+		// 凭据死（auth 两振 SetError）与禁用号不补进；限流持有中本轮跳过。
+		if account.Status != StatusActive {
+			continue
+		}
+		if account.RateLimitResetAt != nil && now.Before(*account.RateLimitResetAt) {
+			continue
+		}
+		candidateIDs = append(candidateIDs, account.ID)
+	}
+	if len(candidateIDs) == 0 || l.probeStates == nil {
+		return entered, healed, nil
+	}
+	states, err := l.probeStates(ctx, candidateIDs)
+	if err != nil {
+		return entered, healed, err
+	}
+	for _, id := range candidateIDs {
+		if states[id] != OpenAIDowngradeStatePendingReplace {
+			continue
+		}
+		if enterErr := l.EnterRescue(ctx, id, OpenAIRescueTriggerReconcile); enterErr != nil {
+			// 单号失败（含幂等跳过）不阻断整轮；瞬时失败下轮重试。
+			if !errors.Is(enterErr, ErrRescueLaneIneligible) {
+				slog.Warn("openai_rescue_sweep_enter_failed", "account_id", id, "error", enterErr)
+			}
+			continue
+		}
+		entered++
+	}
+	return entered, healed, nil
 }

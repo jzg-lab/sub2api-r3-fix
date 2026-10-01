@@ -74,7 +74,15 @@
        openai_codex_ticket*.go / 票表 repo 删除；migration 248 防御性清场（harvest 行归
        normal+pending_replace、DROP harvest_attempts、DROP openai_codex_tickets、CHECK 收窄）；
        网关注入+采票观察哨+前端入口+i18n 全清；让位闸不再需要（无打票状态机可抢号）
-- [ ] 3.3 对账清扫：周期扫描够格未进区 → 补进（trigger: reconcile）
+- [x] 3.3 对账清扫：周期扫描够格未进区 → 补进（trigger: reconcile）
+      （r17ax：RunReconcileSweep 双职责——①补进：OpenAI+资格+status=active（auth 两振
+      SetError 天然排除凭据死）+限流未持有+探针态 pending_replace → EnterRescue{reconcile}，
+      探针状态经 OpenAIProbeHealthLister 窄接口批量取（wire 启动断言，失败降级=只自愈）；
+      ②标记-first 崩溃窗自愈：标记在场但绑定丢失→补绑、调度未开→补开，疑似账号级撤调
+      标记（openai_rescue_suspected，3.5 写入）在场时不复活调度。Start/Stop 进 wire
+      生命周期，清扫循环每轮重读配置（3.8 settings 热更即生效）+正向散布 1.0-1.25x，
+      单轮 5min 上界。6 用例：自愈补绑补开/疑似不复活/补进/凭据死与限流持有排除/
+      无状态源降级/关闸零名单拉取）
 - [ ] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
 - [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
 - [ ] 3.6 转正后处理：reenable 通过后用快照 BindGroups 改绑回原池组（真实组 id，不用

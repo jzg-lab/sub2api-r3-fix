@@ -230,6 +230,23 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
 	)
 	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
+	// 对账清扫：批量探针状态经健康快照查询取（与账号健康列表同源）。
+	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），
+	// 与健康列表同款启动期断言；断言失败时清扫退化为只做标记侧自愈。
+	if healthLister, ok := openAIDowngradeProbeRepository.(service.OpenAIProbeHealthLister); ok {
+		openAIRescueLane.SetProbeStateSource(func(ctx context.Context, accountIDs []int64) (map[int64]string, error) {
+			snapshots, err := healthLister.ListOpenAIProbeHealthSnapshots(ctx, accountIDs)
+			if err != nil {
+				return nil, err
+			}
+			states := make(map[int64]string, len(snapshots))
+			for _, snapshot := range snapshots {
+				states[snapshot.AccountID] = snapshot.State
+			}
+			return states, nil
+		})
+	}
+	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)
@@ -383,7 +400,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbe, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbe, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -457,6 +474,7 @@ func provideCleanup(
 	grokOAuth *service.GrokOAuthService,
 	openAIGateway *service.OpenAIGatewayService,
 	openAIDowngradeProbe *service.OpenAIDowngradeProbeRunner,
+	openAIRescueLane *service.OpenAIRescueLane,
 	scheduledTestRunner *service.ScheduledTestRunnerService,
 	backupSvc *service.BackupService,
 	paymentOrderExpiry *service.PaymentOrderExpiryService,
@@ -735,6 +753,12 @@ func provideCleanup(
 			{"OpenAIDowngradeProbeRunner", func() error {
 				if openAIDowngradeProbe != nil {
 					openAIDowngradeProbe.Stop()
+				}
+				return nil
+			}},
+			{"OpenAIRescueLane", func() error {
+				if openAIRescueLane != nil {
+					openAIRescueLane.Stop()
 				}
 				return nil
 			}},
