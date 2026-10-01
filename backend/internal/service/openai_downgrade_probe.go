@@ -578,6 +578,10 @@ type OpenAIDowngradeProbeRunner struct {
 	// deferCounts 记录各账号连续顺延次数，仅在 runMu 临界区内访问。
 	recentTraffic func(ctx context.Context, accountID int64, within time.Duration) bool
 	deferCounts   map[int64]int
+	// pluginBridge 由装配层注入（PluginManager.BridgeStatus）；nil 时健康快照
+	// 不携带 plugin_bridge 区块（与未启用插件同形）。桥源读失败在源侧吞掉
+	// 返回 nil，绝不拖垮健康快照。
+	pluginBridge func(ctx context.Context) *PluginBridgeStatus
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
@@ -1614,6 +1618,17 @@ func (r *OpenAIDowngradeProbeRunner) SetRecentTrafficChecker(
 		return
 	}
 	r.recentTraffic = fn
+}
+
+// SetPluginBridgeSource 注入救治区插件桥状态源（PluginManager.BridgeStatus）。
+// 未注入时健康快照响应不带 plugin_bridge 区块，行为与桥合入前一致。
+func (r *OpenAIDowngradeProbeRunner) SetPluginBridgeSource(
+	fn func(ctx context.Context) *PluginBridgeStatus,
+) {
+	if r == nil {
+		return
+	}
+	r.pluginBridge = fn
 }
 
 // applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户

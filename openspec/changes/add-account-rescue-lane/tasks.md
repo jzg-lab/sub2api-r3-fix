@@ -36,13 +36,16 @@
 
 ## Phase 2 — fork 后端：插件状态桥
 
-- [ ] 2.1 fork proto 补 status_json 字段（HealthResponse=3 / TestConfigResponse=4，与官方
+- [x] 2.1 fork proto 补 status_json 字段（HealthResponse=3 / TestConfigResponse=4，与官方
        同字段号 wire 纯加法）+ 重生成
-- [ ] 2.2 新只读端点 GET /admin/plugins/:id/status（内部调 Health 透传 status_json）
-- [ ] 2.3 PluginsView 桥补 plugin.status case（插件 UI 已 5s 轮询，面板「状态不可用」复活）
-- [ ] 2.4 宿主状态轮询缓存（30s）+ 插件离线判定（>2min），暴露到健康快照 API
-       （ListOpenAIProbeHealthSnapshots 扩展救治字段）
-- [ ] 2.5 桥接层测试（离线降级/恢复自愈/空状态/旧插件无字段兼容）
+- [x] 2.2 新只读端点 GET /admin/plugins/:id/status（内部调 Health 透传 status_json）
+- [x] 2.3 PluginsView 桥补 plugin.status case（插件 UI 已 5s 轮询，面板「状态不可用」复活）
+- [x] 2.4 宿主状态轮询缓存（30s）+ 插件离线判定（>2min），暴露到健康快照 API
+       （信封化：OpenAIAccountHealthListResult{accounts, plugin_bridge}；离线=距最近
+       成功 Health RPC>2min 读取时刻现算，RPC 失败轮保全旧锚点；桥故障绝不拖垮账号列表）
+- [x] 2.5 桥接层测试（离线降级/恢复自愈/空状态/旧插件无字段兼容）
+       （plugin_manager_status_test.go：15 用例——离线矩阵 5 态/自愈/锚点保全/
+       旧插件/非法 JSON/RPC 静默/缓存不重探/BridgeStatus nil×2/信封透传×3）
 
 ## Phase 3 — fork 后端：救治编排器
 

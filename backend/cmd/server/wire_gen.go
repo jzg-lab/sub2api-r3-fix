@@ -215,6 +215,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginRepository := repository.NewPluginRepository(db)
 	pluginHostInfo := providePluginHostInfo(buildInfo)
 	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
+	// 救治区插件桥：健康快照 API 附带 plugin_bridge 区块（PluginManager 30s
+	// 轮询缓存 + 2min 离线判定）。桥读失败在源侧吞掉，不影响账号健康列表。
+	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)

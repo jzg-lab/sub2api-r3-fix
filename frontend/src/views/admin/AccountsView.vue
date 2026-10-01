@@ -599,7 +599,11 @@ import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
 import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
-import type { OpenAIAccountHealth, OpenAIProbeLastEvidence } from '@/api/admin/accounts'
+import type {
+  OpenAIAccountHealth,
+  OpenAIPluginBridge,
+  OpenAIProbeLastEvidence,
+} from '@/api/admin/accounts'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -1028,6 +1032,9 @@ const refreshTodayStatsBatch = async () => {
 // 连点去重（already_flying）；不重置任何配额状态。
 // =============================================================================
 const accountHealthById = ref<Record<number, OpenAIAccountHealth>>({})
+// 救治区插件桥状态（r17ax Phase 2）：随健康快照批量接口带回，救治中标签的
+// 离线角标以此为准；无启用插件时为 null。
+const pluginBridge = ref<OpenAIPluginBridge | null>(null)
 const healthLoading = ref(false)
 const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
@@ -1047,6 +1054,7 @@ const refreshAccountHealthBatch = async () => {
   const reqSeq = ++healthReqSeq.value
   if (openAIIDs.length === 0) {
     accountHealthById.value = {}
+    pluginBridge.value = null
     return
   }
   healthLoading.value = true
@@ -1054,8 +1062,9 @@ const refreshAccountHealthBatch = async () => {
     const result = await adminAPI.accounts.listOpenAIAccountHealth(openAIIDs)
     if (reqSeq !== healthReqSeq.value) return
     const next: Record<number, OpenAIAccountHealth> = {}
-    for (const item of result) next[item.account_id] = item
+    for (const item of result.accounts) next[item.account_id] = item
     accountHealthById.value = next
+    pluginBridge.value = result.plugin_bridge ?? null
   } catch (error) {
     if (reqSeq !== healthReqSeq.value) return
     console.error('Failed to load account health:', error)
@@ -1254,7 +1263,7 @@ const reenableLifecycle = createOpenAIReenableLifecycle<OpenAIAccountHealth>({
   intervalMs: REENABLE_WATCH_INTERVAL_MS,
   deadlineMs: REENABLE_WATCH_DEADLINE_MS,
   fetchHealth: async (accountId) => {
-    const [health] = await adminAPI.accounts.listOpenAIAccountHealth([accountId])
+    const [health] = (await adminAPI.accounts.listOpenAIAccountHealth([accountId])).accounts
     return health
   },
   getProbeAt: (health) => health.last_probe ? new Date(health.last_probe.at).getTime() : 0,

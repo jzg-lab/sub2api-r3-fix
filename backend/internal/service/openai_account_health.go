@@ -42,6 +42,14 @@ type OpenAIAccountHealth struct {
 	LastProbe     *OpenAIProbeLastEvidence `json:"last_probe,omitempty"`
 }
 
+// OpenAIAccountHealthListResult 批量健康快照响应信封：账号列表 + 全局插件桥
+// 区块。plugin_bridge 是救治区标签（救治中/插件离线角标）的数据源；无启用
+// 插件或桥源未注入时缺席，前端按无桥降级渲染。
+type OpenAIAccountHealthListResult struct {
+	Accounts     []OpenAIAccountHealth `json:"accounts"`
+	PluginBridge *PluginBridgeStatus   `json:"plugin_bridge,omitempty"`
+}
+
 // OpenAIProbeLastEvidence 最近一针证据行（人可自验标签没撒谎）：
 // `09-21 01:23 · rt 1532 · 答对 · ts 332 · gpt-6-astra`。
 type OpenAIProbeLastEvidence struct {
@@ -420,7 +428,9 @@ func (r *OpenAIDowngradeProbeRunner) IsStopped() bool {
 // ListOpenAIAccountHealth 批量健康快照（列表页一次查齐，避免 N+1）。
 // 数据源：probe_states + controls(manual_paused) + accounts(rate_limited_at,
 // extra.qualification) + 最近一针 probe_results（含 turn_state_len）。
-func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context, accountIDs []int64) ([]OpenAIAccountHealth, error) {
+// 响应信封附全局 plugin_bridge 区块（救治区标签数据源；桥源未注入/无启用
+// 插件/桥读失败时缺席，账号列表不受影响）。
+func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context, accountIDs []int64) (*OpenAIAccountHealthListResult, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("openai probe runner is not available")
 	}
@@ -451,7 +461,11 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			LastProbe:     s.LastProbe,
 		})
 	}
-	return out, nil
+	var bridge *PluginBridgeStatus
+	if r.pluginBridge != nil {
+		bridge = r.pluginBridge(ctx)
+	}
+	return &OpenAIAccountHealthListResult{Accounts: out, PluginBridge: bridge}, nil
 }
 
 // GetOpenAIAccountHealth 单号健康快照。
@@ -460,10 +474,10 @@ func (r *OpenAIDowngradeProbeRunner) GetOpenAIAccountHealth(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	if len(list) == 0 {
+	if len(list.Accounts) == 0 {
 		return nil, ErrAccountNotFound
 	}
-	return &list[0], nil
+	return &list.Accounts[0], nil
 }
 
 // OpenAIProbeEvidenceDegraded 最近一针的降智布尔（IsDegraded 的证据行版）：

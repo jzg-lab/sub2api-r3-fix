@@ -1018,11 +1018,38 @@ export interface OpenAIAccountHealth {
   last_probe?: OpenAIProbeLastEvidence | null
 }
 
-/** 批量健康快照（账号列表页一次查齐）。 */
-export async function listOpenAIAccountHealth(ids: number[]): Promise<OpenAIAccountHealth[]> {
-  const { data } = await apiClient.get<OpenAIAccountHealth[]>('/admin/openai/accounts/health', {
-    params: { ids: ids.join(',') }
-  })
+/**
+ * 救治区插件桥状态（当前启用的 OpenAI OAuth 出站插件）。救治中标签的
+ * 离线角标以此为准；无启用插件时整个区块缺席。
+ */
+export interface OpenAIPluginBridge {
+  plugin_id: number
+  name: string
+  version: string
+  running: boolean
+  healthy: boolean
+  offline: boolean
+  message?: string
+  /** 插件自定义状态 JSON 字符串（签寿命/探针区段），透传不解析。 */
+  status_json?: string
+  checked_at: string
+  last_healthy_at?: string
+}
+
+/** 批量健康快照响应信封：账号列表 + 全局插件桥区块。 */
+export interface OpenAIAccountHealthListResult {
+  accounts: OpenAIAccountHealth[]
+  plugin_bridge?: OpenAIPluginBridge
+}
+
+/** 批量健康快照（账号列表页一次查齐，附带救治区插件桥区块）。 */
+export async function listOpenAIAccountHealth(
+  ids: number[]
+): Promise<OpenAIAccountHealthListResult> {
+  const { data } = await apiClient.get<OpenAIAccountHealthListResult>(
+    '/admin/openai/accounts/health',
+    { params: { ids: ids.join(',') } }
+  )
   return data
 }
 
