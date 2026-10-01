@@ -40,6 +40,9 @@ type OpenAIAccountHealth struct {
 	Clickable     bool                     `json:"clickable"`
 	Reason        string                   `json:"reason,omitempty"`
 	LastProbe     *OpenAIProbeLastEvidence `json:"last_probe,omitempty"`
+	// Rescue 救治区注记（r17ax Phase 3.4）：仅在区成员账号上在场；标签
+	// 覆盖见 ListOpenAIAccountHealth（paused/rate_limited 仍最高优先）。
+	Rescue *OpenAIAccountRescueHealth `json:"rescue,omitempty"`
 }
 
 // OpenAIAccountHealthListResult 批量健康快照响应信封：账号列表 + 全局插件桥
@@ -95,6 +98,9 @@ type OpenAIProbeHealthSnapshot struct {
 	RateLimitedAt *time.Time
 	Qualification bool
 	LastProbe     *OpenAIProbeLastEvidence
+	// RescueMarker 救治区成员标记（r17ax Phase 3.4：仓库从
+	// extra->'openai_rescue_lane' 原文列解析；不在区为 nil）。
+	RescueMarker *OpenAIRescueLaneMarker
 }
 
 // OpenAIProbeHealthLister 窄可选能力：批量健康快照聚合（只有真实 repository
@@ -442,10 +448,34 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
+	var bridge *PluginBridgeStatus
+	if r.pluginBridge != nil {
+		bridge = r.pluginBridge(ctx)
+	}
+	// 救治区标签数据源（r17ax Phase 3.4）：桥缺席/离线=降级注记；离线时
+	// StatusJSON 是最近成功 Health 的缓存（Phase 2 语义），照常解析。
+	var prober *OpenAIPluginBridgeProber
+	pluginOffline := bridge == nil
+	if bridge != nil {
+		prober = ParseOpenAIPluginBridgeProber(bridge.StatusJSON)
+		pluginOffline = bridge.Offline
+	}
+	threshold := r.rescueLane.GraduationThreshold()
 	out := make([]OpenAIAccountHealth, 0, len(snapshots))
 	for i := range snapshots {
 		s := snapshots[i]
 		label, color, clickable, reason := LabelOpenAIAccountHealth(s)
+		var rescue *OpenAIAccountRescueHealth
+		// 救治区标签覆盖：paused/rate_limited 是账号级压制态，优先于
+		// 救治标签（操作员动作与额度事实不被观测标签掩盖）。
+		if s.RescueMarker != nil && label != OpenAIHealthLabelPaused && label != OpenAIHealthLabelRateLimited {
+			var bridgeAccount *OpenAIPluginBridgeAccount
+			if prober != nil {
+				bridgeAccount = prober.Accounts[s.AccountID]
+			}
+			label, color, clickable, reason = LabelOpenAIRescueAccount(s.RescueMarker, threshold, bridgeAccount)
+			rescue = BuildOpenAIAccountRescueHealth(s.RescueMarker, threshold, bridgeAccount, pluginOffline)
+		}
 		out = append(out, OpenAIAccountHealth{
 			AccountID:     s.AccountID,
 			State:         s.State,
@@ -459,11 +489,8 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			Clickable:     clickable,
 			Reason:        reason,
 			LastProbe:     s.LastProbe,
+			Rescue:        rescue,
 		})
-	}
-	var bridge *PluginBridgeStatus
-	if r.pluginBridge != nil {
-		bridge = r.pluginBridge(ctx)
 	}
 	return &OpenAIAccountHealthListResult{Accounts: out, PluginBridge: bridge}, nil
 }

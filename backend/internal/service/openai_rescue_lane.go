@@ -208,6 +208,27 @@ func GetOpenAIRescueLaneMarker(account *Account) *OpenAIRescueLaneMarker {
 	if !ok {
 		return nil
 	}
+	return parseOpenAIRescueLaneMarkerFields(fields)
+}
+
+// ParseOpenAIRescueLaneMarkerJSON 从 JSON 串解析标记（健康快照聚合的仓库
+// 通道：extra->'openai_rescue_lane' 原文列）。空/坏 JSON → nil，与 Extra
+// 容错读同一语义。
+func ParseOpenAIRescueLaneMarkerJSON(raw string) *OpenAIRescueLaneMarker {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &fields); err != nil {
+		return nil
+	}
+	return parseOpenAIRescueLaneMarkerFields(fields)
+}
+
+// parseOpenAIRescueLaneMarkerFields 标记字段提取核心（Extra map 与 JSON 串
+// 两通道共用）。entered_at 缺失/非法 → nil（入区时间是不可缺字段）。
+func parseOpenAIRescueLaneMarkerFields(fields map[string]any) *OpenAIRescueLaneMarker {
 	marker := &OpenAIRescueLaneMarker{}
 	if enteredAt, ok := parseOpenAIRescueTimeString(fields["entered_at"]); ok {
 		marker.EnteredAt = enteredAt

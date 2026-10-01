@@ -29,6 +29,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			COALESCE(c.manual_paused, FALSE),
 			a.rate_limited_at,
 			COALESCE(a.extra->>'openai_downgrade_qualification', '') = 'true',
+			a.extra->'openai_rescue_lane',
 			lp.at,
 			lp.mode,
 			lp.reasoning_tokens,
@@ -60,6 +61,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 	for rows.Next() {
 		var snap service.OpenAIProbeHealthSnapshot
 		var rateLimitedAt *time.Time
+		var rescueMarkerJSON *string
 		var lpAt *time.Time
 		var lpMode *string
 		var lpRT *int
@@ -69,12 +71,16 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		var lpStatus *int
 		if err := rows.Scan(
 			&snap.AccountID, &snap.State, &snap.ProbeMode, &snap.Schedulable,
-			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification,
+			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification, &rescueMarkerJSON,
 			&lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
 		); err != nil {
 			return nil, err
 		}
 		snap.RateLimitedAt = rateLimitedAt
+		if rescueMarkerJSON != nil {
+			// 标记解析容错（malformed → nil=不在区），仓库不因坏 Extra 报错。
+			snap.RescueMarker = service.ParseOpenAIRescueLaneMarkerJSON(*rescueMarkerJSON)
+		}
 		if lpAt != nil {
 			ev := &service.OpenAIProbeLastEvidence{
 				At:              *lpAt,

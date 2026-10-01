@@ -83,7 +83,16 @@
       生命周期，清扫循环每轮重读配置（3.8 settings 热更即生效）+正向散布 1.0-1.25x，
       单轮 5min 上界。6 用例：自愈补绑补开/疑似不复活/补进/凭据死与限流持有排除/
       无状态源降级/关闸零名单拉取）
-- [ ] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
+- [x] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
+      （r17ax：LabelOpenAIRescueAccount 纯函数裁决——in_backoff→疑似账号级灰红不可点/
+      连过≥阈值→已复活绿可点（转正必须考证,冷针拦截过期数据,离线缓存仍可点）/
+      其余→救治中蓝紫；退避期满 in_backoff 翻回 false 自然回升救治中。数据链：仓库
+      快照加 extra->'openai_rescue_lane' 原文列→ParseOpenAIRescueLaneMarkerJSON 容错解析
+      （与 Extra 读共享 parseOpenAIRescueLaneMarkerFields 核心）；桥 status_json 经
+      ParseOpenAIPluginBridgeProber 容错解析 prober.accounts[]（3.5 撤调同一数据源）；
+      ListOpenAIAccountHealth 组装时覆盖标签+挂 Rescue 注记（悬停：救治时长/连过/连错/
+      退避到期/毕业阈值/plugin_offline）；paused 与 rate_limited 优先于救治标签；
+      无桥/桥离线→救治中+plugin_offline 注记（调度语义不变）。12 用例）
 - [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
 - [ ] 3.6 转正后处理：reenable 通过后用快照 BindGroups 改绑回原池组（真实组 id，不用
        openai-default）+ 打复活标记（Extra rescued_at 永久 + 复活次数+1；不清除不重置）
