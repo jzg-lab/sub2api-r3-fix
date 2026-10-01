@@ -13,11 +13,17 @@
 ## Phase 1 — 插件 v0.3.0（~/sub2api-cookie-plugin）
 
 - [ ] 1.1 状态查询消息：每账号 {state, consecutive_passes, consecutive_fails,
-       last_probe_at, reroll_count}；Authorization/cookie 值绝不进状态（反指纹纪律）
+       last_probe_at, reroll_count, sign_captured_at, sign_lifetime_stats,
+       estimated_remaining}；Authorization/cookie 值绝不进状态（反指纹纪律）
 - [ ] 1.2 退避期满复探状态回升语义确认（backoff→active 翻转点）
 - [ ] 1.3 testhost 全链路验证 + 官方 sidecar 宿主兼容回归（0.3.0 在官方 v0.2.11 上
        既有功能零回归）
 - [ ] 1.4 构建+签名 0.3.0，manifest tested_sub2api_versions 增补
+- [ ] 1.5 签寿命计量：捕获时间戳+三类死亡信号（faster-model 实时/探针答错/TTL刷新）
+       归档；每账号滚动 p50/p80/min 统计
+- [ ] 1.6 卡点排程：next_probe = sign_captured_at + 寿命p80 - 余量，窗口内 jitter
+       抖动（分布测试验证与换签时刻无强相关）；退避路径不适用卡点
+- [ ] 1.7 寿命统计冷启动：样本<3 时退回保守默认 TTL（现有 240s 兜底逻辑衔接）
 
 ## Phase 2 — fork 后端：插件状态桥
 
@@ -33,7 +39,8 @@
 - [ ] 3.3 对账清扫：周期扫描够格未进区 → 补进（trigger: reconcile）
 - [ ] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
 - [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
-- [ ] 3.6 转正后处理：reenable 通过后自动改绑回主池组
+- [ ] 3.6 转正后处理：reenable 通过后自动改绑回主池组 + 打复活标记
+       （Extra rescued_at 永久 + 复活次数+1；不清除不重置）
 - [ ] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
 - [ ] 3.8 配置项 rescue_lane.*（enabled/group/consecutive_clean_passes/
        reconcile_interval）+ 缺省安全值（enabled=false 上线默认关）
@@ -44,7 +51,10 @@
 - [ ] 4.1 三标签 + 插件离线角标（健康格渲染规则，沿用 7 标签既有模式）
 - [ ] 4.2 「已复活」点击 → 现有 reenable 确认弹窗（probeDeadConfirm 复用）
 - [ ] 4.3 「送入实验台」按钮 + 三条可见性规则 + 幂等提示
-- [ ] 4.4 vue-tsc + vitest 全绿
+- [ ] 4.4 复活号永久徽标（转正后行内常驻；悬停复活时间/次数；与正常号视觉强区分）
+- [ ] 4.5 签余量读秒芯片（徽标旁：签龄/预计余 mm:ss 逐秒走钟；桥 30s 校准；
+       faster-model 归零事件联动；估计值标注）
+- [ ] 4.6 vue-tsc + vitest 全绿
 
 ## Phase 5 — 验证与部署（铁律全流程）
 
