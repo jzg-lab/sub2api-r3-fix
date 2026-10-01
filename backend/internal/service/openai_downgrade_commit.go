@@ -319,34 +319,6 @@ func (s *openAIProbeStaging) CountOpenAIDowngradeEvents(ctx context.Context, id 
 	return count, nil
 }
 
-// 票接口直通（r17u）：stagedRunner 把 runner.store 换成 staging 后，probe()
-// 的 `r.store.(OpenAICodexTicketStore)` 断言在 staging 上失败 → 采票静默
-// 跳过（生产实证：2026-09-21 动态桶 332 针多根，票表恒 0 行零日志）。
-// 票是顺带观察哨，不参与 staging 事务——直通底层真 store，主判定回滚
-// 不拖累票（采到的 332 票不因探针 commit 409 而丢）。
-func (s *openAIProbeStaging) UpsertOpenAICodexTicket(ctx context.Context, ticket *OpenAICodexTicket) error {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return nil
-	}
-	return ts.UpsertOpenAICodexTicket(ctx, ticket)
-}
-
-func (s *openAIProbeStaging) GetOpenAICodexTicket(ctx context.Context, accountID int64, model string) (*OpenAICodexTicket, error) {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return nil, nil
-	}
-	return ts.GetOpenAICodexTicket(ctx, accountID, model)
-}
-
-func (s *openAIProbeStaging) DeleteExpiredOpenAICodexTickets(ctx context.Context, now time.Time) (int64, error) {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return 0, nil
-	}
-	return ts.DeleteExpiredOpenAICodexTickets(ctx, now)
-}
 
 func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *OpenAIDowngradeProbeRunner {
 	// Do not copy the live runner's mutexes, sync.Once values or lifecycle.
@@ -382,12 +354,7 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	candidate := *state
 	// A probe-owned authentication error can occur before a circuit opens.
 	// Requalify it on its current route instead of stranding an on_duty row.
-	// 打票线排除（2026-09-22 修正，1117 实证）：usage probe 的 401 会把
-	// 账号标 error，此分支把 probe_mode 抢改成 qualification，采票循环
-	// 被劫持。harvest 的 401 分诊（凭据失效→停打回原桶判死）在内层
-	// processState 的挂点执行，语义更强，不许被重认证覆盖。
-	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty &&
-		candidate.ProbeMode != "harvest" {
+	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty {
 		candidate.ConsecutiveSuccesses, candidate.ConsecutiveFailures = 0, 0
 		if candidate.ProbeMode == "sol_fallback" {
 			candidate.State = OpenAIDowngradeStateCircuitOpen

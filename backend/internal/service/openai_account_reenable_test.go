@@ -238,27 +238,6 @@ func TestTriggerProbeNow_DeadAccountRunsDiagnostic(t *testing.T) {
 	require.Zero(t, store.saveCalls)
 }
 
-// 对称面:harvest 态判死号(采票线收尾)保持 409——mode=harvest 的
-// runProbe 走采票请求模板,不属于糖题诊断。
-func TestTriggerProbeNow_HarvestDeadStillReenableRequired(t *testing.T) {
-	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	future := now.Add(2 * time.Hour)
-	store := &downgradeProbeStoreStub{}
-	store.state = &OpenAIDowngradeProbeState{
-		AccountID: 7, State: OpenAIDowngradeStatePendingReplace,
-		ProbeMode: "harvest", NextProbeAt: future,
-	}
-	runner := NewOpenAIDowngradeProbeRunner(store,
-		&downgradeProbeAccountRepoStub{account: &Account{
-			ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-			Status: StatusActive, Schedulable: false,
-		}}, nil, nil, nil, nil)
-	runner.now = func() time.Time { return now }
-
-	_, err := runner.TriggerProbeNow(context.Background(), 7)
-	require.ErrorIs(t, err, errOpenAIReenableRequired)
-	require.Equal(t, future, store.state.NextProbeAt)
-}
 
 // 状态不存在的号:账号不存在哨兵。
 func TestReenableOpenAIAccount_NoStateNotFound(t *testing.T) {

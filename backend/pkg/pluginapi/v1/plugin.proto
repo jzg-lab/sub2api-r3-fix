@@ -28,6 +28,10 @@ message HealthRequest {}
 message HealthResponse {
   bool healthy = 1;
   string message = 2;
+  // status_json is an optional plugin-defined JSON blob describing current runtime
+  // status. The host may surface it in diagnostics UI (field number aligned with
+  // the official sub2api protocol v0.2.7+; older hosts ignore unknown fields).
+  string status_json = 3;
 }
 
 message ValidateConfigRequest {
@@ -57,6 +61,9 @@ message TestConfigResponse {
   bool success = 1;
   string message = 2;
   int64 latency_ms = 3;
+  // status_json is an optional plugin-defined JSON blob surfaced to the config UI
+  // (field number aligned with the official sub2api protocol v0.2.7+).
+  string status_json = 4;
 }
 
 message HeaderValues {

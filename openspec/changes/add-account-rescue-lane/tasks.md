@@ -9,25 +9,30 @@
        官方零影响=结构性保障（官方产物无新方法 stub）→ design.md 0.2
 - [x] 0.3 钩子=commit_svc.go:424-433 committed 块（三判死路径单一 choke point）；
        过滤=Events reason + RateLimitResetAt；调度资格验证成立（schedulableAccountsQuery
-       无探针状态检查）；**新冲突=maybeAutoHarvestDead 抢号，须让位闸** → design.md 0.3
+       无探针状态检查）；**原冲突=maybeAutoHarvestDead 抢号——已由打票线整体删除解决（2026-10-02）** → design.md 0.3
 - [x] 0.4 改绑=BindGroups（事务删光+重插，outbox 双份，不撞 r17v 触发器）；进区前快照
        原组 id+priority；CAS 纪律=改组后必须重读再构造 mutation；audit 编排器自理
        → design.md 0.4
 
 ## Phase 1 — 插件 v0.3.0（~/sub2api-cookie-plugin）
 
-- [ ] 1.1 状态查询消息：每账号 {state, consecutive_passes, consecutive_fails,
-       last_probe_at, reroll_count, sign_captured_at, sign_lifetime_stats,
-       estimated_remaining}；Authorization/cookie 值绝不进状态（反指纹纪律）
-- [ ] 1.2 退避期满复探状态回升语义确认（backoff→active 翻转点）
-- [ ] 1.3 testhost 全链路验证 + 官方 sidecar 宿主兼容回归（0.3.0 在官方 v0.2.11 上
-       既有功能零回归）
-- [ ] 1.4 构建+签名 0.3.0，manifest tested_sub2api_versions 增补
-- [ ] 1.5 签寿命计量：捕获时间戳+三类死亡信号（faster-model 实时/探针答错/TTL刷新）
-       归档；每账号滚动 p50/p80/min 统计
-- [ ] 1.6 卡点排程：next_probe = sign_captured_at + 寿命p80 - 余量，窗口内 jitter
-       抖动（分布测试验证与换签时刻无强相关）；退避路径不适用卡点
-- [ ] 1.7 寿命统计冷启动：样本<3 时退回保守默认 TTL（现有 240s 兜底逻辑衔接）
+- [x] 1.1 状态扩展（status_json 内容，不碰 proto/manifest）：consecutive_passes/
+       in_backoff/sign_captured_at/sign_lifetime_stats{p50,p80,min,samples}/
+       estimated_remaining_seconds/estimate_basis{measured|fallback|none}；
+       契约测试锁定；Cookie 值零泄漏（脱敏边界测试）
+- [x] 1.2 退避期满复探回升语义确认（BackoffUntil 过即 Due→pass 摘帽；既有
+       TestStateFailRerollPath 覆盖，v0.3 未改动该路径）
+- [ ] 1.3 testhost 全链路 ✓（build.sh 冒烟绿）；**官方 sidecar 宿主兼容回归待做**
+- [x] 1.4 构建+签名 0.3.0（dist/lyunlong-codex-lb-cookie-pin-0.3.0.s2plugin，
+       key_id=843c85d4b99d8a25）；tested_versions 暂不变，r17ax 落地后补
+- [x] 1.5 签寿命计量：三死亡信号全归档（捕获覆写=换签/TTL 到期清理/重摇——
+       faster-model+探针答错+手动共用 Drop/Reroll 通道）；32 样本滚动窗口
+       最近秩百分位；零值/未来时刻守卫防时钟跳变
+- [x] 1.6 卡点排程 AdaptiveNextProbe：目标=捕获+p80−margin，年轻签少探省额度
+       （上限 7200s）、临死密集盯防（下限 300s 指纹纪律）、jitter=min(距目标1/4,
+       margin) 均匀前抖；分布测试 2000 抽样验证散布+均值（TestAdaptiveJitterSpread）
+- [x] 1.7 冷启动：样本<3 或无签 → 固定间隔（MinAdaptiveSamples=3）；估计基准
+       estimate_basis=fallback 兜底 TTL 口径诚实标注
 
 ## Phase 2 — fork 后端：插件状态桥
 
@@ -46,8 +51,11 @@
        rescue_entered{trigger: auto|manual|reconcile}（改组后重读账号，CAS 纪律）
 - [ ] 3.2 自动钩子：挂 commit_svc.go:424-433 committed 块（三判死路径单一 choke point），
        入口过滤=mutation.Events reason + RateLimitResetAt（三类不进）
-- [ ] 3.2b maybeAutoHarvestDead 让位闸（probe.go:832-845）：救治成员不被自动打票线拉走；
-       出区（转正/撤调度/人工了断）恢复原语义；**与入区转换同一提交落地**
+- [x] 3.2b ~~maybeAutoHarvestDead 让位闸~~——打票线已整体删除（2026-10-02 用户裁定
+       「把打票这条线清除，救号只保留救治区这条线」）：openai_harvest_pipeline.go /
+       openai_codex_ticket*.go / 票表 repo 删除；migration 248 防御性清场（harvest 行归
+       normal+pending_replace、DROP harvest_attempts、DROP openai_codex_tickets、CHECK 收窄）；
+       网关注入+采票观察哨+前端入口+i18n 全清；让位闸不再需要（无打票状态机可抢号）
 - [ ] 3.3 对账清扫：周期扫描够格未进区 → 补进（trigger: reconcile）
 - [ ] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
 - [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度

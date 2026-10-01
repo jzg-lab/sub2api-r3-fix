@@ -468,10 +468,9 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.GET("/accounts/health", h.Admin.OpenAIProbeHealth.ListAccountHealth)
 		openai.GET("/accounts/:id/health", h.Admin.OpenAIProbeHealth.GetAccountHealth)
 		openai.POST("/accounts/:id/probe-now", h.Admin.OpenAIProbeHealth.TriggerProbeNow)
-		// 判死即终态（r17x 选项A 2026-09-21）：手动启用=唯一救援入口。
+		// 判死即终态（r17x 选项A 2026-09-21）：手动启用=唯一救援入口
+		//（打票线已于 2026-10-02 整体删除，救治区为唯一自动救援线）。
 		openai.POST("/accounts/:id/reenable", h.Admin.OpenAIProbeHealth.ReenableAccount)
-		// 自动打票线（相位B 2026-09-21）：问题号转动态桶采票循环。
-		openai.POST("/accounts/:id/harvest", h.Admin.OpenAIProbeHealth.StartHarvest)
 	}
 }
 
@@ -781,6 +780,7 @@ func registerPluginRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 		plugins.GET("/:id/config", h.Admin.Plugin.GetConfig)
 		plugins.PUT("/:id/config", gin.HandlerFunc(stepUpAuth), h.Admin.Plugin.SaveConfig)
 		plugins.POST("/:id/test", gin.HandlerFunc(stepUpAuth), h.Admin.Plugin.Test)
+		plugins.GET("/:id/status", h.Admin.Plugin.Status)
 		plugins.POST("/:id/ui-session", h.Admin.Plugin.CreateUISession)
 	}
 }

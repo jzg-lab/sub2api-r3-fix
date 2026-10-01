@@ -287,12 +287,7 @@ type OpenAIDowngradeProbeState struct {
 	AstraConsecutiveFailures  int
 	AstraConsecutiveSuccesses int
 	AstraNextProbeAt          *time.Time
-	// 自动打票线（2026-09-21 相位B）：动态桶上的采票尝试计数。达到上限仍
-	// 无健康票 = 账号级降智，回 pending_replace（社区实证：账号级 312 永续
-	// = 换票无解，别硬打——"continuing is what escalated a 312 into a wall
-	// of 429s"）。
-	HarvestAttempts int
-	UpdatedAt       time.Time
+	UpdatedAt                 time.Time
 }
 
 // OpenAI proxy outcome kinds feed the per-proxy outcome statistics table
@@ -551,11 +546,6 @@ const (
 	// 判死终态（r17x 选项A）防御性让位间隔：processState 兜底分支把误入的
 	// pending_replace 号排远，不参与正常调度节奏。
 	openAIDowngradeReplacedQuietSchedule = 7 * 24 * time.Hour
-	// 打票复活号观察窗（2026-09-22 用户裁定「通过打票复活的账号 频率就得
-	// 适当高一点」）：复活号弹性最差（刚从判死边缘捞回，弹跳概率高），
-	// 毕业后先进 accelerated 档（5min 级）盯防 2 小时，观察窗走完自然回
-	// 常规 90min 档。与 finishRescue 的 30min 窗区分：那是熔断救援的窗。
-	openAIDowngradeHarvestRevivalWatchWindow = 2 * time.Hour
 )
 
 // OpenAIDowngradeReplaceEventCounter 是用于判死重试退避的窄接口能力。
@@ -829,20 +819,6 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		if !isOpenAIDowngradeProbeAccountEligible(&account, now) || account.Status != StatusActive {
 			continue
 		}
-		// 自动救援钩子（2026-09-22「都让自动」）：判死号静默期满自动进
-		// 打票线。挂在 schedulable 闸之前——判死号 schedulable=false 会被
-		// 下面的 continue 提前跳出，钩子永远够不着。进线成功后
-		// probe_mode='harvest'，由下方 qualification/harvest 路径正常接管。
-		if deadState, err := r.store.GetOpenAIDowngradeState(ctx, account.ID); err == nil && deadState != nil &&
-			deadState.State == OpenAIDowngradeStatePendingReplace {
-			if hookErr := r.maybeAutoHarvestDead(ctx, deadState, now); hookErr != nil {
-				logger.LegacyPrintf("service.openai_downgrade_probe",
-					"[OpenAIDowngradeProbe] auto-harvest failed account=%d: %v", account.ID, hookErr)
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-		}
 		qualification := isOpenAIDowngradeQualificationCandidate(&account) ||
 			account.ProxyID == nil
 		if !account.Schedulable && !qualification {
@@ -960,10 +936,6 @@ func isOpenAIDowngradeProbeStatusAllowed(status string, state *OpenAIDowngradePr
 		state.State == OpenAIDowngradeStateReprobe ||
 		state.State == OpenAIDowngradeStatePendingReplace ||
 		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "qualification") ||
-		// 打票线（2026-09-22 修正）：error 号在采票循环里必须继续被探测
-		// ——harvest 的 401 分诊（凭据失效→停打回原桶）正依赖探针把 401
-		// 带回来；被 status 闸拦掉的话循环空转、凭据死号永不落判死。
-		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "harvest") ||
 		state.ProbeMode == "sol_fallback"
 }
 
@@ -1035,24 +1007,20 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	if state.State == OpenAIDowngradeStatePendingReplace && state.ProbeMode != "harvest" {
-		// 普通判死态不再自动排探针。ListDue 已在 SQL 层排除
-		// pending_replace，理论到不了这里；防御性让位（NextProbeAt 推远）
-		// 防止其它路径把判死号又拉回普通探测循环。harvest 是显式救援态，
-		// 即使状态切换与调度并发留下 pending_replace，也必须继续完成采票针。
+	if state.State == OpenAIDowngradeStatePendingReplace {
+		// 判死终态不再自动排探针。ListDue 已在 SQL 层排除 pending_replace，
+		// 理论到不了这里；防御性让位（NextProbeAt 推远）防止其它路径把
+		// 判死号又拉回普通探测循环。判死号的唯一救援入口 = 手动启用/救治区。
 		state.NextProbeAt = now.Add(openAIDowngradeReplacedQuietSchedule)
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
-		state.ProbeMode != "qualification" && state.ProbeMode != "harvest" &&
+		state.ProbeMode != "qualification" &&
 		state.AuthConsecutiveFailures == 0 {
 		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
 		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
 		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
-		// harvest 例外（2026-09-22 修正，1136 实证）：采票号进线时不设
-		// schedulable（问题号不接流量），但循环必须照常打针——不排除的话
-		// 每 30 分钟让位一次，永远打不了采票针。
 		// auth 一振暂停豁免（r17aq）：schedulable=false 是探针自己落的，
 		// 只有后续探针能洗白（非 auth 应答）或毕业到 error（二振）；
 		// 不豁免 = 暂停号永不再被探，死锁。
@@ -1180,14 +1148,6 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
 		return err
-	}
-	// 自动打票线（2026-09-21 相位B）：harvest 模式的针走独立分诊（采到票回
-	// 静态复检/账号级放弃/继续换IP），不进 Apply 常规迁移——连败计数对采票
-	// 针无意义（降级长度正是预期的「没采到」信号，不是惩罚证据）。
-	if state.ProbeMode == "harvest" {
-		if handled, err := r.processHarvest(ctx, state, &result, now); handled {
-			return err
-		}
 	}
 	// 相位2（2026-09-20 用户批准）+ 纯单针杀（2026-09-22 用户裁定）：
 	// turn_state_len 落降智态（356±20）时记事件；normal 档单 356 即熔断
@@ -2103,15 +2063,10 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		return result
 	}
 	var proxyURL string
-	var bucketProxy *Proxy
 	if r.proxyRepo != nil {
 		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
-		if err == nil && r.proxyRepo != nil {
-			bucketProxy, _ = r.proxyRepo.GetByID(ctx, *account.ProxyID)
-		}
 	} else {
 		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
-		bucketProxy = account.Proxy
 	}
 	if err != nil {
 		// 出口硬闸：解析不出桶代理就不发探针。直连会把家用 IP 暴露给
@@ -2215,24 +2170,6 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 			"status_292", status292,
 			"current_turn_state_len", turnStateLen,
 			"codex_turn_state_len", codexTurnStateLen)
-	}
-	// 相位B（2026-09-21）：探针顺带采票——响应头本带 x-codex-turn-state，
-	// 零新增流量形态。仅 200 且长度过白名单（292/332 双口径）才入库；
-	// 任何失败只记日志，绝不影响探针主判定。采的是账号当前绑定的业务
-	// 出口上的票，出口指纹天然对齐（注入侧同指纹校验）。
-	// r17ae：Set-Cookie 的 __cflb+__oailb 对成套入库（堵实例粘性缺口），
-	// 空对不阻断采票。
-	if status == http.StatusOK {
-		if ticketStore, ok := r.store.(OpenAICodexTicketStore); ok {
-			harvestMode := OpenAICodexTicketHarvestProbe
-			if isOpenAIDynamicProxyBucket(bucketProxy) {
-				harvestMode = OpenAICodexTicketHarvestDynamic
-			}
-			HarvestOpenAICodexTicket(ctx, ticketStore, account.ID, account.ProxyID,
-				probeModel, extractOpenAICodexTurnState(respHeader),
-				ExtractOpenAICodexCookiePair(respHeader.Values("Set-Cookie")),
-				harvestMode, time.Now())
-		}
 	}
 	slog.Info("openai_probe_codex_turn_state_len",
 		"account_id", account.ID,

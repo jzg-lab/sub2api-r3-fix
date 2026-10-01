@@ -337,7 +337,7 @@
                    ① 重新启用 = 复活唯一入口（认证针 1 针结业；静置暂停随请求
                       显式解除，专用解暂停不动 schedulable）；
                    ② 主动检测 = 诊断针（只落证据行不动状态机），满足「看看号
-                      回来没有」；harvest 态判死号后端仍 409。 -->
+                      回来没有」。 -->
               <button
                 v-if="accountHealthById[row.id]?.state === 'pending_replace'"
                 class="rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-500/10"
@@ -1031,8 +1031,6 @@ const accountHealthById = ref<Record<number, OpenAIAccountHealth>>({})
 const healthLoading = ref(false)
 const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
-// 打票线转线中的账号（防重复点击）。
-const harvestingAccount = ref<number | null>(null)
 // 判死号手动启用中的账号（防重复点击，r17am）。
 const reenablingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
@@ -1076,8 +1074,6 @@ const healthBadgeClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
     case 'blue':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-    case 'purple':
-      return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
     case 'gray-red':
       return 'bg-gray-100 text-red-700 dark:bg-dark-700 dark:text-red-400'
     default:
@@ -1095,8 +1091,6 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-500'
     case 'blue':
       return 'bg-blue-500'
-    case 'purple':
-      return 'bg-purple-500'
     case 'gray-red':
       return 'bg-red-400'
     default:
@@ -1142,34 +1136,16 @@ const lastProbeEvidence = (health: OpenAIAccountHealth): string => {
   })
 }
 
-// 相位B（2026-09-21）：问题号标签点击 → 转打票线（迁动态桶采票，
-// 采到回静态复检，复检通过恢复上岗）。
-// r17am：判死号（pending_replace）标签点击改道手动启用——打票线对浏览器
-// OAuth 号被路由保护拒绝，启用针才是唯一活路。
+// r17am：判死号（pending_replace）标签点击 → 手动启用（认证针 1 针结业）。
+// 打票线已整体删除（2026-10-02 r17ax）：pending_replace 是唯一可点标签；
+// circuit_open 问题号由半开复检自动恢复，无手动救援动作。
 const onHealthBadgeClick = (health: OpenAIAccountHealth) => {
   if (!health.clickable) return
   const row = accounts.value.find((a) => a.id === health.account_id)
   if (!row) return
   if (health.state === 'pending_replace') {
     handleReenable(row)
-    return
   }
-  if (!confirm(t('admin.accounts.health.harvestConfirm', { name: row.name }))) return
-  harvestingAccount.value = row.id
-  adminAPI.accounts
-    .startOpenAIHarvest(row.id)
-    .then((result) => {
-      appStore.showSuccess(
-        t('admin.accounts.health.harvestStarted', { time: formatDateTime(result.next_probe_at) })
-      )
-      refreshAccountHealthBatch().catch(() => {})
-    })
-    .catch((error) => {
-      appStore.showError(`${t('admin.accounts.health.harvestFailed')}: ${extractApiErrorMessage(error)}`)
-    })
-    .finally(() => {
-      harvestingAccount.value = null
-    })
 }
 
 const handleProbeNow = async (row: Account) => {

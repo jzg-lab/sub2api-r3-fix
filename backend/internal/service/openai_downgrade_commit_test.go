@@ -686,19 +686,9 @@ func TestOpenAIProbeStagingMismatchRequalifiedByCurrentBucketHealth(t *testing.T
 	require.False(t, stage2.mutation.CompleteQualification)
 }
 
-// r17u 回归：stagedRunner 采票直通——staging 必须实现 OpenAICodexTicketStore
-// （生产实证：断言失败 → 动态桶 332 针多根票表恒空零日志）。
-func TestOpenAIProbeStagingImplementsTicketStore(t *testing.T) {
-	var _ OpenAICodexTicketStore = (*openAIProbeStaging)(nil)
-	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
-	stage := newOpenAIProbeStaging(runner, &Account{ID: 1}, &OpenAIDowngradeProbeState{AccountID: 1})
-	staged := runner.stagedRunner(stage)
-	ts, ok := staged.store.(OpenAICodexTicketStore)
-	require.True(t, ok, "staged runner store must satisfy ticket store for probe-side harvest")
-	_ = ts
-}
-
-func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testing.T) {
+// 浏览器授权号的路由保护闸（SetOpenAIAccountProxy）：与探针模式无关，
+// 任何 staging 路径都不得改写授权出口（打票线删除后依然成立）。
+func TestOpenAIProbeStagingCannotChangeBrowserAuthorizationRoute(t *testing.T) {
 	now := time.Now()
 	homeID, dynID := int64(5), int64(11)
 	newBrowserAccount := func() *Account {
@@ -713,10 +703,10 @@ func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testi
 	}
 	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
 
-	t.Run("harvest_return_to_original_bucket_is_rejected", func(t *testing.T) {
+	t.Run("qualification_return_to_original_bucket_is_rejected", func(t *testing.T) {
 		account := newBrowserAccount()
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
-			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
 		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID),
@@ -724,11 +714,11 @@ func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testi
 		require.False(t, stage.mutation.ProxyChanged)
 	})
 
-	t.Run("harvest_to_other_static_bucket_still_rejected", func(t *testing.T) {
+	t.Run("qualification_to_other_static_bucket_still_rejected", func(t *testing.T) {
 		account := newBrowserAccount()
 		otherID := int64(7)
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
-			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
 		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &otherID),
@@ -736,7 +726,7 @@ func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testi
 		require.False(t, stage.mutation.ProxyChanged)
 	})
 
-	t.Run("non_harvest_mode_rejected", func(t *testing.T) {
+	t.Run("normal_mode_rejected", func(t *testing.T) {
 		account := newBrowserAccount()
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
 			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
@@ -761,7 +751,7 @@ func TestOpenAIProbeCommitFailureYieldsSchedule(t *testing.T) {
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	// 预置真库状态行：next_probe_at 在过去（冻结形态），UpdatedAt 与探针前提一致。
 	rowState := OpenAIDowngradeProbeState{
-		AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
 		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
 	}
@@ -788,7 +778,7 @@ func TestOpenAIProbeCommitFailureYieldsSchedule(t *testing.T) {
 		"yielded schedule must be ~30min out, got %v", base.state.NextProbeAt.Sub(now))
 	require.True(t, base.state.NextProbeAt.Before(now.Add(45*time.Minute)))
 	// 让位只动排期，不动 state/proxy 实质。
-	require.Equal(t, "harvest", base.state.ProbeMode)
+	require.Equal(t, "qualification", base.state.ProbeMode)
 	require.Equal(t, proxyID, *base.state.CurrentProxyID)
 }
 
@@ -803,7 +793,7 @@ func TestOpenAIProbeCommitFailureYieldRespectsConcurrentAdvance(t *testing.T) {
 	}
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	rowState := OpenAIDowngradeProbeState{
-		AccountID: 1137, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		AccountID: 1137, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
 		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
 	}

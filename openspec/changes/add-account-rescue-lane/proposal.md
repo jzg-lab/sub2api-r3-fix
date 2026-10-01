@@ -39,11 +39,12 @@ sidecar 实验台（10/2）已验证救治机制有效：2 号 25% 错 → 丢�
 （commit_svc.go:424-433 committed 块），钩子挂此处；过滤用 mutation.Events 的 reason
 字段（credentials_invalid 排除）+ account.RateLimitResetAt（未来=429 排除）。
 
-**⚠ 与既有自动打票线的冲突（Phase 0.3 新发现，必须处理）**：fork 已有
-maybeAutoHarvestDead（probe.go:832-845）每分钟扫判死号，静默期满（2h-24h）自动拉进
-打票线——和救治区抢同一批号。救治区必须装**让位闸**：救治中的号不被自动打票线拉走；
-出区（转正/撤调度/人工了断）后恢复原语义。让位闸与入区转换必须同一提交落地，否则
-判死 2h 后号被抢走。
+**✅ 原与自动打票线的冲突——已消除（2026-10-02 用户裁定「救号只保留救治区这条线，
+其它救号的统统清理掉」）**：maybeAutoHarvestDead 及整条打票线（A 层 harvest 状态机 +
+B 层 x-codex-turn-state 票表/采票观察哨/已停用的网关注入）已整体删除，migration 248
+防御性清场。救治区成为判死号唯一自动救援线，让位闸需求不复存在。删除前生产实测
+打票线零在途（0 行 probe_mode='harvest'，migration 纯防御）；guardOpenAICodexTurnStateEcho
+跨账号剥头安全闸保留（业务流量在用）。
 
 ### 出口
 

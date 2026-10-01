@@ -1037,7 +1037,7 @@ export interface OpenAIProbeNowResult {
 /** 主动检测：手动针与调度针完全同构，连点去重（already_flying）。
  * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。
  * r17an：判死号（pending_replace 普通）同样走同步诊断针——只落证据行，
- * 不动状态机；harvest 态判死号仍 409。 */
+ * 不动状态机。 */
 export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowResult> {
   const { data } = await apiClient.post<OpenAIProbeNowResult>(
     `/admin/openai/accounts/${id}/probe-now`,
@@ -1068,23 +1068,6 @@ export async function reenableOpenAIAccount(id: number, unpause = false): Promis
     `/admin/openai/accounts/${id}/reenable`,
     undefined,
     { params: unpause ? { unpause: 'true' } : undefined }
-  )
-  return data
-}
-
-export interface OpenAIHarvestStartResult {
-  account_id: number
-  probe_mode: string
-  next_probe_at: string
-  harvest_attempts: number
-}
-
-/** 问题号转打票线（相位B）：迁动态桶采票循环，采到回静态复检。 */
-export async function startOpenAIHarvest(id: number): Promise<OpenAIHarvestStartResult> {
-  const { data } = await apiClient.post<OpenAIHarvestStartResult>(
-    `/admin/openai/accounts/${id}/harvest`,
-    undefined,
-    { timeout: 60000 }
   )
   return data
 }
@@ -1230,7 +1213,6 @@ export const accountsAPI = {
   listOpenAIAccountHealth,
   triggerOpenAIProbeNow,
   reenableOpenAIAccount,
-  startOpenAIHarvest,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

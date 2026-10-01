@@ -1759,7 +1759,7 @@ func TestOpenAIDowngradeProbeRejectsTerminalReplacementWithoutProxy(t *testing.T
 
 	// 普通 pending_replace 不再走 retryReplacement/beginReprobe（原实现无
 	// proxy 时报错），而是防御性让位：不探针、排远 7 天、零 probe 调用。
-	// harvest 的显式救援例外由 TestPendingReplaceHarvestReachesProbePipeline 锁定。
+	// 打票线已删除（2026-10-02）：pending_replace 无探针例外，救治区/手动启用是唯一救援入口。
 	require.NoError(t, runner.processState(context.Background(), state, time.Now()))
 	require.Zero(t, store.probeCalls)
 	require.True(t, state.NextProbeAt.After(time.Now().Add(6*24*time.Hour)),

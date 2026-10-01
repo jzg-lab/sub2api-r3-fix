@@ -65,7 +65,6 @@ const (
 	OpenAIHealthLabelPaused        = "paused"        // 已暂停 灰 不可点
 	OpenAIHealthLabelEnforcement   = "enforcement"   // 静置中 灰红（相位B执法型分型后启用）
 	OpenAIHealthLabelQualification = "qualification" // 待认证 灰
-	OpenAIHealthLabelHarvesting    = "harvesting"    // 打票中 紫（动态桶采票循环里）
 )
 
 // 标签颜色 token（前端映射到主题色）。
@@ -76,7 +75,6 @@ const (
 	OpenAIHealthColorBlue    = "blue"
 	OpenAIHealthColorGray    = "gray"
 	OpenAIHealthColorGrayRed = "gray-red"
-	OpenAIHealthColorPurple  = "purple"
 )
 
 // OpenAIProbeHealthSnapshot 聚合查询的一行输入。
@@ -99,7 +97,7 @@ type OpenAIProbeHealthLister interface {
 
 // LabelOpenAIAccountHealth 纯函数：状态映射表（proposal 表格逐行实现）。
 // 判定优先级自上而下（proposal 裁定）：
-// manual_paused > rate_limited > harvest > pending_replace > circuit_open >
+// manual_paused > rate_limited > pending_replace > circuit_open >
 // reprobe/half_open/sol_fallback > qualification > normal-健康/待复核。
 // normal-健康 vs 待复核的分界 = 最近一针降智布尔（r15e 截断+答对=中性）。
 // 静置中（enforcement）相位A 无数据源，恒不触发；相位B 分型落地后接入。
@@ -111,11 +109,6 @@ func LabelOpenAIAccountHealth(s OpenAIProbeHealthSnapshot) (label, color string,
 		// 限流中：额度耗尽打票救不了，不进打票线（用户裁定）。
 		return OpenAIHealthLabelRateLimited, OpenAIHealthColorGray, false, "rate_limited"
 	}
-	// 打票中（2026-09-21 自动打票线）：动态桶采票循环里，紫标签区分于
-	// 蓝色复检中——打票是救援动作，用户需要一眼看出这个号正在换票。
-	if s.ProbeMode == "harvest" {
-		return OpenAIHealthLabelHarvesting, OpenAIHealthColorPurple, false, "harvest"
-	}
 	if s.State == OpenAIDowngradeStatePendingReplace {
 		return OpenAIHealthLabelProblem, OpenAIHealthColorRed, true, "pending_replace"
 	}
@@ -124,7 +117,8 @@ func LabelOpenAIAccountHealth(s OpenAIProbeHealthSnapshot) (label, color string,
 		return OpenAIHealthLabelRechecking, OpenAIHealthColorBlue, false, "circuit_open/half_open"
 	}
 	if s.State == OpenAIDowngradeStateCircuitOpen {
-		return OpenAIHealthLabelProblem, OpenAIHealthColorRed, true, "circuit_open"
+		// 熔断号由半开复检自动恢复（不可点：打票线已删，无手动救援动作）。
+		return OpenAIHealthLabelProblem, OpenAIHealthColorRed, false, "circuit_open"
 	}
 	if s.State == OpenAIDowngradeStateReprobe || s.ProbeMode == "half_open" || s.ProbeMode == "sol_fallback" {
 		return OpenAIHealthLabelRechecking, OpenAIHealthColorBlue, false, s.State + "/" + s.ProbeMode
@@ -157,13 +151,6 @@ var errOpenAIProbeGenerationChanged = infraerrors.Conflict(
 // 400 客户端错误（不是服务端故障）。
 var errOpenAIProbeNotEligible = infraerrors.BadRequest(
 	"OPENAI_PROBE_NOT_ELIGIBLE", "account is not probe-eligible")
-
-// errOpenAIReenableRequired 判死号（pending_replace）点了主动检测：探针
-// 已停（r17x 选项A「判死即终态」），语义正确的动作是手动启用。409 让前端
-// 区分「已死待启用」与普通检测失败。r17an 起普通判死号改走诊断针，只有
-// harvest 态判死号（采票线收尾，runProbe 走采票模板）仍走此 409。
-var errOpenAIReenableRequired = infraerrors.Conflict(
-	"OPENAI_REENABLE_REQUIRED", "account is dead (pending_replace); use reenable endpoint")
 
 // openAIDowngradeProbeExitThrottleWindow 同出口合成探针最小间隔（镜像
 // ListDue 的 10 分钟节流）；openAIDowngradeProbeExitThrottleRetryAfter 是
@@ -277,19 +264,15 @@ func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accoun
 	// on_duty+非 schedulable+非 qualification+非 error 同样被排除——都走
 	// 路径B 同步诊断针。判死号（pending_replace）r17x 选项A 起也被 ListDue
 	// 排除：提前排期是静默失效。r17an（2026-09-28 用户裁定「被判死的号也要
-	// 可以主动检测」）：普通判死号改走路径B 同步诊断针——只落证据行，不动
+	// 可以主动检测」）：判死号走路径B 同步诊断针——只落证据行，不动
 	// 状态机/排期/调度；判死语义不变，复活唯一入口仍是 ReenableOpenAIAccount
-	// 的认证针。harvest 态判死号（采票线收尾）保持 409：mode=harvest 的
-	// runProbe 走采票请求模板，不属于糖题诊断。
-	if state.State == OpenAIDowngradeStatePendingReplace && state.ProbeMode != "harvest" {
+	// 的认证针。
+	if state.State == OpenAIDowngradeStatePendingReplace {
 		res, err := r.triggerDiagnosticProbeNow(ctx, account, state, now)
 		if err == nil && res != nil && res.Accepted {
 			res.ProbedNow = true
 		}
 		return res, err
-	}
-	if state.State == OpenAIDowngradeStatePendingReplace {
-		return nil, errOpenAIReenableRequired
 	}
 	// CanRunOpenAIDowngradeProbe = ListDue 的 controls/状态/expires 三道
 	// 闸联判（manual_paused + owned_error + auto_pause_on_expired）。控制读取

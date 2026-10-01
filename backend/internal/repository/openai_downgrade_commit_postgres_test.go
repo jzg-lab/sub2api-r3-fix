@@ -43,6 +43,7 @@ func newProbePostgresWithOwnership(t *testing.T, ownership bool) *sql.DB {
 		// Save 写 auth_consecutive_failures 列。
 		"227_proxy_outcome_stats.sql",
 		"247_probe_auth_strikes.sql",
+		"248_drop_harvest_lane_and_codex_tickets.sql",
 	)
 	return newProbePostgresWithMigrations(t, migrations)
 }
@@ -181,6 +182,7 @@ func TestOpenAIProbeNullableVerdictMigrationAndWrites(t *testing.T) {
 		"241_openai_probe_turn_state_len.sql",
 		"244_openai_probe_harvest_mode.sql",
 		"247_probe_auth_strikes.sql",
+		"248_drop_harvest_lane_and_codex_tickets.sql",
 	})
 	seedProbePostgres(t, db)
 	_, err := db.Exec(`

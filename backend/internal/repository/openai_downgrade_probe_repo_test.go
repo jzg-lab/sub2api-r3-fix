@@ -16,7 +16,7 @@ func downgradeDueColumns() []string {
 	return strings.Fields(`account_id state original_proxy_id current_proxy_id probe_mode
 		consecutive_failures consecutive_successes first_failure_at circuit_opened_at recovery_deadline
 		next_probe_at swap_count_7d last_swap_at last_probe_at auth_consecutive_failures astra_consecutive_failures
-		astra_consecutive_successes astra_next_probe_at updated_at consecutive_429s harvest_attempts`)
+		astra_consecutive_successes astra_next_probe_at updated_at consecutive_429s`)
 }
 
 func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
@@ -31,7 +31,7 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 			"a.deleted_at IS NULL",
 			"a.platform = 'openai' AND a.type = 'oauth'",
 			"a.parent_account_id IS NULL",
-			"s.state <> 'pending_replace' OR s.probe_mode = 'harvest'",
+			"AND s.state <> 'pending_replace'",
 			"a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > $1",
 			"WHERE c.account_id = a.id AND c.manual_paused",
 			"a.status = 'active' OR (a.status = 'error' AND EXISTS",
@@ -62,7 +62,7 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		}
 		rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
 			int64(12), "on_duty", int64(3), int64(4), "qualification", 1, 2,
-			nil, nil, nil, now, 1, nil, now, 0, 0, 0, nil, now, 5, 0)
+			nil, nil, nil, now, 1, nil, now, 0, 0, 0, nil, now, 5)
 		mock.ExpectQuery("due").WithArgs(now, expectedLimit).WillReturnRows(rows).RowsWillBeClosed()
 		result, queryErr := repo.ListDueOpenAIDowngradeStates(context.Background(), now, limit)
 		require.NoError(t, queryErr)
@@ -76,34 +76,6 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		require.Equal(t, 5, result[0].Consecutive429s)
 		require.NoError(t, mock.ExpectationsWereMet())
 	}
-}
-
-func TestDowngradeDueQuerySelectsHarvestPendingReplaceOnly(t *testing.T) {
-	now := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
-	matcher := sqlmock.QueryMatcherFunc(func(_, actual string) error {
-		query := strings.Join(strings.Fields(actual), " ")
-		require.Contains(t, query,
-			"AND (s.state <> 'pending_replace' OR s.probe_mode = 'harvest')")
-		require.NotContains(t, query, "AND s.state <> 'pending_replace'")
-		return nil
-	})
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
-	require.NoError(t, err)
-	defer db.Close()
-
-	repo := &openAIDowngradeProbeRepository{db: db}
-	rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
-		int64(21), "pending_replace", nil, nil, "harvest", 0, 0,
-		nil, nil, nil, now, 0, nil, now, 0, 0, 0, nil, now, 0, 1)
-	mock.ExpectQuery("due").WithArgs(now, 10).WillReturnRows(rows).RowsWillBeClosed()
-
-	result, queryErr := repo.ListDueOpenAIDowngradeStates(context.Background(), now, 10)
-	require.NoError(t, queryErr)
-	require.Len(t, result, 1)
-	require.Equal(t, "pending_replace", result[0].State)
-	require.Equal(t, "harvest", result[0].ProbeMode)
-	require.Equal(t, 1, result[0].HarvestAttempts)
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDowngradeDueQueryErrorsAndEmptyResult(t *testing.T) {
@@ -123,7 +95,7 @@ func TestDowngradeDueQueryErrorsAndEmptyResult(t *testing.T) {
 				expectation.WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(1)).RowsWillBeClosed()
 			case "iterate":
 				rows := sqlmock.NewRows(downgradeDueColumns()).AddRow(
-					1, "on_duty", nil, nil, "normal", 0, 0, nil, nil, nil, now, 0, nil, nil, 0, 0, 0, nil, now, 0, 0)
+					1, "on_duty", nil, nil, "normal", 0, 0, nil, nil, nil, now, 0, nil, nil, 0, 0, 0, nil, now, 0)
 				expectation.WillReturnRows(rows.RowError(0, dbErr)).RowsWillBeClosed()
 			default:
 				expectation.WillReturnRows(sqlmock.NewRows(downgradeDueColumns())).RowsWillBeClosed()

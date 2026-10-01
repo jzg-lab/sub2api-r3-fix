@@ -49,24 +49,25 @@
 - 落点 A：probe.go:1254-1266（qualification 连败/reenable 一击退出，事件
   `replace_required{reason:"qualification_failed"}`）
 - 落点 B：probe.go:1538-1565 finishReplacement（sol 针仍降智，事件 `replace_required{swap_count_7d}`）
-- 落点 C：harvest.go:309-341 abandonHarvest（事件 `harvest_abandoned{reason}`；reason=
-  `credentials_invalid`=401 类 / `account_level_degraded`=账号级）
+- 落点 C：~~harvest.go abandonHarvest~~——已随打票线整体删除（2026-10-02），
+  pending_replace 写点收敛为 A+B；401 类判据改由 mutation.Results 的
+  ClassifyOpenAIDowngradeProxyOutcome（auth_error）承担
 - **钩子挂点：commit_svc.go:424-433 `if committed` 块**——三条路径全部经 staged mutation
   在此一次性提交，判死必 committed==true。可用信息：mutation.State / **mutation.Events
   （reason 现成的入口过滤器）** / mutation.Results（可套 ClassifyOpenAIDowngradeProxyOutcome
   五分类复核，注意实际函数名是 ProxyOutcome 不是任务书写的 ProbeResult，probe.go:313-336）/
   mutation.Schedulable / account 快照（RateLimitResetAt）。
-- **入口过滤（精确规则）**：Events 含 harvest_abandoned+reason=credentials_invalid → 排除；
+- **入口过滤（精确规则）**：mutation.Results 复核含 auth_error（401/403 类；原
+  harvest_abandoned+credentials_invalid 判据随打票线删除）→ 排除；
   account.RateLimitResetAt 在未来 → 排除（429 永不导致判死，只动 rate_limited_at 两列
-  account_repo.go:2341-2368）；其余 pending_replace 提交 → 入区（含 account_level_degraded）。
+  account_repo.go:2341-2368）；其余 pending_replace 提交 → 入区。
 - auth 两振出局**不落 pending_replace**（落 status=error 线，probe.go:2016 SetError）——
   不需要额外过滤，天然不在视野内。
 
-**⚠ 冲突：maybeAutoHarvestDead（probe.go:832-845）已在抢同一批号。** 每分钟扫
-status=active 的 pending_replace 号，静默期（NextProbeAt，2h-24h）满即自动拉进打票线
-（改 probe_mode=harvest、state=on_duty、迁动态桶）。**救治区入区转换必须让它让位**
-——在 maybeAutoHarvestDead 判定处加救治成员资格闸（救治中的号不进打票线），否则判死
-2h-24h 后号被抢走。出区（转正/疑似账号级撤调度/人工了断）后恢复原语义。
+**✅ 原冲突（maybeAutoHarvestDead 抢号）已消除**：打票线于 2026-10-02 整体删除
+（用户裁定），migration 248 把 probe_mode CHECK 收窄为无 'harvest' 值，抢号状态机
+不复存在，让位闸随之作废。pending_replace 号保持 ListDue SQL 排除 + 7 天防御性
+让位排远；唯一救援线 = 手动启用（reenable）/ 救治区。
 - reconcile（schedule.go:103-179）不排 pending_replace 但要求末针=429——边缘竞态由
   入口②对账清扫兜住。
 - **调度资格验证成立**：schedulableAccountsQuery（account_repo.go:2048-2067）无任何探针
@@ -96,5 +97,5 @@ status=active 的 pending_replace 号，静默期（NextProbeAt，2h-24h）满�
 ## 实现顺序修正（依 Phase 0 结论）
 
 Phase 1（插件 0.3.0）与 Phase 2（fork proto+状态端点+桥）解耦可并行；Phase 3 编排器
-依赖 0.3 钩子结论与 0.4 通道；**新增前置项：maybeAutoHarvestDead 让位闸必须与入区转换
-同一提交落地**（否则救治号 2h 后被抢）。种子调用直接用 TestAccountConnection，无需新载体。
+依赖 0.3 钩子结论与 0.4 通道；~~让位闸前置项~~已作废（打票线整体删除，2026-10-02）。
+种子调用直接用 TestAccountConnection，无需新载体。
