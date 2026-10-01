@@ -111,8 +111,9 @@ type OpenAIRescueLane struct {
 	// seed 种子流量载体 = TestAccountConnection service 直调（Phase 0.1 定案）。
 	// nil 时跳过种子（插件探针自愈等第一笔真实流量再起）。
 	seed func(ctx context.Context, accountID int64) error
-	// probeStates 批量探针状态源（对账清扫用）；nil 时清扫不补进新号。
-	probeStates func(ctx context.Context, accountIDs []int64) (map[int64]string, error)
+	// probeStates 批量探针健康快照源（对账清扫用：补进判死复核 + 转正收敛
+	// 都需要 State+ProbeMode）；nil 时清扫不补进新号、不做转正收敛。
+	probeStates func(ctx context.Context, accountIDs []int64) (map[int64]OpenAIProbeHealthSnapshot, error)
 	// bridge 插件桥状态源（task 3.5 撤调/恢复的数据依据）；nil 时清扫不碰
 	// 调度撤复（标签照常由健康列表计算，只是不自动撤）。
 	bridge func(ctx context.Context) *PluginBridgeStatus
@@ -147,10 +148,10 @@ func NewOpenAIRescueLane(
 }
 
 // NewOpenAIRescueLaneSeedAdapter 把 AccountTestService 包成种子载体
-//（design 0.1 定案：TestAccountConnection service 直调，OAuth 分支目标与
+// （design 0.1 定案：TestAccountConnection service 直调，OAuth 分支目标与
 // 业务转发同 URL，经插件 Forward 流给探针喂模板；不校验账号死活）。
 // 复用 RunTestBackground 的内存 gin 伪造与 SSE 结果解析。nil 服务返回 nil
-//（编排器按无种子运行，插件探针自愈等真实流量再起）。
+// （编排器按无种子运行，插件探针自愈等真实流量再起）。
 func NewOpenAIRescueLaneSeedAdapter(
 	testService *AccountTestService,
 ) func(ctx context.Context, accountID int64) error {
@@ -423,6 +424,64 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 	return nil
 }
 
+// ---------- 转正（task 3.6：考证通过 → 改绑回原池组 → 清标记 → 复活徽标） ----------
+
+// GraduateRescue 复活转正（两调用方：考证通过急挂钩 + 对账清扫崩溃窗收敛）：
+//  1. 重读账号取标记；无标记 → nil（幂等：钩子与清扫可能并发同号，先到者
+//     转正、后到者空转）
+//  2. 先改绑回原池组再清标记（绑-first：中途崩溃时标记在场 + 探针态仍是
+//     on_duty+normal，下轮清扫按同一判据收敛转正，不产生隐形号）
+//  3. 单次 UpdateExtra 原子完成：清救治标记 + 清疑似标记 + 打永久复活徽标
+//     （rescued_at）+ 复活计数 +1（计数读新写旧，并发双写都写 n+1，良性竞态）
+//  4. rescue_graduated 事件（basis 区分 qualification_pass / sweep_converge），
+//     事件失败只记日志——转正写已落库，不能因事件账翻盘
+//
+// 转正是出口，不做 enabled 闸——开关关掉的瞬间已在区的号照样允许毕业。
+func (l *OpenAIRescueLane) GraduateRescue(ctx context.Context, accountID int64, basis string) error {
+	if l == nil {
+		return errors.New("rescue lane is not available")
+	}
+	account, err := l.accounts.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	marker := GetOpenAIRescueLaneMarker(account)
+	if marker == nil {
+		return nil
+	}
+	if err := l.accounts.BindGroups(ctx, accountID, marker.OrigGroupIDs); err != nil {
+		return fmt.Errorf("rebind orig groups: %w", err)
+	}
+	count := 1
+	if n, ok := parseOpenAIRescueInt(account.Extra[openAIRescueRescueCountKey]); ok {
+		count = int(n) + 1
+	}
+	if err := l.accounts.UpdateExtra(ctx, accountID, map[string]any{
+		openAIRescueLaneExtraKey:      nil,
+		openAIRescueSuspectedExtraKey: false,
+		openAIRescueRescuedAtExtraKey: l.now().UTC().Format(time.RFC3339),
+		openAIRescueRescueCountKey:    count,
+	}); err != nil {
+		return fmt.Errorf("stamp rescue badge: %w", err)
+	}
+	if l.events != nil {
+		details := map[string]any{
+			"basis":          basis,
+			"orig_group_ids": marker.OrigGroupIDs,
+			"orig_priority":  marker.OrigPriority,
+			"rescue_count":   count,
+		}
+		if err := l.events.AppendOpenAIDowngradeEvent(ctx, accountID, account.ProxyID,
+			OpenAIDowngradeEventRescueGraduated, details); err != nil {
+			slog.Warn("openai_rescue_graduate_event_failed",
+				"account_id", accountID, "error", err)
+		}
+	}
+	slog.Info("openai_rescue_graduated",
+		"account_id", accountID, "basis", basis, "rescue_count", count)
+	return nil
+}
+
 // ---------- 对账清扫（task 3.3：周期扫描够格未进区→补进；标记-first 崩溃窗自愈） ----------
 
 // openAIRescueSuspectedExtraKey 疑似账号级撤调标记（task 3.5 写入；清扫侧
@@ -448,10 +507,11 @@ func GetOpenAIRescueSuspected(account *Account) bool {
 	return false
 }
 
-// SetProbeStateSource 注入批量探针状态源（真实现 = 探针仓库的健康快照批量
-// 查询）。未注入时清扫只做标记侧自愈，不补进新号（自动钩子照常工作）。
+// SetProbeStateSource 注入批量探针健康快照源（真实现 = 探针仓库的健康快照
+// 批量查询）。未注入时清扫只做标记侧自愈，不补进新号、不做转正收敛
+// （自动钩子与转正急挂钩照常工作）。
 func (l *OpenAIRescueLane) SetProbeStateSource(
-	fn func(ctx context.Context, accountIDs []int64) (map[int64]string, error),
+	fn func(ctx context.Context, accountIDs []int64) (map[int64]OpenAIProbeHealthSnapshot, error),
 ) {
 	if l == nil {
 		return
@@ -518,6 +578,10 @@ func (l *OpenAIRescueLane) sweepLoop() {
 }
 
 // RunReconcileSweep 一轮对账清扫（公开以便测试与启动确定性检查）：
+//   - 转正收敛（task 3.6）：标记在场 + 探针态已回 on_duty+normal = 考证
+//     已过但急挂钩崩溃窗残留（或钩子注入前老进程升上来的残留）→
+//     GraduateRescue{basis: sweep_converge}。on_duty+qualification = 考证针
+//     还在飞不收敛；考证挂了回判死的号转正条件已不成立，维持救治。
 //   - 补进：OpenAI 平台、资格通过、status=active（auth 两振出局走 SetError，
 //     status!=active 天然排除凭据死）、无标记、探针态=pending_replace、限流
 //     未持有 → EnterRescue{trigger: reconcile}
@@ -527,6 +591,8 @@ func (l *OpenAIRescueLane) sweepLoop() {
 //     疑似标记+事件（幂等：标记在场不重撤）；疑似标记在场且回暖（退避后
 //     新过针）或插件状态丢失（账号从桥消失）→ 清标记+恢复调度+事件。
 //     桥缺席/解析失败 → 不碰调度撤复（无证据不动状态机）。
+//
+// healed 计数含转正（转正是把号送回原位的最终自愈动作）。
 func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, healed, withdrawn int, err error) {
 	if l == nil {
 		return 0, 0, 0, nil
@@ -550,6 +616,9 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			haveBridge = true
 		}
 	}
+	// 第一遍只分拣：在区号（标记在场）与候选号（可能补进）分开收集，
+	// 探针快照一次批量取回后统一处置。
+	var marked []*Account
 	var candidateIDs []int64
 	for i := range accounts {
 		if err := ctx.Err(); err != nil {
@@ -560,52 +629,7 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			continue
 		}
 		if GetOpenAIRescueLaneMarker(account) != nil {
-			// 已入区：绑定自愈 + 撤调/恢复（桥证据），不重复入区。
-			bindingOK := false
-			for _, id := range account.GroupIDs {
-				if id == cfg.GroupID {
-					bindingOK = true
-					break
-				}
-			}
-			if !bindingOK {
-				if err := l.accounts.BindGroups(ctx, account.ID, []int64{cfg.GroupID}); err != nil {
-					slog.Warn("openai_rescue_sweep_heal_bind_failed",
-						"account_id", account.ID, "error", err)
-				} else {
-					healed++
-				}
-			}
-			if haveBridge {
-				var bridgeAccount *OpenAIPluginBridgeAccount
-				if prober != nil {
-					bridgeAccount = prober.Accounts[account.ID]
-				}
-				// 撤调优先于调度自愈：连错进退避的号先停烧额度。
-				if bridgeAccount != nil && bridgeAccount.InBackoff && !GetOpenAIRescueSuspected(account) {
-					if l.withdrawScheduling(ctx, account, bridgeAccount) {
-						withdrawn++
-					}
-					continue
-				}
-				if GetOpenAIRescueSuspected(account) {
-					if recovered, basis := rescueLaneRecoveryEvidence(bridgeAccount); recovered {
-						if l.restoreScheduling(ctx, account, bridgeAccount, basis) {
-							healed++
-						}
-					}
-					// 无回暖证据：维持撤调（有意状态，不是崩溃残留）。
-					continue
-				}
-			}
-			if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
-				if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
-					slog.Warn("openai_rescue_sweep_heal_sched_failed",
-						"account_id", account.ID, "error", err)
-				} else {
-					healed++
-				}
-			}
+			marked = append(marked, account)
 			continue
 		}
 		// 凭据死（auth 两振 SetError）与禁用号不补进；限流持有中本轮跳过。
@@ -617,15 +641,91 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		}
 		candidateIDs = append(candidateIDs, account.ID)
 	}
-	if len(candidateIDs) == 0 || l.probeStates == nil {
-		return entered, healed, withdrawn, nil
+	// 批量探针快照：转正收敛（State+ProbeMode）与补进复核（State）共用一次
+	// 查询。失败时标记侧自愈照常（不依赖探针态），补进与转正收敛本轮放弃、
+	// err 上抛记日志下轮重试。
+	var states map[int64]OpenAIProbeHealthSnapshot
+	if (len(marked) > 0 || len(candidateIDs) > 0) && l.probeStates != nil {
+		ids := make([]int64, 0, len(marked)+len(candidateIDs))
+		for _, account := range marked {
+			ids = append(ids, account.ID)
+		}
+		ids = append(ids, candidateIDs...)
+		fetched, fetchErr := l.probeStates(ctx, ids)
+		if fetchErr != nil {
+			slog.Warn("openai_rescue_sweep_states_failed", "error", fetchErr)
+			err = fetchErr
+		} else {
+			states = fetched
+		}
 	}
-	states, err := l.probeStates(ctx, candidateIDs)
-	if err != nil {
-		return entered, healed, withdrawn, err
+	for _, account := range marked {
+		if err := ctx.Err(); err != nil {
+			return entered, healed, withdrawn, err
+		}
+		// 转正收敛（design 0.4 出口判据）：标记在场 + 探针态已回 on_duty+normal。
+		if snapshot, ok := states[account.ID]; ok &&
+			snapshot.State == OpenAIDowngradeStateOnDuty && snapshot.ProbeMode == "normal" {
+			if gradErr := l.GraduateRescue(ctx, account.ID, "sweep_converge"); gradErr != nil {
+				slog.Warn("openai_rescue_sweep_graduate_failed",
+					"account_id", account.ID, "error", gradErr)
+			} else {
+				healed++
+			}
+			continue
+		}
+		// 已入区：绑定自愈 + 撤调/恢复（桥证据），不重复入区。
+		bindingOK := false
+		for _, id := range account.GroupIDs {
+			if id == cfg.GroupID {
+				bindingOK = true
+				break
+			}
+		}
+		if !bindingOK {
+			if err := l.accounts.BindGroups(ctx, account.ID, []int64{cfg.GroupID}); err != nil {
+				slog.Warn("openai_rescue_sweep_heal_bind_failed",
+					"account_id", account.ID, "error", err)
+			} else {
+				healed++
+			}
+		}
+		if haveBridge {
+			var bridgeAccount *OpenAIPluginBridgeAccount
+			if prober != nil {
+				bridgeAccount = prober.Accounts[account.ID]
+			}
+			// 撤调优先于调度自愈：连错进退避的号先停烧额度。
+			if bridgeAccount != nil && bridgeAccount.InBackoff && !GetOpenAIRescueSuspected(account) {
+				if l.withdrawScheduling(ctx, account, bridgeAccount) {
+					withdrawn++
+				}
+				continue
+			}
+			if GetOpenAIRescueSuspected(account) {
+				if recovered, basis := rescueLaneRecoveryEvidence(bridgeAccount); recovered {
+					if l.restoreScheduling(ctx, account, bridgeAccount, basis) {
+						healed++
+					}
+				}
+				// 无回暖证据：维持撤调（有意状态，不是崩溃残留）。
+				continue
+			}
+		}
+		if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
+			if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
+				slog.Warn("openai_rescue_sweep_heal_sched_failed",
+					"account_id", account.ID, "error", err)
+			} else {
+				healed++
+			}
+		}
 	}
 	for _, id := range candidateIDs {
-		if states[id] != OpenAIDowngradeStatePendingReplace {
+		if err := ctx.Err(); err != nil {
+			return entered, healed, withdrawn, err
+		}
+		if snapshot, ok := states[id]; !ok || snapshot.State != OpenAIDowngradeStatePendingReplace {
 			continue
 		}
 		if enterErr := l.EnterRescue(ctx, id, OpenAIRescueTriggerReconcile); enterErr != nil {
@@ -637,7 +737,7 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		}
 		entered++
 	}
-	return entered, healed, withdrawn, nil
+	return entered, healed, withdrawn, err
 }
 
 // rescueLaneRecoveryEvidence 疑似撤调的回暖证据裁决（纯函数）：

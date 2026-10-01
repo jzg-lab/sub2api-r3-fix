@@ -220,13 +220,17 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
 	// 救治区编排器（r17ax Phase 3）：三入口（自动钩子/手动端点/对账清扫）
-	// 汇入 EnterRescue。config 暂接安全缺省（enabled=false——上线默认关），
-	// settings 热更新在 3.8 落地时替换；种子 = TestAccountConnection 内存
-	// 直调（design 0.1，经插件 Forward 流喂探针模板）。
+	// 汇入 EnterRescue。config 走 settings 热更新（openai_rescue_lane 键，
+	// 每轮清扫/每次判死提交重读，改库即生效；键缺失 = 安全缺省关态）；
+	// 种子 = TestAccountConnection 内存直调（design 0.1，经插件 Forward 流
+	// 喂探针模板）。
 	openAIRescueLane := service.NewOpenAIRescueLane(
 		accountRepository,
 		openAIDowngradeProbeRepository,
-		service.DefaultOpenAIRescueLaneConfig,
+		func() service.OpenAIRescueLaneConfig {
+			return service.ResolveOpenAIRescueLaneConfig(
+				settingService.GetOpenAIRescueLaneSettings(context.Background()))
+		},
 		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
 	)
 	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
@@ -234,14 +238,14 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），
 	// 与健康列表同款启动期断言；断言失败时清扫退化为只做标记侧自愈。
 	if healthLister, ok := openAIDowngradeProbeRepository.(service.OpenAIProbeHealthLister); ok {
-		openAIRescueLane.SetProbeStateSource(func(ctx context.Context, accountIDs []int64) (map[int64]string, error) {
+		openAIRescueLane.SetProbeStateSource(func(ctx context.Context, accountIDs []int64) (map[int64]service.OpenAIProbeHealthSnapshot, error) {
 			snapshots, err := healthLister.ListOpenAIProbeHealthSnapshots(ctx, accountIDs)
 			if err != nil {
 				return nil, err
 			}
-			states := make(map[int64]string, len(snapshots))
+			states := make(map[int64]service.OpenAIProbeHealthSnapshot, len(snapshots))
 			for _, snapshot := range snapshots {
-				states[snapshot.AccountID] = snapshot.State
+				states[snapshot.AccountID] = snapshot
 			}
 			return states, nil
 		})

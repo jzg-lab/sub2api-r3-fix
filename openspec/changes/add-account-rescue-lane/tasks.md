@@ -104,11 +104,22 @@
       新过针）→清标记+恢复调度+事件 rescue_recovered{basis}；无证据维持撤调
       （不是崩溃残留）。桥缺席/解析失败不碰调度撤复。RunReconcileSweep 签名
       扩为 entered/healed/withdrawn 三计数。7 新用例）
-- [ ] 3.6 转正后处理：reenable 通过后用快照 BindGroups 改绑回原池组（真实组 id，不用
-       openai-default）+ 打复活标记（Extra rescued_at 永久 + 复活次数+1；不清除不重置）
+- [x] 3.6 转正后处理：GraduateRescue（考证通过急挂钩 openai_downgrade_probe 资格
+       认证 1 针通过块内同步直调，错误只记日志绝不反向影响考证提交 + 清扫崩溃窗收敛
+       RunReconcileSweep 判据「标记在场+on_duty+normal→basis=sweep_converge」；绑-
+       first 再清标记，中途崩留下轮按同判据收敛）。改绑回快照原池组（真实组 id，
+       不用 openai-default）+ 单次 UpdateExtra 原子打复活标记（Extra rescued_at 永久
+       + rescue_count+1 读新写旧良性竞态 + 清 lane/疑似标记）。probeStates 通道扩为
+       OpenAIProbeHealthSnapshot 全量快照（State+ProbeMode 都要）。转正不做 enabled
+       闸（出口永远合法）。6 新用例：改绑打标/幂等空转/计数递增/清扫收敛/考证中
+       不收敛/判死回退不收敛
 - [ ] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
-- [ ] 3.8 配置项 rescue_lane.*（enabled/group/consecutive_clean_passes/
-       reconcile_interval）+ 缺省安全值（enabled=false 上线默认关）
+- [x] 3.8 配置项 rescue_lane.*：settings 键 openai_rescue_lane（单 JSON 块，
+       与 openai_operations 同形态）——enabled/group_id/consecutive_clean_passes/
+       reconcile_interval_minutes。GetOpenAIRescueLaneSettings 容错读（键缺失/空/
+       坏 JSON/校验不过→安全缺省关态）+ Set 校验落库 + ResolveOpenAIRescueLaneConfig
+       （分钟→Duration、零值回退、err 强制关态）。wire 换 settings 闭包（每轮清扫/
+       每次判死提交重读，无缓存改库即热生效——生产 flip 不重启）。5 新用例
 - [ ] 3.9 编排器状态机测试（入口过滤/对账/标签流转/撤调恢复/转正改绑/删除清位）
 
 ## Phase 4 — fork 前端

@@ -566,10 +566,10 @@ func TestRunReconcileSweepEntersPendingReplaceCandidate(t *testing.T) {
 	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(53)}}
 	sink := &rescueLaneSink{}
 	lane := newRescueLaneTestLane(repo, sink)
-	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]string, error) {
-		states := make(map[int64]string, len(ids))
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
 		for _, id := range ids {
-			states[id] = OpenAIDowngradeStatePendingReplace
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStatePendingReplace}
 		}
 		return states, nil
 	})
@@ -599,11 +599,11 @@ func TestRunReconcileSweepSkipsIneligibleCandidates(t *testing.T) {
 	repo := &rescueLaneRepo{roster: []Account{*authDead, *rateHeld, *onDuty}}
 	var asked []int64
 	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
-	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]string, error) {
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
 		asked = append(asked, ids...)
-		states := make(map[int64]string, len(ids))
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
 		for _, id := range ids {
-			states[id] = OpenAIDowngradeStateOnDuty
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStateOnDuty}
 		}
 		return states, nil
 	})
@@ -857,5 +857,180 @@ func TestRescueLaneRecoveryEvidenceMatrix(t *testing.T) {
 				t.Fatalf("evidence=%v basis=%q, want %v/%q", got, basis, tc.want, tc.wantBasis)
 			}
 		})
+	}
+}
+
+// ---------- 转正（task 3.6：急挂钩 GraduateRescue + 清扫崩溃窗收敛） ----------
+
+func TestGraduateRescueRebindsAndStamps(t *testing.T) {
+	account := rescueLaneSweepAccount(71)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3, 5}, OrigPriority: 7,
+	})
+	account.GroupIDs = []int64{99}
+	account.Extra[openAIRescueSuspectedExtraKey] = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+	fixed := time.Now().UTC().Truncate(time.Second)
+	lane.now = func() time.Time { return fixed }
+
+	if err := lane.GraduateRescue(context.Background(), 71, "qualification_pass"); err != nil {
+		t.Fatalf("GraduateRescue: %v", err)
+	}
+	// 改绑回原池组（快照还原），不再挂救治组。
+	if len(repo.binds) != 1 || len(repo.binds[0]) != 2 ||
+		repo.binds[0][0] != 3 || repo.binds[0][1] != 5 {
+		t.Fatalf("binds=%v, want rebind to orig groups [3 5]", repo.binds)
+	}
+	saved := repo.resolve(71)
+	if GetOpenAIRescueLaneMarker(saved) != nil {
+		t.Fatalf("lane marker must be cleared after graduation")
+	}
+	if GetOpenAIRescueSuspected(saved) {
+		t.Fatalf("suspected marker must be cleared after graduation")
+	}
+	rescuedAt, ok := saved.Extra[openAIRescueRescuedAtExtraKey].(string)
+	if !ok || rescuedAt != fixed.Format(time.RFC3339) {
+		t.Fatalf("rescued_at=%v, want %s", saved.Extra[openAIRescueRescuedAtExtraKey], fixed.Format(time.RFC3339))
+	}
+	if saved.Extra[openAIRescueRescueCountKey] != 1 {
+		t.Fatalf("rescue_count=%v, want 1", saved.Extra[openAIRescueRescueCountKey])
+	}
+	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueGraduated {
+		t.Fatalf("events=%+v, want one rescue_graduated", sink.events)
+	}
+	if sink.events[0].details["basis"] != "qualification_pass" ||
+		sink.events[0].details["rescue_count"] != 1 {
+		t.Fatalf("details=%+v, want basis=qualification_pass count=1", sink.events[0].details)
+	}
+}
+
+func TestGraduateRescueIdempotentWithoutMarker(t *testing.T) {
+	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(72)}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+
+	if err := lane.GraduateRescue(context.Background(), 72, "sweep_converge"); err != nil {
+		t.Fatalf("GraduateRescue on unmarked account: %v", err)
+	}
+	if len(repo.binds) != 0 || len(repo.extraSets) != 0 || len(sink.events) != 0 {
+		t.Fatalf("binds=%d extraSets=%d events=%d, want zero mutations (idempotent)",
+			len(repo.binds), len(repo.extraSets), len(sink.events))
+	}
+}
+
+func TestGraduateRescueIncrementsRescueCount(t *testing.T) {
+	account := rescueLaneSweepAccount(73)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerReconcile,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.Extra[openAIRescueRescueCountKey] = 2 // 二进宫：此前已救活过一次
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	if err := lane.GraduateRescue(context.Background(), 73, "qualification_pass"); err != nil {
+		t.Fatalf("GraduateRescue: %v", err)
+	}
+	if got := repo.resolve(73).Extra[openAIRescueRescueCountKey]; got != 3 {
+		t.Fatalf("rescue_count=%v, want 3", got)
+	}
+}
+
+// rescueLaneSweepLaneWithStates 注入批量探针快照源的清扫测试形态。
+func rescueLaneSweepLaneWithStates(
+	repo *rescueLaneRepo, sink *rescueLaneSink, states map[int64]OpenAIProbeHealthSnapshot,
+) *OpenAIRescueLane {
+	lane := newRescueLaneTestLane(repo, sink)
+	lane.SetProbeStateSource(func(context.Context, []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		return states, nil
+	})
+	return lane
+}
+
+func TestRunReconcileSweepGraduatesLeftoverMarker(t *testing.T) {
+	// 急挂钩崩溃窗残留：考证已过（on_duty+normal）但标记还在 → 清扫收敛转正。
+	account := rescueLaneSweepAccount(74)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := rescueLaneSweepLaneWithStates(repo, sink, map[int64]OpenAIProbeHealthSnapshot{
+		74: {AccountID: 74, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal"},
+	})
+
+	entered, healed, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 1 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/1/nil", entered, healed, err)
+	}
+	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 3 {
+		t.Fatalf("binds=%v, want rebind to orig group [3]", repo.binds)
+	}
+	if GetOpenAIRescueLaneMarker(&repo.roster[0]) != nil {
+		t.Fatalf("marker must be cleared by sweep graduation")
+	}
+	if len(sink.events) != 1 || sink.events[0].details["basis"] != "sweep_converge" {
+		t.Fatalf("events=%+v, want rescue_graduated{basis:sweep_converge}", sink.events)
+	}
+}
+
+func TestRunReconcileSweepHoldsGraduationMidQualification(t *testing.T) {
+	// on_duty+qualification：考证针还在飞——不收敛，维持救治。
+	account := rescueLaneSweepAccount(75)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := rescueLaneSweepLaneWithStates(repo, sink, map[int64]OpenAIProbeHealthSnapshot{
+		75: {AccountID: 75, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification"},
+	})
+
+	entered, healed, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	if len(repo.binds) != 0 || len(repo.extraSets) != 0 || len(sink.events) != 0 {
+		t.Fatalf("binds=%d extraSets=%d events=%d, want no action mid-qualification",
+			len(repo.binds), len(repo.extraSets), len(sink.events))
+	}
+	if GetOpenAIRescueLaneMarker(&repo.roster[0]) == nil {
+		t.Fatalf("marker must persist while qualification is in flight")
+	}
+}
+
+func TestRunReconcileSweepDoesNotGraduateReplacedAccount(t *testing.T) {
+	// pending_replace+normal：考证挂了回判死——转正条件不成立，维持救治。
+	account := rescueLaneSweepAccount(76)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := rescueLaneSweepLaneWithStates(repo, sink, map[int64]OpenAIProbeHealthSnapshot{
+		76: {AccountID: 76, State: OpenAIDowngradeStatePendingReplace, ProbeMode: "normal"},
+	})
+
+	entered, healed, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil", entered, healed, err)
+	}
+	if GetOpenAIRescueLaneMarker(&repo.roster[0]) == nil {
+		t.Fatalf("marker must persist for replaced account")
+	}
+	if len(repo.binds) != 0 {
+		t.Fatalf("binds=%v, want none（挂救治组不动）", repo.binds)
 	}
 }

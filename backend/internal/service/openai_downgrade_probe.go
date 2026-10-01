@@ -1218,6 +1218,16 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
 			return err
 		}
+		// r17ax 3.6 转正急挂钩：考证通过即刻改绑回原池组 + 清标记 + 打复活
+		// 徽标。同步直调但错误只记日志——转正是出口（design 0.4），不得反向
+		// 影响考证通过的提交；失败由对账清扫按同一判据（on_duty+normal+
+		// 标记在场）收敛兜底。
+		if r.rescueLane != nil {
+			if err := r.rescueLane.GraduateRescue(ctx, state.AccountID, "qualification_pass"); err != nil {
+				slog.Warn("openai_rescue_graduate_hook_failed",
+					"account_id", state.AccountID, "error", err)
+			}
+		}
 	}
 	if state.ProbeMode == "qualification" && transition.Circuit {
 		state.State = OpenAIDowngradeStatePendingReplace
