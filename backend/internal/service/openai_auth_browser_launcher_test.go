@@ -52,15 +52,22 @@ func TestOpenAIAuthBrowserLocalIngress(t *testing.T) {
 		proxy *Proxy
 		want  string
 	}{
-		{"static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17921"},
-		{"static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17924"},
-		{"first upstream with unrelated id", &Proxy{ID: 901, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17921"},
-		{"second upstream with unrelated id", &Proxy{ID: 42, Protocol: "SOCKS5H", Host: "127.0.0.1", Port: 17912}, "http://127.0.0.1:17922"},
-		{"third upstream with unrelated id", &Proxy{ID: 3, Protocol: "socks5h", Host: "127.0.0.1", Port: 17913}, "http://127.0.0.1:17923"},
-		{"last upstream with unrelated id", &Proxy{ID: 0, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17924"},
-		{"mapped upstream credentials stay local", &Proxy{ID: 99, Protocol: "socks5h", Host: "127.0.0.1", Port: 17912, Username: "u", Password: "p"}, "http://127.0.0.1:17922"},
+		{"static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17931"},
+		{"static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17934"},
+		{"first upstream with unrelated id", &Proxy{ID: 901, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17931"},
+		{"second upstream with unrelated id", &Proxy{ID: 42, Protocol: "SOCKS5H", Host: "127.0.0.1", Port: 17912}, "http://127.0.0.1:17932"},
+		{"third upstream with unrelated id", &Proxy{ID: 3, Protocol: "socks5h", Host: "127.0.0.1", Port: 17913}, "http://127.0.0.1:17933"},
+		{"last upstream with unrelated id", &Proxy{ID: 0, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17934"},
+		{"mapped upstream credentials stay local", &Proxy{ID: 99, Protocol: "socks5h", Host: "127.0.0.1", Port: 17912, Username: "u", Password: "p"}, "http://127.0.0.1:17932"},
+		{"mihomo static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17921}, "http://127.0.0.1:17931"},
+		{"mihomo static isp 14 (production shape with creds)", &Proxy{ID: 14, Protocol: "socks5h", Host: "127.0.0.1", Port: 17922, Username: "BbFiEuhMZFmD", Password: "MXiwT1UHek"}, "http://127.0.0.1:17932"},
+		{"mihomo static isp 15", &Proxy{ID: 15, Protocol: "socks5h", Host: "127.0.0.1", Port: 17923}, "http://127.0.0.1:17933"},
+		{"mihomo static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17924}, "http://127.0.0.1:17934"},
 		{"below mapping range", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17910}, "socks5h://127.0.0.1:17910"},
 		{"above mapping range", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17915}, "socks5h://127.0.0.1:17915"},
+		{"mihomo below range", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17920}, "socks5h://127.0.0.1:17920"},
+		{"mihomo above range", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17925}, "socks5h://127.0.0.1:17925"},
+		{"mihomo credentialed unmapped rejected", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17920, Username: "u"}, ""},
 		{"other host is not mapped", &Proxy{ID: 13, Protocol: "socks5h", Host: "192.0.2.1", Port: 17911}, "socks5h://192.0.2.1:17911"},
 		{"other protocol is not mapped", &Proxy{ID: 13, Protocol: "http", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17911"},
 		{"credentialed unmapped upstream rejected", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17910, Username: "u"}, ""},
@@ -131,7 +138,7 @@ func TestLauncherLaunchExecsScriptWithCorrectArgv(t *testing.T) {
 	if result.ProfileTag != "auth-"+state[:12] {
 		t.Fatalf("profile tag = %q", result.ProfileTag)
 	}
-	if result.ExitIngress != "http://127.0.0.1:17921" {
+	if result.ExitIngress != "http://127.0.0.1:17931" {
 		t.Fatalf("ingress = %q", result.ExitIngress)
 	}
 	if !strings.Contains(result.AuthURL, "state="+state) {

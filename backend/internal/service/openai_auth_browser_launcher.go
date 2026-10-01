@@ -81,17 +81,23 @@ func NewOpenAIAuthBrowserLauncher(
 }
 
 // openAIAuthBrowserLocalIngress 把业务桶映射到本机免认证入口。
-// 静态 ISP 桶（socks5h://127.0.0.1:17911-17914）远端要认证，Chrome 不支持
-// SOCKS5 认证——mihomo-buckets 已为四桶加了免认证监听口 17921-17924
-// （同 autossh 隧道同出口，只加认证终结层）。其余桶（novproxy 等）本就
-// 免认证，原样返回。
+// 静态 ISP 桶的业务口要认证（老 autossh socks5h://127.0.0.1:17911-17914、
+// r17ar 起 mihomo 原生 17921-17924 且监听带 users），Chrome 无法携带代理
+// 凭据——mihomo-buckets 为四桶另配免认证 Chrome 专用监听口 17931-17934
+// （同上游、同出口、同桶序，仅本机 127.0.0.1）。两代业务口按桶序映射到
+// 该系列；桶行自带凭据不影响映射（凭据留给网关业务路径用）。其余桶
+// （novproxy 等）本就免认证，原样返回。
 func openAIAuthBrowserLocalIngress(p *Proxy) string {
 	if p == nil {
 		return ""
 	}
-	if strings.EqualFold(p.Protocol, "socks5h") &&
-		p.Host == "127.0.0.1" && p.Port >= 17911 && p.Port <= 17914 {
-		return fmt.Sprintf("http://127.0.0.1:%d", p.Port+10)
+	if strings.EqualFold(p.Protocol, "socks5h") && p.Host == "127.0.0.1" {
+		switch {
+		case p.Port >= 17911 && p.Port <= 17914:
+			return fmt.Sprintf("http://127.0.0.1:%d", p.Port+20)
+		case p.Port >= 17921 && p.Port <= 17924:
+			return fmt.Sprintf("http://127.0.0.1:%d", p.Port+10)
+		}
 	}
 	// 带凭据的代理一律不行（无法安全传给 Chrome）；本地免认证口原样。
 	if p.Username != "" || p.Password != "" {
