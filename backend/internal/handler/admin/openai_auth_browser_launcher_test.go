@@ -2,7 +2,9 @@ package admin
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -32,16 +34,18 @@ func TestLaunchAuthBrowserReturnsProcessOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Gateway.AuthBrowserLauncher = tc.launcher
-			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
-				ID: "session-1", State: strings.Repeat("a", 64),
-				CodeVerifier: "test-verifier", ProxyID: 901,
-				Platform: service.PlatformOpenAI, CreatedAt: time.Now(),
-				RedirectURI: "https://chatgpt.com/api/auth/callback/login-web",
-			}}
-			repo := &oauthRouteProxyRepo{proxy: &service.Proxy{
+			proxy := &service.Proxy{
 				ID: 901, Status: service.StatusActive, Protocol: "socks5h",
 				Host: "127.0.0.1", Port: 17913,
+			}
+			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
+				ID: "session-1", State: strings.Repeat("a", 64),
+				CodeVerifier: strings.Repeat("b", 128), ProxyID: 901,
+				Platform: service.PlatformOpenAI, CreatedAt: time.Now(),
+				RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+				ProxyRouteHash: fmt.Sprintf("%x", sha256.Sum256([]byte(proxy.URL()))),
 			}}
+			repo := &oauthRouteProxyRepo{proxy: proxy}
 			handler := &OpenAIOAuthHandler{}
 			handler.SetAuthBrowserLauncher(service.NewOpenAIAuthBrowserLauncher(cfg, store, repo))
 			router := gin.New()
@@ -67,7 +71,9 @@ func TestLaunchAuthBrowserReturnsProcessOutcome(t *testing.T) {
 			require.True(t, body.Data.Launched)
 			require.False(t, body.Data.AlreadyRunning)
 			require.Equal(t, "launcher completed", body.Data.Output)
-			require.Equal(t, "http://127.0.0.1:17923", body.Data.ExitIngress)
+			require.Equal(t, "http://127.0.0.1:17933", body.Data.ExitIngress)
+			require.NotContains(t, response.Body.String(), strings.Repeat("a", 64))
+			require.NotContains(t, response.Body.String(), `"auth_url"`)
 		})
 	}
 }

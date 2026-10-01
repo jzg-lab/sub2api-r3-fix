@@ -124,6 +124,8 @@ backend/.installed
 tests
 !deploy/tests/
 !deploy/tests/**
+!deploy/auth-browser/tests/
+!deploy/auth-browser/tests/**
 CLAUDE.md
 .claude
 scripts

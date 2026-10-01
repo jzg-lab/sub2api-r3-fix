@@ -455,7 +455,6 @@ export async function launchAuthBrowser(
   profile_tag: string
   proxy_name: string
   exit_ingress: string
-  auth_url: string
   output: string
 }> {
   const { data } = await apiClient.post<{
@@ -464,7 +463,6 @@ export async function launchAuthBrowser(
     profile_tag: string
     proxy_name: string
     exit_ingress: string
-    auth_url: string
     output: string
   }>('/admin/openai/launch-auth-browser', { session_id: sessionId }, {
     // Allow the 5s preparation phase and 45s launcher deadline to return a result.

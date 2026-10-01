@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -16,6 +19,9 @@ import (
 )
 
 const defaultAuthBrowserLauncherTimeout = 45 * time.Second
+const openAIAuthBrowserStateLength = 64
+const openAIAuthBrowserCodeVerifierLength = 128
+const maxAuthBrowserLauncherOutput = 8 * 1024
 
 // =============================================================================
 // 授权浏览器直拉（方案A，2026-09-22 用户批准）
@@ -30,7 +36,7 @@ const defaultAuthBrowserLauncherTimeout = 45 * time.Second
 //   2) proxyRepo.GetByID 拿桶 → 映射本机免认证入口（带认证的 socks5h
 //      autossh 口 Chrome 用不了——Chrome --proxy-server 不支持 SOCKS5
 //      认证，统一走 mihomo 免认证监听口）
-//   3) exec launch.sh <state前12位> <auth_url> <本机入口> → Chrome 弹窗
+//   3) exec launch.sh <state指纹> <auth_url> <本机入口> → Chrome 弹窗
 //      （已带桶代理+授权链接+隔离配置+纽约时区）
 //
 // 安全边界：
@@ -91,7 +97,9 @@ func openAIAuthBrowserLocalIngress(p *Proxy) string {
 	if p == nil {
 		return ""
 	}
-	if strings.EqualFold(p.Protocol, "socks5h") && p.Host == "127.0.0.1" {
+	protocol := strings.ToLower(strings.TrimSpace(p.Protocol))
+	host := strings.TrimSpace(p.Host)
+	if protocol == "socks5h" && host == "127.0.0.1" {
 		switch {
 		case p.Port >= 17911 && p.Port <= 17914:
 			return fmt.Sprintf("http://127.0.0.1:%d", p.Port+20)
@@ -103,15 +111,77 @@ func openAIAuthBrowserLocalIngress(p *Proxy) string {
 	if p.Username != "" || p.Password != "" {
 		return ""
 	}
-	return p.Protocol + "://" + net_JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	switch protocol {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return ""
+	}
+	if host == "" || p.Port < 1 || p.Port > 65535 {
+		return ""
+	}
+	if strings.ContainsAny(host, " \t\r\n") {
+		return ""
+	}
+	if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
+		if !strings.HasPrefix(host, "[") || !strings.HasSuffix(host, "]") {
+			return ""
+		}
+		host = host[1 : len(host)-1]
+		if net.ParseIP(host) == nil {
+			return ""
+		}
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return ""
+	}
+	return protocol + "://" + net.JoinHostPort(host, strconv.Itoa(p.Port))
 }
 
-// net_JoinHostPort 避免 import net 只为一个 helper。
-func net_JoinHostPort(host, port string) string {
-	if strings.Contains(host, ":") {
-		return "[" + host + "]:" + port
+type boundedAuthBrowserOutput struct {
+	buffer    bytes.Buffer
+	mu        sync.Mutex
+	limit     int
+	truncated bool
+}
+
+func newBoundedAuthBrowserOutput() *boundedAuthBrowserOutput {
+	return &boundedAuthBrowserOutput{limit: maxAuthBrowserLauncherOutput}
+}
+
+func (b *boundedAuthBrowserOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	total := len(p)
+	remaining := b.limit - b.buffer.Len()
+	if remaining <= 0 {
+		b.truncated = b.truncated || total > 0
+		return total, nil
 	}
-	return host + ":" + port
+	if len(p) > remaining {
+		_, _ = b.buffer.Write(p[:remaining])
+		b.truncated = true
+		return total, nil
+	}
+	_, _ = b.buffer.Write(p)
+	return total, nil
+}
+
+func (b *boundedAuthBrowserOutput) text() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	output := strings.TrimSpace(b.buffer.String())
+	if b.truncated {
+		if output != "" {
+			output += "\n"
+		}
+		output += "[launcher output truncated]"
+	}
+	return output
 }
 
 // OpenAIAuthBrowserLaunchResult 启动结果（回显给前端确认弹窗文案）。
@@ -121,7 +191,6 @@ type OpenAIAuthBrowserLaunchResult struct {
 	ProfileTag     string `json:"profile_tag"`
 	ProxyName      string `json:"proxy_name"`
 	ExitIngress    string `json:"exit_ingress"`
-	AuthURL        string `json:"auth_url"`
 	Output         string `json:"output"`
 }
 
@@ -144,6 +213,31 @@ func (l *OpenAIAuthBrowserLauncher) releaseLaunch(sessionID string) {
 	l.mu.Unlock()
 }
 
+func validOpenAIAuthBrowserLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validOpenAIAuthBrowserState(state string) bool {
+	return validOpenAIAuthBrowserLowerHex(state, openAIAuthBrowserStateLength)
+}
+
+func validOpenAIAuthBrowserCodeVerifier(verifier string) bool {
+	return validOpenAIAuthBrowserLowerHex(verifier, openAIAuthBrowserCodeVerifierLength)
+}
+
+func openAIAuthBrowserProfileTag(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return fmt.Sprintf("auth-%x", sum)
+}
+
 // Launch 按授权会话直拉激活浏览器。sessionID 即生成链接时返回的
 // session_id（前端手里有，不用重新解析 URL）。
 func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string) (*OpenAIAuthBrowserLaunchResult, error) {
@@ -161,22 +255,32 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	if l.now().After(session.CreatedAt.Add(openAIOAuthSessionTTL)) {
 		return nil, fmt.Errorf("authorization session expired")
 	}
-	if strings.TrimSpace(session.State) == "" {
+	if !validOpenAIAuthBrowserState(session.State) {
 		return nil, fmt.Errorf("authorization session state is invalid")
+	}
+	if !validOpenAIAuthBrowserCodeVerifier(session.CodeVerifier) {
+		return nil, fmt.Errorf("authorization session PKCE verifier is invalid")
 	}
 
 	proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
 	if err != nil || proxy == nil || !proxy.IsActive() {
 		return nil, fmt.Errorf("authorization proxy bucket is unavailable")
 	}
+	proxyURL, err := openAIOAuthProxySnapshotURL(proxy, &session.ProxyID)
+	if err != nil {
+		return nil, fmt.Errorf("authorization proxy bucket is unavailable")
+	}
+	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
+		return nil, fmt.Errorf("authorization proxy configuration changed; start a new authorization")
+	}
 	ingress := openAIAuthBrowserLocalIngress(proxy)
 	if ingress == "" {
 		return nil, fmt.Errorf("proxy bucket %s has no Chrome-usable local ingress", proxy.Name)
 	}
 
-	// 浏览器配置目录名：state 前 12 位（一次授权一份隔离配置，合法字符集
-	// 天然满足 launch.sh 的 [A-Za-z0-9._-] 校验——state 是 hex）。
-	profileTag := "auth-" + session.State[:min(12, len(session.State))]
+	// 浏览器配置目录名使用完整 state 的 SHA-256 指纹：保留完整碰撞强度，
+	// 同时避免把 OAuth state 直接暴露到目录名、日志和启动结果中。
+	profileTag := openAIAuthBrowserProfileTag(session.State)
 
 	authURL := openai.BuildAuthorizationURLForPlatform(
 		session.State,
@@ -189,7 +293,6 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		ProfileTag:  profileTag,
 		ProxyName:   proxy.Name,
 		ExitIngress: ingress,
-		AuthURL:     authURL,
 	}
 
 	// 同一授权会话只允许一个启动脚本在途。前端重复点击或网络重试直接复用
@@ -216,10 +319,14 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		commandContext = exec.CommandContext
 	}
 	cmd := commandContext(launchCtx, l.launcherPath, profileTag, authURL, ingress)
+	output := newBoundedAuthBrowserOutput()
+	cmd.Stdout = output
+	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
 		return result, fmt.Errorf("start auth browser launcher: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
+		detail := output.text()
 		logger.LegacyPrintf(
 			"service.openai_auth_browser",
 			"Warning: auth browser launcher for session %s failed: %v",
@@ -227,7 +334,13 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 			err,
 		)
 		if errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
+			if detail != "" {
+				return result, fmt.Errorf("auth browser launcher timed out after %s: %s", timeout, detail)
+			}
 			return result, fmt.Errorf("auth browser launcher timed out after %s", timeout)
+		}
+		if detail != "" {
+			return result, fmt.Errorf("auth browser launcher exited unsuccessfully: %w: %s", err, detail)
 		}
 		return result, fmt.Errorf("auth browser launcher exited unsuccessfully: %w", err)
 	}

@@ -43,6 +43,8 @@ archives:
       - RELEASE-POLICY.md
       - RELEASE-R11.md
       - deploy/*
+      - deploy/auth-browser/*
+      - deploy/auth-browser/tests/*
 
 checksum:
   name_template: 'checksums.txt'
