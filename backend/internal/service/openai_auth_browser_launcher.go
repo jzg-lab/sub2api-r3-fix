@@ -23,6 +23,17 @@ const openAIAuthBrowserStateLength = 64
 const openAIAuthBrowserCodeVerifierLength = 128
 const maxAuthBrowserLauncherOutput = 8 * 1024
 
+var (
+	ErrOpenAIAuthBrowserInvalidRequest     = errors.New("auth browser launch request is invalid")
+	ErrOpenAIAuthBrowserSessionNotFound    = errors.New("authorization session not found")
+	ErrOpenAIAuthBrowserSessionExpired     = errors.New("authorization session expired")
+	ErrOpenAIAuthBrowserSessionInvalid     = errors.New("authorization session is invalid")
+	ErrOpenAIAuthBrowserProxyUnavailable   = errors.New("authorization proxy bucket is unavailable")
+	ErrOpenAIAuthBrowserRouteChanged       = errors.New("authorization proxy configuration changed")
+	ErrOpenAIAuthBrowserIngressUnavailable = errors.New("authorization proxy has no Chrome-usable local ingress")
+	ErrOpenAIAuthBrowserLauncherTimeout    = errors.New("auth browser launcher timed out")
+)
+
 // =============================================================================
 // 授权浏览器直拉（方案A，2026-09-22 用户批准）
 //
@@ -246,36 +257,53 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, fmt.Errorf("%w: session_id is required", ErrOpenAIAuthBrowserInvalidRequest)
 	}
 	session, err := l.sessionStore.Get(ctx, sessionID)
-	if err != nil || session == nil {
-		return nil, fmt.Errorf("authorization session not found or expired")
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPendingAuthSessionNotFound):
+			return nil, ErrOpenAIAuthBrowserSessionNotFound
+		case errors.Is(err, ErrPendingAuthSessionExpired),
+			errors.Is(err, ErrPendingAuthSessionConsumed):
+			return nil, ErrOpenAIAuthBrowserSessionExpired
+		case errors.Is(err, ErrOpenAIOAuthSessionInvalid),
+			errors.Is(err, ErrPendingAuthBrowserMismatch):
+			return nil, fmt.Errorf("%w: %v", ErrOpenAIAuthBrowserSessionInvalid, err)
+		default:
+			return nil, fmt.Errorf("load authorization session: %w", err)
+		}
+	}
+	if session == nil {
+		return nil, ErrOpenAIAuthBrowserSessionNotFound
 	}
 	if l.now().After(session.CreatedAt.Add(openAIOAuthSessionTTL)) {
-		return nil, fmt.Errorf("authorization session expired")
+		return nil, ErrOpenAIAuthBrowserSessionExpired
 	}
 	if !validOpenAIAuthBrowserState(session.State) {
-		return nil, fmt.Errorf("authorization session state is invalid")
+		return nil, fmt.Errorf("%w: state is invalid", ErrOpenAIAuthBrowserSessionInvalid)
 	}
 	if !validOpenAIAuthBrowserCodeVerifier(session.CodeVerifier) {
-		return nil, fmt.Errorf("authorization session PKCE verifier is invalid")
+		return nil, fmt.Errorf("%w: PKCE verifier is invalid", ErrOpenAIAuthBrowserSessionInvalid)
 	}
 
 	proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
-	if err != nil || proxy == nil || !proxy.IsActive() {
-		return nil, fmt.Errorf("authorization proxy bucket is unavailable")
+	if err != nil {
+		return nil, fmt.Errorf("load authorization proxy: %w", err)
+	}
+	if proxy == nil || !proxy.IsActive() {
+		return nil, ErrOpenAIAuthBrowserProxyUnavailable
 	}
 	proxyURL, err := openAIOAuthProxySnapshotURL(proxy, &session.ProxyID)
 	if err != nil {
-		return nil, fmt.Errorf("authorization proxy bucket is unavailable")
+		return nil, ErrOpenAIAuthBrowserProxyUnavailable
 	}
 	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
-		return nil, fmt.Errorf("authorization proxy configuration changed; start a new authorization")
+		return nil, fmt.Errorf("%w; start a new authorization", ErrOpenAIAuthBrowserRouteChanged)
 	}
 	ingress := openAIAuthBrowserLocalIngress(proxy)
 	if ingress == "" {
-		return nil, fmt.Errorf("proxy bucket %s has no Chrome-usable local ingress", proxy.Name)
+		return nil, fmt.Errorf("%w: proxy bucket %s", ErrOpenAIAuthBrowserIngressUnavailable, proxy.Name)
 	}
 
 	// 浏览器配置目录名使用完整 state 的 SHA-256 指纹：保留完整碰撞强度，
@@ -335,9 +363,9 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		)
 		if errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
 			if detail != "" {
-				return result, fmt.Errorf("auth browser launcher timed out after %s: %s", timeout, detail)
+				return result, fmt.Errorf("%w after %s: %s", ErrOpenAIAuthBrowserLauncherTimeout, timeout, detail)
 			}
-			return result, fmt.Errorf("auth browser launcher timed out after %s", timeout)
+			return result, fmt.Errorf("%w after %s", ErrOpenAIAuthBrowserLauncherTimeout, timeout)
 		}
 		if detail != "" {
 			return result, fmt.Errorf("auth browser launcher exited unsuccessfully: %w: %s", err, detail)

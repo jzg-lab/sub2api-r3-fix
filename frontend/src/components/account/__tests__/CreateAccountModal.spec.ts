@@ -10,6 +10,7 @@ const {
   showErrorMock,
   showSuccessMock,
   generateAuthUrlMock,
+  launchAuthBrowserMock,
   exchangeCodeMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
@@ -22,6 +23,7 @@ const {
   showErrorMock: vi.fn(),
   showSuccessMock: vi.fn(),
   generateAuthUrlMock: vi.fn(),
+  launchAuthBrowserMock: vi.fn(),
   exchangeCodeMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
@@ -54,6 +56,7 @@ vi.mock('@/api/admin', () => ({
       importCodexSession: importCodexSessionMock,
       createOpenAICodexPAT: createOpenAICodexPATMock,
       generateAuthUrl: generateAuthUrlMock,
+      launchAuthBrowser: launchAuthBrowserMock,
       exchangeCode: exchangeCodeMock,
     },
     settings: {
@@ -95,15 +98,17 @@ const OAuthAuthorizationFlowStub = defineComponent({
     showCodexPatOption: Boolean,
     initialInputMethod: String,
     loading: Boolean,
+    authBrowserLaunching: Boolean,
   },
   data: () => ({ inputMethod: 'manual', authCode: 'test-code', oauthState: 'test-state' }),
   methods: { reset() {} },
-  emits: ['import-codex-session', 'import-codex-pat', 'generate-url'],
+  emits: ['import-codex-session', 'import-codex-pat', 'generate-url', 'launch-auth-browser'],
   template: `
     <div>
       <button data-testid="import-codex-session" @click="$emit('import-codex-session', 'session-json')">session</button>
       <button data-testid="import-codex-pat" @click="$emit('import-codex-pat', 'pat-token')">pat</button>
       <button data-testid="generate-url" @click="$emit('generate-url')">authorize</button>
+      <button data-testid="launch-auth-browser" @click="$emit('launch-auth-browser')">launch</button>
     </div>
   `,
 })
@@ -269,7 +274,142 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
       auth_url: 'https://auth.example.invalid/authorize?state=test-state',
       session_id: 'test-session',
     })
+    launchAuthBrowserMock.mockReset().mockResolvedValue({
+      launched: true,
+      already_running: false,
+      proxy_name: 'static-isp',
+      output: '',
+    })
     exchangeCodeMock.mockReset().mockResolvedValue({ proxy_id: 23, expires_in: 3600 })
+  })
+
+  it.each([
+    'AUTH_BROWSER_SESSION_NOT_FOUND',
+    'AUTH_BROWSER_SESSION_EXPIRED',
+    'AUTH_BROWSER_SESSION_INVALID',
+    'AUTH_BROWSER_PROXY_ROUTE_STALE',
+  ])('refreshes %s once and launches only the replacement session', async (reason) => {
+    generateAuthUrlMock
+      .mockResolvedValueOnce({
+        auth_url: 'https://auth.example.invalid/authorize?state=old-state',
+        session_id: 'old-session',
+      })
+      .mockResolvedValueOnce({
+        auth_url: 'https://auth.example.invalid/authorize?state=new-state',
+        session_id: 'new-session',
+      })
+    launchAuthBrowserMock
+      .mockRejectedValueOnce({ reason, message: 'authorization session must be replaced' })
+      .mockResolvedValueOnce({
+        launched: true,
+        already_running: false,
+        proxy_name: 'static-isp',
+        output: '',
+      })
+
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await flushPromises()
+
+    expect(generateAuthUrlMock).toHaveBeenCalledTimes(2)
+    expect(generateAuthUrlMock.mock.calls[1]).toEqual([
+      '/admin/openai/generate-auth-url',
+      { proxy_id: 23 },
+    ])
+    expect(launchAuthBrowserMock.mock.calls).toEqual([
+      ['old-session'],
+      ['new-session'],
+    ])
+    expect(showErrorMock).not.toHaveBeenCalled()
+    expect(showSuccessMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['AUTH_BROWSER_LAUNCH_FAILED', 500],
+    ['AUTH_BROWSER_PROXY_UNAVAILABLE', 503],
+    ['AUTH_BROWSER_LAUNCH_TIMEOUT', 504],
+  ])('does not retry non-session launch failure %s', async (reason, status) => {
+    launchAuthBrowserMock.mockRejectedValueOnce({
+      reason,
+      status,
+      message: 'browser launch failed',
+    })
+
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await flushPromises()
+
+    expect(generateAuthUrlMock).toHaveBeenCalledTimes(1)
+    expect(launchAuthBrowserMock).toHaveBeenCalledTimes(1)
+    expect(launchAuthBrowserMock).toHaveBeenCalledWith('test-session')
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('refreshes a recoverable browser session at most once', async () => {
+    generateAuthUrlMock
+      .mockResolvedValueOnce({
+        auth_url: 'https://auth.example.invalid/authorize?state=old-state',
+        session_id: 'old-session',
+      })
+      .mockResolvedValueOnce({
+        auth_url: 'https://auth.example.invalid/authorize?state=new-state',
+        session_id: 'new-session',
+      })
+    launchAuthBrowserMock
+      .mockRejectedValueOnce({
+        reason: 'AUTH_BROWSER_SESSION_EXPIRED',
+        message: 'old session expired',
+      })
+      .mockRejectedValueOnce({
+        reason: 'AUTH_BROWSER_SESSION_EXPIRED',
+        message: 'replacement session expired',
+      })
+
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await flushPromises()
+
+    expect(generateAuthUrlMock).toHaveBeenCalledTimes(2)
+    expect(launchAuthBrowserMock.mock.calls).toEqual([
+      ['old-session'],
+      ['new-session'],
+    ])
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('ignores a browser launch result after the modal is unmounted', async () => {
+    const launch = deferred<{
+      launched: boolean
+      already_running: boolean
+      proxy_name: string
+      output: string
+    }>()
+    launchAuthBrowserMock.mockReturnValueOnce(launch.promise)
+
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await flushPromises()
+
+    wrapper.unmount()
+    launch.resolve({
+      launched: true,
+      already_running: false,
+      proxy_name: 'static-isp',
+      output: '',
+    })
+    await flushPromises()
+
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showErrorMock).not.toHaveBeenCalled()
   })
 
   it('uses the exchange route and stays busy until account creation completes', async () => {

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -168,8 +169,36 @@ func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
 	defer cancel()
 	result, err := h.authBrowserLauncher.Launch(ctx, req.SessionID)
 	if err != nil {
-		response.ErrorFrom(c, infraerrors.New(http.StatusInternalServerError,
-			"AUTH_BROWSER_LAUNCH_FAILED", err.Error()))
+		statusCode := http.StatusInternalServerError
+		reason := "AUTH_BROWSER_LAUNCH_FAILED"
+		switch {
+		case errors.Is(err, service.ErrOpenAIAuthBrowserInvalidRequest):
+			statusCode = http.StatusBadRequest
+			reason = "AUTH_BROWSER_LAUNCH_INVALID_REQUEST"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserSessionNotFound):
+			statusCode = http.StatusNotFound
+			reason = "AUTH_BROWSER_SESSION_NOT_FOUND"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserSessionExpired):
+			statusCode = http.StatusGone
+			reason = "AUTH_BROWSER_SESSION_EXPIRED"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserSessionInvalid):
+			statusCode = http.StatusConflict
+			reason = "AUTH_BROWSER_SESSION_INVALID"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserProxyUnavailable):
+			statusCode = http.StatusServiceUnavailable
+			reason = "AUTH_BROWSER_PROXY_UNAVAILABLE"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserRouteChanged):
+			statusCode = http.StatusConflict
+			reason = "AUTH_BROWSER_PROXY_ROUTE_STALE"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserIngressUnavailable):
+			statusCode = http.StatusServiceUnavailable
+			reason = "AUTH_BROWSER_PROXY_INGRESS_UNAVAILABLE"
+		case errors.Is(err, service.ErrOpenAIAuthBrowserLauncherTimeout),
+			errors.Is(err, context.DeadlineExceeded):
+			statusCode = http.StatusGatewayTimeout
+			reason = "AUTH_BROWSER_LAUNCH_TIMEOUT"
+		}
+		response.ErrorFrom(c, infraerrors.New(statusCode, reason, err.Error()))
 		return
 	}
 	response.Success(c, result)

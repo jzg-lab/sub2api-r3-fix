@@ -2,8 +2,10 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +75,154 @@ func TestLaunchAuthBrowserReturnsProcessOutcome(t *testing.T) {
 			require.Equal(t, "launcher completed", body.Data.Output)
 			require.Equal(t, "http://127.0.0.1:17933", body.Data.ExitIngress)
 			require.NotContains(t, response.Body.String(), strings.Repeat("a", 64))
+			require.NotContains(t, response.Body.String(), `"auth_url"`)
+		})
+	}
+}
+
+func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	validProxy := &service.Proxy{
+		ID: 901, Status: service.StatusActive, Protocol: "socks5h",
+		Host: "127.0.0.1", Port: 17913,
+	}
+	validSession := func() *service.OpenAIOAuthSession {
+		return &service.OpenAIOAuthSession{
+			ID: "session-1", State: strings.Repeat("a", 64),
+			CodeVerifier: strings.Repeat("b", 128), ProxyID: validProxy.ID,
+			Platform: service.PlatformOpenAI, CreatedAt: time.Now(),
+			RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+			ProxyRouteHash: fmt.Sprintf("%x", sha256.Sum256([]byte(validProxy.URL()))),
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		sessionID  string
+		session    func() *service.OpenAIOAuthSession
+		storeErr   error
+		proxy      func() *service.Proxy
+		proxyErr   error
+		wantStatus int
+		wantReason string
+	}{
+		{
+			name: "missing session", sessionID: "missing",
+			session:    func() *service.OpenAIOAuthSession { return nil },
+			wantStatus: http.StatusNotFound, wantReason: "AUTH_BROWSER_SESSION_NOT_FOUND",
+		},
+		{
+			name: "blank session", sessionID: " ", session: validSession,
+			wantStatus: http.StatusBadRequest, wantReason: "AUTH_BROWSER_LAUNCH_INVALID_REQUEST",
+		},
+		{
+			name: "expired session", sessionID: "session-1",
+			session: func() *service.OpenAIOAuthSession {
+				session := validSession()
+				session.CreatedAt = time.Now().Add(-3 * time.Hour)
+				return session
+			},
+			wantStatus: http.StatusGone, wantReason: "AUTH_BROWSER_SESSION_EXPIRED",
+		},
+		{
+			name: "invalid session state", sessionID: "session-1",
+			session: func() *service.OpenAIOAuthSession {
+				session := validSession()
+				session.State = "corrupted"
+				return session
+			},
+			wantStatus: http.StatusConflict, wantReason: "AUTH_BROWSER_SESSION_INVALID",
+		},
+		{
+			name: "changed proxy route", sessionID: "session-1",
+			session: func() *service.OpenAIOAuthSession {
+				session := validSession()
+				session.ProxyRouteHash = strings.Repeat("0", 64)
+				return session
+			},
+			wantStatus: http.StatusConflict, wantReason: "AUTH_BROWSER_PROXY_ROUTE_STALE",
+		},
+		{
+			name: "inactive proxy", sessionID: "session-1", session: validSession,
+			proxy: func() *service.Proxy {
+				proxy := *validProxy
+				proxy.Status = service.StatusDisabled
+				return &proxy
+			},
+			wantStatus: http.StatusServiceUnavailable, wantReason: "AUTH_BROWSER_PROXY_UNAVAILABLE",
+		},
+		{
+			name: "unsupported proxy ingress", sessionID: "session-1",
+			session: func() *service.OpenAIOAuthSession {
+				session := validSession()
+				proxy := *validProxy
+				proxy.Port = 18000
+				proxy.Username = "u"
+				proxy.Password = "p"
+				session.ProxyRouteHash = fmt.Sprintf("%x", sha256.Sum256([]byte(proxy.URL())))
+				return session
+			},
+			proxy: func() *service.Proxy {
+				proxy := *validProxy
+				proxy.Port = 18000
+				proxy.Username = "u"
+				proxy.Password = "p"
+				return &proxy
+			},
+			wantStatus: http.StatusServiceUnavailable, wantReason: "AUTH_BROWSER_PROXY_INGRESS_UNAVAILABLE",
+		},
+		{
+			name: "preparation timeout", sessionID: "session-1", session: validSession,
+			storeErr:   context.DeadlineExceeded,
+			wantStatus: http.StatusGatewayTimeout, wantReason: "AUTH_BROWSER_LAUNCH_TIMEOUT",
+		},
+		{
+			name: "store failure", sessionID: "session-1", session: validSession,
+			storeErr:   errors.New("injected store failure"),
+			wantStatus: http.StatusInternalServerError, wantReason: "AUTH_BROWSER_LAUNCH_FAILED",
+		},
+		{
+			name: "damaged stored session", sessionID: "session-1", session: validSession,
+			storeErr:   fmt.Errorf("%w: proxy is invalid", service.ErrOpenAIOAuthSessionInvalid),
+			wantStatus: http.StatusConflict, wantReason: "AUTH_BROWSER_SESSION_INVALID",
+		},
+		{
+			name: "proxy store failure", sessionID: "session-1", session: validSession,
+			proxyErr:   errors.New("injected proxy store failure"),
+			wantStatus: http.StatusInternalServerError, wantReason: "AUTH_BROWSER_LAUNCH_FAILED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.AuthBrowserLauncher = "/usr/bin/true"
+			proxy := validProxy
+			if tc.proxy != nil {
+				proxy = tc.proxy()
+			}
+			handler := &OpenAIOAuthHandler{}
+			handler.SetAuthBrowserLauncher(service.NewOpenAIAuthBrowserLauncher(
+				cfg,
+				&oauthRouteSessionStore{session: tc.session(), err: tc.storeErr},
+				&oauthRouteProxyRepo{proxy: proxy, err: tc.proxyErr},
+			))
+			router := gin.New()
+			router.POST("/admin/openai/launch-auth-browser", handler.LaunchAuthBrowser)
+			payload, err := json.Marshal(OpenAILaunchAuthBrowserRequest{SessionID: tc.sessionID})
+			require.NoError(t, err)
+			request := httptest.NewRequest(http.MethodPost, "/admin/openai/launch-auth-browser",
+				bytes.NewReader(payload))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			require.Equal(t, tc.wantStatus, response.Code, response.Body.String())
+			var body struct {
+				Reason string `json:"reason"`
+				Data   any    `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+			require.Equal(t, tc.wantReason, body.Reason)
+			require.Nil(t, body.Data)
 			require.NotContains(t, response.Body.String(), `"auth_url"`)
 		})
 	}
