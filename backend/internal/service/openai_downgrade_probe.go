@@ -582,6 +582,10 @@ type OpenAIDowngradeProbeRunner struct {
 	// 不携带 plugin_bridge 区块（与未启用插件同形）。桥源读失败在源侧吞掉
 	// 返回 nil，绝不拖垮健康快照。
 	pluginBridge func(ctx context.Context) *PluginBridgeStatus
+	// rescueLane 救治区编排器（r17ax Phase 3）；nil 时判死提交不触发自动
+	// 入区（手动/对账入口不受影响）。自动钩子在 commit 通道 committed 块
+	// 异步触发，入区失败绝不反向影响探针提交。
+	rescueLane *OpenAIRescueLane
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
@@ -1629,6 +1633,15 @@ func (r *OpenAIDowngradeProbeRunner) SetPluginBridgeSource(
 		return
 	}
 	r.pluginBridge = fn
+}
+
+// SetRescueLane 注入救治区编排器（r17ax Phase 3）。未注入时判死提交不触发
+// 自动入区，行为与救治区合入前一致；手动端点与对账清扫入口不经此字段。
+func (r *OpenAIDowngradeProbeRunner) SetRescueLane(lane *OpenAIRescueLane) {
+	if r == nil {
+		return
+	}
+	r.rescueLane = lane
 }
 
 // applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户

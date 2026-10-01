@@ -54,11 +54,21 @@
 
 ## Phase 3 — fork 后端：救治编排器
 
-- [ ] 3.1 入口转换函数 enterRescue(account)：快照原组 id+priority → BindGroups 绑救治组
+- [x] 3.1 入口转换函数 enterRescue(account)：快照原组 id+priority → BindGroups 绑救治组
        → 开调度 → Extra 救治标记 → 种子=TestAccountConnection service 直调 → 事件
        rescue_entered{trigger: auto|manual|reconcile}（改组后重读账号，CAS 纪律）
-- [ ] 3.2 自动钩子：挂 commit_svc.go:424-433 committed 块（三判死路径单一 choke point），
+       ✓（10/2）openai_rescue_lane.go EnterRescue：标记-first（崩溃可对账补绑）→BindGroups
+       →重读后 SetSchedulable→种子（RunTestBackground 内存直调，失败只记 seed_ok 不回滚）
+       →事件；幂等（标记在场直接返回）；ShouldAutoEnterRescueLane 纯函数过滤；
+       19 用例全绿（openai_rescue_lane_test.go）；wire 装配=DefaultOpenAIRescueLaneConfig
+       （enabled=false 上线默认关）+种子适配器（3.8 落地时换 settings 闭包）
+- [x] 3.2 自动钩子：挂 committed 块（三判死路径单一 choke point），
        入口过滤=mutation.Events reason + RateLimitResetAt（三类不进）
+       ✓（10/2）openai_downgrade_commit.go committed 块：pending_replace 提交生效→
+       异步 goroutine（3min 上界，mutation 值拷贝防竞争）→MaybeAutoEnterRescue
+       （开关关零成本跳过）；过滤改按 mutation.Results 复核 Classify…AuthError
+       （7ce95d8 后 Events reason 收敛，401 类判据改 Results——打票线删除时已定）；
+       账号快照提交后重读取（限流复核用），读失败按无证据继续（对账兜底）
 - [x] 3.2b ~~maybeAutoHarvestDead 让位闸~~——打票线已整体删除（2026-10-02 用户裁定
        「把打票这条线清除，救号只保留救治区这条线」）：openai_harvest_pipeline.go /
        openai_codex_ticket*.go / 票表 repo 删除；migration 248 防御性清场（harvest 行归

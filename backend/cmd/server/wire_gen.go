@@ -219,6 +219,17 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// 轮询缓存 + 2min 离线判定）。桥读失败在源侧吞掉，不影响账号健康列表。
 	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
+	// 救治区编排器（r17ax Phase 3）：三入口（自动钩子/手动端点/对账清扫）
+	// 汇入 EnterRescue。config 暂接安全缺省（enabled=false——上线默认关），
+	// settings 热更新在 3.8 落地时替换；种子 = TestAccountConnection 内存
+	// 直调（design 0.1，经插件 Forward 流喂探针模板）。
+	openAIRescueLane := service.NewOpenAIRescueLane(
+		accountRepository,
+		openAIDowngradeProbeRepository,
+		service.DefaultOpenAIRescueLaneConfig,
+		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
+	)
+	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)

@@ -394,6 +394,25 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 		if runner.abuseSignal != nil {
 			openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(*runner.abuseSignal)
 		}
+		// 救治区自动钩子（r17ax Phase 3.2）：判死提交生效即触发入区过滤。
+		// 异步执行——EnterRescue 含种子流量（真实上游请求，秒到分钟级），
+		// 不能阻塞探针扫描循环；mutation 拷贝值传递，避免提交后 staging
+		// 复用期的数据竞争。入区失败只记日志 + 对账清扫兜底（钩子内纪律）。
+		if stage.mutation.State != nil &&
+			stage.mutation.State.State == OpenAIDowngradeStatePendingReplace &&
+			r.rescueLane != nil {
+			mutation := stage.mutation
+			account, accountErr := r.accountRepo.GetByID(ctx, stage.mutation.AccountID)
+			if accountErr != nil {
+				account = nil
+			}
+			lane := r.rescueLane
+			go func() {
+				hookCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+				lane.MaybeAutoEnterRescue(hookCtx, &mutation, account)
+			}()
+		}
 		// committed && err != nil 只剩快照刷新失败（ErrOpenAIProbeSnapshotRefresh）：
 		// 提交已生效，错误照常上抛，让位分支不得介入。
 		return err
