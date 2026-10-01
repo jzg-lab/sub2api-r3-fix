@@ -22,7 +22,12 @@
        契约测试锁定；Cookie 值零泄漏（脱敏边界测试）
 - [x] 1.2 退避期满复探回升语义确认（BackoffUntil 过即 Due→pass 摘帽；既有
        TestStateFailRerollPath 覆盖，v0.3 未改动该路径）
-- [ ] 1.3 testhost 全链路 ✓（build.sh 冒烟绿）；**官方 sidecar 宿主兼容回归待做**
+- [x] 1.3 testhost 全链路 ✓（build.sh 冒烟绿）；官方 sidecar 宿主兼容回归 ✓
+       （10/2 官方 v0.2.11@18200：上传 trusted+compatible+tested、启用健康
+       "lb cookie pin ready"、prober/adaptive_scheduling 区段经 /status 完整
+       透传、新配置键 adaptive_probe_scheduling/probe_schedule_margin_seconds
+       SaveConfig 往返生效。**官方宿主升级须先 disable 再 upload**——生产
+       0.2.1→0.3.0 会有一个插件停用窗口，上产清单单列）
 - [x] 1.4 构建+签名 0.3.0（dist/lyunlong-codex-lb-cookie-pin-0.3.0.s2plugin，
        key_id=843c85d4b99d8a25）；tested_versions 暂不变，r17ax 落地后补
 - [x] 1.5 签寿命计量：三死亡信号全归档（捕获覆写=换签/TTL 到期清理/重摇——
