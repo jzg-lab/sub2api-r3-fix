@@ -1361,6 +1361,8 @@ func TestApplyCodexOAuthTransform_EmptyInput(t *testing.T) {
 
 func TestNormalizeCodexModel_Gpt53(t *testing.T) {
 	cases := map[string]string{
+		"gpt-6.1-sol":               "gpt-6.1-sol",
+		"openai/GPT_6.1_SOL":        "gpt-6.1-sol",
 		"gpt-6-astra":               "gpt-6-astra",
 		"openai/gpt-6-astra":        "gpt-6-astra",
 		"gpt-6":                     "gpt-6-astra",
@@ -1399,6 +1401,16 @@ func TestNormalizeCodexModel_Gpt53(t *testing.T) {
 	for input, expected := range cases {
 		require.Equal(t, expected, normalizeCodexModel(input))
 	}
+}
+
+func TestNormalizeCodexModelGPT61SolDoesNotRewriteUnverifiedSuffixes(t *testing.T) {
+	for _, model := range []string{"gpt-6.1-sol-xhigh", "gpt-6.1-sol-preview"} {
+		require.Equal(t, model, normalizeCodexModel(model))
+	}
+}
+
+func TestSupportsVerbosityGPT61SolFailsClosed(t *testing.T) {
+	require.False(t, SupportsVerbosity("gpt-6.1-sol"))
 }
 
 func TestNormalizeCodexModel_RemovedModelsFallbackToSupportedTargets(t *testing.T) {

@@ -24,6 +24,7 @@ func TestEnsureOpenAICodexModelMappingFloor(t *testing.T) {
 			credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6": "gpt-5.6"}},
 			want: map[string]any{"model_mapping": map[string]any{
 				"gpt-5.6": "gpt-5.6", "gpt-6": "gpt-6", "gpt-6-astra": "gpt-6-astra",
+				"gpt-6.1-sol": "gpt-6.1-sol",
 			}},
 		},
 		{
@@ -33,6 +34,7 @@ func TestEnsureOpenAICodexModelMappingFloor(t *testing.T) {
 			credentials: map[string]any{"model_mapping": map[string]any{"gpt-6": "custom-upstream"}},
 			want: map[string]any{"model_mapping": map[string]any{
 				"gpt-6": "custom-upstream", "gpt-6-astra": "gpt-6-astra",
+				"gpt-6.1-sol": "gpt-6.1-sol",
 			}},
 		},
 		{

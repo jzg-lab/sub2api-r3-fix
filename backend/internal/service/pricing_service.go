@@ -1381,6 +1381,12 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 // 5. gpt-5.4* -> 业务静态兜底价
 // 6. 最终回退到 DefaultTestModel (gpt-5.1-codex)
 func (s *PricingService) matchOpenAIModel(model string) *LiteLLMModelPricing {
+	// gpt-6.1-sol is intentionally exact-only until an explicit same-name
+	// price card exists. Never inherit another OpenAI model's static/default rate.
+	if openai.IsGPT61SolModelSpelling(model) {
+		return s.pricingData["gpt-6.1-sol"]
+	}
+
 	if strings.HasPrefix(model, "gpt-5.3-codex-spark") {
 		if pricing, ok := s.pricingData["gpt-5.1-codex"]; ok {
 			logger.LegacyPrintf("service.pricing", "[Pricing][SparkBilling] %s -> %s billing", model, "gpt-5.1-codex")

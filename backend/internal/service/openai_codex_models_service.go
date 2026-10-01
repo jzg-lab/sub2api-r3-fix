@@ -474,6 +474,23 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		}
 	}
 
+	if openai.IsGPT61SolModelSpelling(modelID) {
+		defaultReasoningLevel := "xhigh"
+		descriptor.Slug = "gpt-6.1-sol"
+		descriptor.DisplayName = "GPT-6.1 Sol"
+		descriptor.Description = "OpenAI GPT coding model routed through Sub2API."
+		descriptor.DefaultReasoningLevel = &defaultReasoningLevel
+		descriptor.SupportedReasoningLevels = []configuredCodexReasoningLevel{
+			{Effort: "xhigh", Description: "Extra-high reasoning depth for difficult tasks"},
+		}
+		descriptor.DefaultReasoningSummary = "none"
+		descriptor.ContextWindow = 0
+		descriptor.MaxContextWindow = 0
+		descriptor.EffectiveContextWindowPercent = 0
+		descriptor.UseResponsesLite = false
+		return descriptor
+	}
+
 	if isOpenAICodexGPTModel(modelID) {
 		descriptor.DisplayName = openaiCodexDisplayName(modelID)
 		descriptor.Description = "OpenAI GPT coding model routed through Sub2API."
@@ -1852,6 +1869,7 @@ func CodexModelsManifestETag(body []byte) string {
 }
 
 var apiKeyCodexModelsWithoutResponsesLite = map[string]struct{}{
+	"gpt-6.1-sol":   {},
 	"gpt-6-astra":   {},
 	"gpt-6-sol":     {},
 	"gpt-6-luna":    {},

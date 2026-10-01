@@ -383,6 +383,21 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 		require.True(t, isOpenAICodexImageInputModel(modelID), modelID)
 	}
 
+	gpt61Sol := newConfiguredCodexModelDescriptor("gpt-6.1-sol")
+	require.Equal(t, "GPT-6.1 Sol", gpt61Sol.DisplayName)
+	require.NotNil(t, gpt61Sol.DefaultReasoningLevel)
+	require.Equal(t, "xhigh", *gpt61Sol.DefaultReasoningLevel)
+	require.Equal(t, []string{"xhigh"}, effortsFromConfiguredCodexLevels(gpt61Sol.SupportedReasoningLevels))
+	require.Empty(t, gpt61Sol.ServiceTiers)
+	require.False(t, gpt61Sol.SupportVerbosity)
+	require.False(t, gpt61Sol.SupportsImageDetailOriginal)
+	require.False(t, gpt61Sol.SupportsParallelToolCalls)
+	require.Equal(t, []string{"text"}, gpt61Sol.InputModalities)
+	require.Zero(t, gpt61Sol.ContextWindow)
+	require.Zero(t, gpt61Sol.MaxContextWindow)
+	require.False(t, gpt61Sol.UseResponsesLite)
+	require.False(t, isOpenAICodexImageInputModel("gpt-6.1-sol"))
+
 	gpt55 := newConfiguredCodexModelDescriptor("gpt-5.5")
 	require.Equal(t, "GPT-5.5", gpt55.DisplayName)
 	require.NotNil(t, gpt55.DefaultReasoningLevel)
@@ -2207,8 +2222,8 @@ func TestAdjustAPIKeyCodexModelsManifest(t *testing.T) {
 	}{
 		{
 			name: "affected models disable responses lite and preserve unknown fields",
-			body: `{"models":[{"slug":"gpt-6-astra","use_responses_lite":true},{"slug":"gpt-6-sol","use_responses_lite":true},{"slug":"gpt-6-luna","use_responses_lite":true},{"slug":"gpt-5.6-sol","use_responses_lite":true,"unknown_model":{"enabled":true}},{"slug":"gpt-5.6-terra","use_responses_lite":true},{"slug":"gpt-5.6-luna","use_responses_lite":true}],"unknown_top":{"version":1}}`,
-			want: `{"models":[{"slug":"gpt-6-astra","use_responses_lite":false},{"slug":"gpt-6-sol","use_responses_lite":false},{"slug":"gpt-6-luna","use_responses_lite":false},{"slug":"gpt-5.6-sol","unknown_model":{"enabled":true},"use_responses_lite":false},{"slug":"gpt-5.6-terra","use_responses_lite":false},{"slug":"gpt-5.6-luna","use_responses_lite":false}],"unknown_top":{"version":1}}`,
+			body: `{"models":[{"slug":"gpt-6.1-sol","use_responses_lite":true},{"slug":"gpt-6-astra","use_responses_lite":true},{"slug":"gpt-6-sol","use_responses_lite":true},{"slug":"gpt-6-luna","use_responses_lite":true},{"slug":"gpt-5.6-sol","use_responses_lite":true,"unknown_model":{"enabled":true}},{"slug":"gpt-5.6-terra","use_responses_lite":true},{"slug":"gpt-5.6-luna","use_responses_lite":true}],"unknown_top":{"version":1}}`,
+			want: `{"models":[{"slug":"gpt-6.1-sol","use_responses_lite":false},{"slug":"gpt-6-astra","use_responses_lite":false},{"slug":"gpt-6-sol","use_responses_lite":false},{"slug":"gpt-6-luna","use_responses_lite":false},{"slug":"gpt-5.6-sol","unknown_model":{"enabled":true},"use_responses_lite":false},{"slug":"gpt-5.6-terra","use_responses_lite":false},{"slug":"gpt-5.6-luna","use_responses_lite":false}],"unknown_top":{"version":1}}`,
 		},
 		{
 			name: "unaffected model unchanged",

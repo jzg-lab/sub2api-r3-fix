@@ -506,7 +506,7 @@ func hasOpenAIOAuthCredentialMaterial(credentials map[string]any) bool {
 // 的保底键:上游导入工具(codex-auth-manager 等)携带的映射模板可能滞后于新
 // 模型发布(如 2026-09 的 gpt-6 批次),缺键会让测试连接面板与调度白名单看
 // 不到新模型。创建/更新时以恒等映射补齐;已存在的映射项永不覆盖。
-var openAICodexModelMappingFloorKeys = []string{"gpt-6", "gpt-6-astra"}
+var openAICodexModelMappingFloorKeys = []string{"gpt-6", "gpt-6-astra", "gpt-6.1-sol"}
 
 // ensureOpenAICodexModelMappingFloor 为 OpenAI OAuth 账号的
 // credentials.model_mapping 合并保底模型键(恒等映射)。仅在已有非空映射时
