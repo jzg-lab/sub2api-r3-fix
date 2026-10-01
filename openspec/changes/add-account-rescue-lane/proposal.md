@@ -35,6 +35,15 @@ sidecar 实验台（10/2）已验证救治机制有效：2 号 25% 错 → 丢�
 
 入口过滤（三类不进区）：401/吊销死（插件治不了，走重新授权/退换）、429/额度死（不是
 降智）、未分类判死。进区资格 = 降智类判死（答错/低rt/降智指纹/双信号熔断路径落判死）。
+**落点已定案（Phase 0.3）**：三条判死路径全部经 processStateAtomic 单一提交点
+（commit_svc.go:424-433 committed 块），钩子挂此处；过滤用 mutation.Events 的 reason
+字段（credentials_invalid 排除）+ account.RateLimitResetAt（未来=429 排除）。
+
+**⚠ 与既有自动打票线的冲突（Phase 0.3 新发现，必须处理）**：fork 已有
+maybeAutoHarvestDead（probe.go:832-845）每分钟扫判死号，静默期满（2h-24h）自动拉进
+打票线——和救治区抢同一批号。救治区必须装**让位闸**：救治中的号不被自动打票线拉走；
+出区（转正/撤调度/人工了断）后恢复原语义。让位闸与入区转换必须同一提交落地，否则
+判死 2h 后号被抢走。
 
 ### 出口
 
@@ -70,10 +79,11 @@ sidecar 实验台（10/2）已验证救治机制有效：2 号 25% 错 → 丢�
 ### 流量种子（关键技术前提）
 
 插件探针复用业务请求模板（指纹同形纪律），救治组无客户流量时插件无模板可探。宿主在
-进区转换时自动打一发轻量种子请求（复用账号测试路径，sidecar 已验证测试流量过插件路径
-触发捕获）。**实现前置任务：核实 fork 里哪条宿主发起的请求路径过插件 Forward 钩子**
-（候选：accounts/:id/test / 诊断针路径B / 新增最小 seed forward），选不破坏指纹纪律的
-一条。种子只在进区时打一次，之后插件 15 分钟自循环。
+进区转换时自动打一发轻量种子请求。**载体已定案（Phase 0.1）**：service 层直调
+`TestAccountConnection`（账号测试路径，不校验账号死活，目标 URL 与业务转发一致），该
+路径过插件 Forward 钩子，且插件路由只看平台/OAuth/灰度桶、不看账号状态——零新增协议、
+零指纹破坏。降智探针/转正冷针不过插件（保持无签冷启动语义，判定不被插件 Cookie 污染）。
+种子只在进区时打一次，之后插件 15 分钟自循环。
 
 ### 换签时效计量与卡点（签寿命计量学）
 
@@ -96,15 +106,21 @@ Cookie 无 Expires 属性，硬 TTL 不存在，窗口是观测推断的；faste
 换签时刻强相关形成可聚类指纹——自适应但不可预测）。年轻签期少探（省额度），临近
 预期死亡密集探（早发现早换签）。退避/疑似账号级路径不适用卡点（无签可保）。
 
-### 插件状态桥（本特性最大单体）
+### 插件状态桥（Phase 0.2 后工程量大幅缩水）
 
-fork 宿主当前完全没有读插件运行时状态的能力（UI 桥无 plugin.status 消息）。需要：
+插件 Health 响应**早已携带** status_json（官方协议字段 3，含每账号探针状态），fork
+proto 缺该字段把数据丢了；插件 UI 也已每 5s 轮询 plugin.status 消息，只是 fork 桥没接。
 
-1. 插件 v0.3.0 新增状态查询消息：返回每账号
-   `{state: active|backoff, consecutive_passes, consecutive_fails, last_probe_at, reroll_count,
-   sign_captured_at, sign_lifetime_stats{p50,p80,min,samples}, estimated_remaining}`，
-   作为可选能力向后兼容（官方宿主不查询则零影响）。
-2. fork 宿主新增桥接轮询（默认 30s）+ 进程内缓存，暴露给标签计算与健康快照 API。
+1. fork proto 补字段（HealthResponse.status_json=3 / TestConfigResponse.status_json=4，
+   与官方同字段号，wire 纯加法）→ 新只读端点 GET /admin/plugins/:id/status（内部调
+   Health 透传）→ PluginsView 桥补 plugin.status case，插件面板「状态不可用」免费复活。
+2. 插件 v0.3.0 只做 **status_json JSON 内容扩展**（不碰 proto/manifest——manifest 被
+   双重 schema 锁死，加字段=拒装）：consecutive_passes 计数器（现在只有连错计数）+
+   签寿命字段 `{sign_captured_at, sign_lifetime_stats{p50,p80,min,samples},
+   estimated_remaining}`。官方 v0.2.11 零影响是结构性保障：宿主→插件方法只能宿主发起，
+   官方产物没有新方法 stub，物理上发不出新调用。
+3. fork 宿主桥接轮询（默认 30s）+ 进程内缓存 + 插件离线判定（>2min 无响应），暴露给
+   标签计算与健康快照 API。
 
 ### 惩罚窗升级风险（已知情接受）
 
@@ -114,8 +130,9 @@ fork 宿主当前完全没有读插件运行时状态的能力（UI 桥无 plugi
 
 ## 变更范围
 
-- **插件** `~/sub2api-cookie-plugin` 0.2.1 → 0.3.0：状态上报消息（新 RPC，向后兼容）；
-  签寿命计量（捕获/死亡时间戳+滚动统计）；自适应卡点探针排程（实测窗口+jitter）。
+- **插件** `~/sub2api-cookie-plugin` 0.2.1 → 0.3.0：status_json 内容扩展（连过计数器+
+  签寿命计量字段；不碰 proto/manifest）；签寿命计量（捕获/死亡时间戳+滚动统计）；
+  自适应卡点探针排程（实测窗口+jitter）。
 - **fork 后端**（r17ax）：插件状态桥；救治编排器（入口转换/对账清扫/种子/标签计算/撤
   调度恢复）；转正打复活标记（rescued_at/次数，永久）；手动入区端点；audit 事件；
   健康快照 API 扩展救治字段+签寿命字段；配置项

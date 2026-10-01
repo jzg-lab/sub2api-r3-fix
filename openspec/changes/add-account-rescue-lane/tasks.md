@@ -2,13 +2,17 @@
 
 ## Phase 0 — 前置核实（写码前必须完成）
 
-- [ ] 0.1 核实 fork 宿主侧哪条请求路径过插件 Forward 钩子：accounts/:id/test、诊断针
-       路径B（triggerDiagnosticProbeNow）、网关转发，三者逐一确认；选定种子流量载体
-- [ ] 0.2 核实插件协议能力协商机制，确认新增状态消息对官方 v0.2.11 宿主零影响
-- [ ] 0.3 核实判死分类的落点：探针状态机里 pending_replace 迁移的降智类/401类/429类
-       判别字段（钩子挂点与入口过滤器共用）
-- [ ] 0.4 核实组绑定改写的既有通道（account_groups 触发器/ scheduler_outbox 惯例，
-       r17v 教训：绕开触发器撞键）
+- [x] 0.1 种子载体=TestAccountConnection（service 层直调，不校验死活，过插件 Forward，
+       插件路由只看平台/OAuth/灰度桶；降智探针/冷针不过插件=判定不被插件污染）→ design.md 0.1
+- [x] 0.2 状态桥=插件 Health 早已带 status_json（官方字段3）fork proto 缺字段丢弃；
+       补字段+透传端点+PluginsView 桥 case 即可（不新增 RPC）；manifest 双重锁死禁改；
+       官方零影响=结构性保障（官方产物无新方法 stub）→ design.md 0.2
+- [x] 0.3 钩子=commit_svc.go:424-433 committed 块（三判死路径单一 choke point）；
+       过滤=Events reason + RateLimitResetAt；调度资格验证成立（schedulableAccountsQuery
+       无探针状态检查）；**新冲突=maybeAutoHarvestDead 抢号，须让位闸** → design.md 0.3
+- [x] 0.4 改绑=BindGroups（事务删光+重插，outbox 双份，不撞 r17v 触发器）；进区前快照
+       原组 id+priority；CAS 纪律=改组后必须重读再构造 mutation；audit 编排器自理
+       → design.md 0.4
 
 ## Phase 1 — 插件 v0.3.0（~/sub2api-cookie-plugin）
 
@@ -27,20 +31,28 @@
 
 ## Phase 2 — fork 后端：插件状态桥
 
-- [ ] 2.1 宿主↔插件状态轮询（30s）+ 进程内缓存 + 插件离线判定（>2min 无响应）
-- [ ] 2.2 状态暴露到健康快照 API（ListOpenAIProbeHealthSnapshots 扩展救治字段）
-- [ ] 2.3 桥接层测试（离线降级/恢复自愈/空状态）
+- [ ] 2.1 fork proto 补 status_json 字段（HealthResponse=3 / TestConfigResponse=4，与官方
+       同字段号 wire 纯加法）+ 重生成
+- [ ] 2.2 新只读端点 GET /admin/plugins/:id/status（内部调 Health 透传 status_json）
+- [ ] 2.3 PluginsView 桥补 plugin.status case（插件 UI 已 5s 轮询，面板「状态不可用」复活）
+- [ ] 2.4 宿主状态轮询缓存（30s）+ 插件离线判定（>2min），暴露到健康快照 API
+       （ListOpenAIProbeHealthSnapshots 扩展救治字段）
+- [ ] 2.5 桥接层测试（离线降级/恢复自愈/空状态/旧插件无字段兼容）
 
 ## Phase 3 — fork 后端：救治编排器
 
-- [ ] 3.1 入口转换函数 enterRescue(account)：绑救治组 + 开调度 + Extra 救治标记 +
-       种子请求 + 事件 rescue_entered{trigger: auto|manual|reconcile}
-- [ ] 3.2 自动钩子：挂判死迁移点（Phase 0.3 核实的落点），入口过滤三类不进
+- [ ] 3.1 入口转换函数 enterRescue(account)：快照原组 id+priority → BindGroups 绑救治组
+       → 开调度 → Extra 救治标记 → 种子=TestAccountConnection service 直调 → 事件
+       rescue_entered{trigger: auto|manual|reconcile}（改组后重读账号，CAS 纪律）
+- [ ] 3.2 自动钩子：挂 commit_svc.go:424-433 committed 块（三判死路径单一 choke point），
+       入口过滤=mutation.Events reason + RateLimitResetAt（三类不进）
+- [ ] 3.2b maybeAutoHarvestDead 让位闸（probe.go:832-845）：救治成员不被自动打票线拉走；
+       出区（转正/撤调度/人工了断）恢复原语义；**与入区转换同一提交落地**
 - [ ] 3.3 对账清扫：周期扫描够格未进区 → 补进（trigger: reconcile）
 - [ ] 3.4 标签计算：救治中/已复活(连过≥6)/疑似账号级(backoff)；插件离线降级态
 - [ ] 3.5 疑似账号级自动撤调度 + 退避回暖恢复调度
-- [ ] 3.6 转正后处理：reenable 通过后自动改绑回主池组 + 打复活标记
-       （Extra rescued_at 永久 + 复活次数+1；不清除不重置）
+- [ ] 3.6 转正后处理：reenable 通过后用快照 BindGroups 改绑回原池组（真实组 id，不用
+       openai-default）+ 打复活标记（Extra rescued_at 永久 + 复活次数+1；不清除不重置）
 - [ ] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
 - [ ] 3.8 配置项 rescue_lane.*（enabled/group/consecutive_clean_passes/
        reconcile_interval）+ 缺省安全值（enabled=false 上线默认关）
