@@ -473,14 +473,20 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 		s := snapshots[i]
 		label, color, clickable, reason := LabelOpenAIAccountHealth(s)
 		var rescue *OpenAIAccountRescueHealth
-		// 救治区标签覆盖：paused/rate_limited 是账号级压制态，优先于
-		// 救治标签（操作员动作与额度事实不被观测标签掩盖）。
-		if s.RescueMarker != nil && label != OpenAIHealthLabelPaused && label != OpenAIHealthLabelRateLimited {
+		// 救治区标签覆盖（r17bb 修正）：rate_limited 是额度事实，仍优先于
+		// 救治标签；manual_paused 不再遮蔽——r17ba 后入区即关调度，区里
+		// 暂停是「防调用保险丝」而非独立状态，遮住救治中/已复活会让操作员
+		// 看不到救治进度（1217 试点：满血号停在灰 paused 上不可点）。暂停
+		// 以 reason 后缀注记 + ManualPaused 字段双通道保留。
+		if s.RescueMarker != nil && label != OpenAIHealthLabelRateLimited {
 			var bridgeAccount *OpenAIPluginBridgeAccount
 			if prober != nil {
 				bridgeAccount = prober.Accounts[s.AccountID]
 			}
 			label, color, clickable, reason = LabelOpenAIRescueAccount(s.RescueMarker, threshold, bridgeAccount)
+			if s.ManualPaused {
+				reason += "+manual_paused"
+			}
 			rescue = BuildOpenAIAccountRescueHealth(s.RescueMarker, threshold, bridgeAccount, pluginOffline)
 		}
 		var rescued *OpenAIAccountRescuedBadge

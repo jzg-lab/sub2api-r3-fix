@@ -261,6 +261,18 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// 撤调/恢复桥证据（task 3.5）：与插件桥缓存同源（30s 轮询 + 离线沿用
 	// 最近成功缓存）；清扫据此撤调度/回暖恢复。
 	openAIRescueLane.SetBridgeSource(pluginManager.BridgeStatus)
+	// 救治号资格针走插件钉扎传输（r17bb）：1217 实证被 Cookie 钉扎救回的号
+	// 在裸 LB 路上 4 针全 200+错答——针不与真实流量同路就结构性测不出救治
+	// 效果。仅带救治标记的账号改道；插件未启用/未处理回退原直连。
+	openAIDowngradeProbe.SetPluginRoundTrip(pluginManager.RoundTripOpenAIOAuth)
+	// 自动资格针（r17bb）：清扫见插件连过达阈值且号仍在判死位 → 自动打针
+	// （unpause=true：r17ba 后入区即关调度，区里手动暂停是防调用保险丝，
+	// 留着会把针永远堵死——1217 试点实证死锁；针通过仍是上岗唯一前置，
+	// 不破坏「确认救活才进正式调用」的保证）。nil 安全：未注入不自动打。
+	openAIRescueLane.SetNeedleTrigger(func(ctx context.Context, accountID int64) error {
+		_, err := openAIDowngradeProbe.ReenableOpenAIAccount(ctx, accountID, true)
+		return err
+	})
 	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)

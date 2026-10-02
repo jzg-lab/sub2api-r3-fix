@@ -1559,3 +1559,107 @@ func TestEnterRescueKeepsPauseBrakeOnManualEntry(t *testing.T) {
 		t.Fatalf("marker missing after manual entry")
 	}
 }
+
+// ---------- 自动资格针（r17bb，插件连过证据驱动） ----------
+
+// TestRunReconcileSweepAutoNeedleOnPluginPasses 插件连过达阈值 + 号在判死位 →
+// 清扫自动打资格针并记账；冷却窗内二轮清扫不重打（1217 死锁的机器解：
+// 暂停不再堵针——触发载体在 wire 侧带 unpause=true）。
+func TestRunReconcileSweepAutoNeedleOnPluginPasses(t *testing.T) {
+	account := rescueLaneSweepAccount(81)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+		rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(81, false, 6, 0, false, "2026-10-02T09:00:00Z")), true)
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStatePendingReplace}
+		}
+		return states, nil
+	})
+	var needled []int64
+	lane.SetNeedleTrigger(func(_ context.Context, accountID int64) error {
+		needled = append(needled, accountID)
+		return nil
+	})
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(needled) != 1 || needled[0] != 81 {
+		t.Fatalf("needled=%v, want [81]", needled)
+	}
+	marker := GetOpenAIRescueLaneMarker(&repo.roster[0])
+	if marker == nil || marker.AutoNeedleAttempts != 1 || marker.AutoNeedleAt.IsZero() {
+		t.Fatalf("marker=%+v, want auto needle bookkeeping (attempts=1, at set)", marker)
+	}
+	// 冷却内二轮清扫不重打。
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep2: %v", err)
+	}
+	if len(needled) != 1 {
+		t.Fatalf("cooldown violated: needled=%v", needled)
+	}
+}
+
+// TestRunReconcileSweepAutoNeedleGates 不打针的闸门矩阵：针在途
+//（qualification，state 非 pending_replace）/ 连过未达阈值 / 退避中 /
+// 自动上限已满 / 未注入触发载体。
+func TestRunReconcileSweepAutoNeedleGates(t *testing.T) {
+	newLane := func(state string, passes int, inBackoff bool, attempts int, withTrigger bool) (*OpenAIRescueLane, *int) {
+		account := rescueLaneSweepAccount(82)
+		rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+			EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+			OrigGroupIDs: []int64{3}, OrigPriority: 5,
+			AutoNeedleAttempts: attempts,
+		})
+		account.GroupIDs = []int64{99}
+		account.Schedulable = false
+		repo := &rescueLaneRepo{roster: []Account{*account}}
+		lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+			rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(82, inBackoff, passes, 0, false, "2026-10-02T09:00:00Z")), true)
+		lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+			states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
+			for _, id := range ids {
+				states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: state}
+			}
+			return states, nil
+		})
+		calls := 0
+		if withTrigger {
+			lane.SetNeedleTrigger(func(context.Context, int64) error { calls++; return nil })
+		}
+		return lane, &calls
+	}
+	cases := []struct {
+		name        string
+		state       string
+		passes      int
+		inBackoff   bool
+		attempts    int
+		withTrigger bool
+	}{
+		{"针在途（qualification）不打", OpenAIDowngradeStateOnDuty, 6, false, 0, true},
+		{"连过未达阈值不打", OpenAIDowngradeStatePendingReplace, 5, false, 0, true},
+		{"退避中不打（撤调优先）", OpenAIDowngradeStatePendingReplace, 6, true, 0, true},
+		{"自动上限已满不打", OpenAIDowngradeStatePendingReplace, 6, false, 3, true},
+		{"未注入载体不打", OpenAIDowngradeStatePendingReplace, 6, false, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lane, calls := newLane(tc.state, tc.passes, tc.inBackoff, tc.attempts, tc.withTrigger)
+			if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if *calls != 0 {
+				t.Fatalf("needle calls=%d, want 0", *calls)
+			}
+		})
+	}
+}

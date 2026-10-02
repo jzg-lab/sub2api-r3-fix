@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -311,7 +312,10 @@ func TestListOpenAIAccountHealthOfflineBridgeKeepsRevivedFromCache(t *testing.T)
 }
 
 func TestListOpenAIAccountHealthPausedWinsOverRescue(t *testing.T) {
-	// 手动暂停是账号级压制态：暂停标签优先，救治注记不挂（恢复后自然回显）。
+	// r17bb 语义翻转：manual_paused 不再遮蔽救治标签（r17ba 后入区即关
+	// 调度，区里暂停是防调用保险丝而非独立状态；1217 试点实证满血号停在
+	// 灰 paused 上不可点、救治进度不可见）。救治标签优先，暂停以 reason
+	// 后缀注记 + ManualPaused 字段保留。rate_limited 仍是账号级压制态。
 	lane := newRescueLaneTestLane(&rescueLaneRepo{account: rescueLaneTestAccount()}, &rescueLaneSink{})
 	snapshot := rescueLaneInLaneSnapshot(t, 42, func(s *OpenAIProbeHealthSnapshot) { s.ManualPaused = true })
 	runner := rescueLaneHealthRunner(snapshot, nil, lane)
@@ -321,8 +325,14 @@ func TestListOpenAIAccountHealthPausedWinsOverRescue(t *testing.T) {
 		t.Fatalf("ListOpenAIAccountHealth: %v", err)
 	}
 	row := result.Accounts[0]
-	if row.Label != OpenAIHealthLabelPaused || row.Rescue != nil {
-		t.Fatalf("row=%+v, want paused without rescue annotation", row)
+	if row.Label != OpenAIHealthLabelRescuing || row.Rescue == nil {
+		t.Fatalf("row=%+v, want rescuing label with rescue annotation despite manual pause", row)
+	}
+	if !row.ManualPaused {
+		t.Fatalf("row=%+v, want ManualPaused=true surfaced alongside rescue label", row)
+	}
+	if !strings.HasSuffix(row.Reason, "+manual_paused") {
+		t.Fatalf("row=%+v, want reason suffixed with +manual_paused", row)
 	}
 }
 

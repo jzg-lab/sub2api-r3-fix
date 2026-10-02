@@ -129,11 +129,11 @@ func TestResolveOpenAIRescueLaneConfigMatrix(t *testing.T) {
 		{"读库出错→强制关态", OpenAIRescueLaneSettings{Enabled: true, GroupID: 99}, errors.New("db down"),
 			DefaultOpenAIRescueLaneConfig()},
 		{"零值→安全缺省（组未配置）", OpenAIRescueLaneSettings{}, nil,
-			OpenAIRescueLaneConfig{Enabled: false, GroupID: 0, ConsecutiveCleanPasses: 6, ReconcileInterval: 5 * time.Minute}},
+			OpenAIRescueLaneConfig{Enabled: false, GroupID: 0, ConsecutiveCleanPasses: 3, ReconcileInterval: 5 * time.Minute}},
 		{"显式值→分钟转Duration", OpenAIRescueLaneSettings{Enabled: true, GroupID: 99, ConsecutiveCleanPasses: 4, ReconcileIntervalMinutes: 3}, nil,
 			OpenAIRescueLaneConfig{Enabled: true, GroupID: 99, ConsecutiveCleanPasses: 4, ReconcileInterval: 3 * time.Minute}},
 		{"开关开但组未配→开而不通（配置闸兜底）", OpenAIRescueLaneSettings{Enabled: true}, nil,
-			OpenAIRescueLaneConfig{Enabled: true, GroupID: 0, ConsecutiveCleanPasses: 6, ReconcileInterval: 5 * time.Minute}},
+			OpenAIRescueLaneConfig{Enabled: true, GroupID: 0, ConsecutiveCleanPasses: 3, ReconcileInterval: 5 * time.Minute}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

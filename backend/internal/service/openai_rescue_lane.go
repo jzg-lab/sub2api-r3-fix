@@ -64,8 +64,12 @@ var (
 )
 
 const (
-	// openAIRescueDefaultCleanPasses 已复活阈值（连过 ≥ 此数）。proposal 默认 6。
-	openAIRescueDefaultCleanPasses = 6
+	// openAIRescueDefaultCleanPasses 已复活阈值（连过 ≥ 此数）。proposal 默认
+	// 6；r17bb 降为 3，与插件 0.3.2 密集档退出线（probe_burst_until_passes=3）
+	// 对齐——插件侧攒满 3 连过后若还要再等 3 针才毕业，密集档退回稳态档的
+	// 稀疏间隔会把上岗拖长数十分钟。settings 的 ConsecutiveCleanPasses 覆盖
+	// 仍有效。
+	openAIRescueDefaultCleanPasses = 3
 	// openAIRescueDefaultReconcileInterval 对账清扫周期（proposal：5min）。
 	openAIRescueDefaultReconcileInterval = 5 * time.Minute
 	// openAIRescueSeedMaxAttempts 连续种子失败上限（成功清零）。超限后不再
@@ -77,6 +81,14 @@ const (
 	// probe interval 才出首针进 prober 视图，此窗内不重复补种（15min 盖住
 	// 生产默认 interval=900s；更长 interval 的窗内最多每小时 4 发，良性）。
 	openAIRescueReseedInterval = 15 * time.Minute
+	// openAIRescueAutoNeedleCooldown 自动资格针冷却（r17bb）：针失败（r17y
+	// 一击回判死）后到下次自动重试的最小间隔。10min 盖住两轮清扫 + 针
+	// qualification 节奏，失败重试有呼吸窗。
+	openAIRescueAutoNeedleCooldown = 10 * time.Minute
+	// openAIRescueAutoNeedleMaxAttempts 自动资格针触发上限（每账号每轮救治；
+	// 毕业清标记即重置）。达上限后停自动留人工——插件证据仍在累积，手动
+	// 毕业入口不受影响。
+	openAIRescueAutoNeedleMaxAttempts = 3
 	// openAIRescueExitAuthRejected 出区原因：种子流量吃凭据级拒绝
 	// （401/403/token 吊销类）。cookie 插件治不了 OAuth 令牌本身。
 	openAIRescueExitAuthRejected = "auth_rejected"
@@ -141,6 +153,13 @@ type OpenAIRescueLaneSnapshot struct {
 	// LastSeedAt 最近一次种子尝试时刻（补种节流：模板喂上后插件最多一个
 	// interval 才出首针，这窗内不重复补种）。
 	LastSeedAt time.Time `json:"last_seed_at,omitempty"`
+	// AutoNeedleAt 最近一次自动资格针触发时刻（r17bb 冷却节流：针失败 r17y
+	// 一击回判死后，等冷却再重试，不每轮清扫空打）。
+	AutoNeedleAt time.Time `json:"auto_needle_at,omitempty"`
+	// AutoNeedleAttempts 自动资格针连续触发次数（针通过→转正收敛会清整个
+	// 标记，无需手动归零；达 openAIRescueAutoNeedleMaxAttempts 后停自动，
+	// 留人工处置——插件证据继续累积，手动毕业入口随时可用）。
+	AutoNeedleAttempts int `json:"auto_needle_attempts,omitempty"`
 	// ExitReason 非空 = 出区中（唯一现值 auth_rejected：种子吃凭据级拒绝）。
 	// 清扫见到即续走出区，不做绑定/调度自愈（否则与出区意图打架）。
 	ExitReason string `json:"exit_reason,omitempty"`
@@ -177,7 +196,11 @@ type OpenAIRescueLane struct {
 	// 强拉入区。入区/在区不再有任何开调度动作（用户裁定：唯一开调度点=
 	// 考证通过后的资格完成），此闸与调度开无关。nil = 无闸（测试桩）。
 	schedulingGate func(ctx context.Context, accountID int64) (bool, error)
-	now            func() time.Time
+	// needleTrigger 自动资格针载体（r17bb；真实现 = 探针 runner 的
+	// ReenableOpenAIAccount(unpause=true)）。插件连过达阈值的在区判死号
+	// 由清扫自动打针；nil 时清扫不自动打（转正收敛与手动毕业不受影响）。
+	needleTrigger func(ctx context.Context, accountID int64) error
+	now           func() time.Time
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -319,6 +342,12 @@ func parseOpenAIRescueLaneMarkerFields(fields map[string]any) *OpenAIRescueLaneM
 	if lastSeedAt, ok := parseOpenAIRescueTimeString(fields["last_seed_at"]); ok {
 		marker.LastSeedAt = lastSeedAt
 	}
+	if autoNeedleAt, ok := parseOpenAIRescueTimeString(fields["auto_needle_at"]); ok {
+		marker.AutoNeedleAt = autoNeedleAt
+	}
+	if attempts, ok := parseOpenAIRescueInt(fields["auto_needle_attempts"]); ok && attempts > 0 {
+		marker.AutoNeedleAttempts = int(attempts)
+	}
 	if reason, ok := fields["exit_reason"].(string); ok {
 		marker.ExitReason = reason
 	}
@@ -354,6 +383,12 @@ func rescueLaneMarkerExtraValue(marker OpenAIRescueLaneMarker) map[string]any {
 	}
 	if !marker.LastSeedAt.IsZero() {
 		value["last_seed_at"] = marker.LastSeedAt.UTC().Format(time.RFC3339)
+	}
+	if !marker.AutoNeedleAt.IsZero() {
+		value["auto_needle_at"] = marker.AutoNeedleAt.UTC().Format(time.RFC3339)
+	}
+	if marker.AutoNeedleAttempts > 0 {
+		value["auto_needle_attempts"] = marker.AutoNeedleAttempts
 	}
 	if marker.ExitReason != "" {
 		value["exit_reason"] = marker.ExitReason
@@ -589,6 +624,28 @@ func (l *OpenAIRescueLane) updateMarkerFields(
 	})
 }
 
+// autoNeedle 自动资格针（r17bb）：插件连过证据达阈值后由清扫触发。触发即
+// 记账（AutoNeedleAt/Attempts）——针本体异步收敛：成功 → state 进
+// qualification → 连过转 normal → 下一轮清扫转正毕业清标记；失败 → r17y
+// 一击回判死 → 冷却后重试。记账失败只记日志（最坏形态=下轮清扫重触发，
+// 5min 间隔有界）。毕业清整个标记，Attempts 天然按轮重置。
+func (l *OpenAIRescueLane) autoNeedle(ctx context.Context, accountID int64) {
+	needleErr := l.needleTrigger(ctx, accountID)
+	if needleErr != nil {
+		slog.Warn("openai_rescue_auto_needle_failed",
+			"account_id", accountID, "error", needleErr)
+	}
+	if markErr := l.updateMarkerFields(ctx, accountID, func(m *OpenAIRescueLaneMarker) {
+		m.AutoNeedleAt = l.now().UTC()
+		m.AutoNeedleAttempts++
+	}); markErr != nil {
+		slog.Warn("openai_rescue_auto_needle_mark_failed",
+			"account_id", accountID, "error", markErr)
+	}
+	slog.Info("openai_rescue_auto_needle_triggered",
+		"account_id", accountID, "error", needleErr)
+}
+
 // rescueSeedAuthRejected 种子流量的凭据级失败判定（401/403/token 吊销类）。
 // 匹配 AccountTestService 自家错误格式（"API returned 401: ..."）与上游
 // 错误码词面（token_revoked/invalid_grant），均在自家代码与上游 body
@@ -818,6 +875,18 @@ func (l *OpenAIRescueLane) SetSchedulingGate(fn func(ctx context.Context, accoun
 	l.schedulingGate = fn
 }
 
+// SetNeedleTrigger 注入自动资格针载体（真实现 = ReenableOpenAIAccount 带
+// unpause=true：在区手动暂停是防调用刹车而非防针——r17ba 后入区本就不开
+// 调度，暂停留着只会把针永远堵死，1217 试点实证的死锁形态；针本身是合成
+// 流量且仍以针通过为上岗前置，不破坏「确认救活才进正式调用」的保证）。
+// 未注入时清扫不自动打针，行为与 r17ba 一致。
+func (l *OpenAIRescueLane) SetNeedleTrigger(fn func(ctx context.Context, accountID int64) error) {
+	if l == nil {
+		return
+	}
+	l.needleTrigger = fn
+}
+
 // Start 启动对账清扫循环（自 Provider 调用；与探针 runner 同生命周期）。
 // 循环体每轮重读配置：开关未开时按间隔空转（3.8 settings 热更新即生效）。
 func (l *OpenAIRescueLane) Start() {
@@ -1017,6 +1086,22 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 				}
 				// 无回暖证据：维持撤调（有意状态，不是崩溃残留）。
 				continue
+			}
+			// 自动资格针（r17bb）：插件连过达阈值 + 本号仍在判死位 → 清扫
+			// 自动打针（针走 pluginRoundTrip 与真实流量同路，钉扎救治效果
+			// 可被观测）。冷却与上限防空转；针在途（state=qualification）
+			// 自然跳过——不满足 pending_replace；针通过转 normal 后由上方
+			// 转正收敛段收编毕业。
+			if l.needleTrigger != nil && bridgeAccount != nil &&
+				!bridgeAccount.InBackoff && !bridgeAccount.SuspectAccountLevel &&
+				bridgeAccount.ConsecutivePasses >= cfg.ConsecutiveCleanPasses &&
+				marker.AutoNeedleAttempts < openAIRescueAutoNeedleMaxAttempts &&
+				(marker.AutoNeedleAt.IsZero() ||
+					now.Sub(marker.AutoNeedleAt) >= openAIRescueAutoNeedleCooldown) {
+				if snapshot, ok := states[account.ID]; ok &&
+					snapshot.State == OpenAIDowngradeStatePendingReplace {
+					l.autoNeedle(ctx, account.ID)
+				}
 			}
 		}
 		// 在区号 schedulable=false 是期望形态（r17ba 用户裁定：入区即关、

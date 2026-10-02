@@ -586,6 +586,12 @@ type OpenAIDowngradeProbeRunner struct {
 	// 入区（手动/对账入口不受影响）。自动钩子在 commit 通道 committed 块
 	// 异步触发，入区失败绝不反向影响探针提交。
 	rescueLane *OpenAIRescueLane
+	// pluginRoundTrip 由装配层注入（PluginManager.RoundTripOpenAIOAuth）；
+	// 救治区账号的资格针经它走插件钉扎传输（与真实流量同路）。1217 实证
+	// （2026-10-02）：被 Cookie 钉扎救回的号在未钉扎的裸 LB 路上 4 针全
+	// 200+错答，资格针不走插件 = 结构性测不出救治效果。nil 或未处理时
+	// 原路回退 DoProbeWithTLS，行为与合入前一致。
+	pluginRoundTrip func(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, bool, error)
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
@@ -1654,6 +1660,19 @@ func (r *OpenAIDowngradeProbeRunner) SetRescueLane(lane *OpenAIRescueLane) {
 	r.rescueLane = lane
 }
 
+// SetPluginRoundTrip 注入插件钉扎传输（PluginManager.RoundTripOpenAIOAuth）。
+// 仅救治区账号（带 openai_rescue_lane 标记）的资格针改走该传输：针与真实
+// 流量同路，Cookie 钉扎的救治效果才能被资格针观测到。非救治账号与未注入/
+// 未处理路径保持原 DoProbeWithTLS 直连，行为与合入前一致。
+func (r *OpenAIDowngradeProbeRunner) SetPluginRoundTrip(
+	fn func(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, bool, error),
+) {
+	if r == nil {
+		return
+	}
+	r.pluginRoundTrip = fn
+}
+
 // applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户
 // 裁定：机制必须能检测到额度耗尽，耗尽号不能一直探）。两级：
 //  1. 429 带显式重置时间（x-codex-* 窗口头或 usage_limit_reached 体，真实
@@ -2159,8 +2178,20 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		if r.tlsProfiles != nil {
 			probeProfile = r.tlsProfiles.ResolveTLSProfile(account)
 		}
+		// 救治区账号的资格针优先走插件钉扎传输（r17bb）：1217 实证被
+		// Cookie 钉扎救回的号在裸 LB 路上 4 针全 200+错答——资格针不与
+		// 真实流量同路就结构性测不出救治效果。插件未启用/未处理时回退
+		// 原一次性专用传输，非救治账号路径不变。
 		var resp *http.Response
-		resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+		if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(account) != nil {
+			var handled bool
+			resp, handled, requestErr = r.pluginRoundTrip(ctx, req, proxyURL, account)
+			if !handled {
+				resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+			}
+		} else {
+			resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+		}
 		if requestErr != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
