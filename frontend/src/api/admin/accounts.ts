@@ -1099,6 +1099,28 @@ export async function reenableOpenAIAccount(id: number, unpause = false): Promis
   return data
 }
 
+export interface OpenAIRescueResult {
+  account_id: number
+  /** true = 本次实际送入（绑救治组 + 开调度 + 种子流量）。 */
+  entered: boolean
+  /** true = 已在救治区（幂等返回，未重复操作）。 */
+  already_in_lane: boolean
+  trigger: string
+}
+
+/** 手动送入救治区（task 3.7）：判死号 → 绑救治组 + 开调度 + 种子流量喂插件，
+ * 插件自动救号（连过阈值 → 已复活 → 点击转正）。种子吃凭据级拒绝
+ * （401/403）时号已回判死原位，后端以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED
+ * 拒绝——提示走删号重新授权。超时须容纳种子全程（上游一轮对话）。 */
+export async function rescueOpenAIAccount(id: number): Promise<OpenAIRescueResult> {
+  const { data } = await apiClient.post<OpenAIRescueResult>(
+    `/admin/openai/accounts/${id}/rescue`,
+    undefined,
+    { timeout: 180000 }
+  )
+  return data
+}
+
 export interface SparkShadowCreatePayload {
   name?: string
   priority?: number
@@ -1240,6 +1262,7 @@ export const accountsAPI = {
   listOpenAIAccountHealth,
   triggerOpenAIProbeNow,
   reenableOpenAIAccount,
+  rescueOpenAIAccount,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

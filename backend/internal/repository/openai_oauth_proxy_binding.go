@@ -284,6 +284,69 @@ func validateOpenAIOAuthSchedulable(
 	return validateOpenAIOAuthQualification(ctx, exec, account)
 }
 
+// accountBoundOnlyToGroup 账号当前是否仅绑定指定组。救治区放行的安全依据：
+// 仅绑救治组 = 账号全部流量都从无客户订阅的救治组走，资格闸保护的客户面
+// 不可能被触达；还绑着任何别的组（客户池）就不放行。
+func accountBoundOnlyToGroup(ctx context.Context, exec sqlExecutor, accountID int64, groupID int64) (bool, error) {
+	rows, err := exec.QueryContext(ctx, `
+		SELECT group_id FROM account_groups WHERE account_id = $1
+	`, accountID)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	only := false
+	for rows.Next() {
+		var bound int64
+		if err := rows.Scan(&bound); err != nil {
+			return false, err
+		}
+		if bound != groupID {
+			return false, nil
+		}
+		only = true
+	}
+	return only, rows.Err()
+}
+
+// validateOpenAIOAuthSchedulableInRescueLane 救治区专用调度校验（r17ax）：
+// 判死号入区要开调度，但救治区救的正是没过资格考（Extra 无合格戳）的号，
+// 全局资格闸会 409。放行条件收紧为「账号当前仅绑定救治组」——闸的语义
+// （未考证 OAuth 号不得进客户流量）在救治组拓扑下不可能被违反；代理在场
+// 校验保留（无代理种子/插件都无从工作）。
+func validateOpenAIOAuthSchedulableInRescueLane(
+	ctx context.Context,
+	exec sqlExecutor,
+	accountID int64,
+	rescueGroupID int64,
+	schedulable bool,
+) error {
+	if !schedulable {
+		return nil
+	}
+	account, err := lockOpenAIOAuthAccount(ctx, exec, accountID)
+	if err != nil {
+		return err
+	}
+	if !service.IsOpenAIBrowserOAuthAccount(account) {
+		return nil
+	}
+	if rescueGroupID <= 0 {
+		return service.ErrOpenAIOAuthRescueBindingRequired
+	}
+	only, err := accountBoundOnlyToGroup(ctx, exec, accountID, rescueGroupID)
+	if err != nil {
+		return err
+	}
+	if !only {
+		return service.ErrOpenAIOAuthRescueBindingRequired
+	}
+	if account.ProxyID == nil || *account.ProxyID <= 0 {
+		return service.ErrOpenAIOAuthProxyRequired
+	}
+	return nil
+}
+
 func validateOpenAIOAuthQualification(ctx context.Context, exec sqlExecutor, account *service.Account) error {
 	if account == nil || account.ProxyID == nil || *account.ProxyID <= 0 {
 		return service.ErrOpenAIOAuthProxyRequired

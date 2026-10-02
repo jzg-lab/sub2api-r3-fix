@@ -2713,6 +2713,55 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 	return nil
 }
 
+// SetSchedulableInRescueLane 救治区专用调度开关（r17ax）。判死号入区开调度
+// 被全局 OAuth 资格闸拦（没过资格考的号无合格戳 → 409），而救治区救的正是
+// 这类号。校验走 validateOpenAIOAuthSchedulableInRescueLane：仅绑救治组时
+// 放行资格戳校验（救治组无客户订阅，闸保护的客户面不可能被触达），代理
+// 在场校验保留。其余行为与 SetSchedulable 一致（outbox 双发 + 快照同步）。
+func (r *accountRepository) SetSchedulableInRescueLane(ctx context.Context, id int64, rescueGroupID int64, schedulable bool) error {
+	baseCtx := ctx
+	contextTx := dbent.TxFromContext(ctx)
+	client := clientFromContext(ctx, r.client)
+	var tx *dbent.Tx
+	if contextTx == nil {
+		var err error
+		tx, err = r.client.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			ctx = dbent.NewTxContext(ctx, tx)
+			client = tx.Client()
+		}
+	}
+	if err := validateOpenAIOAuthSchedulableInRescueLane(ctx, client, id, rescueGroupID, schedulable); err != nil {
+		return err
+	}
+	result, err := client.Account.Update().
+		Where(dbaccount.IDEQ(id)).
+		SetSchedulable(schedulable).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return service.ErrAccountNotFound
+	}
+	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		return err
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	if contextTx == nil {
+		r.syncSchedulerAccountSnapshot(baseCtx, id)
+	}
+	return nil
+}
+
 func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now time.Time) (int64, error) {
 	rows, err := r.sql.QueryContext(ctx, `
 		UPDATE accounts

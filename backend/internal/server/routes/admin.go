@@ -471,6 +471,8 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// 判死即终态（r17x 选项A 2026-09-21）：手动启用=唯一救援入口
 		//（打票线已于 2026-10-02 整体删除，救治区为唯一自动救援线）。
 		openai.POST("/accounts/:id/reenable", h.Admin.OpenAIProbeHealth.ReenableAccount)
+		// 救治区手动入口（task 3.7）：判死号 → 插件实验台自动救号。
+		openai.POST("/accounts/:id/rescue", h.Admin.OpenAIProbeHealth.RescueAccount)
 	}
 }
 

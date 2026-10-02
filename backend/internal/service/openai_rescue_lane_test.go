@@ -340,9 +340,14 @@ func TestEnterRescueTransitionOrderAndEffects(t *testing.T) {
 	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerReconcile); err != nil {
 		t.Fatalf("EnterRescue: %v", err)
 	}
-	// 次序：标记-first（崩溃可对账补救）→ 改绑 → 重读后开调度。
-	if len(repo.calls) != 3 || repo.calls[0] != "extra" || repo.calls[1] != "bind" || repo.calls[2] != "sched" {
-		t.Fatalf("call order=%v, want [extra bind sched]", repo.calls)
+	// 次序：标记-first（崩溃可对账补救）→ 改绑 → 重读后开调度 → 种子记账
+	//（末位 extra = SeedOK/SeedAttempts 写回标记，清扫补种子的依据）。
+	if len(repo.calls) != 4 || repo.calls[0] != "extra" || repo.calls[1] != "bind" ||
+		repo.calls[2] != "sched" || repo.calls[3] != "extra" {
+		t.Fatalf("call order=%v, want [extra bind sched extra]", repo.calls)
+	}
+	if len(repo.extraSets) != 2 {
+		t.Fatalf("extraSets=%d, want 2 (marker + seed bookkeeping)", len(repo.extraSets))
 	}
 	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 99 {
 		t.Fatalf("binds=%v, want single bind to rescue group 99", repo.binds)
@@ -1032,5 +1037,367 @@ func TestRunReconcileSweepDoesNotGraduateReplacedAccount(t *testing.T) {
 	}
 	if len(repo.binds) != 0 {
 		t.Fatalf("binds=%v, want none（挂救治组不动）", repo.binds)
+	}
+}
+
+// ---------- 救治调度通道 + 种子记账 + 凭据级出区 + 手动入口（补丁包 2026-10-02） ----------
+
+// rescueSchedulerSpy 救治区专用调度通道桩：记录调用；可选注入错误。
+type rescueSchedulerSpy struct {
+	AccountRepository
+	calls []rescueSchedulerCall
+	err   error
+}
+
+type rescueSchedulerCall struct {
+	accountID     int64
+	rescueGroupID int64
+	schedulable   bool
+}
+
+func (s *rescueSchedulerSpy) SetSchedulableInRescueLane(_ context.Context, accountID, rescueGroupID int64, schedulable bool) error {
+	s.calls = append(s.calls, rescueSchedulerCall{accountID, rescueGroupID, schedulable})
+	return s.err
+}
+
+func TestEnableSchedulingPrefersRescueChannel(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	spy := &rescueSchedulerSpy{}
+	lane.SetRescueScheduler(spy)
+
+	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
+		t.Fatalf("EnterRescue: %v", err)
+	}
+	if len(spy.calls) != 1 || spy.calls[0].accountID != 42 ||
+		spy.calls[0].rescueGroupID != 99 || !spy.calls[0].schedulable {
+		t.Fatalf("spy.calls=%+v, want one (42, 99, true)", spy.calls)
+	}
+	// 注入了专用通道就不能再走普通通道（没过资格考的号普通通道必 409）。
+	for _, enabled := range repo.schedSets {
+		if enabled {
+			t.Fatalf("repo.schedSets=%v, plain channel must not enable scheduling", repo.schedSets)
+		}
+	}
+}
+
+func TestEnableSchedulingFallsBackWithoutRescueScheduler(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
+		t.Fatalf("EnterRescue: %v", err)
+	}
+	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
+		t.Fatalf("schedSets=%v, want [true] via fallback channel", repo.schedSets)
+	}
+}
+
+func TestRescueSeedAuthRejectedClassifier(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{errors.New("connection reset by peer"), false},
+		{errors.New("context deadline exceeded"), false},
+		{errors.New("API returned 401: Unauthorized"), true},
+		{errors.New("API returned 403: Forbidden"), true},
+		{errors.New("refresh failed: token_revoked"), true},
+		{errors.New("oauth2: \"invalid_grant\""), true},
+	}
+	for _, tc := range cases {
+		if got := rescueSeedAuthRejected(tc.err); got != tc.want {
+			t.Fatalf("rescueSeedAuthRejected(%v)=%v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestEnterRescueSeedSuccessStampsMarker(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	lane.seed = func(context.Context, int64) error { return nil }
+
+	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
+		t.Fatalf("EnterRescue: %v", err)
+	}
+	marker := GetOpenAIRescueLaneMarker(repo.account)
+	if marker == nil {
+		t.Fatalf("marker missing")
+	}
+	if !marker.SeedOK || marker.SeedAttempts != 1 {
+		t.Fatalf("seed bookkeeping: seed_ok=%v attempts=%d, want true/1", marker.SeedOK, marker.SeedAttempts)
+	}
+}
+
+func TestEnterRescueSeedAuthRejectedExitsAndReturnsSentinel(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+	lane.seed = func(context.Context, int64) error {
+		return errors.New("API returned 401: token_revoked")
+	}
+
+	err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto)
+	if !errors.Is(err, ErrRescueSeedAuthRejected) {
+		t.Fatalf("EnterRescue err=%v, want ErrRescueSeedAuthRejected", err)
+	}
+	// 号回判死原位：标记清空、原组还回、调度关、冷却戳在窗内。
+	if marker := GetOpenAIRescueLaneMarker(repo.account); marker != nil {
+		t.Fatalf("marker must be cleared after auth-reject exit, got %+v", marker)
+	}
+	if len(repo.account.GroupIDs) != 2 || repo.account.GroupIDs[0] != 3 || repo.account.GroupIDs[1] != 5 {
+		t.Fatalf("group_ids=%v, want orig [3 5]", repo.account.GroupIDs)
+	}
+	if repo.account.Schedulable {
+		t.Fatalf("schedulable must be off after exit")
+	}
+	if !OpenAIRescueAuthRejectSuppressed(repo.account, time.Now()) {
+		t.Fatalf("auth-reject cooldown tombstone missing after exit")
+	}
+	// 事件账：只有 rescue_auth_rejected（入区没成，不发 rescue_entered）。
+	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueAuthRejected {
+		t.Fatalf("events=%+v, want single rescue_auth_rejected", sink.events)
+	}
+	// 调度轨迹：入区开过一次、出区关掉一次。
+	if len(repo.schedSets) != 2 || !repo.schedSets[0] || repo.schedSets[1] {
+		t.Fatalf("schedSets=%v, want [true false]", repo.schedSets)
+	}
+}
+
+func TestEnterRescueSeedTransportFailureStaysInLane(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+	lane.seed = func(context.Context, int64) error { return errors.New("dial tcp: timeout") }
+
+	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
+		t.Fatalf("non-auth seed failure must not fail EnterRescue: %v", err)
+	}
+	marker := GetOpenAIRescueLaneMarker(repo.account)
+	if marker == nil || marker.SeedOK || marker.SeedAttempts != 1 {
+		t.Fatalf("marker=%+v, want in-lane with seed_ok=false attempts=1", marker)
+	}
+	if len(repo.account.GroupIDs) != 1 || repo.account.GroupIDs[0] != 99 {
+		t.Fatalf("group_ids=%v, account must stay bound to rescue group", repo.account.GroupIDs)
+	}
+	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueEntered ||
+		sink.events[0].details["seed_ok"] != false {
+		t.Fatalf("events=%+v, want rescue_entered{seed_ok:false}", sink.events)
+	}
+}
+
+func TestSweepResumesExitInProgress(t *testing.T) {
+	account := rescueLaneSweepAccount(61)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		ExitReason:   openAIRescueExitAuthRejected, // 出区半途崩溃窗：清扫续走
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+
+	entered, healed, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/0/nil (exit is not healing)", entered, healed, err)
+	}
+	target := &repo.roster[0]
+	if GetOpenAIRescueLaneMarker(target) != nil {
+		t.Fatalf("marker must be cleared after exit resume")
+	}
+	if len(target.GroupIDs) != 1 || target.GroupIDs[0] != 3 {
+		t.Fatalf("group_ids=%v, want orig [3]", target.GroupIDs)
+	}
+	if target.Schedulable {
+		t.Fatalf("schedulable must be off after exit resume")
+	}
+	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueAuthRejected {
+		t.Fatalf("events=%+v, want rescue_auth_rejected", sink.events)
+	}
+}
+
+func TestSweepReseedsUnseededMarkedAccount(t *testing.T) {
+	account := rescueLaneSweepAccount(62)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedAttempts: 1, // 半进区：种子还没打成功
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 1 {
+		t.Fatalf("seed calls=%d, want 1 (reseed unseeded marked account)", seedCalls)
+	}
+	marker := GetOpenAIRescueLaneMarker(&repo.roster[0])
+	if marker == nil || !marker.SeedOK || marker.SeedAttempts != 2 {
+		t.Fatalf("marker=%+v, want seed_ok=true attempts=2", marker)
+	}
+}
+
+func TestSweepSeedAttemptsCapStopsReseed(t *testing.T) {
+	account := rescueLaneSweepAccount(63)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedAttempts: openAIRescueSeedMaxAttempts, // 上限已到：不再空打
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 0 {
+		t.Fatalf("seed calls=%d, want 0 (attempts cap reached)", seedCalls)
+	}
+}
+
+func TestSweepReseedAuthRejectedExitsLane(t *testing.T) {
+	account := rescueLaneSweepAccount(64)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+	lane.seed = func(context.Context, int64) error {
+		return errors.New("API returned 403: forbidden")
+	}
+
+	entered, _, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 {
+		t.Fatalf("entered=%d err=%v, want 0/nil (suppressed by cooldown after exit)", entered, err)
+	}
+	target := &repo.roster[0]
+	if GetOpenAIRescueLaneMarker(target) != nil {
+		t.Fatalf("marker must be cleared after reseed auth-reject")
+	}
+	if len(target.GroupIDs) != 1 || target.GroupIDs[0] != 3 {
+		t.Fatalf("group_ids=%v, want orig [3]", target.GroupIDs)
+	}
+}
+
+func TestSweepDoesNotReenterWithinAuthRejectCooldown(t *testing.T) {
+	account := rescueLaneSweepAccount(65)
+	// 上轮凭据级出区留下的冷却戳（标记已清）：Status 仍 Active + 探针态
+	// pending_replace，若无冷却闸清扫会每轮再补进空转。
+	account.Extra[openAIRescueAuthRejectedAtExtraKey] = time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStatePendingReplace}
+		}
+		return states, nil
+	})
+
+	entered, _, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 {
+		t.Fatalf("entered=%d err=%v, want 0/nil (cooldown suppresses re-entry)", entered, err)
+	}
+	if len(repo.binds) != 0 {
+		t.Fatalf("binds=%v, want none during cooldown", repo.binds)
+	}
+}
+
+func TestEnterRescueClearsStaleAuthRejectCooldown(t *testing.T) {
+	account := rescueLaneTestAccount()
+	account.Extra[openAIRescueAuthRejectedAtExtraKey] = time.Now().UTC().Format(time.RFC3339)
+	repo := &rescueLaneRepo{account: account}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	// 手动入口不受冷却闸限制，且成功入区清掉旧戳。
+	entered, err := lane.EnterRescueManual(context.Background(), 42)
+	if err != nil || !entered {
+		t.Fatalf("EnterRescueManual entered=%v err=%v, want true/nil (manual bypasses cooldown)", entered, err)
+	}
+	// 桩的 UpdateExtra 以 nil 值代键删除（真实现 JSONB 合并删键），读侧
+	// nil = 不压制——按行为断言而非键存在性。
+	if OpenAIRescueAuthRejectSuppressed(repo.account, time.Now()) {
+		t.Fatalf("stale cooldown must stop suppressing after entry")
+	}
+}
+
+func TestMaybeAutoEnterRescueRespectsAuthRejectCooldown(t *testing.T) {
+	account := rescueLaneTestAccount()
+	account.Status = StatusActive
+	account.Extra[openAIRescueAuthRejectedAtExtraKey] = time.Now().UTC().Format(time.RFC3339)
+	repo := &rescueLaneRepo{account: account}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	clean := OpenAIDowngradeProbeResult{TransportOK: true, AnswerCorrect: true, HTTPStatus: http.StatusOK}
+	lane.MaybeAutoEnterRescue(context.Background(), rescueLanePendingMutation(clean), repo.account)
+	if len(repo.binds) != 0 {
+		t.Fatalf("binds=%v, auto hook must respect cooldown tombstone", repo.binds)
+	}
+}
+
+func TestEnterRescueManualIdempotentSecondCall(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+
+	entered, err := lane.EnterRescueManual(context.Background(), 42)
+	if err != nil || !entered {
+		t.Fatalf("first manual enter: entered=%v err=%v, want true/nil", entered, err)
+	}
+	entered, err = lane.EnterRescueManual(context.Background(), 42)
+	if err != nil || entered {
+		t.Fatalf("second manual enter: entered=%v err=%v, want false/nil (already in lane)", entered, err)
+	}
+	if len(repo.binds) != 1 {
+		t.Fatalf("binds=%d, want 1 (idempotent)", len(repo.binds))
+	}
+}
+
+func TestEnterRescueManualPropagatesAuthRejection(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	lane.seed = func(context.Context, int64) error {
+		return errors.New("API returned 401: unauthorized")
+	}
+
+	entered, err := lane.EnterRescueManual(context.Background(), 42)
+	if entered {
+		t.Fatalf("entered=true, want false on auth rejection")
+	}
+	if !errors.Is(err, ErrRescueSeedAuthRejected) {
+		t.Fatalf("err=%v, want ErrRescueSeedAuthRejected (manual surfaces it)", err)
+	}
+	// 号已回判死原位。
+	if GetOpenAIRescueLaneMarker(repo.account) != nil || repo.account.Schedulable {
+		t.Fatalf("account must be back at pending_replace rest position")
 	}
 }

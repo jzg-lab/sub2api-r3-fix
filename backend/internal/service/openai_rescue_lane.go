@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 const (
@@ -28,6 +30,10 @@ const (
 	// OpenAIDowngradeEventRescueRecovered 疑似账号级回暖（退避期满复探过针）
 	// 恢复调度，或插件状态丢失（重启）后的陈旧撤调恢复。
 	OpenAIDowngradeEventRescueRecovered = "rescue_recovered"
+	// OpenAIDowngradeEventRescueAuthRejected 种子流量吃凭据级拒绝（401/403/
+	// token 吊销类）自动出区：cookie 插件治不了 OAuth 令牌本身，号回判死
+	// 原位（问题号标签），人工走删号重授权。
+	OpenAIDowngradeEventRescueAuthRejected = "rescue_auth_rejected"
 
 	// 救治区触发源（rescue_entered.details.trigger）。
 	OpenAIRescueTriggerAuto      = "auto"
@@ -43,6 +49,9 @@ const (
 	openAIRescueLaneExtraKey      = "openai_rescue_lane"
 	openAIRescueRescuedAtExtraKey = "openai_rescue_rescued_at"
 	openAIRescueRescueCountKey    = "openai_rescue_rescue_count"
+	// openAIRescueAuthRejectedAtExtraKey 凭据级出区冷却戳（RFC3339）：
+	// 出区时打、成功入区时清；窗内自动补进被压住（见冷却窗常量注释）。
+	openAIRescueAuthRejectedAtExtraKey = "openai_rescue_auth_rejected_at"
 )
 
 var (
@@ -59,7 +68,38 @@ const (
 	openAIRescueDefaultCleanPasses = 6
 	// openAIRescueDefaultReconcileInterval 对账清扫周期（proposal：5min）。
 	openAIRescueDefaultReconcileInterval = 5 * time.Minute
+	// openAIRescueSeedMaxAttempts 种子尝试上限（入区 1 次 + 清扫补种若干）。
+	// 超限后不再空打——凭据级失败早已出区，非凭据失败说明上游/链路本身
+	// 有问题，等插件真实流量兜底。
+	openAIRescueSeedMaxAttempts = 5
+	// openAIRescueExitAuthRejected 出区原因：种子流量吃凭据级拒绝
+	// （401/403/token 吊销类）。cookie 插件治不了 OAuth 令牌本身。
+	openAIRescueExitAuthRejected = "auth_rejected"
+	// openAIRescueAuthRejectReentryCooldown 凭据级出区后的自动补进冷却窗：
+	// 出区即清标记，若无冷却戳，Status 仍 Active 的判死号会被清扫下一轮
+	// 立刻再补进 → 种子 401 → 再出区，每 5 分钟空转一圈。戳在窗内时自动
+	// 钩子与清扫补进都跳过；手动入口（送入实验台）不受限——人工重试明志。
+	openAIRescueAuthRejectReentryCooldown = 24 * time.Hour
 )
+
+var (
+	// ErrRescueSeedAuthRejected 入区/补种子吃凭据级拒绝后已自动出区（号回
+	// 判死原位）。自动钩子与清扫按已处理忽略；手动入口透传给管理端展示。
+	ErrRescueSeedAuthRejected = infraerrors.Conflict(
+		"OPENAI_RESCUE_SEED_AUTH_REJECTED",
+		"rescue seed was rejected by upstream credentials (401/403): the OAuth token problem cannot be healed by the rescue lane; account returned to pending_replace",
+	)
+)
+
+// OpenAIRescueLaneScheduler 救治区专用调度通道：账号「仅绑救治组」时放行
+// OAuth 资格闸（闸语义 = 未考证号不进客户流量；救治组无客户订阅，拓扑上
+// 不可能违反）。真实现 = 仓库具体类型（wire 类型断言注入，同
+// OpenAIProbeHealthLister 先例）；未注入时回退普通 SetSchedulable——
+// 没过资格考的号会吃 409 OPENAI_OAUTH_QUALIFICATION_REQUIRED（生产 wire
+// 恒注入，回退仅测试桩路径）。
+type OpenAIRescueLaneScheduler interface {
+	SetSchedulableInRescueLane(ctx context.Context, accountID int64, rescueGroupID int64, schedulable bool) error
+}
 
 // OpenAIRescueLaneConfig 救治区配置（settings 装配层注入；缺省安全值）。
 type OpenAIRescueLaneConfig struct {
@@ -90,6 +130,15 @@ type OpenAIRescueLaneSnapshot struct {
 	Trigger      string    `json:"trigger"`
 	OrigGroupIDs []int64   `json:"orig_group_ids"`
 	OrigPriority int       `json:"orig_priority"`
+	// SeedOK 种子流量已成功打过至少一次（插件探针模板已喂上；清扫据此
+	// 判断是否补种子）。
+	SeedOK bool `json:"seed_ok,omitempty"`
+	// SeedAttempts 种子尝试次数（含失败；达 openAIRescueSeedMaxAttempts 后
+	// 清扫不再补种子——持续失败的号留在区里等插件真实流量，不无限空打）。
+	SeedAttempts int `json:"seed_attempts,omitempty"`
+	// ExitReason 非空 = 出区中（唯一现值 auth_rejected：种子吃凭据级拒绝）。
+	// 清扫见到即续走出区，不做绑定/调度自愈（否则与出区意图打架）。
+	ExitReason string `json:"exit_reason,omitempty"`
 }
 
 // OpenAIRescueLaneMarker 是 Extra[openai_rescue_lane] 的解析形态。
@@ -117,7 +166,10 @@ type OpenAIRescueLane struct {
 	// bridge 插件桥状态源（task 3.5 撤调/恢复的数据依据）；nil 时清扫不碰
 	// 调度撤复（标签照常由健康列表计算，只是不自动撤）。
 	bridge func(ctx context.Context) *PluginBridgeStatus
-	now    func() time.Time
+	// rescueScheduler 救治区专用调度通道（资格闸放行口）；nil 回退普通
+	// SetSchedulable（见 OpenAIRescueLaneScheduler 注释）。
+	rescueScheduler OpenAIRescueLaneScheduler
+	now             func() time.Time
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -198,6 +250,9 @@ func ShouldAutoEnterRescueLane(
 	if account != nil && GetOpenAIRescueLaneMarker(account) != nil {
 		return false
 	}
+	if account != nil && OpenAIRescueAuthRejectSuppressed(account, now) {
+		return false
+	}
 	return true
 }
 
@@ -249,18 +304,47 @@ func parseOpenAIRescueLaneMarkerFields(fields map[string]any) *OpenAIRescueLaneM
 	if priority, ok := parseOpenAIRescueInt(fields["orig_priority"]); ok {
 		marker.OrigPriority = int(priority)
 	}
+	marker.SeedOK = parseOpenAIRescueBool(fields["seed_ok"])
+	if attempts, ok := parseOpenAIRescueInt(fields["seed_attempts"]); ok && attempts > 0 {
+		marker.SeedAttempts = int(attempts)
+	}
+	if reason, ok := fields["exit_reason"].(string); ok {
+		marker.ExitReason = reason
+	}
 	return marker
+}
+
+// parseOpenAIRescueBool 容错解析布尔（JSON 往返后可能是 bool/string）。
+func parseOpenAIRescueBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	}
+	return false
 }
 
 // rescueLaneMarkerExtraValue 构造可写入 Extra 的标记值（时间用 RFC3339 字符串，
 // 与读侧容错解析配对）。
 func rescueLaneMarkerExtraValue(marker OpenAIRescueLaneMarker) map[string]any {
-	return map[string]any{
+	value := map[string]any{
 		"entered_at":     marker.EnteredAt.UTC().Format(time.RFC3339),
 		"trigger":        marker.Trigger,
 		"orig_group_ids": marker.OrigGroupIDs,
 		"orig_priority":  marker.OrigPriority,
 	}
+	// 可选字段只在非零值时写入（保持老标记 JSON 形态稳定，减少无谓代际）。
+	if marker.SeedOK {
+		value["seed_ok"] = true
+	}
+	if marker.SeedAttempts > 0 {
+		value["seed_attempts"] = marker.SeedAttempts
+	}
+	if marker.ExitReason != "" {
+		value["exit_reason"] = marker.ExitReason
+	}
+	return value
 }
 
 // parseOpenAIRescueTimeString 容错解析时间（RFC3339 字符串）。
@@ -333,8 +417,10 @@ func (l *OpenAIRescueLane) MaybeAutoEnterRescue(
 	}
 	if err := l.EnterRescue(ctx, mutation.AccountID, OpenAIRescueTriggerAuto); err != nil {
 		// 判死提交本身已落库：入区失败只记日志，绝不反向影响探针通道。
-		// 幂等拒绝（已在区）与开关态不是错误；瞬时失败由对账清扫兜底。
-		if errors.Is(err, ErrRescueLaneDisabled) || errors.Is(err, ErrRescueLaneIneligible) {
+		// 幂等拒绝（已在区）与开关态不是错误；凭据级拒绝已出区（种子
+		// 401/403 类，cookie 插件治不了）；瞬时失败由对账清扫兜底。
+		if errors.Is(err, ErrRescueLaneDisabled) || errors.Is(err, ErrRescueLaneIneligible) ||
+			errors.Is(err, ErrRescueSeedAuthRejected) {
 			return
 		}
 		slog.Warn("openai_rescue_auto_enter_failed",
@@ -384,6 +470,8 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 	}
 	if err := l.accounts.UpdateExtra(ctx, accountID, map[string]any{
 		openAIRescueLaneExtraKey: rescueLaneMarkerExtraValue(marker),
+		// 上一轮凭据级出区的冷却戳随入区一并清除（手动重试明志；坏值同清）。
+		openAIRescueAuthRejectedAtExtraKey: nil,
 	}); err != nil {
 		return err
 	}
@@ -396,25 +484,32 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 		return fmt.Errorf("reread after bind: %w", err)
 	}
 	if !fresh.Schedulable {
-		if err := l.accounts.SetSchedulable(ctx, accountID, true); err != nil {
+		// 救治优先通道：没过资格考（Extra 无合格戳）的判死号在全局资格闸
+		// 下会 409，而救治区救的正是这类号——仅绑救治组时放行。
+		if err := l.enableScheduling(ctx, accountID); err != nil {
 			return fmt.Errorf("enable scheduling: %w", err)
 		}
 	}
 
-	seedOK := true
-	if l.seed != nil {
-		if err := l.seed(ctx, accountID); err != nil {
-			seedOK = false
-			slog.Warn("openai_rescue_seed_failed",
-				"account_id", accountID, "trigger", trigger, "error", err)
+	seedErr := l.seedAndAccount(ctx, account, trigger)
+	if seedErr != nil {
+		if errors.Is(seedErr, ErrRescueSeedAuthRejected) {
+			// 凭据级死（401/403/token 吊销）：插件治不了 OAuth 令牌。出区
+			// 已在 seedAndAccount 内完成（号回判死原位），入区不算失败也
+			// 不算成功——调用方（自动钩子/清扫）忽略，手动入口透传展示。
+			return seedErr
 		}
+		// 非凭据失败：留在区里（插件真实流量/下轮清扫补种子兜底）。
 	}
 	if l.events != nil {
 		details := map[string]any{
 			"trigger":        trigger,
 			"orig_group_ids": marker.OrigGroupIDs,
 			"orig_priority":  marker.OrigPriority,
-			"seed_ok":        seedOK,
+			"seed_ok":        seedErr == nil,
+		}
+		if seedErr != nil {
+			details["seed_error"] = seedErr.Error()
 		}
 		if err := l.events.AppendOpenAIDowngradeEvent(ctx, accountID, account.ProxyID,
 			OpenAIDowngradeEventRescueEntered, details); err != nil {
@@ -422,6 +517,155 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 		}
 	}
 	return nil
+}
+
+// seedAndAccount 打种子并把结果记账进标记（SeedOK/SeedAttempts，清扫补
+// 种子的依据）。凭据级拒绝（401/403/token 吊销类）时完成出区并返回
+// ErrRescueSeedAuthRejected；其余失败只返回原错误（号留在区里）。
+// 种子载体未注入（测试桩）时零成本通过。
+func (l *OpenAIRescueLane) seedAndAccount(ctx context.Context, account *Account, trigger string) error {
+	if l == nil || l.seed == nil {
+		return nil
+	}
+	seedErr := l.seed(ctx, account.ID)
+	if seedErr != nil {
+		slog.Warn("openai_rescue_seed_failed",
+			"account_id", account.ID, "trigger", trigger, "error", seedErr)
+	}
+	if markErr := l.updateMarkerFields(ctx, account.ID, func(m *OpenAIRescueLaneMarker) {
+		m.SeedAttempts++
+		m.SeedOK = seedErr == nil
+	}); markErr != nil {
+		// 记账失败不改变种子结局（清扫下轮按 SeedOK 缺失补打，幂等）。
+		slog.Warn("openai_rescue_seed_mark_failed",
+			"account_id", account.ID, "error", markErr)
+	}
+	if seedErr != nil && rescueSeedAuthRejected(seedErr) {
+		if exitErr := l.ExitRescue(ctx, account.ID, openAIRescueExitAuthRejected); exitErr != nil {
+			slog.Warn("openai_rescue_exit_failed",
+				"account_id", account.ID, "reason", openAIRescueExitAuthRejected, "error", exitErr)
+		}
+		return ErrRescueSeedAuthRejected
+	}
+	return seedErr
+}
+
+// updateMarkerFields 读-改-写标记字段（UpdateExtra 是 JSONB 整键合并，
+// 标记值必须整体重写）。变更回调内改副本，写回整键。
+func (l *OpenAIRescueLane) updateMarkerFields(
+	ctx context.Context, accountID int64,
+	mutate func(m *OpenAIRescueLaneMarker),
+) error {
+	account, err := l.accounts.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	marker := GetOpenAIRescueLaneMarker(account)
+	if marker == nil {
+		return ErrRescueLaneIneligible
+	}
+	mutate(marker)
+	return l.accounts.UpdateExtra(ctx, accountID, map[string]any{
+		openAIRescueLaneExtraKey: rescueLaneMarkerExtraValue(*marker),
+	})
+}
+
+// rescueSeedAuthRejected 种子流量的凭据级失败判定（401/403/token 吊销类）。
+// 匹配 AccountTestService 自家错误格式（"API returned 401: ..."）与上游
+// 错误码词面（token_revoked/invalid_grant），均在自家代码与上游 body
+// 可控范围。cookie 插件管的是 __cflb/__oailb 会话 cookie，治不了 OAuth
+// 令牌本身——这类号留在区里只会白烧清扫轮次。
+func rescueSeedAuthRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, pattern := range [...]string{
+		"API returned 401",
+		"API returned 403",
+		"token_revoked",
+		"invalid_grant",
+	} {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExitRescue 出区（种子凭据级失败出口）。顺序设计（崩溃窗各自可收敛）：
+//  1. 标记打 exit_reason（在场 = 出区中；清扫见到续走本函数而非自愈回区）
+//  2. 撤调度（判死号本就该不可调度；先停烧再改绑，无流量泄漏窗）
+//  3. 改绑回原组（入区快照）
+//  4. 清标记（连带 seed/exit 字段）
+//  5. rescue_auth_rejected 事件（失败只记日志——出区写已落库）
+func (l *OpenAIRescueLane) ExitRescue(ctx context.Context, accountID int64, reason string) error {
+	if l == nil {
+		return errors.New("rescue lane is not available")
+	}
+	account, err := l.accounts.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	marker := GetOpenAIRescueLaneMarker(account)
+	if marker == nil {
+		return nil // 幂等：出区半途标记已被清，或从未入区。
+	}
+	origGroupIDs := marker.OrigGroupIDs
+	if marker.ExitReason == "" {
+		if err := l.updateMarkerFields(ctx, accountID, func(m *OpenAIRescueLaneMarker) {
+			m.ExitReason = reason
+		}); err != nil {
+			return fmt.Errorf("mark exit: %w", err)
+		}
+	}
+	if account.Schedulable {
+		if err := l.accounts.SetSchedulable(ctx, accountID, false); err != nil {
+			return fmt.Errorf("withdraw scheduling: %w", err)
+		}
+	}
+	if err := l.accounts.BindGroups(ctx, accountID, origGroupIDs); err != nil {
+		return fmt.Errorf("rebind orig groups: %w", err)
+	}
+	clearWrites := map[string]any{
+		openAIRescueLaneExtraKey:      nil,
+		openAIRescueSuspectedExtraKey: false,
+	}
+	if reason == openAIRescueExitAuthRejected {
+		// 冷却戳：出区后自动补进在窗内被压住（号留给删号重授权），
+		// 手动入口不受限。与清标记同一写，原子完成。
+		clearWrites[openAIRescueAuthRejectedAtExtraKey] = l.now().UTC().Format(time.RFC3339)
+	}
+	if err := l.accounts.UpdateExtra(ctx, accountID, clearWrites); err != nil {
+		return fmt.Errorf("clear marker: %w", err)
+	}
+	if l.events != nil {
+		if err := l.events.AppendOpenAIDowngradeEvent(ctx, accountID, account.ProxyID,
+			OpenAIDowngradeEventRescueAuthRejected, map[string]any{"reason": reason}); err != nil {
+			slog.Warn("openai_rescue_exit_event_failed",
+				"account_id", accountID, "error", err)
+		}
+	}
+	slog.Info("openai_rescue_exited", "account_id", accountID, "reason", reason)
+	return nil
+}
+
+// EnterRescueManual 手动入区入口（task 3.7，管理端「送入实验台」按钮）：
+// 与自动入口共用 EnterRescue 全部语义，返回 entered=false 表示已在区
+// （幂等，前端可据此提示）。凭据级拒绝以 ErrRescueSeedAuthRejected 透传。
+func (l *OpenAIRescueLane) EnterRescueManual(ctx context.Context, accountID int64) (bool, error) {
+	if l == nil {
+		return false, errors.New("rescue lane is not available")
+	}
+	account, err := l.accounts.GetByID(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	already := GetOpenAIRescueLaneMarker(account) != nil
+	if err := l.EnterRescue(ctx, accountID, OpenAIRescueTriggerManual); err != nil {
+		return false, err
+	}
+	return !already, nil
 }
 
 // ---------- 转正（task 3.6：考证通过 → 改绑回原池组 → 清标记 → 复活徽标） ----------
@@ -507,6 +751,24 @@ func GetOpenAIRescueSuspected(account *Account) bool {
 	return false
 }
 
+// OpenAIRescueAuthRejectSuppressed 凭据级出区冷却戳是否仍在窗内（容错读：
+// 缺失/坏值 = 不压制）。自动钩子与清扫补进据此跳过，防止「补进 → 种子
+// 401 → 出区 → 再补进」每轮空转；手动入口不查它。
+func OpenAIRescueAuthRejectSuppressed(account *Account, now time.Time) bool {
+	if account == nil || len(account.Extra) == 0 {
+		return false
+	}
+	raw, ok := account.Extra[openAIRescueAuthRejectedAtExtraKey]
+	if !ok || raw == nil {
+		return false
+	}
+	stamp, ok := parseOpenAIRescueTimeString(raw)
+	if !ok {
+		return false
+	}
+	return now.Sub(stamp) < openAIRescueAuthRejectReentryCooldown
+}
+
 // SetProbeStateSource 注入批量探针健康快照源（真实现 = 探针仓库的健康快照
 // 批量查询）。未注入时清扫只做标记侧自愈，不补进新号、不做转正收敛
 // （自动钩子与转正急挂钩照常工作）。
@@ -526,6 +788,24 @@ func (l *OpenAIRescueLane) SetBridgeSource(fn func(ctx context.Context) *PluginB
 		return
 	}
 	l.bridge = fn
+}
+
+// SetRescueScheduler 注入救治区专用调度通道（wire 对仓库具体类型断言后
+// 调用）。未注入时 enableScheduling 回退普通 SetSchedulable。
+func (l *OpenAIRescueLane) SetRescueScheduler(scheduler OpenAIRescueLaneScheduler) {
+	if l == nil {
+		return
+	}
+	l.rescueScheduler = scheduler
+}
+
+// enableScheduling 开调度：救治优先通道（仅绑救治组 → 资格闸放行），
+// 未注入时回退普通通道。
+func (l *OpenAIRescueLane) enableScheduling(ctx context.Context, accountID int64) error {
+	if l.rescueScheduler != nil {
+		return l.rescueScheduler.SetSchedulableInRescueLane(ctx, accountID, l.config().GroupID, true)
+	}
+	return l.accounts.SetSchedulable(ctx, accountID, true)
 }
 
 // Start 启动对账清扫循环（自 Provider 调用；与探针 runner 同生命周期）。
@@ -639,6 +919,10 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		if account.RateLimitResetAt != nil && now.Before(*account.RateLimitResetAt) {
 			continue
 		}
+		// 凭据级出区冷却窗内不补进（出区即清标记，无此闸会每轮空转）。
+		if OpenAIRescueAuthRejectSuppressed(account, now) {
+			continue
+		}
 		candidateIDs = append(candidateIDs, account.ID)
 	}
 	// 批量探针快照：转正收敛（State+ProbeMode）与补进复核（State）共用一次
@@ -662,6 +946,19 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 	for _, account := range marked {
 		if err := ctx.Err(); err != nil {
 			return entered, healed, withdrawn, err
+		}
+		marker := GetOpenAIRescueLaneMarker(account)
+		if marker == nil {
+			continue // 并发转正/出区已清标记：本轮快照过期，下轮归位。
+		}
+		// 出区续走（种子凭据级拒绝的崩溃窗）：exit_reason 在场 = 出区中，
+		// 不做绑定/调度自愈（否则把正要送回原池的号又拉回救治组）。
+		if marker.ExitReason != "" {
+			if exitErr := l.ExitRescue(ctx, account.ID, marker.ExitReason); exitErr != nil {
+				slog.Warn("openai_rescue_sweep_exit_failed",
+					"account_id", account.ID, "reason", marker.ExitReason, "error", exitErr)
+			}
+			continue
 		}
 		// 转正收敛（design 0.4 出口判据）：标记在场 + 探针态已回 on_duty+normal。
 		if snapshot, ok := states[account.ID]; ok &&
@@ -713,11 +1010,26 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			}
 		}
 		if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
-			if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
+			// 救治优先通道（r17ax：没合格戳的判死号全局闸 409）。
+			if err := l.enableScheduling(ctx, account.ID); err != nil {
 				slog.Warn("openai_rescue_sweep_heal_sched_failed",
 					"account_id", account.ID, "error", err)
 			} else {
 				healed++
+			}
+		}
+		// 补种子（半进区收尾 + 种子失败重试）：插件探针模板来自真实转发
+		// 流量，救治组无客户流量，没种子的号插件无从学起。上限
+		// openAIRescueSeedMaxAttempts 防空打；凭据级拒绝由 seedAndAccount
+		// 内部出区。
+		if l.seed != nil && !GetOpenAIRescueSuspected(account) &&
+			!marker.SeedOK && marker.SeedAttempts < openAIRescueSeedMaxAttempts {
+			if err := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); err != nil {
+				if errors.Is(err, ErrRescueSeedAuthRejected) {
+					// 已出区（号回判死原位），事件与日志在 seedAndAccount 内。
+					continue
+				}
+				// 其余失败已在 seedAndAccount 内 Warn，下轮按 attempts 继续。
 			}
 		}
 	}
@@ -729,8 +1041,9 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			continue
 		}
 		if enterErr := l.EnterRescue(ctx, id, OpenAIRescueTriggerReconcile); enterErr != nil {
-			// 单号失败（含幂等跳过）不阻断整轮；瞬时失败下轮重试。
-			if !errors.Is(enterErr, ErrRescueLaneIneligible) {
+			// 单号失败（含幂等跳过）不阻断整轮；瞬时失败下轮重试；
+			// 凭据级拒绝已出区（种子 401/403 类），不是故障不 Warn 刷屏。
+			if !errors.Is(enterErr, ErrRescueLaneIneligible) && !errors.Is(enterErr, ErrRescueSeedAuthRejected) {
 				slog.Warn("openai_rescue_sweep_enter_failed", "account_id", id, "error", enterErr)
 			}
 			continue
@@ -808,7 +1121,7 @@ func (l *OpenAIRescueLane) restoreScheduling(
 			"account_id", account.ID, "error", err)
 		return false
 	}
-	if err := l.accounts.SetSchedulable(ctx, account.ID, true); err != nil {
+	if err := l.enableScheduling(ctx, account.ID); err != nil {
 		slog.Warn("openai_rescue_restore_sched_failed",
 			"account_id", account.ID, "error", err)
 		return false
@@ -826,4 +1139,25 @@ func (l *OpenAIRescueLane) restoreScheduling(
 	}
 	slog.Info("openai_rescue_restored", "account_id", account.ID, "basis", basis)
 	return true
+}
+
+// ---------- 手动入口（task 3.7：管理端「送入实验台」按钮） ----------
+
+// RescueAccount 手动送入救治区（handler 经 runner 转调救治编排器）。
+// 返回 {entered, already_in_lane}：entered=false = 已在区（幂等）。
+// 凭据级拒绝（种子 401/403 类）透传 ErrRescueSeedAuthRejected——号已回
+// 判死原位，管理端把「救不了」说清楚而不是报个含糊的 500。
+func (r *OpenAIDowngradeProbeRunner) RescueAccount(ctx context.Context, accountID int64) (map[string]any, error) {
+	if r == nil || r.rescueLane == nil {
+		return nil, errors.New("rescue lane is not available")
+	}
+	entered, err := r.rescueLane.EnterRescueManual(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"entered":         entered,
+		"already_in_lane": !entered,
+		"trigger":         OpenAIRescueTriggerManual,
+	}, nil
 }

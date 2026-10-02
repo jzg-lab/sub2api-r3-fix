@@ -234,6 +234,12 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
 	)
 	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
+	// 救治区专用调度通道（r17ax 资格闸放行口）：真实现挂在仓库具体类型上
+	// （仅绑救治组的号允许开调度）；断言失败时回退普通 SetSchedulable——
+	// 没过资格考的判死号会吃 409，生产 wire 恒断言成功，回退仅测试桩路径。
+	if rescueScheduler, ok := accountRepository.(service.OpenAIRescueLaneScheduler); ok {
+		openAIRescueLane.SetRescueScheduler(rescueScheduler)
+	}
 	// 对账清扫：批量探针状态经健康快照查询取（与账号健康列表同源）。
 	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），
 	// 与健康列表同款启动期断言；断言失败时清扫退化为只做标记侧自愈。

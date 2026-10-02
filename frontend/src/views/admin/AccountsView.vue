@@ -347,6 +347,18 @@
               >
                 {{ reenablingAccount === row.id ? t('admin.accounts.health.reenableRunning') : t('admin.accounts.health.reenable') }}
               </button>
+              <!-- task 3.7：判死号第二救援入口——送入实验台（救治区）。与
+                   重新启用（认证针人工复活）互补：这条走插件自动救号。已在
+                   区（label=rescuing）不重复显示。 -->
+              <button
+                v-if="accountHealthById[row.id]?.state === 'pending_replace' && accountHealthById[row.id]?.label !== 'rescuing'"
+                class="rounded border border-indigo-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-500 dark:text-indigo-300 dark:hover:bg-indigo-500/10"
+                :disabled="rescuingAccount === row.id"
+                :title="t('admin.accounts.health.rescueHint')"
+                @click="handleRescue(row)"
+              >
+                {{ rescuingAccount === row.id ? t('admin.accounts.health.rescueRunning') : t('admin.accounts.health.rescue') }}
+              </button>
               <button
                 class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
                 :disabled="probingAccounts.has(row.id)"
@@ -594,7 +606,7 @@ import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
@@ -1040,6 +1052,7 @@ const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
 // 判死号手动启用中的账号（防重复点击，r17am）。
 const reenablingAccount = ref<number | null>(null)
+const rescuingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
 const probingAcc = ref<Account | null>(null)
 
@@ -1237,6 +1250,38 @@ const handleReenable = (row: Account) => {
       reenablingAccount.value = null
     },
   })
+}
+
+// task 3.7：判死号手动送入救治区（实验台）。与重新启用互补——这条走
+// 插件自动救号（绑救治组 + 开调度 + 种子流量）。种子吃凭据级拒绝
+// （401/403）时后端已把号退回判死原位，以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED
+// 说明；文案指引删号重新授权。clean-passes 阈值展示用后端默认（面板不
+// 拉救治区设置；后端设置改动不常见，文案略有出入可接受）。
+const RESCUE_CLEAN_PASSES_DEFAULT = 6
+
+const handleRescue = async (row: Account) => {
+  if (rescuingAccount.value !== null) return
+  const health = accountHealthById.value[row.id]
+  if (health && health.state !== 'pending_replace') return
+  if (!confirm(t('admin.accounts.health.rescueConfirm', { name: row.name, passes: RESCUE_CLEAN_PASSES_DEFAULT }))) return
+  rescuingAccount.value = row.id
+  try {
+    const result = await adminAPI.accounts.rescueOpenAIAccount(row.id)
+    if (result.already_in_lane) {
+      appStore.showInfo(t('admin.accounts.health.rescueAlready'))
+    } else {
+      appStore.showSuccess(t('admin.accounts.health.rescueStarted'))
+    }
+    refreshAccountHealthBatch().catch(() => {})
+  } catch (error) {
+    if (extractApiErrorCode(error) === 'OPENAI_RESCUE_SEED_AUTH_REJECTED') {
+      appStore.showError(t('admin.accounts.health.rescueAuthRejected'))
+    } else {
+      appStore.showError(`${t('admin.accounts.health.rescueFailed')}: ${extractApiErrorMessage(error)}`)
+    }
+  } finally {
+    rescuingAccount.value = null
+  }
 }
 
 // r17an：重新启用结果监视——reenable API 只报「针已排」，认证针异步落地

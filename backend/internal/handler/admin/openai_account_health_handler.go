@@ -107,3 +107,22 @@ func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// RescueAccount POST /api/v1/admin/openai/accounts/:id/rescue
+// 手动送入救治区（task 3.7）：判死号 → 绑救治组 + 开调度 + 种子流量，
+// 插件自动救号（连过阈值 → 已复活 → 点击转正）。已在区幂等返回
+// already_in_lane=true；种子吃凭据级拒绝（401/403）时号已回判死原位，
+// 以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED 说明「救不了，走删号重授权」。
+// 落 audit_logs（审计中间件自动记录 POST 变更类请求）。
+func (h *OpenAIProbeHealthHandler) RescueAccount(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	result, err := h.runner.RescueAccount(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
