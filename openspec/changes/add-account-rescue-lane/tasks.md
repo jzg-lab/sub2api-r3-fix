@@ -58,8 +58,11 @@
        → 开调度 → Extra 救治标记 → 种子=TestAccountConnection service 直调 → 事件
        rescue_entered{trigger: auto|manual|reconcile}（改组后重读账号，CAS 纪律）
        ✓（10/2）openai_rescue_lane.go EnterRescue：标记-first（崩溃可对账补绑）→BindGroups
-       →重读后 SetSchedulable→种子（RunTestBackground 内存直调，失败只记 seed_ok 不回滚）
+       →强制关调度→种子（RunTestBackground 内存直调，失败只记 seed_ok 不回滚）
        →事件；幂等（标记在场直接返回）；ShouldAutoEnterRescueLane 纯函数过滤；
+       （r17ba 终版：用户裁定「没确认救活绝不进正式调用」——入区不但不开调度，
+       判死前在岗残留 schedulable=true 也强制关；全链唯一开调度点=复活点击→
+       考证针通过→资格完成 SetSchedulable(true)，即「检测通过自动启用」）；
        19 用例全绿（openai_rescue_lane_test.go）；wire 装配=DefaultOpenAIRescueLaneConfig
        （enabled=false 上线默认关）+种子适配器（3.8 落地时换 settings 闭包）
 - [x] 3.2 自动钩子：挂 committed 块（三判死路径单一 choke point），
@@ -78,8 +81,11 @@
       （r17ax：RunReconcileSweep 双职责——①补进：OpenAI+资格+status=active（auth 两振
       SetError 天然排除凭据死）+限流未持有+探针态 pending_replace → EnterRescue{reconcile}，
       探针状态经 OpenAIProbeHealthLister 窄接口批量取（wire 启动断言，失败降级=只自愈）；
-      ②标记-first 崩溃窗自愈：标记在场但绑定丢失→补绑、调度未开→补开，疑似账号级撤调
-      标记（openai_rescue_suspected，3.5 写入）在场时不复活调度。Start/Stop 进 wire
+      ②标记-first 崩溃窗自愈：标记在场但绑定丢失→补绑（r17ba 起无调度自愈——在区
+      schedulable=false 是期望形态不是崩溃窗），疑似账号级撤调标记（openai_rescue_suspected，
+      3.5 写入）在场时不复活调度；r17ba 补进候选加 schedulingGate 预检（手动暂停的
+      判死号不被强拉入区，r17an 静置语义；根治 r17az 每轮撞 DB 触发器 WARN 刷屏）。
+      Start/Stop 进 wire
       生命周期，清扫循环每轮重读配置（3.8 settings 热更即生效）+正向散布 1.0-1.25x，
       单轮 5min 上界。6 用例：自愈补绑补开/疑似不复活/补进/凭据死与限流持有排除/
       无状态源降级/关闸零名单拉取）
@@ -101,7 +107,8 @@
       不变式，幂等不重撤；恢复：疑似标记在场+回暖证据（rescueLaneRecoveryEvidence
       纯函数：账号从桥消失=plugin_state_lost 插件重启兜底防永钉死 / 退避期满
       in_backoff=false+suspect 清+连过>0=plugin_pass——退避进门连过已清零,>0 即
-      新过针）→清标记+恢复调度+事件 rescue_recovered{basis}；无证据维持撤调
+      新过针）→清标记+事件 rescue_recovered{basis}（r17ba 起恢复不开调度——回到
+      「救治中」继续攒连过证据，开调度唯一时刻仍是考证通过后的资格完成）；无证据维持撤调
       （不是崩溃残留）。桥缺席/解析失败不碰调度撤复。RunReconcileSweep 签名
       扩为 entered/healed/withdrawn 三计数。7 新用例）
 - [x] 3.6 转正后处理：GraduateRescue（考证通过急挂钩 openai_downgrade_probe 资格
@@ -151,8 +158,10 @@
 
 - [ ] 5.1 sidecar E2E 全流程（验收标准 1-4 逐条）
 - [ ] 5.2 全量回归 + 新增测试全绿；前端构建后 commit 再 make build（版本戳教训）
-      （r17ba 进行中：源码全绿（backend service 126s + repo + vue-tsc 0 +
-      vitest 1940），链测抓出两缺陷已修——reenable 409 豁免 + 插件失忆补种）
+      （r17ba 完成：全后端 48 包 ok + vue-tsc 0 + vitest 1940，链测抓出两缺陷已修
+      ——reenable 409 豁免 + 插件失忆补种；终版重设计=在区一律不开调度（入区强制关/
+      清扫无自愈开/回暖恢复不开），唯一开调度点=考证通过后的资格完成，测试套同步
+      （TestEnterRescueTurnsOffPreexistingScheduling / TestSweepNeverOpensSchedulingInLane））
 - [ ] 5.3 铁律三段式：同配方重建 r17aw 对照 → 候选 vs 对照 rodata 去版本串逐字符比对
 - [ ] 5.4 生产部署清单（start 脚本/配置/回滚件/插件 0.3.0 上传）→ 用户逐项点头执行
 - [ ] 5.5 生产验证：组隔离、首号入区观测、主池流量零影响

@@ -340,11 +340,12 @@ func TestEnterRescueTransitionOrderAndEffects(t *testing.T) {
 	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerReconcile); err != nil {
 		t.Fatalf("EnterRescue: %v", err)
 	}
-	// 次序：标记-first（崩溃可对账补救）→ 改绑 → 重读后开调度 → 种子记账
-	//（末位 extra = SeedOK/SeedAttempts 写回标记，清扫补种子的依据）。
-	if len(repo.calls) != 4 || repo.calls[0] != "extra" || repo.calls[1] != "bind" ||
-		repo.calls[2] != "sched" || repo.calls[3] != "extra" {
-		t.Fatalf("call order=%v, want [extra bind sched extra]", repo.calls)
+	// 次序：标记-first（崩溃可对账补救）→ 改绑 → 种子记账（末位 extra =
+	// SeedOK/SeedAttempts 写回标记，清扫补种子的依据）。r17ba 起入区不开
+	// 调度（在区期望形态 schedulable=false，唯一开调度点=考证通过）。
+	if len(repo.calls) != 3 || repo.calls[0] != "extra" || repo.calls[1] != "bind" ||
+		repo.calls[2] != "extra" {
+		t.Fatalf("call order=%v, want [extra bind extra]", repo.calls)
 	}
 	if len(repo.extraSets) != 2 {
 		t.Fatalf("extraSets=%d, want 2 (marker + seed bookkeeping)", len(repo.extraSets))
@@ -352,8 +353,8 @@ func TestEnterRescueTransitionOrderAndEffects(t *testing.T) {
 	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 99 {
 		t.Fatalf("binds=%v, want single bind to rescue group 99", repo.binds)
 	}
-	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
-		t.Fatalf("schedSets=%v, want [true]", repo.schedSets)
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（入区不开调度）", repo.schedSets)
 	}
 	if seedCalls != 1 {
 		t.Fatalf("seed calls=%d, want 1", seedCalls)
@@ -431,7 +432,9 @@ func TestEnterRescueToleratesSeedFailure(t *testing.T) {
 	}
 }
 
-func TestEnterRescueSkipsSchedulableWhenAlreadyEnabled(t *testing.T) {
+func TestEnterRescueTurnsOffPreexistingScheduling(t *testing.T) {
+	// r17ba 用户裁定：在区一律不调度——判死前在岗残留的 schedulable=true
+	// 入区即强制关（绝不在救治阶段进任何调度）。
 	account := rescueLaneTestAccount()
 	account.Schedulable = true
 	repo := &rescueLaneRepo{account: account}
@@ -440,8 +443,8 @@ func TestEnterRescueSkipsSchedulableWhenAlreadyEnabled(t *testing.T) {
 	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerManual); err != nil {
 		t.Fatalf("EnterRescue: %v", err)
 	}
-	if len(repo.schedSets) != 0 {
-		t.Fatalf("schedSets=%v, want none (already schedulable)", repo.schedSets)
+	if len(repo.schedSets) != 1 || repo.schedSets[0] {
+		t.Fatalf("schedSets=%v, want [false]（在岗残留强制关）", repo.schedSets)
 	}
 }
 
@@ -521,7 +524,8 @@ func TestRunReconcileSweepHealsMarkedAccount(t *testing.T) {
 		OrigGroupIDs: []int64{3},
 		OrigPriority: 5,
 	})
-	// 标记-first 崩溃窗残留：救治组绑定丢失 + 调度未开。
+	// 标记-first 崩溃窗残留：救治组绑定丢失（schedulable=false 是在区
+	// 期望形态，r17ba 起不再是自愈项——唯一开调度点=考证通过）。
 	account.GroupIDs = []int64{3}
 	account.Schedulable = false
 	repo := &rescueLaneRepo{roster: []Account{*account}}
@@ -529,14 +533,14 @@ func TestRunReconcileSweepHealsMarkedAccount(t *testing.T) {
 	lane := newRescueLaneTestLane(repo, sink)
 
 	entered, healed, _, err := lane.RunReconcileSweep(context.Background())
-	if err != nil || entered != 0 || healed != 2 {
-		t.Fatalf("entered=%d healed=%d err=%v, want 0/2/nil", entered, healed, err)
+	if err != nil || entered != 0 || healed != 1 {
+		t.Fatalf("entered=%d healed=%d err=%v, want 0/1/nil（只补绑不开调度）", entered, healed, err)
 	}
 	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 99 {
 		t.Fatalf("binds=%v, want rebind to rescue group 99", repo.binds)
 	}
-	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
-		t.Fatalf("schedSets=%v, want [true]", repo.schedSets)
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（在区不开调度）", repo.schedSets)
 	}
 	if len(sink.events) != 0 {
 		t.Fatalf("heal must not emit events, got %d", len(sink.events))
@@ -756,8 +760,8 @@ func TestRunReconcileSweepRestoresOnPluginPass(t *testing.T) {
 	if GetOpenAIRescueSuspected(&repo.roster[0]) {
 		t.Fatalf("suspected marker still present after restore")
 	}
-	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
-		t.Fatalf("schedSets=%v, want [true]", repo.schedSets)
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（回暖回救治中攒证据，不开调度——r17ba）", repo.schedSets)
 	}
 	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueRecovered {
 		t.Fatalf("events=%+v, want one rescue_recovered", sink.events)
@@ -812,8 +816,11 @@ func TestRunReconcileSweepRestoresOnPluginStateLost(t *testing.T) {
 	if err != nil || healed != 1 {
 		t.Fatalf("healed=%d err=%v, want 1/nil", healed, err)
 	}
-	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
-		t.Fatalf("schedSets=%v, want [true]", repo.schedSets)
+	if GetOpenAIRescueSuspected(&repo.roster[0]) {
+		t.Fatalf("suspected marker must be cleared after state-lost restore")
+	}
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（回暖不开调度——r17ba）", repo.schedSets)
 	}
 	if len(sink.events) != 1 || sink.events[0].details["basis"] != "plugin_state_lost" {
 		t.Fatalf("events=%+v, want basis=plugin_state_lost", sink.events)
@@ -1042,57 +1049,6 @@ func TestRunReconcileSweepDoesNotGraduateReplacedAccount(t *testing.T) {
 
 // ---------- 救治调度通道 + 种子记账 + 凭据级出区 + 手动入口（补丁包 2026-10-02） ----------
 
-// rescueSchedulerSpy 救治区专用调度通道桩：记录调用；可选注入错误。
-type rescueSchedulerSpy struct {
-	AccountRepository
-	calls []rescueSchedulerCall
-	err   error
-}
-
-type rescueSchedulerCall struct {
-	accountID     int64
-	rescueGroupID int64
-	schedulable   bool
-}
-
-func (s *rescueSchedulerSpy) SetSchedulableInRescueLane(_ context.Context, accountID, rescueGroupID int64, schedulable bool) error {
-	s.calls = append(s.calls, rescueSchedulerCall{accountID, rescueGroupID, schedulable})
-	return s.err
-}
-
-func TestEnableSchedulingPrefersRescueChannel(t *testing.T) {
-	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
-	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
-	spy := &rescueSchedulerSpy{}
-	lane.SetRescueScheduler(spy)
-
-	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
-		t.Fatalf("EnterRescue: %v", err)
-	}
-	if len(spy.calls) != 1 || spy.calls[0].accountID != 42 ||
-		spy.calls[0].rescueGroupID != 99 || !spy.calls[0].schedulable {
-		t.Fatalf("spy.calls=%+v, want one (42, 99, true)", spy.calls)
-	}
-	// 注入了专用通道就不能再走普通通道（没过资格考的号普通通道必 409）。
-	for _, enabled := range repo.schedSets {
-		if enabled {
-			t.Fatalf("repo.schedSets=%v, plain channel must not enable scheduling", repo.schedSets)
-		}
-	}
-}
-
-func TestEnableSchedulingFallsBackWithoutRescueScheduler(t *testing.T) {
-	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
-	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
-
-	if err := lane.EnterRescue(context.Background(), 42, OpenAIRescueTriggerAuto); err != nil {
-		t.Fatalf("EnterRescue: %v", err)
-	}
-	if len(repo.schedSets) != 1 || !repo.schedSets[0] {
-		t.Fatalf("schedSets=%v, want [true] via fallback channel", repo.schedSets)
-	}
-}
-
 func TestRescueSeedAuthRejectedClassifier(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -1163,9 +1119,9 @@ func TestEnterRescueSeedAuthRejectedExitsAndReturnsSentinel(t *testing.T) {
 	if len(sink.events) != 1 || sink.events[0].eventType != OpenAIDowngradeEventRescueAuthRejected {
 		t.Fatalf("events=%+v, want single rescue_auth_rejected", sink.events)
 	}
-	// 调度轨迹：入区开过一次、出区关掉一次。
-	if len(repo.schedSets) != 2 || !repo.schedSets[0] || repo.schedSets[1] {
-		t.Fatalf("schedSets=%v, want [true false]", repo.schedSets)
+	// 调度轨迹：入区不开（r17ba），号本来就是关的，出区也无需再关。
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（全程零调度动作）", repo.schedSets)
 	}
 }
 
@@ -1525,5 +1481,81 @@ func TestEnterRescueManualPropagatesAuthRejection(t *testing.T) {
 	// 号已回判死原位。
 	if GetOpenAIRescueLaneMarker(repo.account) != nil || repo.account.Schedulable {
 		t.Fatalf("account must be back at pending_replace rest position")
+	}
+}
+
+// ---------- 调度闸预检（r17ba：手动暂停被清扫完整尊重） ----------
+
+// TestSweepNeverOpensSchedulingInLane r17ba 用户裁定「没确认救活绝不进
+// 正式调用」的结构性锁：在区号（无论暂停与否）清扫没有任何开调度路径
+//（r17az 每轮撞 DB 触发器 WARN 刷屏的根治）。
+func TestSweepNeverOpensSchedulingInLane(t *testing.T) {
+	account := rescueLaneSweepAccount(81)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = false // 用户暂停后的现场形态
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{}) // 无闸也成立：结构性无开调度路径
+
+	entered, healed, withdrawn, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 || healed != 0 || withdrawn != 0 {
+		t.Fatalf("entered=%d healed=%d withdrawn=%d err=%v, want 0/0/0/nil", entered, healed, withdrawn, err)
+	}
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（在区零开调度路径）", repo.schedSets)
+	}
+}
+
+// TestSweepSkipsEnteringManuallyPausedCandidates 手动暂停的判死号不入区：
+// 静置刹车（r17an 语义）下清扫强拉入区 = 换绑 + 开调度双违反。
+func TestSweepSkipsEnteringManuallyPausedCandidates(t *testing.T) {
+	repo := &rescueLaneRepo{roster: []Account{*rescueLaneSweepAccount(82)}}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStatePendingReplace}
+		}
+		return states, nil
+	})
+	lane.SetSchedulingGate(func(context.Context, int64) (bool, error) { return false, nil })
+
+	entered, _, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || entered != 0 {
+		t.Fatalf("entered=%d err=%v, want 0/nil（暂停候选不入区）", entered, err)
+	}
+	if len(repo.binds) != 0 || GetOpenAIRescueLaneMarker(&repo.roster[0]) != nil {
+		t.Fatalf("binds=%d marker=%v, want 未入区原样", len(repo.binds), GetOpenAIRescueLaneMarker(&repo.roster[0]))
+	}
+}
+
+// TestEnterRescueKeepsPauseBrakeOnManualEntry 手动送入暂停号：入区照常
+//（种子/插件探针不经宿主调度），调度保持关——解暂停由转正点击显式完成。
+func TestEnterRescueKeepsPauseBrakeOnManualEntry(t *testing.T) {
+	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
+	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	entered, err := lane.EnterRescueManual(context.Background(), 42)
+	if err != nil || !entered {
+		t.Fatalf("EnterRescueManual entered=%v err=%v, want true/nil", entered, err)
+	}
+	if seedCalls != 1 {
+		t.Fatalf("seed calls=%d, want 1（种子照喂）", seedCalls)
+	}
+	if len(repo.schedSets) != 0 {
+		t.Fatalf("schedSets=%v, want none（入区零调度动作）", repo.schedSets)
+	}
+	if GetOpenAIRescueLaneMarker(repo.account) == nil {
+		t.Fatalf("marker missing after manual entry")
 	}
 }

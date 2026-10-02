@@ -234,11 +234,13 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
 	)
 	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
-	// 救治区专用调度通道（r17ax 资格闸放行口）：真实现挂在仓库具体类型上
-	// （仅绑救治组的号允许开调度）；断言失败时回退普通 SetSchedulable——
-	// 没过资格考的判死号会吃 409，生产 wire 恒断言成功，回退仅测试桩路径。
-	if rescueScheduler, ok := accountRepository.(service.OpenAIRescueLaneScheduler); ok {
-		openAIRescueLane.SetRescueScheduler(rescueScheduler)
+	// 调度闸预检（r17ba）：与 ListDue 同源的 controls 闸（manual_paused/
+	// owned_error fail-closed）。唯一用途=清扫补进候选过滤——手动暂停的
+	// 判死号不被强拉入区（r17an 静置语义）。在区号已无任何开调度路径
+	//（用户裁定：入区即关调度，唯一开调度点=考证通过后的资格完成），
+	// 面板暂停被完整尊重，不再撞 DB 触发器刷 WARN。
+	if controlStore, ok := openAIDowngradeProbeRepository.(service.OpenAIDowngradeProbeControlStore); ok {
+		openAIRescueLane.SetSchedulingGate(controlStore.CanRunOpenAIDowngradeProbe)
 	}
 	// 对账清扫：批量探针状态经健康快照查询取（与账号健康列表同源）。
 	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），

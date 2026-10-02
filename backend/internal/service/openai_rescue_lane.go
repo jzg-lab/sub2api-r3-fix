@@ -96,12 +96,8 @@ var (
 	)
 )
 
-// OpenAIRescueLaneScheduler 救治区专用调度通道：账号「仅绑救治组」时放行
-// OAuth 资格闸（闸语义 = 未考证号不进客户流量；救治组无客户订阅，拓扑上
-// 不可能违反）。真实现 = 仓库具体类型（wire 类型断言注入，同
-// OpenAIProbeHealthLister 先例）；未注入时回退普通 SetSchedulable——
-// 没过资格考的号会吃 409 OPENAI_OAUTH_QUALIFICATION_REQUIRED（生产 wire
-// 恒注入，回退仅测试桩路径）。
+// OpenAIRescueLaneScheduler 救治区专用调度通道（r17ax 引入；r17ba 起入区
+// 不再开调度，编排器不再消费——仓库实现保留作手动运维口）。
 type OpenAIRescueLaneScheduler interface {
 	SetSchedulableInRescueLane(ctx context.Context, accountID int64, rescueGroupID int64, schedulable bool) error
 }
@@ -175,10 +171,13 @@ type OpenAIRescueLane struct {
 	// bridge 插件桥状态源（task 3.5 撤调/恢复的数据依据）；nil 时清扫不碰
 	// 调度撤复（标签照常由健康列表计算，只是不自动撤）。
 	bridge func(ctx context.Context) *PluginBridgeStatus
-	// rescueScheduler 救治区专用调度通道（资格闸放行口）；nil 回退普通
-	// SetSchedulable（见 OpenAIRescueLaneScheduler 注释）。
-	rescueScheduler OpenAIRescueLaneScheduler
-	now             func() time.Time
+	// schedulingGate 调度闸预检（r17ba；真实现 = CanRunOpenAIDowngradeProbe，
+	// 镜像 ListDue 的 manual_paused/owned_error 排除闸）。唯一消费点=清扫
+	// 补进的候选过滤：手动暂停（静置刹车，r17an 语义）的判死号不被清扫
+	// 强拉入区。入区/在区不再有任何开调度动作（用户裁定：唯一开调度点=
+	// 考证通过后的资格完成），此闸与调度开无关。nil = 无闸（测试桩）。
+	schedulingGate func(ctx context.Context, accountID int64) (bool, error)
+	now            func() time.Time
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -449,7 +448,8 @@ func (l *OpenAIRescueLane) MaybeAutoEnterRescue(
 //  3. 快照原组 id+priority（BindGroups 会删光 account_groups，不存即丢）
 //  4. 先打标记再改绑（标记-first：中途崩溃对账可补绑；绑-first 无标记=隐形）
 //  5. BindGroups 绑救治组（事务删光重插，触发器双发 outbox）
-//  6. 重读账号（BindGroups 推 updated_at 代际）→ SetSchedulable(true)
+//  6. 调度强制关（r17ba：在区一律不调度，判死前在岗残留也关；唯一开
+//     调度点=考证通过后的资格完成）
 //  7. 种子流量（TestAccountConnection 直调；失败只记账不回滚——插件探针
 //     自愈等真实流量再起，回滚反而丢已入区状态）
 //  8. rescue_entered 事件（trigger 区分入口）
@@ -493,16 +493,14 @@ func (l *OpenAIRescueLane) EnterRescue(ctx context.Context, accountID int64, tri
 	if err := l.accounts.BindGroups(ctx, accountID, []int64{cfg.GroupID}); err != nil {
 		return fmt.Errorf("bind rescue group: %w", err)
 	}
-	// CAS 纪律（design 0.4）：BindGroups 推走 updated_at 代际，改调度前重读。
-	fresh, err := l.accounts.GetByID(ctx, accountID)
-	if err != nil {
-		return fmt.Errorf("reread after bind: %w", err)
-	}
-	if !fresh.Schedulable {
-		// 救治优先通道：没过资格考（Extra 无合格戳）的判死号在全局资格闸
-		// 下会 409，而救治区救的正是这类号——仅绑救治组时放行。
-		if err := l.enableScheduling(ctx, accountID); err != nil {
-			return fmt.Errorf("enable scheduling: %w", err)
+	// 在区一律不调度（r17ba 用户裁定「没确认救活绝不进正式调用」）：入区
+	// 不但不开调度，判死前在岗残留的 schedulable=true 也强制关。全流程唯一
+	// 开调度点 = 复活点击 → 考证针通过 → 资格完成 SetSchedulable(true)
+	//（即「检测通过自动启用」），随后转正回绑原池。救治证据链（种子=服务层
+	// 直调、插件探针=插件自有通道）都不经宿主调度，关调度零代价。
+	if account.Schedulable {
+		if err := l.accounts.SetSchedulable(ctx, accountID, false); err != nil {
+			return fmt.Errorf("disable scheduling in lane: %w", err)
 		}
 	}
 
@@ -811,22 +809,13 @@ func (l *OpenAIRescueLane) SetBridgeSource(fn func(ctx context.Context) *PluginB
 	l.bridge = fn
 }
 
-// SetRescueScheduler 注入救治区专用调度通道（wire 对仓库具体类型断言后
-// 调用）。未注入时 enableScheduling 回退普通 SetSchedulable。
-func (l *OpenAIRescueLane) SetRescueScheduler(scheduler OpenAIRescueLaneScheduler) {
+// SetSchedulingGate 注入调度闸预检（真实现 = 探针控制仓 CanRunOpenAIDowngradeProbe）。
+// 唯一消费点 = 清扫补进候选过滤（手动暂停的判死号不入区，r17an 静置语义）。
+func (l *OpenAIRescueLane) SetSchedulingGate(fn func(ctx context.Context, accountID int64) (bool, error)) {
 	if l == nil {
 		return
 	}
-	l.rescueScheduler = scheduler
-}
-
-// enableScheduling 开调度：救治优先通道（仅绑救治组 → 资格闸放行），
-// 未注入时回退普通通道。
-func (l *OpenAIRescueLane) enableScheduling(ctx context.Context, accountID int64) error {
-	if l.rescueScheduler != nil {
-		return l.rescueScheduler.SetSchedulableInRescueLane(ctx, accountID, l.config().GroupID, true)
-	}
-	return l.accounts.SetSchedulable(ctx, accountID, true)
+	l.schedulingGate = fn
 }
 
 // Start 启动对账清扫循环（自 Provider 调用；与探针 runner 同生命周期）。
@@ -1030,15 +1019,10 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 				continue
 			}
 		}
-		if !account.Schedulable && !GetOpenAIRescueSuspected(account) {
-			// 救治优先通道（r17ax：没合格戳的判死号全局闸 409）。
-			if err := l.enableScheduling(ctx, account.ID); err != nil {
-				slog.Warn("openai_rescue_sweep_heal_sched_failed",
-					"account_id", account.ID, "error", err)
-			} else {
-				healed++
-			}
-		}
+		// 在区号 schedulable=false 是期望形态（r17ba 用户裁定：入区即关、
+		// 唯一开调度点=考证通过后的资格完成）——不再是崩溃窗，无调度自愈。
+		// 偶发 schedulable=true（r17az 时代入区残留/并发竞态）由撤调与
+		// 出区路径兜底关掉；确定性收敛靠下轮判死复核，不开调度。
 		// 补种子（半进区收尾 + 种子失败重试 + 插件失忆自愈 r17ba）：插件
 		// 探针模板来自真实转发流量，救治组无客户流量，没种子的号插件无从
 		// 学起。SeedOK 只证种子曾打过——插件进程换代丢光内存模板后，按桥
@@ -1069,6 +1053,13 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		}
 		if snapshot, ok := states[id]; !ok || snapshot.State != OpenAIDowngradeStatePendingReplace {
 			continue
+		}
+		// 手动暂停的判死号不入区（r17ba）：静置刹车是有意态（r17an 语义），
+		// 清扫强拉入区=换绑+开调度双违反；解暂停后下轮自然收。
+		if l.schedulingGate != nil {
+			if ok, gErr := l.schedulingGate(ctx, id); gErr == nil && !ok {
+				continue
+			}
 		}
 		if enterErr := l.EnterRescue(ctx, id, OpenAIRescueTriggerReconcile); enterErr != nil {
 			// 单号失败（含幂等跳过）不阻断整轮；瞬时失败下轮重试；
@@ -1139,8 +1130,10 @@ func (l *OpenAIRescueLane) withdrawScheduling(
 	return true
 }
 
-// restoreScheduling 疑似撤调的回暖恢复：清疑似标记 → 恢复调度 → 事件
-// （basis=plugin_pass 真回暖 / plugin_state_lost 插件状态丢失兜底）。
+// restoreScheduling 疑似撤调的回暖恢复：清疑似标记 → 事件（basis=plugin_pass
+// 真回暖 / plugin_state_lost 插件状态丢失兜底）。r17ba 起不开调度——在区
+// 期望形态就是 schedulable=false，回暖后回到「救治中」继续攒连过证据，
+// 开调度的唯一时刻仍是考证通过后的资格完成（转正）。
 func (l *OpenAIRescueLane) restoreScheduling(
 	ctx context.Context, account *Account, bridgeAccount *OpenAIPluginBridgeAccount, basis string,
 ) bool {
@@ -1148,11 +1141,6 @@ func (l *OpenAIRescueLane) restoreScheduling(
 		openAIRescueSuspectedExtraKey: false,
 	}); err != nil {
 		slog.Warn("openai_rescue_restore_mark_failed",
-			"account_id", account.ID, "error", err)
-		return false
-	}
-	if err := l.enableScheduling(ctx, account.ID); err != nil {
-		slog.Warn("openai_rescue_restore_sched_failed",
 			"account_id", account.ID, "error", err)
 		return false
 	}
