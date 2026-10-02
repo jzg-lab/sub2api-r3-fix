@@ -1213,30 +1213,40 @@ func TestSweepReseedsUnseededMarkedAccount(t *testing.T) {
 	}
 }
 
-func TestSweepSeedAttemptsCapStopsReseed(t *testing.T) {
-	account := rescueLaneSweepAccount(63)
-	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
-		EnteredAt:    time.Now().UTC(),
-		Trigger:      OpenAIRescueTriggerAuto,
-		OrigGroupIDs: []int64{3},
-		OrigPriority: 5,
-		SeedAttempts: openAIRescueSeedMaxAttempts, // 上限已到：不再空打
-	})
-	account.GroupIDs = []int64{99}
-	account.Schedulable = true
-	repo := &rescueLaneRepo{roster: []Account{*account}}
-	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
-	seedCalls := 0
-	lane.seed = func(context.Context, int64) error {
-		seedCalls++
-		return nil
+// TestSweepSeedSlowLanePacesNeverStops r17bc 永不停种：连败达慢道门槛后，
+// 新鲜失败（LastSeedAt 还在 1h 窗内）本轮不打；窗满后再试——永不彻底停
+// （老预算语义 openAIRescueSeedMaxAttempts 硬停已被用户裁定「一直救到救
+// 回来」移除）。
+func TestSweepSeedSlowLanePacesNeverStops(t *testing.T) {
+	run := func(lastSeedAgo time.Duration) int {
+		account := rescueLaneSweepAccount(63)
+		rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+			EnteredAt:    time.Now().UTC(),
+			Trigger:      OpenAIRescueTriggerAuto,
+			OrigGroupIDs: []int64{3},
+			OrigPriority: 5,
+			SeedAttempts: openAIRescueSeedSlowLaneAttempts, // 连败达门槛：进慢道
+			LastSeedAt:   time.Now().UTC().Add(-lastSeedAgo),
+		})
+		account.GroupIDs = []int64{99}
+		account.Schedulable = true
+		repo := &rescueLaneRepo{roster: []Account{*account}}
+		lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
+		seedCalls := 0
+		lane.seed = func(context.Context, int64) error {
+			seedCalls++
+			return nil
+		}
+		if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		return seedCalls
 	}
-
-	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
-		t.Fatalf("sweep: %v", err)
+	if got := run(10 * time.Minute); got != 0 {
+		t.Fatalf("慢道新鲜失败: seed calls=%d, want 0 (每小时最多一试)", got)
 	}
-	if seedCalls != 0 {
-		t.Fatalf("seed calls=%d, want 0 (attempts cap reached)", seedCalls)
+	if got := run(openAIRescueSeedSlowInterval + 5*time.Minute); got != 1 {
+		t.Fatalf("慢道窗满: seed calls=%d, want 1 (永不停种)", got)
 	}
 }
 
@@ -1488,7 +1498,7 @@ func TestEnterRescueManualPropagatesAuthRejection(t *testing.T) {
 
 // TestSweepNeverOpensSchedulingInLane r17ba 用户裁定「没确认救活绝不进
 // 正式调用」的结构性锁：在区号（无论暂停与否）清扫没有任何开调度路径
-//（r17az 每轮撞 DB 触发器 WARN 刷屏的根治）。
+// （r17az 每轮撞 DB 触发器 WARN 刷屏的根治）。
 func TestSweepNeverOpensSchedulingInLane(t *testing.T) {
 	account := rescueLaneSweepAccount(81)
 	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
@@ -1535,7 +1545,7 @@ func TestSweepSkipsEnteringManuallyPausedCandidates(t *testing.T) {
 }
 
 // TestEnterRescueKeepsPauseBrakeOnManualEntry 手动送入暂停号：入区照常
-//（种子/插件探针不经宿主调度），调度保持关——解暂停由转正点击显式完成。
+// （种子/插件探针不经宿主调度），调度保持关——解暂停由转正点击显式完成。
 func TestEnterRescueKeepsPauseBrakeOnManualEntry(t *testing.T) {
 	repo := &rescueLaneRepo{account: rescueLaneTestAccount()}
 	lane := newRescueLaneTestLane(repo, &rescueLaneSink{})
@@ -1609,15 +1619,16 @@ func TestRunReconcileSweepAutoNeedleOnPluginPasses(t *testing.T) {
 }
 
 // TestRunReconcileSweepAutoNeedleGates 不打针的闸门矩阵：针在途
-//（qualification，state 非 pending_replace）/ 连过未达阈值 / 退避中 /
-// 自动上限已满 / 未注入触发载体。
+// （qualification，state 非 pending_replace）/ 连过未达阈值 / 退避中 /
+// 连败冷却递增未满 / 未注入触发载体。
 func TestRunReconcileSweepAutoNeedleGates(t *testing.T) {
-	newLane := func(state string, passes int, inBackoff bool, attempts int, withTrigger bool) (*OpenAIRescueLane, *int) {
+	newLane := func(state string, passes int, inBackoff bool, attempts int, needleAt time.Time, withTrigger bool) (*OpenAIRescueLane, *int) {
 		account := rescueLaneSweepAccount(82)
 		rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
 			EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
 			OrigGroupIDs: []int64{3}, OrigPriority: 5,
 			AutoNeedleAttempts: attempts,
+			AutoNeedleAt:       needleAt,
 		})
 		account.GroupIDs = []int64{99}
 		account.Schedulable = false
@@ -1643,17 +1654,24 @@ func TestRunReconcileSweepAutoNeedleGates(t *testing.T) {
 		passes      int
 		inBackoff   bool
 		attempts    int
+		needleAgo   time.Duration
 		withTrigger bool
 	}{
-		{"针在途（qualification）不打", OpenAIDowngradeStateOnDuty, 6, false, 0, true},
-		{"连过未达阈值不打", OpenAIDowngradeStatePendingReplace, 5, false, 0, true},
-		{"退避中不打（撤调优先）", OpenAIDowngradeStatePendingReplace, 6, true, 0, true},
-		{"自动上限已满不打", OpenAIDowngradeStatePendingReplace, 6, false, 3, true},
-		{"未注入载体不打", OpenAIDowngradeStatePendingReplace, 6, false, 0, false},
+		{"针在途（qualification）不打", OpenAIDowngradeStateOnDuty, 6, false, 0, 0, true},
+		{"连过未达阈值不打", OpenAIDowngradeStatePendingReplace, 5, false, 0, 0, true},
+		{"退避中不打（撤调优先）", OpenAIDowngradeStatePendingReplace, 6, true, 0, 0, true},
+		// r17bc 永不停针：连败 3 次不再封停，只把冷却递增到 2h——30min 前
+		// 打过 → 仍在冷却窗内，不打。
+		{"连败多次冷却递增未满不打", OpenAIDowngradeStatePendingReplace, 6, false, 3, 30 * time.Minute, true},
+		{"未注入载体不打", OpenAIDowngradeStatePendingReplace, 6, false, 0, 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lane, calls := newLane(tc.state, tc.passes, tc.inBackoff, tc.attempts, tc.withTrigger)
+			needleAt := time.Time{}
+			if tc.needleAgo > 0 {
+				needleAt = time.Now().UTC().Add(-tc.needleAgo)
+			}
+			lane, calls := newLane(tc.state, tc.passes, tc.inBackoff, tc.attempts, needleAt, tc.withTrigger)
 			if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
 				t.Fatalf("sweep: %v", err)
 			}
@@ -1661,5 +1679,116 @@ func TestRunReconcileSweepAutoNeedleGates(t *testing.T) {
 				t.Fatalf("needle calls=%d, want 0", *calls)
 			}
 		})
+	}
+}
+
+// TestRunReconcileSweepAutoNeedleNeverStops r17bc 永不停针回归锁：连败 3 次
+// （老上限 openAIRescueAutoNeedleMaxAttempts=3 的封停点）后，只要递增冷却
+// （2h 封顶）期满，照样再打——预算设计已按用户裁定「一直救到救回来」移除。
+func TestRunReconcileSweepAutoNeedleNeverStops(t *testing.T) {
+	account := rescueLaneSweepAccount(83)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+		AutoNeedleAttempts: 3, // 老设计的封停点：新语义只影响冷却长度
+		AutoNeedleAt:       time.Now().UTC().Add(-openAIRescueAutoNeedleMaxCooldown),
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+		rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(83, false, 6, 0, false, "2026-10-02T09:00:00Z")), true)
+	lane.SetProbeStateSource(func(_ context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+		states := make(map[int64]OpenAIProbeHealthSnapshot, len(ids))
+		for _, id := range ids {
+			states[id] = OpenAIProbeHealthSnapshot{AccountID: id, State: OpenAIDowngradeStatePendingReplace}
+		}
+		return states, nil
+	})
+	var needled []int64
+	lane.SetNeedleTrigger(func(_ context.Context, accountID int64) error {
+		needled = append(needled, accountID)
+		return nil
+	})
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(needled) != 1 || needled[0] != 83 {
+		t.Fatalf("needled=%v, want [83]（永不停：冷却期满即再打）", needled)
+	}
+}
+
+// TestOpenAIRescueAutoNeedleCooldownEscalation 冷却递增表：10min → 30min →
+// 90min → 2h（封顶后恒定）。
+func TestOpenAIRescueAutoNeedleCooldownEscalation(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, 10 * time.Minute},
+		{1, 30 * time.Minute},
+		{2, 90 * time.Minute},
+		{3, 2 * time.Hour},
+		{9, 2 * time.Hour},
+	}
+	for _, tc := range cases {
+		if got := openAIRescueAutoNeedleCooldownFor(tc.attempts); got != tc.want {
+			t.Fatalf("cooldownFor(%d)=%v, want %v", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// TestSweepRebindsDualBoundAccountToSoloRescueGroup r17az 语义回归（r17bc
+// 恢复）：启动链路的池组触发器会把原池组加回救治号（[原池组,救治组] 双绑，
+// 10/2 生产实证 1215/1217/1218/1219 全员双绑）——含救治组不算健康，必须
+// 独绑救治组，多余组重绑掉。
+func TestSweepRebindsDualBoundAccountToSoloRescueGroup(t *testing.T) {
+	account := rescueLaneSweepAccount(84)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+	})
+	account.GroupIDs = []int64{3, 99} // 双绑：触发器把原池组加回来了
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	sink := &rescueLaneSink{}
+	lane := newRescueLaneTestLane(repo, sink)
+
+	_, healed, _, err := lane.RunReconcileSweep(context.Background())
+	if err != nil || healed != 1 {
+		t.Fatalf("healed=%d err=%v, want 1/nil（双绑 → 重绑独绑）", healed, err)
+	}
+	if len(repo.binds) != 1 || len(repo.binds[0]) != 1 || repo.binds[0][0] != 99 {
+		t.Fatalf("binds=%v, want solo rebind to rescue group 99", repo.binds)
+	}
+}
+
+// TestSweepNoSeedWhenPluginTracksUnseededAccount r17bc：插件已在跟踪（模板
+// 在场、探针在跑）时，即使 SeedOK=false（种子从没打成功——真实流量自己
+// 喂了模板）也不补种：种子目的已达成，空打只添上游暴露。
+func TestSweepNoSeedWhenPluginTracksUnseededAccount(t *testing.T) {
+	account := rescueLaneSweepAccount(69)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3}, OrigPriority: 5,
+		// SeedOK=false 且零失败计数：从没种子成功，但插件在跟踪本号。
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = false
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+		rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(69, false, 2, 0, false, "0001-01-01T00:00:00Z")), true)
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 0 {
+		t.Fatalf("seed calls=%d, want 0 (plugin tracks account: template alive)", seedCalls)
 	}
 }

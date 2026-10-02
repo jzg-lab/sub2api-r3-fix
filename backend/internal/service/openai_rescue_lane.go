@@ -72,23 +72,30 @@ const (
 	openAIRescueDefaultCleanPasses = 3
 	// openAIRescueDefaultReconcileInterval 对账清扫周期（proposal：5min）。
 	openAIRescueDefaultReconcileInterval = 5 * time.Minute
-	// openAIRescueSeedMaxAttempts 连续种子失败上限（成功清零）。超限后不再
-	// 空打——凭据级失败早已出区，非凭据失败说明上游/链路本身有问题，等
-	// 插件真实流量兜底。
-	openAIRescueSeedMaxAttempts = 5
+	// openAIRescueSeedSlowLaneAttempts 种子失败慢道门槛（成功清零）。r17bc
+	// 用户裁定「所有问题号一直救到救回来」——种子永不停止；但连败达此数
+	// 后进慢道：每小时最多一试（openAIRescueSeedSlowInterval）。种子是真实
+	// 上游请求，密集空打会喂执法升级（1223 实证：救治中连探 → token 吊销）。
+	// 老常量 openAIRescueSeedMaxAttempts 的硬停预算语义已移除。
+	openAIRescueSeedSlowLaneAttempts = 5
+	// openAIRescueSeedSlowInterval 慢道补种最小间隔（连败达慢道门槛后，
+	// 两次种子尝试之间的最小等待）。
+	openAIRescueSeedSlowInterval = time.Hour
 	// openAIRescueReseedInterval 插件失忆补种节流：插件探针模板在内存里，
 	// 进程换代即丢（fork 宿主无 KV 持久化）。种子喂上模板后插件最多一个
 	// probe interval 才出首针进 prober 视图，此窗内不重复补种（15min 盖住
 	// 生产默认 interval=900s；更长 interval 的窗内最多每小时 4 发，良性）。
 	openAIRescueReseedInterval = 15 * time.Minute
-	// openAIRescueAutoNeedleCooldown 自动资格针冷却（r17bb）：针失败（r17y
-	// 一击回判死）后到下次自动重试的最小间隔。10min 盖住两轮清扫 + 针
-	// qualification 节奏，失败重试有呼吸窗。
+	// openAIRescueAutoNeedleCooldown 自动资格针基础冷却（r17bb 起）：每次
+	// 自动针后到下次重试的最小间隔；随连败次数 ×3 递增（见
+	// openAIRescueAutoNeedleCooldownFor），封顶 openAIRescueAutoNeedleMaxCooldown。
 	openAIRescueAutoNeedleCooldown = 10 * time.Minute
-	// openAIRescueAutoNeedleMaxAttempts 自动资格针触发上限（每账号每轮救治；
-	// 毕业清标记即重置）。达上限后停自动留人工——插件证据仍在累积，手动
-	// 毕业入口不受影响。
-	openAIRescueAutoNeedleMaxAttempts = 3
+	// openAIRescueAutoNeedleMaxCooldown 自动资格针冷却封顶（r17bc）：重试
+	// 永不停止（用户裁定「一直救到救回来」），但节奏指数退避——考证针是
+	// 真实上游流量，1223 实证连探可把号探到 token 吊销。节奏 10min→30min→
+	// 90min→2h（封顶后恒定）。老上限 openAIRescueAutoNeedleMaxAttempts=3
+	// 是预算设计，r17bc 移除。
+	openAIRescueAutoNeedleMaxCooldown = 2 * time.Hour
 	// openAIRescueExitAuthRejected 出区原因：种子流量吃凭据级拒绝
 	// （401/403/token 吊销类）。cookie 插件治不了 OAuth 令牌本身。
 	openAIRescueExitAuthRejected = "auth_rejected"
@@ -147,8 +154,8 @@ type OpenAIRescueLaneSnapshot struct {
 	// 判断是否补种子）。注意：种子成功 ≠ 模板永在——插件进程换代会丢光
 	// 内存模板，清扫按桥证据（prober 未跟踪）触发补种（r17ba）。
 	SeedOK bool `json:"seed_ok,omitempty"`
-	// SeedAttempts 连续种子失败次数（成功即清零；达 openAIRescueSeedMaxAttempts
-	// 后清扫不再补种子——持续失败的号留在区里等插件真实流量，不无限空打）。
+	// SeedAttempts 连续种子失败次数（成功即清零）。r17bc 起不再停种：达
+	// openAIRescueSeedSlowLaneAttempts 后进慢道（每小时最多一试），永不停。
 	SeedAttempts int `json:"seed_attempts,omitempty"`
 	// LastSeedAt 最近一次种子尝试时刻（补种节流：模板喂上后插件最多一个
 	// interval 才出首针，这窗内不重复补种）。
@@ -156,9 +163,9 @@ type OpenAIRescueLaneSnapshot struct {
 	// AutoNeedleAt 最近一次自动资格针触发时刻（r17bb 冷却节流：针失败 r17y
 	// 一击回判死后，等冷却再重试，不每轮清扫空打）。
 	AutoNeedleAt time.Time `json:"auto_needle_at,omitempty"`
-	// AutoNeedleAttempts 自动资格针连续触发次数（针通过→转正收敛会清整个
-	// 标记，无需手动归零；达 openAIRescueAutoNeedleMaxAttempts 后停自动，
-	// 留人工处置——插件证据继续累积，手动毕业入口随时可用）。
+	// AutoNeedleAttempts 自动资格针连败次数（针通过→转正收敛会清整个标记，
+	// 无需手动归零）。r17bc 起不设上限：只驱动冷却递增（×3 封顶 2h），
+	// 重试永不停止。
 	AutoNeedleAttempts int `json:"auto_needle_attempts,omitempty"`
 	// ExitReason 非空 = 出区中（唯一现值 auth_rejected：种子吃凭据级拒绝）。
 	// 清扫见到即续走出区，不做绑定/调度自愈（否则与出区意图打架）。
@@ -624,6 +631,21 @@ func (l *OpenAIRescueLane) updateMarkerFields(
 	})
 }
 
+// openAIRescueAutoNeedleCooldownFor 自动资格针重试节奏（r17bc）：连败次数
+// 越多冷却越长——基础 10min × 3^attempts，封顶 2h。永不停止重试，但失败
+// 越多打得越慢：针是真实上游流量，固定短间隔重试在账号已被降智的场合
+// 等于主动喂执法升级（1223 实证：连探 → probe_auth_terminal → token 吊销）。
+func openAIRescueAutoNeedleCooldownFor(attempts int) time.Duration {
+	cooldown := openAIRescueAutoNeedleCooldown
+	for i := 0; i < attempts; i++ {
+		cooldown *= 3
+		if cooldown >= openAIRescueAutoNeedleMaxCooldown {
+			return openAIRescueAutoNeedleMaxCooldown
+		}
+	}
+	return cooldown
+}
+
 // autoNeedle 自动资格针（r17bb）：插件连过证据达阈值后由清扫触发。触发即
 // 记账（AutoNeedleAt/Attempts）——针本体异步收敛：成功 → state 进
 // qualification → 连过转 normal → 下一轮清扫转正毕业清标记；失败 → r17y
@@ -1051,13 +1073,11 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			continue
 		}
 		// 已入区：绑定自愈 + 撤调/恢复（桥证据），不重复入区。
-		bindingOK := false
-		for _, id := range account.GroupIDs {
-			if id == cfg.GroupID {
-				bindingOK = true
-				break
-			}
-		}
+		// 独绑救治组才算健康（r17az 语义，r17bc 恢复）：启动链路的池组触发器
+		// 每次重启会把原池组加回救治号（[原池组,救治组] 双绑），r17ba 重构时
+		// 判据被放宽成「含救治组即可」——10/2 生产实证 1215/1217/1218/1219
+		// 全部回到双绑。多余组或丢救治组都重绑 [救治组]，≤1 轮中和。
+		bindingOK := len(account.GroupIDs) == 1 && account.GroupIDs[0] == cfg.GroupID
 		if !bindingOK {
 			if err := l.accounts.BindGroups(ctx, account.ID, []int64{cfg.GroupID}); err != nil {
 				slog.Warn("openai_rescue_sweep_heal_bind_failed",
@@ -1089,15 +1109,14 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			}
 			// 自动资格针（r17bb）：插件连过达阈值 + 本号仍在判死位 → 清扫
 			// 自动打针（针走 pluginRoundTrip 与真实流量同路，钉扎救治效果
-			// 可被观测）。冷却与上限防空转；针在途（state=qualification）
-			// 自然跳过——不满足 pending_replace；针通过转 normal 后由上方
-			// 转正收敛段收编毕业。
+			// 可被观测）。冷却随连败递增防空转（r17bc 起无上限，永不停止）；
+			// 针在途（state=qualification）自然跳过——不满足 pending_replace；
+			// 针通过转 normal 后由上方转正收敛段收编毕业。
 			if l.needleTrigger != nil && bridgeAccount != nil &&
 				!bridgeAccount.InBackoff && !bridgeAccount.SuspectAccountLevel &&
 				bridgeAccount.ConsecutivePasses >= cfg.ConsecutiveCleanPasses &&
-				marker.AutoNeedleAttempts < openAIRescueAutoNeedleMaxAttempts &&
 				(marker.AutoNeedleAt.IsZero() ||
-					now.Sub(marker.AutoNeedleAt) >= openAIRescueAutoNeedleCooldown) {
+					now.Sub(marker.AutoNeedleAt) >= openAIRescueAutoNeedleCooldownFor(marker.AutoNeedleAttempts)) {
 				if snapshot, ok := states[account.ID]; ok &&
 					snapshot.State == OpenAIDowngradeStatePendingReplace {
 					l.autoNeedle(ctx, account.ID)
@@ -1113,22 +1132,34 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 		// 学起。SeedOK 只证种子曾打过——插件进程换代丢光内存模板后，按桥
 		// 证据（prober 启用却未跟踪本号）判失忆补种；openAIRescueReseedInterval
 		// 节流覆盖「模板已喂、等首针」窗（首针最多一个 interval 后出现）。
-		// 上限 openAIRescueSeedMaxAttempts 防空打（成功清零=连续失败语义）；
-		// 凭据级拒绝由 seedAndAccount 内部出区。
+		// r17bc 永不停种（用户裁定「所有问题号一直救到救回来」）：连败达
+		// openAIRescueSeedSlowLaneAttempts 后进慢道（每小时最多一试）——种子
+		// 是真实上游请求，密集空打喂执法升级（1223 实证）。插件已在跟踪本号
+		//（模板在场）时跳过补种：SeedOK 只证种子曾成功，模板现状以桥证据
+		// 为准；凭据级拒绝由 seedAndAccount 内部出区。
 		needSeed := !marker.SeedOK
+		if needSeed && haveBridge && prober != nil && prober.Enabled &&
+			prober.Accounts[account.ID] != nil {
+			// 模板在场（插件正跟踪本号、探针在跑）：种子目的已达成，本轮
+			// 不补——空打种子只是多余的上游暴露。
+			needSeed = false
+		}
 		if !needSeed && l.seed != nil && haveBridge && prober != nil && prober.Enabled &&
 			prober.Accounts[account.ID] == nil {
 			needSeed = marker.LastSeedAt.IsZero() ||
 				now.Sub(marker.LastSeedAt) >= openAIRescueReseedInterval
 		}
-		if l.seed != nil && !GetOpenAIRescueSuspected(account) &&
-			needSeed && marker.SeedAttempts < openAIRescueSeedMaxAttempts {
-			if err := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); err != nil {
-				if errors.Is(err, ErrRescueSeedAuthRejected) {
-					// 已出区（号回判死原位），事件与日志在 seedAndAccount 内。
-					continue
+		if l.seed != nil && !GetOpenAIRescueSuspected(account) && needSeed {
+			slowLane := marker.SeedAttempts >= openAIRescueSeedSlowLaneAttempts
+			if !slowLane || marker.LastSeedAt.IsZero() ||
+				now.Sub(marker.LastSeedAt) >= openAIRescueSeedSlowInterval {
+				if err := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); err != nil {
+					if errors.Is(err, ErrRescueSeedAuthRejected) {
+						// 已出区（号回判死原位），事件与日志在 seedAndAccount 内。
+						continue
+					}
+					// 其余失败已在 seedAndAccount 内 Warn，下轮按 attempts 继续。
 				}
-				// 其余失败已在 seedAndAccount 内 Warn，下轮按 attempts 继续。
 			}
 		}
 	}
