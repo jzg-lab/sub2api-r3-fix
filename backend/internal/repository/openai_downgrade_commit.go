@@ -298,8 +298,11 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIAccountReenable(
 
 	ownedStatusError := status == service.StatusError &&
 		ownedError.Valid && errorMessage.Valid && ownedError.String == errorMessage.String
+	// schedulable 阻断项的救治区豁免（r17ba）：在区号入区即有意开调度
+	//（救治组喂种子/测试流量），复活点击 = revived 标签 → reenable 考证，
+	// 带 AllowSchedulable 放行；其余闸（平台/影子/过期/状态）不豁免。
 	if platform != service.PlatformOpenAI || accountType != service.AccountTypeOAuth ||
-		parentAccountID.Valid || !notExpired || schedulable ||
+		parentAccountID.Valid || !notExpired || (!mutation.AllowSchedulable && schedulable) ||
 		(status != service.StatusActive && !ownedStatusError) {
 		return false, service.ErrOpenAIReenableBlocked
 	}

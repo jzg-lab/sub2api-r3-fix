@@ -1125,8 +1125,12 @@ func TestEnterRescueSeedSuccessStampsMarker(t *testing.T) {
 	if marker == nil {
 		t.Fatalf("marker missing")
 	}
-	if !marker.SeedOK || marker.SeedAttempts != 1 {
-		t.Fatalf("seed bookkeeping: seed_ok=%v attempts=%d, want true/1", marker.SeedOK, marker.SeedAttempts)
+	if !marker.SeedOK || marker.SeedAttempts != 0 {
+		// r17ba：成功清零连续失败计数（跨插件换代补种不吃上限额度）。
+		t.Fatalf("seed bookkeeping: seed_ok=%v attempts=%d, want true/0", marker.SeedOK, marker.SeedAttempts)
+	}
+	if marker.LastSeedAt.IsZero() {
+		t.Fatalf("seed bookkeeping: last_seed_at missing")
 	}
 }
 
@@ -1247,8 +1251,9 @@ func TestSweepReseedsUnseededMarkedAccount(t *testing.T) {
 		t.Fatalf("seed calls=%d, want 1 (reseed unseeded marked account)", seedCalls)
 	}
 	marker := GetOpenAIRescueLaneMarker(&repo.roster[0])
-	if marker == nil || !marker.SeedOK || marker.SeedAttempts != 2 {
-		t.Fatalf("marker=%+v, want seed_ok=true attempts=2", marker)
+	if marker == nil || !marker.SeedOK || marker.SeedAttempts != 0 {
+		// 成功补种清零连续失败计数（原语义 attempts=2 → r17ba 连续失败语义 0）。
+		t.Fatalf("marker=%+v, want seed_ok=true attempts=0", marker)
 	}
 }
 
@@ -1276,6 +1281,127 @@ func TestSweepSeedAttemptsCapStopsReseed(t *testing.T) {
 	}
 	if seedCalls != 0 {
 		t.Fatalf("seed calls=%d, want 0 (attempts cap reached)", seedCalls)
+	}
+}
+
+// r17ba 插件失忆补种：SeedOK=true 只证种子曾打过；插件进程换代丢光内存
+// 模板后 prober 未跟踪本号，清扫须补种（生产实证：0.2.1→0.3.1 换代后
+// 1218/1219 停在零针）。
+func TestSweepReseedsWhenPluginForgotTemplate(t *testing.T) {
+	account := rescueLaneSweepAccount(65)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedOK:       true,
+		LastSeedAt:   time.Now().UTC().Add(-openAIRescueReseedInterval - time.Minute),
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+		rescueLaneBridgeJSON(), true) // 桥在线、prober 启用、accounts 空=失忆
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 1 {
+		t.Fatalf("seed calls=%d, want 1 (amnesia reseed)", seedCalls)
+	}
+}
+
+func TestSweepNoReseedWhileAwaitingFirstProbe(t *testing.T) {
+	// 模板刚喂上（LastSeedAt 新鲜）：等插件首针进视图，不重复补种。
+	account := rescueLaneSweepAccount(66)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedOK:       true,
+		LastSeedAt:   time.Now().UTC().Add(-time.Minute),
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{}, rescueLaneBridgeJSON(), true)
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 0 {
+		t.Fatalf("seed calls=%d, want 0 (throttled: awaiting first probe)", seedCalls)
+	}
+}
+
+func TestSweepNoReseedWhenProberTracksAccount(t *testing.T) {
+	// prober 已跟踪（有模板有探针）：SeedOK=true 的常规态，不补种。
+	account := rescueLaneSweepAccount(67)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedOK:       true,
+		LastSeedAt:   time.Now().UTC().Add(-time.Hour),
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{},
+		rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(67, false, 3, 0, false, "0001-01-01T00:00:00Z")), true)
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 0 {
+		t.Fatalf("seed calls=%d, want 0 (tracked by prober)", seedCalls)
+	}
+}
+
+func TestSweepNoAmnesiaReseedWithoutBridge(t *testing.T) {
+	// 桥缺席（无启用插件/旧装配）：无失忆证据，SeedOK=true 不补种
+	//（无桥补种=每轮空打上游）。
+	account := rescueLaneSweepAccount(68)
+	rescueLaneApplyMarker(t, account, OpenAIRescueLaneMarker{
+		EnteredAt:    time.Now().UTC(),
+		Trigger:      OpenAIRescueTriggerAuto,
+		OrigGroupIDs: []int64{3},
+		OrigPriority: 5,
+		SeedOK:       true,
+		LastSeedAt:   time.Now().UTC().Add(-time.Hour),
+	})
+	account.GroupIDs = []int64{99}
+	account.Schedulable = true
+	repo := &rescueLaneRepo{roster: []Account{*account}}
+	lane := rescueLaneSweepLaneWithBridge(repo, &rescueLaneSink{}, "", false)
+	seedCalls := 0
+	lane.seed = func(context.Context, int64) error {
+		seedCalls++
+		return nil
+	}
+
+	if _, _, _, err := lane.RunReconcileSweep(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if seedCalls != 0 {
+		t.Fatalf("seed calls=%d, want 0 (no bridge evidence)", seedCalls)
 	}
 }
 

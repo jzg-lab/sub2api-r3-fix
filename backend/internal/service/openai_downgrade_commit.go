@@ -69,9 +69,13 @@ type OpenAIAccountReenableMutation struct {
 	ExpectedProxyID          *int64
 	ExpectedStatus           string
 	ExpectedSchedulable      bool
-	Unpause                  bool
-	ReenabledAt              time.Time
-	State                    *OpenAIDowngradeProbeState
+	// AllowSchedulable 救治区豁免（r17ba）：在区号入区时被有意开调度
+	//（救治组收种子/测试流量），普通 reenable 闸把 schedulable=true 视为
+	// 异常态拒绝——复活点击（标签 revived → reenable 考证）必须放行。
+	AllowSchedulable bool
+	Unpause          bool
+	ReenabledAt      time.Time
+	State            *OpenAIDowngradeProbeState
 }
 
 type OpenAIAccountReenableStore interface {

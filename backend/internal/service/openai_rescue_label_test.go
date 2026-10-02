@@ -26,7 +26,7 @@ func rescueLaneBridgeJSON(accounts ...string) string {
 func TestParseOpenAIPluginBridgeProber(t *testing.T) {
 	prober := ParseOpenAIPluginBridgeProber(rescueLaneBridgeJSON(
 		`{"account_id":42,"consecutive_passes":7,"consec_fails":0,"suspect_account_level":false,`+
-			`"in_backoff":false,"backoff_until":"0001-01-01T00:00:00Z","last_probe_at":"2026-10-02T08:00:00Z",`+
+			`"in_backoff":false,"backoff_until":"0001-01-01T00:00:00Z","last_probe_at":"2026-10-02T08:00:00Z","last_verdict":"pass",`+
 			`"sign_captured_at":"2026-10-02T07:00:00Z","estimated_remaining_seconds":1800,"estimate_basis":"measured"}`,
 		`{"account_id":43,"consecutive_passes":0,"consec_fails":3,"suspect_account_level":true,`+
 			`"in_backoff":true,"backoff_until":"2026-10-02T09:00:00Z","last_probe_at":"2026-10-02T08:40:00Z"}`,
@@ -43,6 +43,9 @@ func TestParseOpenAIPluginBridgeProber(t *testing.T) {
 	}
 	if ok.LastProbeAt.IsZero() || !ok.LastProbeAt.Equal(time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)) {
 		t.Fatalf("last_probe_at=%v, want 2026-10-02T08:00:00Z", ok.LastProbeAt)
+	}
+	if ok.LastVerdict != "pass" {
+		t.Fatalf("last_verdict=%q, want pass", ok.LastVerdict)
 	}
 	sus := prober.Accounts[43]
 	if sus == nil || !sus.InBackoff || !sus.SuspectAccountLevel || sus.ConsecFails != 3 {
@@ -122,6 +125,7 @@ func TestLabelOpenAIRescueAccountMatrix(t *testing.T) {
 func TestBuildOpenAIAccountRescueHealth(t *testing.T) {
 	entered := time.Now().UTC().Truncate(time.Second)
 	until := entered.Add(time.Hour)
+	probedAt := entered.Add(10 * time.Minute)
 	marker := &OpenAIRescueLaneMarker{EnteredAt: entered, Trigger: OpenAIRescueTriggerReconcile}
 	bridge := &OpenAIPluginBridgeAccount{
 		ConsecutivePasses:   4,
@@ -129,6 +133,8 @@ func TestBuildOpenAIAccountRescueHealth(t *testing.T) {
 		SuspectAccountLevel: false,
 		InBackoff:           false,
 		BackoffUntil:        until,
+		LastProbeAt:         probedAt,
+		LastVerdict:         "pass",
 	}
 	note := BuildOpenAIAccountRescueHealth(marker, 6, bridge, true)
 	if note == nil {
@@ -143,10 +149,17 @@ func TestBuildOpenAIAccountRescueHealth(t *testing.T) {
 	if note.BackoffUntil == nil || !note.BackoffUntil.Equal(until) {
 		t.Fatalf("backoff_until=%v, want %v", note.BackoffUntil, until)
 	}
+	// 插件最近一针透出（两本账分置的展示侧：宿主证据行冻结在判死针）。
+	if note.PluginLastProbeAt == nil || !note.PluginLastProbeAt.Equal(probedAt) || note.PluginLastVerdict != "pass" {
+		t.Fatalf("plugin last probe=%v/%q, want %v/pass", note.PluginLastProbeAt, note.PluginLastVerdict, probedAt)
+	}
 	// 无桥数据：计数字段零值呈现（诚实：无数据 ≠ 探针结论为零）。
 	bare := BuildOpenAIAccountRescueHealth(marker, 6, nil, false)
 	if bare == nil || bare.ConsecutivePasses != 0 || bare.PluginOffline {
 		t.Fatalf("bare=%+v, want zero passes / not offline", bare)
+	}
+	if bare.PluginLastProbeAt != nil || bare.PluginLastVerdict != "" {
+		t.Fatalf("bare plugin last probe=%v/%q, want absent without bridge", bare.PluginLastProbeAt, bare.PluginLastVerdict)
 	}
 	if BuildOpenAIAccountRescueHealth(nil, 6, bridge, false) != nil {
 		t.Fatalf("nil marker must yield nil annotation")
@@ -208,6 +221,46 @@ func TestListOpenAIAccountHealthRescueRevivedOverride(t *testing.T) {
 	}
 	if row.Rescue.PluginOffline {
 		t.Fatalf("plugin_offline=true, want false（桥在线）")
+	}
+}
+
+func TestListOpenAIAccountHealthRescuedBadge(t *testing.T) {
+	// task 4.4 永久复活徽标：转正后（无在区标记）Rescue 缺席、Rescued 在场；
+	// 在区号二次入区时徽标与在区注记并存（血统不丢）。
+	lane := newRescueLaneTestLane(&rescueLaneRepo{account: rescueLaneTestAccount()}, &rescueLaneSink{})
+	at := time.Date(2026, 10, 2, 2, 30, 0, 0, time.UTC)
+	graduated := OpenAIProbeHealthSnapshot{
+		AccountID: 42, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+		Schedulable: true, RescuedAt: &at, RescueCount: 2,
+	}
+	runner := rescueLaneHealthRunner(graduated, nil, lane)
+	result, err := runner.ListOpenAIAccountHealth(context.Background(), []int64{42})
+	if err != nil {
+		t.Fatalf("ListOpenAIAccountHealth: %v", err)
+	}
+	row := result.Accounts[0]
+	if row.Rescue != nil {
+		t.Fatalf("graduated row rescue=%+v, want nil（转正清在区注记）", row.Rescue)
+	}
+	if row.Rescued == nil || !row.Rescued.At.Equal(at) || row.Rescued.Count != 2 {
+		t.Fatalf("rescued=%+v, want at=%v count=2", row.Rescued, at)
+	}
+	// 正常号标签不受徽标影响。
+	if row.Label != OpenAIHealthLabelNormal {
+		t.Fatalf("label=%s, want normal（徽标不抢标签）", row.Label)
+	}
+
+	reentered := rescueLaneInLaneSnapshot(t, 42, func(s *OpenAIProbeHealthSnapshot) {
+		s.RescuedAt, s.RescueCount = &at, 1
+	})
+	runner = rescueLaneHealthRunner(reentered, nil, lane)
+	result, err = runner.ListOpenAIAccountHealth(context.Background(), []int64{42})
+	if err != nil {
+		t.Fatalf("ListOpenAIAccountHealth re-entered: %v", err)
+	}
+	row = result.Accounts[0]
+	if row.Rescue == nil || row.Rescued == nil || row.Rescued.Count != 1 {
+		t.Fatalf("re-entered row rescue=%+v rescued=%+v, want both present", row.Rescue, row.Rescued)
 	}
 }
 

@@ -43,6 +43,9 @@ type OpenAIAccountHealth struct {
 	// Rescue 救治区注记（r17ax Phase 3.4）：仅在区成员账号上在场；标签
 	// 覆盖见 ListOpenAIAccountHealth（paused/rate_limited 仍最高优先）。
 	Rescue *OpenAIAccountRescueHealth `json:"rescue,omitempty"`
+	// Rescued 永久复活徽标（task 4.4）：曾从救治区毕业的账号永久在场
+	// （与 Rescue 是两个东西：转正清 Rescue、留 Rescued 血统）。
+	Rescued *OpenAIAccountRescuedBadge `json:"rescued,omitempty"`
 }
 
 // OpenAIAccountHealthListResult 批量健康快照响应信封：账号列表 + 全局插件桥
@@ -101,6 +104,10 @@ type OpenAIProbeHealthSnapshot struct {
 	// RescueMarker 救治区成员标记（r17ax Phase 3.4：仓库从
 	// extra->'openai_rescue_lane' 原文列解析；不在区为 nil）。
 	RescueMarker *OpenAIRescueLaneMarker
+	// RescuedAt/RescueCount 永久复活徽标（task 4.4：GraduateRescue 打的
+	// 血统标记；RescuedAt 非 nil 即有徽标，坏值按无徽标）。
+	RescuedAt   *time.Time
+	RescueCount int
 }
 
 // OpenAIProbeHealthLister 窄可选能力：批量健康快照聚合（只有真实 repository
@@ -476,6 +483,10 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			label, color, clickable, reason = LabelOpenAIRescueAccount(s.RescueMarker, threshold, bridgeAccount)
 			rescue = BuildOpenAIAccountRescueHealth(s.RescueMarker, threshold, bridgeAccount, pluginOffline)
 		}
+		var rescued *OpenAIAccountRescuedBadge
+		if s.RescuedAt != nil {
+			rescued = &OpenAIAccountRescuedBadge{At: *s.RescuedAt, Count: s.RescueCount}
+		}
 		out = append(out, OpenAIAccountHealth{
 			AccountID:     s.AccountID,
 			State:         s.State,
@@ -490,6 +501,7 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			Reason:        reason,
 			LastProbe:     s.LastProbe,
 			Rescue:        rescue,
+			Rescued:       rescued,
 		})
 	}
 	return &OpenAIAccountHealthListResult{Accounts: out, PluginBridge: bridge}, nil
@@ -636,6 +648,7 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 		ExpectedProxyID:          cloneOpenAIProbePointer(account.ProxyID),
 		ExpectedStatus:           account.Status,
 		ExpectedSchedulable:      account.Schedulable,
+		AllowSchedulable:         GetOpenAIRescueLaneMarker(account) != nil,
 		Unpause:                  unpause,
 		ReenabledAt:              now,
 		State:                    &candidate,

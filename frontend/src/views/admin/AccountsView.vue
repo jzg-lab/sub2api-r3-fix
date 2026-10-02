@@ -320,6 +320,27 @@
                   <span :class="['h-1.5 w-1.5 rounded-full', healthDotClass(accountHealthById[row.id])]" />
                   {{ t(`admin.accounts.health.labels.${accountHealthById[row.id].label}`) }}
                 </button>
+                <!-- task 4.4/4.5：永久复活徽标（转正后常驻血统）+ 签余量读秒
+                     芯片（救治中号独有；~ 前缀=插件 fallback 估计值）。 -->
+                <div
+                  v-if="accountHealthById[row.id].rescued || rescueSignChip(row.id)"
+                  class="flex flex-wrap items-center gap-1"
+                >
+                  <span
+                    v-if="accountHealthById[row.id].rescued"
+                    class="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300"
+                    :title="rescuedChipTitle(accountHealthById[row.id])"
+                  >
+                    ✿ {{ rescuedChipText(accountHealthById[row.id]) }}
+                  </span>
+                  <span
+                    v-if="rescueSignChip(row.id)"
+                    class="inline-flex items-center rounded-full border border-indigo-300 bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300"
+                    :title="rescueSignTitle(row.id)"
+                  >
+                    {{ rescueSignText(row.id) }}
+                  </span>
+                </div>
                 <span
                   v-if="accountHealthById[row.id].last_probe"
                   class="max-w-[11rem] truncate font-mono text-[10px] leading-4 text-gray-500 dark:text-gray-400"
@@ -1056,6 +1077,129 @@ const rescuingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
 const probingAcc = ref<Account | null>(null)
 
+// task 4.5：签余量读秒——桥 status_json prober.accounts 的签捕获/余量估计
+// （原文透传，前端解析）。健康批量刷新时重建 = 桥校准节奏；芯片秒针走
+// nowTick。无签（插件尚未捕获）不在表 → 不显芯片。
+interface RescueSignInfo {
+  capturedAt: number
+  estRemainingSec: number | null
+  basis: string
+}
+const rescueSignByAccount = ref<Record<number, RescueSignInfo>>({})
+// 秒针：仅在有救治中号且桥给了签数据时走钟（watch 启停，空转零成本）。
+const nowTick = ref(Date.now())
+let rescueClockTimer: ReturnType<typeof setInterval> | null = null
+
+const parseRescueSignInfo = (bridge: OpenAIPluginBridge | null | undefined): Record<number, RescueSignInfo> => {
+  const out: Record<number, RescueSignInfo> = {}
+  if (!bridge?.status_json) return out
+  try {
+    const parsed = JSON.parse(bridge.status_json) as {
+      prober?: {
+        accounts?: Array<{
+          account_id?: number
+          sign_captured_at?: string
+          estimated_remaining_seconds?: number | null
+          estimate_basis?: string
+        }>
+      }
+    }
+    for (const acc of parsed.prober?.accounts ?? []) {
+      if (!acc || typeof acc.account_id !== 'number' || !acc.sign_captured_at) continue
+      const capturedAt = Date.parse(acc.sign_captured_at)
+      if (!Number.isFinite(capturedAt)) continue
+      out[acc.account_id] = {
+        capturedAt,
+        estRemainingSec:
+          typeof acc.estimated_remaining_seconds === 'number' ? acc.estimated_remaining_seconds : null,
+        basis: acc.estimate_basis || 'none'
+      }
+    }
+  } catch {
+    // 坏 JSON → 按无签数据渲染（芯片缺席，不炸健康格）。
+  }
+  return out
+}
+
+// 只依赖健康表与签表（accounts 解构在本块之后，勿引用——TDZ）。
+const anyRescueSignChipVisible = computed(() => {
+  const signs = rescueSignByAccount.value
+  for (const health of Object.values(accountHealthById.value)) {
+    if (health.rescue && signs[health.account_id]) return true
+  }
+  return false
+})
+
+watch(
+  anyRescueSignChipVisible,
+  (visible) => {
+    if (visible && rescueClockTimer === null) {
+      rescueClockTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 1000)
+    } else if (!visible && rescueClockTimer !== null) {
+      clearInterval(rescueClockTimer)
+      rescueClockTimer = null
+    }
+  },
+  { immediate: true }
+)
+
+const fmtSignClock = (seconds: number): string => {
+  const total = Math.max(0, Math.floor(seconds))
+  const minutes = Math.floor(total / 60)
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60)
+    return `${hours}h${String(minutes % 60).padStart(2, '0')}`
+  }
+  return `${minutes}:${String(total % 60).padStart(2, '0')}`
+}
+
+// 余量以桥 checked_at 为锚扣除流逝（估计值是 Health RPC 时刻算的）。
+const rescueSignChip = (accountId: number): { age: string; remain: string | null; approx: boolean } | null => {
+  const info = rescueSignByAccount.value[accountId]
+  if (!info) return null
+  const now = nowTick.value
+  const age = fmtSignClock((now - info.capturedAt) / 1000)
+  let remain: string | null = null
+  if (info.estRemainingSec != null) {
+    const anchor = pluginBridge.value?.checked_at ? Date.parse(pluginBridge.value.checked_at) : now
+    const elapsed = Number.isFinite(anchor) ? (now - anchor) / 1000 : 0
+    remain = fmtSignClock(info.estRemainingSec - elapsed)
+  }
+  return { age, remain, approx: info.basis !== 'measured' }
+}
+
+const rescueSignText = (accountId: number): string => {
+  const chip = rescueSignChip(accountId)
+  if (!chip) return ''
+  const approx = chip.approx ? '~' : ''
+  return chip.remain != null
+    ? t('admin.accounts.health.signChip', { age: chip.age, remain: approx + chip.remain })
+    : t('admin.accounts.health.signAgeChip', { age: chip.age })
+}
+
+const rescueSignTitle = (accountId: number): string => {
+  const info = rescueSignByAccount.value[accountId]
+  if (!info) return ''
+  return t('admin.accounts.health.signChipTitle', {
+    at: formatDateTime(new Date(info.capturedAt)),
+    basis: info.basis
+  })
+}
+
+// task 4.4：永久复活徽标文案（悬停=复活时间+累计次数）。
+const rescuedChipText = (health: OpenAIAccountHealth): string =>
+  health.rescued ? t('admin.accounts.health.rescuedBadge', { count: health.rescued.count }) : ''
+
+const rescuedChipTitle = (health: OpenAIAccountHealth): string =>
+  health.rescued
+    ? t('admin.accounts.health.rescuedTitle', {
+        time: formatDateTime(health.rescued.at),
+        count: health.rescued.count
+      })
+    : ''
+
 const isOpenAIOAuthHealthAccount = (row: Account): boolean =>
   row.platform === 'openai' && row.type === 'oauth'
 
@@ -1068,6 +1212,7 @@ const refreshAccountHealthBatch = async () => {
   if (openAIIDs.length === 0) {
     accountHealthById.value = {}
     pluginBridge.value = null
+    rescueSignByAccount.value = {}
     return
   }
   healthLoading.value = true
@@ -1078,6 +1223,7 @@ const refreshAccountHealthBatch = async () => {
     for (const item of result.accounts) next[item.account_id] = item
     accountHealthById.value = next
     pluginBridge.value = result.plugin_bridge ?? null
+    rescueSignByAccount.value = parseRescueSignInfo(result.plugin_bridge)
   } catch (error) {
     if (reqSeq !== healthReqSeq.value) return
     console.error('Failed to load account health:', error)
@@ -1096,6 +1242,9 @@ const healthBadgeClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
     case 'blue':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+    case 'blue-purple':
+      // 救治中（r17ax Phase 3.4 标签表）：紫罗兰，与复检中的纯蓝区分。
+      return 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
     case 'gray-red':
       return 'bg-gray-100 text-red-700 dark:bg-dark-700 dark:text-red-400'
     default:
@@ -1113,6 +1262,8 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-500'
     case 'blue':
       return 'bg-blue-500'
+    case 'blue-purple':
+      return 'bg-violet-500'
     case 'gray-red':
       return 'bg-red-400'
     default:
@@ -1122,8 +1273,26 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
 
 const healthBadgeTitle = (health: OpenAIAccountHealth): string => {
   const label = t(`admin.accounts.health.labels.${health.label}`)
-  if (!health.clickable) return label
-  return `${label} · ${t('admin.accounts.health.clickHint')}`
+  let title = label
+  // 救治区注记：连过进度 + 插件侧最近一针（宿主证据行冻结在判死针，
+  // 活跃证据在插件——悬停里两本账并排，回应「检测时间没跟上」的观感差）。
+  if (health.rescue) {
+    title += ` · ${t('admin.accounts.health.rescueProgress', {
+      passes: health.rescue.consecutive_passes,
+      threshold: health.rescue.graduation_threshold
+    })}`
+    if (health.rescue.plugin_last_probe_at) {
+      const verdict = health.rescue.plugin_last_verdict === 'fail'
+        ? t('admin.accounts.health.answerWrong')
+        : t('admin.accounts.health.answerCorrect')
+      title += ` · ${t('admin.accounts.health.pluginProbeTitle', {
+        time: formatDateTime(health.rescue.plugin_last_probe_at),
+        verdict
+      })}`
+    }
+  }
+  if (!health.clickable) return title
+  return `${title} · ${t('admin.accounts.health.clickHint')}`
 }
 
 const lastProbeTitle = (health: OpenAIAccountHealth): string => {
@@ -3074,6 +3243,10 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (rescueClockTimer !== null) {
+    clearInterval(rescueClockTimer)
+    rescueClockTimer = null
+  }
   reenableLifecycle.dispose()
   upstreamBillingRateAbortController?.abort()
   invalidateBatchedUsageRequests()

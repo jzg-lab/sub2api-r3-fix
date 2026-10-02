@@ -68,10 +68,15 @@ const (
 	openAIRescueDefaultCleanPasses = 6
 	// openAIRescueDefaultReconcileInterval 对账清扫周期（proposal：5min）。
 	openAIRescueDefaultReconcileInterval = 5 * time.Minute
-	// openAIRescueSeedMaxAttempts 种子尝试上限（入区 1 次 + 清扫补种若干）。
-	// 超限后不再空打——凭据级失败早已出区，非凭据失败说明上游/链路本身
-	// 有问题，等插件真实流量兜底。
+	// openAIRescueSeedMaxAttempts 连续种子失败上限（成功清零）。超限后不再
+	// 空打——凭据级失败早已出区，非凭据失败说明上游/链路本身有问题，等
+	// 插件真实流量兜底。
 	openAIRescueSeedMaxAttempts = 5
+	// openAIRescueReseedInterval 插件失忆补种节流：插件探针模板在内存里，
+	// 进程换代即丢（fork 宿主无 KV 持久化）。种子喂上模板后插件最多一个
+	// probe interval 才出首针进 prober 视图，此窗内不重复补种（15min 盖住
+	// 生产默认 interval=900s；更长 interval 的窗内最多每小时 4 发，良性）。
+	openAIRescueReseedInterval = 15 * time.Minute
 	// openAIRescueExitAuthRejected 出区原因：种子流量吃凭据级拒绝
 	// （401/403/token 吊销类）。cookie 插件治不了 OAuth 令牌本身。
 	openAIRescueExitAuthRejected = "auth_rejected"
@@ -131,11 +136,15 @@ type OpenAIRescueLaneSnapshot struct {
 	OrigGroupIDs []int64   `json:"orig_group_ids"`
 	OrigPriority int       `json:"orig_priority"`
 	// SeedOK 种子流量已成功打过至少一次（插件探针模板已喂上；清扫据此
-	// 判断是否补种子）。
+	// 判断是否补种子）。注意：种子成功 ≠ 模板永在——插件进程换代会丢光
+	// 内存模板，清扫按桥证据（prober 未跟踪）触发补种（r17ba）。
 	SeedOK bool `json:"seed_ok,omitempty"`
-	// SeedAttempts 种子尝试次数（含失败；达 openAIRescueSeedMaxAttempts 后
-	// 清扫不再补种子——持续失败的号留在区里等插件真实流量，不无限空打）。
+	// SeedAttempts 连续种子失败次数（成功即清零；达 openAIRescueSeedMaxAttempts
+	// 后清扫不再补种子——持续失败的号留在区里等插件真实流量，不无限空打）。
 	SeedAttempts int `json:"seed_attempts,omitempty"`
+	// LastSeedAt 最近一次种子尝试时刻（补种节流：模板喂上后插件最多一个
+	// interval 才出首针，这窗内不重复补种）。
+	LastSeedAt time.Time `json:"last_seed_at,omitempty"`
 	// ExitReason 非空 = 出区中（唯一现值 auth_rejected：种子吃凭据级拒绝）。
 	// 清扫见到即续走出区，不做绑定/调度自愈（否则与出区意图打架）。
 	ExitReason string `json:"exit_reason,omitempty"`
@@ -308,6 +317,9 @@ func parseOpenAIRescueLaneMarkerFields(fields map[string]any) *OpenAIRescueLaneM
 	if attempts, ok := parseOpenAIRescueInt(fields["seed_attempts"]); ok && attempts > 0 {
 		marker.SeedAttempts = int(attempts)
 	}
+	if lastSeedAt, ok := parseOpenAIRescueTimeString(fields["last_seed_at"]); ok {
+		marker.LastSeedAt = lastSeedAt
+	}
 	if reason, ok := fields["exit_reason"].(string); ok {
 		marker.ExitReason = reason
 	}
@@ -340,6 +352,9 @@ func rescueLaneMarkerExtraValue(marker OpenAIRescueLaneMarker) map[string]any {
 	}
 	if marker.SeedAttempts > 0 {
 		value["seed_attempts"] = marker.SeedAttempts
+	}
+	if !marker.LastSeedAt.IsZero() {
+		value["last_seed_at"] = marker.LastSeedAt.UTC().Format(time.RFC3339)
 	}
 	if marker.ExitReason != "" {
 		value["exit_reason"] = marker.ExitReason
@@ -534,7 +549,13 @@ func (l *OpenAIRescueLane) seedAndAccount(ctx context.Context, account *Account,
 	}
 	if markErr := l.updateMarkerFields(ctx, account.ID, func(m *OpenAIRescueLaneMarker) {
 		m.SeedAttempts++
+		m.LastSeedAt = l.now().UTC()
 		m.SeedOK = seedErr == nil
+		if seedErr == nil {
+			// 成功清零连续失败计数（r17ba）：插件进程换代丢模板后的补种
+			// 也走本函数，若成功不清零，跨重启多次补种会耗尽上限卡死。
+			m.SeedAttempts = 0
+		}
 	}); markErr != nil {
 		// 记账失败不改变种子结局（清扫下轮按 SeedOK 缺失补打，幂等）。
 		slog.Warn("openai_rescue_seed_mark_failed",
@@ -1018,12 +1039,21 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 				healed++
 			}
 		}
-		// 补种子（半进区收尾 + 种子失败重试）：插件探针模板来自真实转发
-		// 流量，救治组无客户流量，没种子的号插件无从学起。上限
-		// openAIRescueSeedMaxAttempts 防空打；凭据级拒绝由 seedAndAccount
-		// 内部出区。
+		// 补种子（半进区收尾 + 种子失败重试 + 插件失忆自愈 r17ba）：插件
+		// 探针模板来自真实转发流量，救治组无客户流量，没种子的号插件无从
+		// 学起。SeedOK 只证种子曾打过——插件进程换代丢光内存模板后，按桥
+		// 证据（prober 启用却未跟踪本号）判失忆补种；openAIRescueReseedInterval
+		// 节流覆盖「模板已喂、等首针」窗（首针最多一个 interval 后出现）。
+		// 上限 openAIRescueSeedMaxAttempts 防空打（成功清零=连续失败语义）；
+		// 凭据级拒绝由 seedAndAccount 内部出区。
+		needSeed := !marker.SeedOK
+		if !needSeed && l.seed != nil && haveBridge && prober != nil && prober.Enabled &&
+			prober.Accounts[account.ID] == nil {
+			needSeed = marker.LastSeedAt.IsZero() ||
+				now.Sub(marker.LastSeedAt) >= openAIRescueReseedInterval
+		}
 		if l.seed != nil && !GetOpenAIRescueSuspected(account) &&
-			!marker.SeedOK && marker.SeedAttempts < openAIRescueSeedMaxAttempts {
+			needSeed && marker.SeedAttempts < openAIRescueSeedMaxAttempts {
 			if err := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); err != nil {
 				if errors.Is(err, ErrRescueSeedAuthRejected) {
 					// 已出区（号回判死原位），事件与日志在 seedAndAccount 内。

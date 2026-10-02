@@ -113,29 +113,46 @@
        OpenAIProbeHealthSnapshot 全量快照（State+ProbeMode 都要）。转正不做 enabled
        闸（出口永远合法）。6 新用例：改绑打标/幂等空转/计数递增/清扫收敛/考证中
        不收敛/判死回退不收敛
-- [ ] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
+- [x] 3.7 手动入区端点 POST /admin/openai/accounts/:id/rescue（幂等+audit）
+      （✓ 1381588 已带：handler+audit+i18n+前端 rescueOpenAIAccount；r17ax 链测
+      实证 1217/1218/1219 手动入区走的就是它）
 - [x] 3.8 配置项 rescue_lane.*：settings 键 openai_rescue_lane（单 JSON 块，
        与 openai_operations 同形态）——enabled/group_id/consecutive_clean_passes/
        reconcile_interval_minutes。GetOpenAIRescueLaneSettings 容错读（键缺失/空/
        坏 JSON/校验不过→安全缺省关态）+ Set 校验落库 + ResolveOpenAIRescueLaneConfig
        （分钟→Duration、零值回退、err 强制关态）。wire 换 settings 闭包（每轮清扫/
        每次判死提交重读，无缓存改库即热生效——生产 flip 不重启）。5 新用例
-- [ ] 3.9 编排器状态机测试（入口过滤/对账/标签流转/撤调恢复/转正改绑/删除清位）
+- [x] 3.9 编排器状态机测试（入口过滤/对账/标签流转/撤调恢复/转正改绑/删除清位）
+      （✓ openai_rescue_lane_test.go 40+ 用例：入口矩阵/标记往返/转换次序/幂等/
+      种子三态/清扫自愈补进/撤调恢复矩阵/转正三件/冷却闸/失忆补种×4；
+      openai_rescue_label_test.go 12 用例：桥解析/标签矩阵/注记/复活徽标；
+      reenable commit 仓测含救治区 AllowSchedulable 豁免）
 
 ## Phase 4 — fork 前端
 
-- [ ] 4.1 三标签 + 插件离线角标（健康格渲染规则，沿用 7 标签既有模式）
-- [ ] 4.2 「已复活」点击 → 现有 reenable 确认弹窗（probeDeadConfirm 复用）
-- [ ] 4.3 「送入实验台」按钮 + 三条可见性规则 + 幂等提示
-- [ ] 4.4 复活号永久徽标（转正后行内常驻；悬停复活时间/次数；与正常号视觉强区分）
-- [ ] 4.5 签余量读秒芯片（徽标旁：签龄/预计余 mm:ss 逐秒走钟；桥 30s 校准；
+- [x] 4.1 三标签 + 插件离线角标（健康格渲染规则，沿用 7 标签既有模式）
+      （✓ 救治中蓝紫/已复活绿可点/疑似灰红 + plugin_offline 角标；r17ba 补：
+      悬停连过进度 + 插件最近一针（时间+判定）——两本账并排）
+- [x] 4.2 「已复活」点击 → 现有 reenable 确认弹窗（probeDeadConfirm 复用）
+      （✓ 复用 reenable 流；r17ba 修链尾 409：reenable 闸把在区号的有意
+      schedulable=true 误判异常态 → AllowSchedulable 豁免（在区号放行，
+      其余闸不豁免），生产 1217 点击 409 实证后修复+仓测锁定）
+- [x] 4.3 「送入实验台」按钮 + 三条可见性规则 + 幂等提示
+- [x] 4.4 复活号永久徽标（转正后行内常驻；悬停复活时间/次数；与正常号视觉强区分）
+      （✓ ✿ 已复活 ×N emerald 常驻；repo extra 双列 → 快照 → DTO rescued 徽标；
+      转正清 rescue 注记、留 rescued 血统；再入区两注记并存）
+- [x] 4.5 签余量读秒芯片（徽标旁：签龄/预计余 mm:ss 逐秒走钟；桥 30s 校准；
        faster-model 归零事件联动；估计值标注）
-- [ ] 4.6 vue-tsc + vitest 全绿
+      （✓ indigo 芯片：签龄+余寿 1s 走钟，锚 plugin_bridge.checked_at 扣流逝；
+      basis≠measured 前缀 ~；悬停捕获时刻+basis）
+- [x] 4.6 vue-tsc + vitest 全绿（0 错 / 1940 全过）
 
 ## Phase 5 — 验证与部署（铁律全流程）
 
 - [ ] 5.1 sidecar E2E 全流程（验收标准 1-4 逐条）
 - [ ] 5.2 全量回归 + 新增测试全绿；前端构建后 commit 再 make build（版本戳教训）
+      （r17ba 进行中：源码全绿（backend service 126s + repo + vue-tsc 0 +
+      vitest 1940），链测抓出两缺陷已修——reenable 409 豁免 + 插件失忆补种）
 - [ ] 5.3 铁律三段式：同配方重建 r17aw 对照 → 候选 vs 对照 rodata 去版本串逐字符比对
 - [ ] 5.4 生产部署清单（start 脚本/配置/回滚件/插件 0.3.0 上传）→ 用户逐项点头执行
 - [ ] 5.5 生产验证：组隔离、首号入区观测、主池流量零影响

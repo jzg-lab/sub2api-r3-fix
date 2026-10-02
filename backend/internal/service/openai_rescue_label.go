@@ -41,6 +41,8 @@ type OpenAIPluginBridgeAccount struct {
 	InBackoff           bool
 	BackoffUntil        time.Time
 	LastProbeAt         time.Time
+	// LastVerdict 插件最近一针判定（pass/fail；空=尚无针）。
+	LastVerdict string
 }
 
 // OpenAIPluginBridgeProber 桥 status_json 的 prober 区段解析形态。
@@ -69,6 +71,7 @@ func ParseOpenAIPluginBridgeProber(statusJSON string) *OpenAIPluginBridgeProber 
 				InBackoff           bool      `json:"in_backoff"`
 				BackoffUntil        time.Time `json:"backoff_until"`
 				LastProbeAt         time.Time `json:"last_probe_at"`
+				LastVerdict         string    `json:"last_verdict"`
 			} `json:"accounts"`
 		} `json:"prober"`
 	}
@@ -92,6 +95,7 @@ func ParseOpenAIPluginBridgeProber(statusJSON string) *OpenAIPluginBridgeProber 
 			InBackoff:           raw.InBackoff,
 			BackoffUntil:        raw.BackoffUntil,
 			LastProbeAt:         raw.LastProbeAt,
+			LastVerdict:         raw.LastVerdict,
 		}
 	}
 	return prober
@@ -109,6 +113,19 @@ type OpenAIAccountRescueHealth struct {
 	BackoffUntil        *time.Time `json:"backoff_until,omitempty"`
 	PluginOffline       bool       `json:"plugin_offline"`
 	GraduationThreshold int        `json:"graduation_threshold"`
+	// PluginLastProbeAt/PluginLastVerdict 插件侧最近一针（r17ba 悬停证据）：
+	// 宿主证据行冻结在判死针（ListDue 排除 pending_replace），救治区里活跃
+	// 的是插件针——两本账分置，「检测还是 7 小时前」的观感差由此解释。
+	PluginLastProbeAt *time.Time `json:"plugin_last_probe_at,omitempty"`
+	PluginLastVerdict string     `json:"plugin_last_verdict,omitempty"`
+}
+
+// OpenAIAccountRescuedBadge 永久复活徽标（task 4.4）：救治区毕业的血统
+// 标记，转正时打、永不清除——与在区注记 OpenAIAccountRescueHealth 是两个
+// 东西（后者转正即清）。前端据此渲染永久「已复活」角标（悬停时间+次数）。
+type OpenAIAccountRescuedBadge struct {
+	At    time.Time `json:"at"`
+	Count int       `json:"count"`
 }
 
 // GraduationThreshold 毕业阈值（已复活判定的连过下限）。配置缺省时用默认 6。
@@ -177,6 +194,11 @@ func BuildOpenAIAccountRescueHealth(
 		if !bridge.BackoffUntil.IsZero() {
 			until := bridge.BackoffUntil
 			note.BackoffUntil = &until
+		}
+		if !bridge.LastProbeAt.IsZero() {
+			at := bridge.LastProbeAt
+			note.PluginLastProbeAt = &at
+			note.PluginLastVerdict = bridge.LastVerdict
 		}
 	}
 	return note

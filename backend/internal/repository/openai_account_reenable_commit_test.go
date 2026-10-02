@@ -462,6 +462,38 @@ func TestOpenAIAccountReenableCommitRejectsPausedAndIneligibleAccounts(t *testin
 	}
 }
 
+func TestOpenAIAccountReenableCommitAllowsSchedulableInRescueLane(t *testing.T) {
+	// r17ba 救治区豁免：在区号入区即有意开调度（救治组喂种子），复活点击
+	//（revived → reenable 考证）带 AllowSchedulable 放行；不带旗号照旧拒绝
+	//（见 RejectsPausedAndIneligibleAccounts/schedulable_would_bypass_qualification）。
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	mutation := reenableCommitFixture()
+	mutation.AllowSchedulable = true
+	mutation.ExpectedSchedulable = true
+	accountRow := validReenableAccountRow(mutation)
+	accountRow.schedulable = true
+	mock.ExpectBegin()
+	expectReenableAccountLock(mock, mutation, accountRow)
+	expectReenableControlLock(mock, mutation.AccountID, false, nil)
+	expectReenableStateLock(mock, mutation, mutation.ExpectedStateUpdatedAt, service.OpenAIDowngradeStatePendingReplace)
+	mock.ExpectExec(`INSERT INTO openai_downgrade_probe_events`).
+		WithArgs(mutation.AccountID, mutation.ExpectedProxyID, "manual_reenable", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE openai_downgrade_probe_states`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	repo := &openAIDowngradeProbeRepository{db: db}
+	unpaused, err := repo.CommitOpenAIAccountReenable(context.Background(), mutation)
+
+	require.NoError(t, err)
+	require.False(t, unpaused)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestOpenAIAccountReenableCommitAcceptsOwnedError(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)

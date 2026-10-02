@@ -1002,6 +1002,28 @@ export interface OpenAIProbeLastEvidence {
   degraded: boolean
 }
 
+/** 救治区在区注记（连过计数/退避/插件离线角标；转正即清）。 */
+export interface OpenAIAccountRescueHealth {
+  entered_at: string
+  trigger: string
+  consecutive_passes: number
+  consec_fails: number
+  in_backoff: boolean
+  suspect_account_level: boolean
+  backoff_until?: string | null
+  plugin_offline: boolean
+  graduation_threshold: number
+  /** 插件侧最近一针（宿主证据行冻结在判死针，救治区活跃证据在插件）。 */
+  plugin_last_probe_at?: string | null
+  plugin_last_verdict?: string
+}
+
+/** 永久复活徽标（救治区毕业血统，转正时打、永不清除）。 */
+export interface OpenAIAccountRescuedBadge {
+  at: string
+  count: number
+}
+
 /** 单账号健康快照：探针状态机真值 + 最近一针实测，绝不读滞后的启用状态。 */
 export interface OpenAIAccountHealth {
   account_id: number
@@ -1016,6 +1038,8 @@ export interface OpenAIAccountHealth {
   clickable: boolean
   reason?: string
   last_probe?: OpenAIProbeLastEvidence | null
+  rescue?: OpenAIAccountRescueHealth | null
+  rescued?: OpenAIAccountRescuedBadge | null
 }
 
 /**
