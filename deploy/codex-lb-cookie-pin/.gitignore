@@ -1,0 +1,5 @@
+dist/
+*.s2plugin
+.s2plugin-keys/
+*.ed25519
+.DS_Store

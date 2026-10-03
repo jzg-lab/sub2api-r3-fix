@@ -10,9 +10,13 @@ import (
 )
 
 var (
-	ErrAccountNotFound      = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
-	ErrAccountNilInput      = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
-	ErrAccountNotInFallback = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrAccountNotFound           = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
+	ErrAccountNilInput           = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
+	ErrAccountNotInFallback      = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
+	ErrOAuthReauthorizationStale = infraerrors.Conflict(
+		"OAUTH_REAUTH_STALE_ACCOUNT",
+		"account changed while OAuth authorization was in progress; restart authorization",
+	)
 )
 
 const AccountListGroupUngrouped int64 = -1
@@ -125,6 +129,31 @@ type AccountRepository interface {
 	// ListShadowsByParent 返回指定父账号的影子账号；当前实现仅查 quota_dimension='spark'（唯一预设）。
 	// ⚠️ 新增影子维度时：须更新此函数（或新增维度专用列举），并检查所有调用点（级联删除/一母一影校验/type 守卫），否则会静默漏掉新维度。
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
+}
+
+// OAuthReauthorizationRepository owns the single-transaction credential
+// replacement path used after an interactive OAuth flow.
+type OAuthReauthorizationRepository interface {
+	ApplyOAuthCredentials(
+		ctx context.Context,
+		id int64,
+		expectedUpdatedAt time.Time,
+		accountType string,
+		credentials map[string]any,
+		extra map[string]any,
+	) (*Account, error)
+}
+
+// OAuthReauthorizationService is intentionally narrower than AdminService.
+// Keeping this capability separate avoids forcing every lightweight admin
+// service test double to implement the interactive OAuth persistence path.
+type OAuthReauthorizationService interface {
+	ApplyOAuthCredentials(
+		ctx context.Context,
+		id int64,
+		expectedUpdatedAt time.Time,
+		input *ApplyOAuthCredentialsInput,
+	) (*Account, error)
 }
 
 type AccountDuplicateRepository interface {

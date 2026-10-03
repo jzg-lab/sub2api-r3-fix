@@ -1910,7 +1910,10 @@ func (r *OpenAIDowngradeProbeRunner) spread(base time.Duration) time.Duration {
 }
 
 func (r *OpenAIDowngradeProbeRunner) runProbe(ctx context.Context, account *Account, mode string) OpenAIDowngradeProbeResult {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// 3 分钟（2026-10-02 生产实证）：xhigh 满血针 53-100s 完成，但 4/16 落在
+	// 精确 120s 被 ctx 切断——流零产出（rt=0）不是质量信号，只是预算太紧。
+	// 180s 给 xhigh 推理留出头部空间；RunOnce 外层 5min 上限仍兜底。
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	probe := r.probeFn
 	if probe == nil {

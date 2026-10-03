@@ -2,6 +2,10 @@ version: 2
 
 project_name: sub2api
 
+before:
+  hooks:
+    - sh deploy/codex-lb-cookie-pin/build.sh
+
 builds:
   - id: sub2api
     dir: backend
@@ -31,20 +35,35 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - LICENSE*
       - README*
       - RELEASE-POLICY.md
       - RELEASE-R11.md
-      - deploy/*
+      - deploy/*.md
+      - deploy/*.sh
+      - deploy/*.yml
+      - deploy/*.yaml
+      - deploy/*.service
+      - deploy/*.tmpl
+      - deploy/Caddyfile
+      - deploy/Dockerfile
+      - deploy/Makefile
+      - deploy/.env.example
+      - deploy/tests/*
       - deploy/auth-browser/*
-      - deploy/auth-browser/tests/*
+      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-0.3.7.s2plugin
+        dst: plugins
+        strip_parent: true
+      - src: deploy/codex-lb-cookie-pin/README.md
+        dst: plugins
+        strip_parent: true
 
 checksum:
   name_template: 'checksums.txt'

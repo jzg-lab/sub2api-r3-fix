@@ -26,8 +26,10 @@ export function useGeminiOAuth() {
   const state = ref('')
   const loading = ref(false)
   const error = ref('')
+  let requestVersion = 0
 
   const resetState = () => {
+    requestVersion++
     authUrl.value = ''
     sessionId.value = ''
     state.value = ''
@@ -41,6 +43,7 @@ export function useGeminiOAuth() {
     oauthType?: string,
     tierId?: string
   ): Promise<boolean> => {
+    const version = ++requestVersion
     loading.value = true
     authUrl.value = ''
     sessionId.value = ''
@@ -57,16 +60,18 @@ export function useGeminiOAuth() {
       if (trimmedTierID) payload.tier_id = trimmedTierID
 
       const response = await adminAPI.gemini.generateAuthUrl(payload as any)
+      if (version !== requestVersion) return false
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
       state.value = response.state
       return true
     } catch (err: any) {
+      if (version !== requestVersion) return false
       error.value = err.response?.data?.detail || t('admin.accounts.oauth.gemini.failedToGenerateUrl')
       appStore.showError(error.value)
       return false
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 
@@ -84,6 +89,7 @@ export function useGeminiOAuth() {
       return null
     }
 
+    const version = ++requestVersion
     loading.value = true
     error.value = ''
 
@@ -99,8 +105,9 @@ export function useGeminiOAuth() {
       if (trimmedTierID) payload.tier_id = trimmedTierID
 
       const tokenInfo = await adminAPI.gemini.exchangeCode(payload as any)
-      return tokenInfo as GeminiTokenInfo
+      return version === requestVersion ? tokenInfo as GeminiTokenInfo : null
     } catch (err: any) {
+      if (version !== requestVersion) return null
       // Check for specific missing project_id error
       const errorMessage = err.message || err.response?.data?.message || ''
       if (errorMessage.includes('missing project_id')) {
@@ -111,7 +118,7 @@ export function useGeminiOAuth() {
       appStore.showError(error.value)
       return null
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 

@@ -42,9 +42,11 @@ export function useAccountOAuth() {
   const sessionKey = ref('')
   const loading = ref(false)
   const error = ref('')
+  let requestVersion = 0
 
   // Reset state
   const resetState = () => {
+    requestVersion++
     authUrl.value = ''
     authCode.value = ''
     sessionId.value = ''
@@ -58,6 +60,7 @@ export function useAccountOAuth() {
     addMethod: AddMethod,
     proxyId?: number | null
   ): Promise<boolean> => {
+    const version = ++requestVersion
     loading.value = true
     authUrl.value = ''
     sessionId.value = ''
@@ -71,15 +74,17 @@ export function useAccountOAuth() {
           : '/admin/accounts/generate-setup-token-url'
 
       const response = await adminAPI.accounts.generateAuthUrl(endpoint, proxyConfig)
+      if (version !== requestVersion) return false
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
       return true
     } catch (err: any) {
+      if (version !== requestVersion) return false
       error.value = err.response?.data?.detail || 'Failed to generate auth URL'
       appStore.showError(error.value)
       return false
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 
@@ -93,6 +98,7 @@ export function useAccountOAuth() {
       return null
     }
 
+    const version = ++requestVersion
     loading.value = true
     error.value = ''
 
@@ -109,13 +115,14 @@ export function useAccountOAuth() {
         ...proxyConfig
       })
 
-      return tokenInfo as TokenInfo
+      return version === requestVersion ? tokenInfo as TokenInfo : null
     } catch (err: any) {
+      if (version !== requestVersion) return null
       error.value = err.response?.data?.detail || 'Failed to exchange auth code'
       appStore.showError(error.value)
       return null
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 
@@ -130,6 +137,7 @@ export function useAccountOAuth() {
       return null
     }
 
+    const version = ++requestVersion
     loading.value = true
     error.value = ''
 
@@ -146,12 +154,13 @@ export function useAccountOAuth() {
         ...proxyConfig
       })
 
-      return tokenInfo as TokenInfo
+      return version === requestVersion ? tokenInfo as TokenInfo : null
     } catch (err: any) {
+      if (version !== requestVersion) return null
       error.value = err.response?.data?.detail || 'Cookie authorization failed'
       return null
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 

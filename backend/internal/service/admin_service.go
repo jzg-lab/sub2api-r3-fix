@@ -420,6 +420,15 @@ type UpdateAccountInput struct {
 	SkipMixedChannelCheck bool // 跳过混合渠道检查（用户已确认风险）
 }
 
+// ApplyOAuthCredentialsInput is intentionally smaller than UpdateAccountInput:
+// re-authorization replaces credentials but only merges provider metadata into
+// Extra. Persistent routing and scheduling configuration stays server-side.
+type ApplyOAuthCredentialsInput struct {
+	Type        string
+	Credentials map[string]any
+	Extra       map[string]any
+}
+
 // BulkUpdateAccountsInput describes the payload for bulk updating accounts.
 type BulkUpdateAccountsInput struct {
 	AccountIDs     []int64

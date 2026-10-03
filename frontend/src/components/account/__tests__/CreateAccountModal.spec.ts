@@ -151,9 +151,9 @@ const ModelWhitelistSelectorStub = defineComponent({
   >models</button>`,
 })
 
-function mountModal(groups: any[] = []) {
+function mountModal(groups: any[] = [], show = true) {
   return mount(CreateAccountModal, {
-    props: { show: true, proxies: [], groups },
+    props: { show, proxies: [], groups },
     global: {
       stubs: {
         BaseDialog: BaseDialogStub,
@@ -248,6 +248,26 @@ function authSubmit(wrapper: ReturnType<typeof mountModal>) {
 }
 
 describe('CreateAccountModal local concurrency', () => {
+  it('mounts closed and resets safely across repeated open and close cycles', async () => {
+    const wrapper = mountModal([], false)
+    await flushPromises()
+    expect(wrapper.find('form#create-account-form').exists()).toBe(false)
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+      const name = wrapper.get('form#create-account-form input[type="text"]')
+      expect((name.element as HTMLInputElement).value).toBe('')
+      await name.setValue('unsaved account')
+      await selectButtonByText(wrapper, 'OpenAI')
+      await wrapper.setProps({ show: false })
+      await flushPromises()
+      expect(wrapper.find('form#create-account-form').exists()).toBe(false)
+    }
+    expect(wrapper.emitted('created')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('keeps the fixed limit after platform changes and reopening', async () => {
     const wrapper = mountModal()
     const limit = () => wrapper.get('input[type="number"][readonly]')

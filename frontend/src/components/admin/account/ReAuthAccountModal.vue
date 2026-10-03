@@ -49,7 +49,7 @@
       </div>
 
       <!-- Add Method Selection (Claude only) -->
-      <fieldset v-if="isAnthropic" class="border-0 p-0">
+      <fieldset v-if="isAnthropic" :disabled="currentLoading" class="border-0 p-0">
         <legend class="input-label">{{ t('admin.accounts.oauth.authMethod') }}</legend>
         <div class="mt-2 flex gap-4">
           <label class="flex cursor-pointer items-center">
@@ -138,7 +138,10 @@
         :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isGrok ? 'grok' : 'anthropic'"
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         :initial-input-method="grokInitialInputMethod"
+        :show-auth-browser-launch="isOpenAI"
+        :auth-browser-launching="authBrowserLaunching"
         @generate-url="handleGenerateUrl"
+        @launch-auth-browser="handleLaunchAuthBrowser"
         @cookie-auth="handleCookieAuth"
         @validate-refresh-token="handleValidateRefreshToken"
         @import-sso="handleGrokImportSSO"
@@ -190,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
@@ -203,6 +206,8 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
+import { useReauthSession, type ReauthOperation } from '@/composables/useReauthSession'
+import { useReauthBrowserLaunch } from '@/composables/useReauthBrowserLaunch'
 import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -246,6 +251,9 @@ const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
 // State
 const addMethod = ref<AddMethod>('oauth')
 const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('code_assist')
+const reauthSession = useReauthSession(props)
+const { launching: authBrowserLaunching, launch: handleLaunchAuthBrowser } =
+  useReauthBrowserLaunch(reauthSession, openaiOAuth, () => oauthFlowRef.value?.reset())
 
 // Computed - check platform
 const isOpenAI = computed(() => props.account?.platform === 'openai')
@@ -286,6 +294,7 @@ const currentSessionId = computed(() => {
   return claudeOAuth.sessionId.value
 })
 const currentLoading = computed(() => {
+  if (reauthSession.busy.value) return true
   if (isOpenAILike.value) return openaiOAuth.loading.value
   if (isGemini.value) return geminiOAuth.loading.value
   if (isAntigravity.value) return antigravityOAuth.loading.value
@@ -324,9 +333,22 @@ const canExchangeCode = computed(() => {
 })
 
 // Watchers
+function resetState() {
+  addMethod.value = 'oauth'
+  geminiOAuthType.value = 'code_assist'
+  claudeOAuth.resetState()
+  openaiOAuth.resetState()
+  geminiOAuth.resetState()
+  antigravityOAuth.resetState()
+  grokOAuth.resetState()
+  oauthFlowRef.value?.reset()
+}
+onBeforeUnmount(resetState)
+
 watch(
-  () => props.show,
-  (newVal) => {
+  () => [props.show, props.account?.id, props.account?.platform, props.account?.proxy_id] as const,
+  ([newVal]) => {
+    resetState()
     if (newVal && props.account) {
       // Initialize addMethod based on current account type (Claude only)
       if (
@@ -344,29 +366,47 @@ watch(
               ? 'ai_studio'
               : 'code_assist'
       }
-    } else {
-      resetState()
     }
-  }
+  },
+  { immediate: true, flush: 'sync' }
 )
 
 // Methods
-const resetState = () => {
-  addMethod.value = 'oauth'
-  geminiOAuthType.value = 'code_assist'
-  claudeOAuth.resetState()
-  openaiOAuth.resetState()
-  geminiOAuth.resetState()
-  antigravityOAuth.resetState()
-  grokOAuth.resetState()
-  oauthFlowRef.value?.reset()
-}
-
 const handleClose = () => {
+  reauthSession.invalidate()
+  resetState()
   emit('close')
 }
 
-const handleGenerateUrl = async () => {
+const completeReauth = (operation: ReauthOperation, account: Account) => {
+  if (!reauthSession.isCurrent(operation)) return
+  handleClose()
+  appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+  emit('reauthorized', account)
+}
+
+const applyReauthCredentials = async (
+  operation: ReauthOperation,
+  type: 'oauth' | 'setup-token',
+  credentials: Record<string, unknown>,
+  extra?: Record<string, unknown>
+): Promise<Account> => {
+  if (!reauthSession.isCurrent(operation)) {
+    throw new Error('Account is no longer available')
+  }
+  const expectedUpdatedAt = operation.expectedUpdatedAt
+  if (!expectedUpdatedAt) {
+    throw new Error('Account revision is unavailable; restart authorization')
+  }
+  return adminAPI.accounts.applyOAuthCredentials(operation.account.id, {
+    type,
+    credentials,
+    extra,
+    expected_updated_at: expectedUpdatedAt
+  })
+}
+
+const handleGenerateUrl = () => reauthSession.run(async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
@@ -383,10 +423,11 @@ const handleGenerateUrl = async () => {
   } else {
     await claudeOAuth.generateAuthUrl(addMethod.value, props.account.proxy_id)
   }
-}
+})
 
-const handleExchangeCode = async () => {
+const handleExchangeCode = () => reauthSession.run(async (operation) => {
   if (!props.account) return
+  const method = addMethod.value
 
   const authCode = oauthFlowRef.value?.authCode || ''
   if (!authCode.trim()) return
@@ -409,23 +450,17 @@ const handleExchangeCode = async () => {
       stateToUse,
       props.account.proxy_id
     )
-    if (!tokenInfo) return
+    if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
     // Build credentials and extra info
     const credentials = oauthClient.buildCredentials(tokenInfo)
     const extra = oauthClient.buildExtraInfo(tokenInfo)
 
     try {
-      const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-        type: 'oauth',
-        credentials,
-        extra
-      })
-
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra)
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
       appStore.showError(oauthClient.error.value)
     }
@@ -445,20 +480,15 @@ const handleExchangeCode = async () => {
       oauthType: geminiOAuthType.value,
       tierId: typeof (props.account.credentials as any)?.tier_id === 'string' ? ((props.account.credentials as any).tier_id as string) : undefined
     })
-    if (!tokenInfo) return
+    if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
     const credentials = geminiOAuth.buildCredentials(tokenInfo)
 
     try {
-      await adminAPI.accounts.update(props.account.id, {
-        type: 'oauth',
-        credentials
-      })
-      const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials)
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       geminiOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
       appStore.showError(geminiOAuth.error.value)
     }
@@ -477,20 +507,15 @@ const handleExchangeCode = async () => {
       state: stateToUse,
       proxyId: props.account.proxy_id
     })
-    if (!tokenInfo) return
+    if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
     const credentials = antigravityOAuth.buildCredentials(tokenInfo)
 
     try {
-      await adminAPI.accounts.update(props.account.id, {
-        type: 'oauth',
-        credentials
-      })
-      const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials)
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       antigravityOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
       appStore.showError(antigravityOAuth.error.value)
     }
@@ -508,22 +533,16 @@ const handleExchangeCode = async () => {
       state: stateToUse,
       proxyId: props.account.proxy_id
     })
-    if (!tokenInfo) return
+    if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
     const credentials = grokOAuth.buildCredentials(tokenInfo)
     const extra = grokOAuth.buildExtraInfo(tokenInfo)
 
     try {
-      const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-        type: 'oauth',
-        credentials,
-        extra
-      })
-
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra)
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       grokOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
       appStore.showError(grokOAuth.error.value)
     }
@@ -538,7 +557,7 @@ const handleExchangeCode = async () => {
     try {
       const proxyConfig = props.account.proxy_id ? { proxy_id: props.account.proxy_id } : {}
       const endpoint =
-        addMethod.value === 'oauth'
+        method === 'oauth'
           ? '/admin/accounts/exchange-code'
           : '/admin/accounts/exchange-setup-token-code'
 
@@ -547,29 +566,31 @@ const handleExchangeCode = async () => {
         code: authCode.trim(),
         ...proxyConfig
       })
+      if (!reauthSession.isCurrent(operation)) return
 
       const extra = claudeOAuth.buildExtraInfo(tokenInfo)
 
-      const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-        type: addMethod.value as 'oauth' | 'setup-token',
-        credentials: tokenInfo as unknown as Record<string, unknown>,
+      const updatedAccount = await applyReauthCredentials(
+        operation,
+        method as 'oauth' | 'setup-token',
+        tokenInfo as unknown as Record<string, unknown>,
         extra
-      })
+      )
 
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       claudeOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
       appStore.showError(claudeOAuth.error.value)
     } finally {
-      claudeOAuth.loading.value = false
+      if (reauthSession.isCurrent(operation)) claudeOAuth.loading.value = false
     }
   }
-}
+})
 
-const handleCookieAuth = async (sessionKey: string) => {
+const handleCookieAuth = (sessionKey: string) => reauthSession.run(async (operation) => {
   if (!props.account || isOpenAILike.value) return
+  const method = addMethod.value
 
   claudeOAuth.loading.value = true
   claudeOAuth.error.value = ''
@@ -577,7 +598,7 @@ const handleCookieAuth = async (sessionKey: string) => {
   try {
     const proxyConfig = props.account.proxy_id ? { proxy_id: props.account.proxy_id } : {}
     const endpoint =
-      addMethod.value === 'oauth'
+      method === 'oauth'
         ? '/admin/accounts/cookie-auth'
         : '/admin/accounts/setup-token-cookie-auth'
 
@@ -586,48 +607,43 @@ const handleCookieAuth = async (sessionKey: string) => {
       code: sessionKey.trim(),
       ...proxyConfig
     })
+    if (!reauthSession.isCurrent(operation)) return
 
     const extra = claudeOAuth.buildExtraInfo(tokenInfo)
 
-    const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-      type: addMethod.value as 'oauth' | 'setup-token',
-      credentials: tokenInfo as unknown as Record<string, unknown>,
+    const updatedAccount = await applyReauthCredentials(
+      operation,
+      method as 'oauth' | 'setup-token',
+      tokenInfo as unknown as Record<string, unknown>,
       extra
-    })
+    )
 
-    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-    emit('reauthorized', updatedAccount)
-    handleClose()
+    completeReauth(operation, updatedAccount)
   } catch (error: any) {
+    if (!reauthSession.isCurrent(operation)) return
     claudeOAuth.error.value =
       error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
   } finally {
-    claudeOAuth.loading.value = false
+    if (reauthSession.isCurrent(operation)) claudeOAuth.loading.value = false
   }
-}
+})
 
 /** Apply Grok Build OAuth tokens onto the existing account (never store password/SSO). */
-const applyGrokReauthTokenInfo = async (tokenInfo: {
+const applyGrokReauthTokenInfo = async (operation: ReauthOperation, tokenInfo: {
   access_token?: string
   refresh_token?: string
   email?: string
   [key: string]: unknown
 }) => {
-  if (!props.account) return
+  if (!reauthSession.isCurrent(operation)) return
   const credentials = grokOAuth.buildCredentials(tokenInfo as any)
   const extra = grokOAuth.buildExtraInfo(tokenInfo as any)
-  const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-    type: 'oauth',
-    credentials,
-    extra
-  })
-  appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-  emit('reauthorized', updatedAccount)
-  handleClose()
+  const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra)
+  completeReauth(operation, updatedAccount)
 }
 
 /** Re-auth the existing account with one refresh token. */
-const handleValidateRefreshToken = async (refreshTokenInput: string) => {
+const handleValidateRefreshToken = (refreshTokenInput: string) => reauthSession.run(async (operation) => {
   if (!props.account) return
   if (isGrok.value) {
     await handleGrokValidateRefreshToken(refreshTokenInput)
@@ -645,17 +661,17 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
     openaiOAuth.error.value = ''
     try {
       const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
-      if (!tokenInfo) return
+      if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
-      const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-        type: 'oauth',
-        credentials: openaiOAuth.buildCredentials(tokenInfo),
-        extra: openaiOAuth.buildExtraInfo(tokenInfo)
-      })
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-      emit('reauthorized', updatedAccount)
-      handleClose()
+      const updatedAccount = await applyReauthCredentials(
+        operation,
+        'oauth',
+        openaiOAuth.buildCredentials(tokenInfo),
+        openaiOAuth.buildExtraInfo(tokenInfo)
+      )
+      completeReauth(operation, updatedAccount)
     } catch (error: any) {
+      if (!reauthSession.isCurrent(operation)) return
       openaiOAuth.error.value =
         error.response?.data?.detail ||
         error.response?.data?.message ||
@@ -663,7 +679,7 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
         t('admin.accounts.oauth.authFailed')
       appStore.showError(openaiOAuth.error.value)
     } finally {
-      openaiOAuth.loading.value = false
+      if (reauthSession.isCurrent(operation)) openaiOAuth.loading.value = false
     }
     return
   }
@@ -673,16 +689,16 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
   antigravityOAuth.error.value = ''
   try {
     const tokenInfo = await antigravityOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
-    if (!tokenInfo) return
+    if (!tokenInfo || !reauthSession.isCurrent(operation)) return
 
-    const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-      type: 'oauth',
-      credentials: antigravityOAuth.buildCredentials(tokenInfo, refreshToken)
-    })
-    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
-    emit('reauthorized', updatedAccount)
-    handleClose()
+    const updatedAccount = await applyReauthCredentials(
+      operation,
+      'oauth',
+      antigravityOAuth.buildCredentials(tokenInfo, refreshToken)
+    )
+    completeReauth(operation, updatedAccount)
   } catch (error: any) {
+    if (!reauthSession.isCurrent(operation)) return
     antigravityOAuth.error.value =
       error.response?.data?.detail ||
       error.response?.data?.message ||
@@ -690,12 +706,12 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
       t('admin.accounts.oauth.authFailed')
     appStore.showError(antigravityOAuth.error.value)
   } finally {
-    antigravityOAuth.loading.value = false
+    if (reauthSession.isCurrent(operation)) antigravityOAuth.loading.value = false
   }
-}
+})
 
 /** Re-auth with a single SSO cookie → Build OAuth (not batch create). */
-const handleGrokImportSSO = async (ssoInput: string) => {
+const handleGrokImportSSO = (ssoInput: string) => reauthSession.run(async (operation) => {
   if (!props.account || !isGrok.value) return
   const ssoToken = ssoInput
     .split('\n')
@@ -708,20 +724,21 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   try {
     const tokenInfo = await grokOAuth.validateSSOToken(ssoToken, props.account.proxy_id)
     if (!tokenInfo) return
-    await applyGrokReauthTokenInfo(tokenInfo)
+    await applyGrokReauthTokenInfo(operation, tokenInfo)
   } catch (error: any) {
+    if (!reauthSession.isCurrent(operation)) return
     grokOAuth.error.value =
       error.response?.data?.detail ||
       error.message ||
       t('admin.accounts.oauth.grok.failedToValidateSSO', 'Failed to validate Grok SSO')
     appStore.showError(grokOAuth.error.value)
   } finally {
-    grokOAuth.loading.value = false
+    if (reauthSession.isCurrent(operation)) grokOAuth.loading.value = false
   }
-}
+})
 
 /** Re-auth with a single refresh token. */
-const handleGrokValidateRefreshToken = async (refreshTokenInput: string) => {
+const handleGrokValidateRefreshToken = (refreshTokenInput: string) => reauthSession.run(async (operation) => {
   if (!props.account || !isGrok.value) return
   const refreshToken = refreshTokenInput
     .split('\n')
@@ -737,15 +754,16 @@ const handleGrokValidateRefreshToken = async (refreshTokenInput: string) => {
   try {
     const tokenInfo = await grokOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
     if (!tokenInfo) return
-    await applyGrokReauthTokenInfo(tokenInfo)
+    await applyGrokReauthTokenInfo(operation, tokenInfo)
   } catch (error: any) {
+    if (!reauthSession.isCurrent(operation)) return
     grokOAuth.error.value =
       error.response?.data?.detail ||
       error.message ||
       t('admin.accounts.oauth.grok.failedToValidateRT')
     appStore.showError(grokOAuth.error.value)
   } finally {
-    grokOAuth.loading.value = false
+    if (reauthSession.isCurrent(operation)) grokOAuth.loading.value = false
   }
-}
+})
 </script>

@@ -2,11 +2,11 @@
   <div
     class="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-700 dark:bg-blue-900/30"
   >
-      <div class="flex items-start gap-4">
+    <div class="flex flex-col items-start gap-4 sm:flex-row">
       <div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-blue-500">
         <Icon name="link" size="md" class="text-white" />
       </div>
-      <div class="flex-1">
+      <div class="min-w-0 w-full flex-1 break-words">
         <h4 class="mb-3 font-semibold text-blue-900 dark:text-blue-200">{{ oauthTitle }}</h4>
 
         <!-- Auth Method Selection -->
@@ -671,7 +671,7 @@
               >
                 1
               </div>
-              <div class="flex-1">
+              <div class="min-w-0 flex-1">
                 <p class="mb-2 font-medium text-blue-900 dark:text-blue-200">
                   {{ oauthStep1GenerateUrl }}
                 </p>
@@ -731,17 +731,17 @@
                   {{ loading ? t('admin.accounts.oauth.generating') : oauthGenerateAuthUrl }}
                 </button>
                 <div v-else class="space-y-3">
-                  <div class="flex items-center gap-2">
+                  <div class="flex flex-wrap items-center gap-2">
                     <input
                       :value="authUrl"
                       readonly
                       type="text"
-                      class="input flex-1 bg-gray-50 font-mono text-xs dark:bg-gray-700"
+                      class="input min-w-0 w-full bg-gray-50 font-mono text-xs dark:bg-gray-700 sm:w-0 sm:flex-1"
                     />
                     <button
                       v-if="showAuthBrowserLaunch"
                       type="button"
-                      class="btn btn-primary whitespace-nowrap text-xs"
+                      class="btn btn-primary shrink-0 whitespace-nowrap text-xs"
                       :class="{ 'cursor-not-allowed opacity-60': authBrowserLaunching }"
                       :disabled="authBrowserLaunching"
                       :aria-busy="authBrowserLaunching"
@@ -758,7 +758,7 @@
                     </button>
                     <button
                       type="button"
-                      class="btn btn-secondary p-2"
+                      class="btn btn-secondary shrink-0 p-2"
                       title="Copy URL"
                       @click="handleCopyUrl"
                     >
@@ -808,7 +808,7 @@
               >
                 2
               </div>
-              <div class="flex-1">
+              <div class="min-w-0 flex-1">
                 <p class="mb-2 font-medium text-blue-900 dark:text-blue-200">
                   {{ oauthStep2OpenUrl }}
                 </p>
@@ -849,7 +849,7 @@
               >
                 3
               </div>
-              <div class="flex-1">
+              <div class="min-w-0 flex-1">
                 <p class="mb-2 font-medium text-blue-900 dark:text-blue-200">
                   {{ oauthStep3EnterCode }}
                 </p>

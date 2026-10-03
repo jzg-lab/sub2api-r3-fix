@@ -310,6 +310,7 @@ export async function applyOAuthCredentials(
     type: 'oauth' | 'setup-token'
     credentials: Record<string, unknown>
     extra?: Record<string, unknown>
+    expected_updated_at: string
   }
 ): Promise<Account> {
   const { data } = await apiClient.post<Account>(

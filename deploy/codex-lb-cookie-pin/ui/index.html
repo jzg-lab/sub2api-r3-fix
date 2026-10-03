@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex LB Cookie Pin</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 16px; }
+  fieldset { border: 1px solid #ddd; border-radius: 8px; margin: 0 0 14px; padding: 10px 14px; }
+  legend { font-weight: 600; font-size: 13px; padding: 0 6px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .row label { min-width: 150px; font-size: 13px; }
+  .row .hint { font-size: 12px; color: #888; flex: 1; }
+  input[type=text], input[type=number], select {
+    flex: 1; max-width: 320px; padding: 5px 8px; border: 1px solid #ccc; border-radius: 6px;
+    font: inherit; background: transparent; color: inherit;
+  }
+  input[type=checkbox] { width: 16px; height: 16px; }
+  .btns { display: flex; gap: 8px; margin: 4px 0 16px; }
+  button {
+    padding: 6px 16px; border: 1px solid #ccc; border-radius: 6px; font: inherit;
+    cursor: pointer; background: transparent; color: inherit;
+  }
+  button.primary { border-color: #4a7dff; color: #4a7dff; font-weight: 600; }
+  .msg { margin: 8px 0; font-size: 13px; white-space: pre-wrap; }
+  .msg.ok { color: #2a9d4a; } .msg.err { color: #d9483b; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 6px; }
+  th, td { border-bottom: 1px solid #e5e5e5; text-align: left; padding: 4px 8px; }
+  th { color: #888; font-weight: 600; }
+  .badge { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 11px; }
+  .badge.fresh { background: #e2f5e8; color: #227a3f; }
+  .badge.stale { background: #fdeaea; color: #b3352a; }
+  .badge.pass { background: #e2f5e8; color: #227a3f; }
+  .badge.fail { background: #fdeaea; color: #b3352a; }
+  .badge.error { background: #fdf3e0; color: #a06b00; }
+  .badge.suspect { background: #fdeaea; color: #b3352a; font-weight: 600; }
+  .ans { color: #888; font-size: 11.5px; }
+  .counters { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: #666; margin-top: 8px; }
+  .counters b { color: inherit; }
+  :root[data-theme="dark"] .badge.fresh, @media (prefers-color-scheme: dark) { }
+</style>
+</head>
+<body>
+<h1>Codex LB Cookie Pin</h1>
+<div class="sub">被动捕获 OpenAI 负载均衡粘性 Cookie（__cflb / __oailb），出站自动注入，把账号钉在满血网关上。检测到 faster-model 替换信号自动丢 Cookie 重摇。</div>
+
+<fieldset>
+  <legend>配置</legend>
+  <div class="row"><label><input type="checkbox" id="enabled"> 总开关</label>
+    <span class="hint">关闭后 Forward 直通，零捕获零注入</span></div>
+  <div class="row"><label>Cookie 白名单</label>
+    <input type="text" id="cookie_names" placeholder="__cflb,__oailb">
+    <span class="hint">逗号分隔，1–8 个</span></div>
+  <div class="row"><label>兜底 TTL（秒）</label>
+    <input type="number" id="default_ttl_seconds" min="30" max="3600">
+    <span class="hint">会话 Cookie 的默认有效期，30–3600</span></div>
+  <div class="row"><label>提前刷新窗（秒）</label>
+    <input type="number" id="refresh_before_seconds" min="5">
+    <span class="hint">剩余寿命低于此值即重摇，须小于兜底 TTL</span></div>
+  <div class="row"><label>注入范围</label>
+    <select id="inject_scope">
+      <option value="codex">codex — 仅 chatgpt.com/backend-api/codex*</option>
+      <option value="all">all — 全部出站请求</option>
+    </select></div>
+  <div class="row"><label><input type="checkbox" id="reroll_on_faster_model"> 命中 faster-model 自动重摇</label>
+    <span class="hint">模型被替换路由时当场丢 Cookie</span></div>
+  <div class="row"><label><input type="checkbox" id="persist_kv"> 宿主 KV 持久化</label>
+    <span class="hint">插件重启不丢罐（旧宿主无此能力时自动跳过）</span></div>
+  <div class="row"><label>手动重摇账号</label>
+    <input type="text" id="drop_account_ids" placeholder="如 1209,1210（留空不动作）">
+    <span class="hint">一次性动作：保存时丢弃这些账号的 Cookie</span></div>
+</fieldset>
+
+<fieldset>
+  <legend>质量探针自愈（v0.2）</legend>
+  <div class="row"><label><input type="checkbox" id="quality_probe_enabled"> 启用质量探针</label>
+    <span class="hint">定期判别题检测静默降智，答错自动重摇。默认关：探针是主动出站流量</span></div>
+  <div class="row"><label>探针间隔（秒）</label>
+    <input type="number" id="probe_interval_seconds" min="300" max="7200">
+    <span class="hint">每账号独立排期，300–7200</span></div>
+  <div class="row"><label>探针模型</label>
+    <input type="text" id="probe_model" placeholder="留空 = 跟随账号最近业务模型">
+    <span class="hint">留空即可；显式指定用于定向测试</span></div>
+  <div class="row"><label>连错阈值</label>
+    <input type="number" id="max_consecutive_probe_failures" min="2" max="10">
+    <span class="hint">连续答错达此值判疑似账号级、停探退避，2–10</span></div>
+  <div class="row"><label>退避时长（秒）</label>
+    <input type="number" id="probe_backoff_seconds" min="600" max="86400">
+    <span class="hint">账号级疑似冷却期，期满自动复探，600–86400</span></div>
+</fieldset>
+
+<div class="btns">
+  <button class="primary" id="save">保存</button>
+  <button id="test">测试已保存配置</button>
+  <button id="refresh">刷新状态</button>
+</div>
+<div class="msg" id="msg"></div>
+
+<fieldset>
+  <legend>运行状态（每 5 秒自动刷新）</legend>
+  <div id="status">等待数据…</div>
+</fieldset>
+
+<script>
+(function () {
+  "use strict";
+  var BRIDGE = (function () {
+    var m = /(?:^|#)bridge_token=([^&]+)/.exec(location.hash);
+    return m ? decodeURIComponent(m[1]) : "";
+  })();
+  var pending = {};   // request_id -> {resolve, reject, timer}
+  var seq = 0;
+
+  function post(type, params, timeoutMs) {
+    var id = "ui-" + (++seq);
+    return new Promise(function (resolve, reject) {
+      pending[id] = {
+        resolve: resolve, reject: reject,
+        timer: setTimeout(function () {
+          delete pending[id];
+          reject(new Error("请求超时: " + type));
+        }, timeoutMs || 8000)
+      };
+      parent.postMessage({
+        source: "sub2api-plugin-ui",
+        bridge_token: BRIDGE,
+        type: type,
+        request_id: id,
+        params: params || {}
+      }, "*");
+    });
+  }
+
+  // 信封校验：来源必须是父窗口、宿主标识、bridge token、等待中的 request_id。
+  window.addEventListener("message", function (event) {
+    if (event.source !== parent) return;
+    var data = event.data;
+    if (!data || data.source !== "sub2api-plugin-host") return;
+    if (data.bridge_token !== BRIDGE) return;
+    var entry = pending[data.request_id];
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    delete pending[data.request_id];
+    if (data.ok) entry.resolve(data); else entry.reject(new Error(data.error && data.error.message || "请求失败"));
+  });
+
+  var $ = function (id) { return document.getElementById(id); };
+  function say(text, isErr) {
+    var el = $("msg");
+    el.textContent = text;
+    el.className = "msg " + (isErr ? "err" : "ok");
+  }
+  function resize() {
+    post("ui.resize", { height: document.documentElement.scrollHeight }, 3000).catch(function () {});
+  }
+
+  function formToConfig() {
+    var names = $("cookie_names").value.split(",").map(function (s) { return s.trim().toLowerCase(); })
+      .filter(function (s) { return s.length > 0; });
+    var drops = $("drop_account_ids").value.split(",").map(function (s) { return parseInt(s.trim(), 10); })
+      .filter(function (n) { return !isNaN(n) && n > 0; });
+    return {
+      enabled: $("enabled").checked,
+      cookie_names: names,
+      default_ttl_seconds: parseInt($("default_ttl_seconds").value, 10) || 240,
+      refresh_before_seconds: parseInt($("refresh_before_seconds").value, 10) || 30,
+      inject_scope: $("inject_scope").value,
+      reroll_on_faster_model: $("reroll_on_faster_model").checked,
+      persist_kv: $("persist_kv").checked,
+      drop_account_ids: drops.length ? drops : undefined,
+      quality_probe_enabled: $("quality_probe_enabled").checked,
+      probe_interval_seconds: parseInt($("probe_interval_seconds").value, 10) || 900,
+      probe_model: $("probe_model").value.trim() || undefined,
+      max_consecutive_probe_failures: parseInt($("max_consecutive_probe_failures").value, 10) || 3,
+      probe_backoff_seconds: parseInt($("probe_backoff_seconds").value, 10) || 3600
+    };
+  }
+  function configToForm(cfg) {
+    if (!cfg) return;
+    if (typeof cfg.enabled === "boolean") $("enabled").checked = cfg.enabled;
+    if (cfg.cookie_names) $("cookie_names").value = cfg.cookie_names.join(",");
+    if (cfg.default_ttl_seconds) $("default_ttl_seconds").value = cfg.default_ttl_seconds;
+    if (cfg.refresh_before_seconds) $("refresh_before_seconds").value = cfg.refresh_before_seconds;
+    if (cfg.inject_scope) $("inject_scope").value = cfg.inject_scope;
+    if (typeof cfg.reroll_on_faster_model === "boolean") $("reroll_on_faster_model").checked = cfg.reroll_on_faster_model;
+    if (typeof cfg.persist_kv === "boolean") $("persist_kv").checked = cfg.persist_kv;
+    if (typeof cfg.quality_probe_enabled === "boolean") $("quality_probe_enabled").checked = cfg.quality_probe_enabled;
+    if (cfg.probe_interval_seconds) $("probe_interval_seconds").value = cfg.probe_interval_seconds;
+    if (cfg.probe_model) $("probe_model").value = cfg.probe_model; else $("probe_model").value = "";
+    if (cfg.max_consecutive_probe_failures) $("max_consecutive_probe_failures").value = cfg.max_consecutive_probe_failures;
+    if (cfg.probe_backoff_seconds) $("probe_backoff_seconds").value = cfg.probe_backoff_seconds;
+    // drop_account_ids 是一次性字段，规范化回包里不会有；表单保存成功后清空。
+    $("drop_account_ids").value = "";
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function verdictBadge(v) {
+    var cls = v === "pass" ? "pass" : (v === "fail" ? "fail" : "error");
+    return '<span class="badge ' + cls + '">' + esc(v || "—") + "</span>";
+  }
+  function renderStatus(statusJson) {
+    var s;
+    try { s = JSON.parse(statusJson); } catch (e) { $("status").textContent = "状态解析失败"; return; }
+    var html = "";
+    if (!s || !s.accounts || !s.accounts.length) {
+      html += "<div class='sub'>罐为空（尚无捕获，或已全部过期/重摇）</div>";
+    } else {
+      var rows = s.accounts.map(function (a) {
+        return "<tr><td>" + esc(a.account_id) + "</td><td>" + esc(a.names || "") + "</td><td>" +
+          (a.newest_remaining_seconds >= 0 ? a.newest_remaining_seconds + "s" : "—") + "</td><td>" +
+          (a.fresh ? '<span class="badge fresh">新鲜</span>' : '<span class="badge stale">待重摇</span>') +
+          "</td></tr>";
+      }).join("");
+      html += "<table><tr><th>账号</th><th>Cookie</th><th>剩余寿命</th><th>状态</th></tr>" + rows + "</table>";
+    }
+    html += '<div class="counters"><span>捕获 <b>' + (s.captures || 0) + "</b></span>" +
+      "<span>注入 <b>" + (s.injects || 0) + "</b></span>" +
+      "<span>信号重摇 <b>" + (s.rerolls || 0) + "</b></span>" +
+      "<span>过期 <b>" + (s.expiries || 0) + "</b></span>" +
+      "<span>观测响应 <b>" + (s.responses_observed || 0) + "</b></span>" +
+      "<span>开关 <b>" + (s.enabled ? "开" : "关") + "</b></span></div>";
+    // 质量探针区段（v0.2，旧插件无此键时跳过）。
+    if (s && s.prober) {
+      var p = s.prober;
+      html += "<div style='margin-top:12px;font-weight:600;font-size:13px'>质量探针 — " +
+        (p.enabled ? "开" : "关") + (p.model ? "（模型 " + esc(p.model) + "）" : "（跟随业务模型）") + "</div>";
+      if (!p.accounts || !p.accounts.length) {
+        html += "<div class='sub'>尚无探针记录（需开启探针且账号有业务流量）</div>";
+      } else {
+        var prow = p.accounts.map(function (a) {
+          return "<tr><td>" + esc(a.account_id) + "</td><td>" + verdictBadge(a.last_verdict) + "</td><td>" +
+            esc(a.last_question_id || "—") + "</td><td class='ans'>" + esc(a.last_answer || "—") + "</td><td>" +
+            (a.consec_fails || 0) + "</td><td>" + (a.quality_rerolls || 0) + "</td><td>" +
+            (a.suspect_account_level ? '<span class="badge suspect">疑似账号级</span>' : "—") + "</td></tr>";
+        }).join("");
+        html += "<table><tr><th>账号</th><th>最近判定</th><th>最近题</th><th>最近答案</th><th>连错</th><th>质量重摇</th><th>嫌疑</th></tr>" + prow + "</table>" +
+          '<div class="counters"><span>探针 <b>' + (p.probes || 0) + "</b></span>" +
+          "<span>答错 <b>" + (p.fails || 0) + "</b></span>" +
+          "<span>质量重摇 <b>" + (p.quality_rerolls || 0) + "</b></span>" +
+          "<span>疑似账号级 <b>" + (p.suspect_account_levels || 0) + "</b></span></div>";
+      }
+    }
+    $("status").innerHTML = html;
+    resize();
+  }
+
+  function pullStatus() {
+    post("plugin.status", {}, 6000).then(function (resp) {
+      var r = resp.result || resp;
+      var sj = r.status_json || (r.status && r.status.status_json);
+      if (sj) renderStatus(sj);
+    }).catch(function () { $("status").textContent = "状态不可用（插件未启用或宿主不支持）"; });
+  }
+
+  $("save").addEventListener("click", function () {
+    post("config.save", { config: formToConfig() }).then(function (resp) {
+      configToForm(resp.config);      // 用宿主规范化后的配置回填
+      say("已保存（手动重摇已执行）");
+      setTimeout(pullStatus, 400);
+    }).catch(function (e) { say("保存失败: " + e.message, true); });
+  });
+  $("test").addEventListener("click", function () {
+    post("config.test", {}).then(function (resp) {
+      var r = resp.result || {};
+      say("测试通过: " + (r.message || "ok"));
+      if (r.status_json) renderStatus(r.status_json);
+    }).catch(function (e) { say("测试失败: " + e.message, true); });
+  });
+  $("refresh").addEventListener("click", pullStatus);
+
+  // 启动序列：ready → 拉配置 → 拉状态 → 周期轮询。
+  parent.postMessage({ source: "sub2api-plugin-ui", bridge_token: BRIDGE, type: "sub2api.plugin.ready" }, "*");
+  post("config.load", {}).then(function (resp) {
+    configToForm(resp.config);
+    say("配置已加载");
+  }).catch(function (e) { say("配置加载失败: " + e.message, true); });
+  pullStatus();
+  setInterval(pullStatus, 5000);
+  window.addEventListener("resize", resize);
+})();
+</script>
+</body>
+</html>

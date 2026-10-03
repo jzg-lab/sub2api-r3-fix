@@ -997,6 +997,37 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	return s.accountRepo.UpdateExtra(ctx, id, updates)
 }
 
+func (s *adminServiceImpl) ApplyOAuthCredentials(
+	ctx context.Context,
+	id int64,
+	expectedUpdatedAt time.Time,
+	input *ApplyOAuthCredentialsInput,
+) (*Account, error) {
+	if input == nil {
+		return nil, ErrAccountNilInput
+	}
+	repo, ok := s.accountRepo.(OAuthReauthorizationRepository)
+	if !ok {
+		return nil, infraerrors.InternalServer(
+			"OAUTH_REAUTH_UNSUPPORTED",
+			"account repository does not support atomic OAuth re-authorization",
+		)
+	}
+	credentials := maps.Clone(input.Credentials)
+	if len(credentials) == 0 {
+		return nil, infraerrors.BadRequest("OAUTH_CREDENTIALS_REQUIRED", "OAuth credentials cannot be empty")
+	}
+	SanitizeStoredCredentials("", credentials)
+	return repo.ApplyOAuthCredentials(
+		ctx,
+		id,
+		expectedUpdatedAt,
+		input.Type,
+		credentials,
+		maps.Clone(input.Extra),
+	)
+}
+
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {

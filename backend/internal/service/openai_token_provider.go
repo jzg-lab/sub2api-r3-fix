@@ -144,10 +144,13 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 1) Try cache first.
 	if p.tokenCache != nil {
-		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
+		if token, err := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
 		} else if err != nil {
+			if errors.Is(err, errOAuthRefreshAccountStateChanged) {
+				return "", err
+			}
 			slog.Warn("openai_token_cache_get_failed", "account_id", account.ID, "error", err)
 		}
 	}
@@ -185,7 +188,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache {
 				p.metrics.lockContention.Add(1)
 				p.metrics.touchNow()
-				token, waitErr := p.waitForTokenAfterLockRace(ctx, cacheKey)
+				token, waitErr := p.waitForTokenAfterLockRace(ctx, cacheKey, account)
 				if waitErr != nil {
 					return "", waitErr
 				}
@@ -216,7 +219,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		} else {
 			p.metrics.lockContention.Add(1)
 			p.metrics.touchNow()
-			token, waitErr := p.waitForTokenAfterLockRace(ctx, cacheKey)
+			token, waitErr := p.waitForTokenAfterLockRace(ctx, cacheKey, account)
 			if waitErr != nil {
 				return "", waitErr
 			}
@@ -236,6 +239,9 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
+			if !oauthTokenAccountIdentityMatches(account, latestAccount) {
+				return "", errOAuthRefreshAccountStateChanged
+			}
 			slog.Debug("openai_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetOpenAIAccessToken()
 			if strings.TrimSpace(accessToken) == "" {
@@ -306,7 +312,7 @@ func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account
 	)
 }
 
-func (p *OpenAITokenProvider) waitForTokenAfterLockRace(ctx context.Context, cacheKey string) (string, error) {
+func (p *OpenAITokenProvider) waitForTokenAfterLockRace(ctx context.Context, cacheKey string, account *Account) (string, error) {
 	wait := openAILockInitialWait
 	totalWaitMs := int64(0)
 	for i := 0; i < openAILockMaxAttempts; i++ {
@@ -333,7 +339,10 @@ func (p *OpenAITokenProvider) waitForTokenAfterLockRace(ctx context.Context, cac
 		p.metrics.lockWaitTotalMs.Add(waitMs)
 		p.metrics.touchNow()
 
-		token, err := p.tokenCache.GetAccessToken(ctx, cacheKey)
+		token, err := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo)
+		if errors.Is(err, errOAuthRefreshAccountStateChanged) {
+			return "", err
+		}
 		if err == nil && strings.TrimSpace(token) != "" {
 			p.metrics.lockWaitHit.Add(1)
 			if totalWaitMs >= openAILockWarnThresholdMs {
