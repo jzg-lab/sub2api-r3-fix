@@ -115,16 +115,12 @@ type openAICodexTelemetryManager struct {
 	metrics  map[int64]*openAICodexMetricState
 	upstream HTTPUpstream
 	// proxyLookup 在发送期补齐账号的代理出口（见 bindProxyLookup）。
-	proxyLookup func(ctx context.Context, account *Account) string
+	proxyLookup func(ctx context.Context, account *Account) (string, error)
 }
 
-// bindProxyLookup 注入账号→代理出口的解析函数。转发链路构造的账号对象可能
-// 只带 ProxyID 而未预载 Proxy 关联（openai_gateway_forward.go 的 proxyURL
-// 此时为空串），遥测若照发就会绕过账号代理直连 chatgpt.com——中转的出口
-// 指纹（家用 IP + Go 默认 ClientHello）会直接暴露。发送期经此函数补齐；
-// 仍解析不出时 send 宁可丢弃遥测也绝不直连。
+// The lookup distinguishes a valid direct route from an unavailable proxy.
 func (m *openAICodexTelemetryManager) bindProxyLookup(
-	lookup func(ctx context.Context, account *Account) string,
+	lookup func(ctx context.Context, account *Account) (string, error),
 ) {
 	if m == nil || lookup == nil {
 		return
@@ -134,28 +130,31 @@ func (m *openAICodexTelemetryManager) bindProxyLookup(
 	m.mu.Unlock()
 }
 
-// resolveProxyURL 返回该任务应使用的代理出口；空串表示无法确定。
+// resolveProxyURL reloads the route; an empty URL without error means direct.
 func (m *openAICodexTelemetryManager) resolveProxyURL(
 	ctx context.Context, job openAICodexTelemetryJob,
-) string {
+) (string, error) {
 	if job.client.account == nil {
-		return ""
+		return "", errOpenAIOAuthProxyUnavailable
 	}
 	m.mu.Lock()
 	lookup := m.proxyLookup
 	m.mu.Unlock()
 	if lookup == nil {
-		return ""
+		return "", errOpenAIOAuthProxyUnavailable
 	}
-	current := strings.TrimSpace(lookup(ctx, job.client.account))
+	current, err := lookup(ctx, job.client.account)
+	if err != nil {
+		return "", err
+	}
 	if validateOpenAIOAuthProxyURL(current) != nil {
-		return ""
+		return "", errOpenAIOAuthProxyInvalid
 	}
 	// A queued request is not authority to reuse or change an old route.
-	if queued := strings.TrimSpace(job.client.proxyURL); queued != "" && queued != current {
-		return ""
+	if queued := strings.TrimSpace(job.client.proxyURL); (queued != "" || job.client.account.ProxyID == nil) && queued != current {
+		return "", errOpenAIOAuthProxyInvalid
 	}
-	return current
+	return current, nil
 }
 
 var openAICodexTelemetryGlobal = &openAICodexTelemetryManager{
@@ -385,12 +384,8 @@ func (m *openAICodexTelemetryManager) send(job openAICodexTelemetryJob) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), openAICodexTelemetryTimeout)
 	defer cancel()
-	// 出口硬闸：解析不出账号代理就丢弃本批遥测。直连会把家用 IP 与 Go 默认
-	// TLS 指纹同时暴露给 chatgpt.com/ab.chatgpt.com，缺一批遥测只是真实性
-	// 略降，走错出口则是不可撤销的身份泄露（真实客户端网络失败时同样会丢
-	// 遥测，丢弃本身不构成异常特征）。
-	proxyURL := m.resolveProxyURL(ctx, job)
-	if proxyURL == "" {
+	proxyURL, err := m.resolveProxyURL(ctx, job)
+	if err != nil {
 		return nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, job.url, bytes.NewReader(job.body))

@@ -378,14 +378,17 @@ func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 	}
 
 	// Create account
-	proxyID := tokenInfo.ProxyID
+	var proxyID *int64
+	if tokenInfo.ProxyID > 0 {
+		proxyID = &tokenInfo.ProxyID
+	}
 	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
 		Name:        name,
 		Platform:    platform,
 		Type:        "oauth",
 		Credentials: credentials,
 		Extra:       nil,
-		ProxyID:     &proxyID,
+		ProxyID:     proxyID,
 		Concurrency: req.Concurrency,
 		Priority:    req.Priority,
 		GroupIDs:    req.GroupIDs,

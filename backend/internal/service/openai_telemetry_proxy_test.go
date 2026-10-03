@@ -17,16 +17,18 @@ func TestOpenAITelemetryProxyRejectsStaleQueuedRoute(t *testing.T) {
 			manager := &openAICodexTelemetryManager{}
 			calls := 0
 			if mode != "missing_lookup" {
-				manager.bindProxyLookup(func(ctx context.Context, got *Account) string {
+				manager.bindProxyLookup(func(ctx context.Context, got *Account) (string, error) {
 					calls++
 					require.Same(t, account, got)
 					switch mode {
-					case "unresolved", "direct":
-						return ""
+					case "unresolved":
+						return "", errOpenAIOAuthProxyUnavailable
+					case "direct":
+						return "", nil
 					case "changed":
-						return "http://127.0.0.1:18081"
+						return "http://127.0.0.1:18081", nil
 					default:
-						return route
+						return route, nil
 					}
 				})
 			}
@@ -34,10 +36,12 @@ func TestOpenAITelemetryProxyRejectsStaleQueuedRoute(t *testing.T) {
 			if mode == "missing_account" {
 				job.client.account = nil
 			}
-			got := manager.resolveProxyURL(context.Background(), job)
+			got, err := manager.resolveProxyURL(context.Background(), job)
 			if mode == "current" {
+				require.NoError(t, err)
 				require.Equal(t, route, got)
 			} else {
+				require.Error(t, err)
 				require.Empty(t, got)
 			}
 			if mode != "missing_account" && mode != "missing_lookup" {
@@ -86,11 +90,13 @@ func TestOpenAITelemetryProxyReloadsAccountAndHonorsCancellation(t *testing.T) {
 				return &currentProxy, nil
 			}}
 			runner := &OpenAIDowngradeProbeRunner{accountRepo: repo, proxyRepo: proxies}
-			got := runner.resolveTelemetryProxyURL(ctx, queued)
+			got, err := runner.resolveTelemetryProxyURL(ctx, queued)
 			if mode == "current" {
+				require.NoError(t, err)
 				require.Equal(t, proxy.URL(), got)
 				require.Equal(t, 1, lookupCalls)
 			} else {
+				require.Error(t, err)
 				require.Empty(t, got)
 			}
 			if mode == "cancelled" || mode == "deleted" || mode == "reassigned" || mode == "inactive_account" {
@@ -98,4 +104,15 @@ func TestOpenAITelemetryProxyReloadsAccountAndHonorsCancellation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenAITelemetryUsesCurrentDirectRoute(t *testing.T) {
+	account := &Account{ID: 17, Status: StatusActive}
+	runner := &OpenAIDowngradeProbeRunner{accountRepo: &downgradeProbeAccountRepoStub{account: account}}
+	manager := &openAICodexTelemetryManager{}
+	manager.bindProxyLookup(runner.resolveTelemetryProxyURL)
+	job := openAICodexTelemetryJob{client: openAICodexTelemetryIdentity{account: account}}
+	route, err := manager.resolveProxyURL(context.Background(), job)
+	require.NoError(t, err)
+	require.Empty(t, route)
 }

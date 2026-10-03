@@ -120,7 +120,7 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsActiveDuplicate(t *testing.T) {
 	require.ErrorIs(t, err, service.ErrOpenAIOAuthIdentityExists)
 }
 
-func TestPrepareOpenAIOAuthAccountCreateRestoresDeletedQualifiedProxy(t *testing.T) {
+func TestPrepareOpenAIOAuthAccountCreateDoesNotRestoreDeletedProxy(t *testing.T) {
 	db, mock := openAIOAuthPrepareMock(t)
 	account := openAIOAuthCreateFixture()
 	account.ProxyID = nil
@@ -134,23 +134,21 @@ func TestPrepareOpenAIOAuthAccountCreateRestoresDeletedQualifiedProxy(t *testing
 		int64(7),
 		time.Now().Add(-time.Hour),
 	))
-	expectValidOpenAIOAuthProxy(mock, 7)
 
 	err := prepareOpenAIOAuthAccountCreate(t.Context(), db, account)
 
 	require.NoError(t, err)
-	require.Equal(t, int64(7), requireProxyID(t, account.ProxyID))
-	require.EqualValues(t, int64(7), account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey])
-	require.Equal(t, true, account.Extra[service.OpenAIDowngradeQualificationExtraKey])
+	require.Nil(t, account.ProxyID)
+	require.NotContains(t, account.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+	require.NotContains(t, account.Extra, service.OpenAIDowngradeQualificationExtraKey)
 	require.Equal(t, true, account.Extra["caller_value"])
-	require.False(t, account.Schedulable)
+	require.True(t, account.Schedulable)
 }
 
-func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *testing.T) {
+func TestPrepareOpenAIOAuthAccountCreateIgnoresHistoricalBindings(t *testing.T) {
 	tests := []struct {
-		name      string
-		history   *sqlmock.Rows
-		wantError error
+		name    string
+		history *sqlmock.Rows
 	}{
 		{
 			name: "missing",
@@ -162,7 +160,6 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 				int64(7),
 				time.Now().Add(-time.Hour),
 			),
-			wantError: service.ErrOpenAIOAuthHistoryBindingMissing,
 		},
 		{
 			name: "corrupt",
@@ -174,7 +171,6 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 				int64(7),
 				time.Now().Add(-time.Hour),
 			),
-			wantError: service.ErrOpenAIOAuthProxyBindingCorrupt,
 		},
 		{
 			name: "conflict",
@@ -191,7 +187,6 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 				int64(8),
 				time.Now().Add(-time.Hour),
 			),
-			wantError: service.ErrOpenAIOAuthHistoryBindingConflict,
 		},
 	}
 
@@ -201,10 +196,12 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsHistoricalBindingFailures(t *test
 			account := openAIOAuthCreateFixture()
 			expectOpenAIOAuthIdentityLock(mock)
 			expectOpenAIOAuthHistory(mock, tt.history)
+			expectValidOpenAIOAuthProxy(mock, 7)
 
 			err := prepareOpenAIOAuthAccountCreate(t.Context(), db, account)
 
-			require.ErrorIs(t, err, tt.wantError)
+			require.NoError(t, err)
+			require.True(t, account.Schedulable)
 		})
 	}
 }
@@ -222,11 +219,11 @@ func TestPrepareOpenAIOAuthAccountCreateAllowsFreshIdentityWithoutProxy(t *testi
 
 	require.NoError(t, err)
 	require.Nil(t, account.ProxyID)
-	require.Equal(t, true, account.Extra[service.OpenAIDowngradeQualificationExtraKey])
-	require.False(t, account.Schedulable)
+	require.NotContains(t, account.Extra, service.OpenAIDowngradeQualificationExtraKey)
+	require.True(t, account.Schedulable)
 }
 
-func TestPrepareOpenAIOAuthAccountCreateRejectsRequestedProxyMismatch(t *testing.T) {
+func TestPrepareOpenAIOAuthAccountCreateAllowsDifferentProxyOnReimport(t *testing.T) {
 	db, mock := openAIOAuthPrepareMock(t)
 	account := openAIOAuthCreateFixture()
 	requestedProxyID := int64(8)
@@ -240,10 +237,12 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsRequestedProxyMismatch(t *testing
 		int64(7),
 		time.Now().Add(-time.Hour),
 	))
+	expectValidOpenAIOAuthProxy(mock, requestedProxyID)
 
 	err := prepareOpenAIOAuthAccountCreate(t.Context(), db, account)
 
-	require.ErrorIs(t, err, service.ErrOpenAIOAuthProxyMismatch)
+	require.NoError(t, err)
+	require.Equal(t, requestedProxyID, *account.ProxyID)
 }
 
 func TestPrepareOpenAIOAuthAccountCreateRejectsInvalidProxy(t *testing.T) {
@@ -263,7 +262,7 @@ func TestPrepareOpenAIOAuthAccountCreateRejectsInvalidProxy(t *testing.T) {
 	require.ErrorIs(t, err, service.ErrOpenAIOAuthProxyInvalid)
 }
 
-func TestPrepareOpenAIOAuthAccountCreateArmsFirstQualification(t *testing.T) {
+func TestPrepareOpenAIOAuthAccountCreateIsImmediatelySchedulable(t *testing.T) {
 	db, mock := openAIOAuthPrepareMock(t)
 	account := openAIOAuthCreateFixture()
 	account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] = int64(999)
@@ -278,8 +277,8 @@ func TestPrepareOpenAIOAuthAccountCreateArmsFirstQualification(t *testing.T) {
 	require.NoError(t, err)
 	_, qualifiedExists := account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]
 	require.False(t, qualifiedExists, "a caller cannot pre-qualify a new authorization proxy")
-	require.Equal(t, true, account.Extra[service.OpenAIDowngradeQualificationExtraKey])
-	require.False(t, account.Schedulable)
+	require.NotContains(t, account.Extra, service.OpenAIDowngradeQualificationExtraKey)
+	require.True(t, account.Schedulable)
 }
 
 func TestPrepareOpenAIOAuthAccountCreateIgnoresNonBrowserOAuthAccounts(t *testing.T) {

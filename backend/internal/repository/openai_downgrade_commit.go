@@ -53,8 +53,9 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		accepted := false
 		if ok {
 			for _, result := range mutation.Results {
-				if result.IsQualificationPass() && result.ProxyID != nil &&
-					*result.ProxyID == qualificationProxyID {
+				if result.IsQualificationPass() &&
+					((result.ProxyID == nil && qualificationProxyID == 0) ||
+						(result.ProxyID != nil && *result.ProxyID == qualificationProxyID)) {
 					accepted = true
 					break
 				}
@@ -75,7 +76,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if mutation.CompleteQualification {
+	if mutation.CompleteQualification && qualificationProxyID > 0 {
 		if err := lockValidOpenAIOAuthProxy(ctx, tx, qualificationProxyID); err != nil {
 			return err
 		}
@@ -125,16 +126,13 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		if mutation.FallbackMode != nil {
 			extra[service.OpenAIDowngradeSolFallbackExtraKey] = *mutation.FallbackMode
 		}
-		if mutation.CompleteQualification {
-			extra[service.OpenAIOAuthQualifiedProxyExtraKey] = qualificationProxyID
-		}
 		payload, err := json.Marshal(extra)
 		if err != nil {
 			return err
 		}
 		extraExpression := "COALESCE(extra, '{}'::jsonb) || $5::jsonb"
 		if mutation.CompleteQualification {
-			extraExpression = "(" + extraExpression + ") - '" + service.OpenAIDowngradeQualificationExtraKey + "'"
+			extraExpression = "(" + extraExpression + ") - '" + service.OpenAIDowngradeQualificationExtraKey + "' - '" + service.OpenAIOAuthQualifiedProxyExtraKey + "'"
 		}
 		// Merely naming status/error_message in UPDATE revokes error ownership,
 		// even if their values are unchanged. Leave them out for ordinary probes.
@@ -222,15 +220,19 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 	return nil
 }
 
-// openAIQualificationProxyTarget 返回资格完成应落账的合格代理 id。
-// 老号(代理未变):快照代理 ExpectedProxyID。新号工作流(r15b/r17b):
-// 同轮自动分桶,目标为 mutation.ProxyID(快照为 nil)。两者皆无即非法。
+// Zero identifies a direct route when retiring a legacy qualification marker.
 func openAIQualificationProxyTarget(mutation *service.OpenAIDowngradeMutation) (int64, bool) {
 	if !mutation.ProxyChanged {
+		if mutation.ExpectedProxyID == nil {
+			return 0, true
+		}
 		if mutation.ExpectedProxyID != nil && *mutation.ExpectedProxyID > 0 {
 			return *mutation.ExpectedProxyID, true
 		}
 		return 0, false
+	}
+	if mutation.ProxyID == nil {
+		return 0, true
 	}
 	if mutation.ProxyID != nil && *mutation.ProxyID > 0 {
 		return *mutation.ProxyID, true

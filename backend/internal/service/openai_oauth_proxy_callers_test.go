@@ -12,11 +12,13 @@ import (
 )
 
 type openAIOAuthProxyNoNetworkClient struct {
-	calls int
+	calls    int
+	proxyURL string
 }
 
-func (c *openAIOAuthProxyNoNetworkClient) ExchangeCode(context.Context, string, string, string, string, string) (*openai.TokenResponse, error) {
+func (c *openAIOAuthProxyNoNetworkClient) ExchangeCode(_ context.Context, _, _, _, proxyURL, _ string) (*openai.TokenResponse, error) {
 	c.calls++
+	c.proxyURL = proxyURL
 	return nil, errors.New("unexpected upstream call")
 }
 
@@ -25,8 +27,9 @@ func (c *openAIOAuthProxyNoNetworkClient) RefreshToken(context.Context, string, 
 	return nil, errors.New("unexpected upstream call")
 }
 
-func (c *openAIOAuthProxyNoNetworkClient) RefreshTokenWithClientID(context.Context, string, string, string) (*openai.TokenResponse, error) {
+func (c *openAIOAuthProxyNoNetworkClient) RefreshTokenWithClientID(_ context.Context, _, proxyURL, _ string) (*openai.TokenResponse, error) {
 	c.calls++
+	c.proxyURL = proxyURL
 	return nil, errors.New("unexpected upstream call")
 }
 
@@ -100,7 +103,7 @@ func TestOpenAIOAuthProxyFailuresDoNotReachUpstream(t *testing.T) {
 	}
 }
 
-func TestOpenAIUnassignedOAuthCannotRefreshDirectly(t *testing.T) {
+func TestOpenAIUnassignedOAuthRefreshesDirectly(t *testing.T) {
 	client := &openAIOAuthProxyNoNetworkClient{}
 	svc := NewOpenAIOAuthService(nil, client)
 	account := &Account{
@@ -108,21 +111,44 @@ func TestOpenAIUnassignedOAuthCannotRefreshDirectly(t *testing.T) {
 		Credentials: map[string]any{"refresh_token": "fixture"},
 	}
 	_, err := svc.RefreshAccountToken(context.Background(), account)
-	require.ErrorIs(t, err, errOpenAIOAuthProxyRequired)
-	require.Zero(t, client.calls)
+	require.EqualError(t, err, "unexpected upstream call")
+	require.Equal(t, 1, client.calls)
+	require.Empty(t, client.proxyURL)
 }
 
-func TestOpenAIRawRefreshRejectsDirectAndInvalidRoutes(t *testing.T) {
+func TestOpenAIOAuthDirectAuthorizationReachesExchange(t *testing.T) {
+	client := &openAIOAuthProxyNoNetworkClient{}
+	svc := NewOpenAIOAuthService(nil, client)
+	svc.SetSessionStore(newTestOpenAIOAuthSessionStore())
+	defer svc.Stop()
+	result, err := svc.GenerateAuthURL(t.Context(), nil, "", PlatformOpenAI)
+	require.NoError(t, err)
+	require.Zero(t, result.ProxyID)
+	session, err := svc.sessionStore.Get(t.Context(), result.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, openAIOAuthProxyRouteHash(""), session.ProxyRouteHash)
+	_, err = svc.ExchangeCode(t.Context(), &OpenAIExchangeCodeInput{
+		SessionID: result.SessionID, State: session.State, Code: "fixture",
+	})
+	require.EqualError(t, err, "unexpected upstream call")
+	require.Equal(t, 1, client.calls)
+	require.Empty(t, client.proxyURL)
+	_, err = svc.sessionStore.Get(t.Context(), result.SessionID)
+	require.Error(t, err, "direct authorization sessions remain one-shot")
+}
+
+func TestOpenAIRawRefreshRejectsInvalidRoutesAndAllowsDirect(t *testing.T) {
 	client := &openAIOAuthProxyNoNetworkClient{}
 	svc := NewOpenAIOAuthService(nil, client)
 	defer svc.Stop()
-	for _, route := range []string{"", " ", "direct://localhost:8080", "http://", "http://localhost:0"} {
+	for _, route := range []string{" ", "direct://localhost:8080", "http://", "http://localhost:0"} {
 		_, err := svc.RefreshToken(context.Background(), "fixture", route)
 		require.Error(t, err)
 		_, err = svc.RefreshTokenWithClientID(context.Background(), "fixture", route, "fixture")
 		require.Error(t, err)
 	}
-	_, err := svc.RefreshTokenWithProxyID(context.Background(), "fixture", nil, "")
-	require.ErrorIs(t, err, errOpenAIOAuthProxyRequired)
 	require.Zero(t, client.calls)
+	_, err := svc.RefreshTokenWithProxyID(context.Background(), "fixture", nil, "")
+	require.EqualError(t, err, "unexpected upstream call")
+	require.Equal(t, 1, client.calls)
 }

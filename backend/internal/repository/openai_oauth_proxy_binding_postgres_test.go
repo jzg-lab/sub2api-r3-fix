@@ -99,11 +99,11 @@ func TestPrepareOpenAIOAuthAccountCreatePostgresSerializesConcurrentIdentity(t *
 	`, service.OpenAIDowngradeQualificationExtraKey).
 		Scan(&accountCount, &schedulable, &qualificationPending))
 	require.Equal(t, 1, accountCount)
-	require.False(t, schedulable)
-	require.True(t, qualificationPending)
+	require.True(t, schedulable)
+	require.False(t, qualificationPending)
 }
 
-func TestPrepareOpenAIOAuthAccountCreatePostgresRestoresDeletedQualifiedProxy(t *testing.T) {
+func TestPrepareOpenAIOAuthAccountCreatePostgresAllowsDirectReimport(t *testing.T) {
 	db := newProbePostgres(t)
 	_, err := db.Exec("INSERT INTO proxies(id) VALUES(7)")
 	require.NoError(t, err)
@@ -132,13 +132,13 @@ func TestPrepareOpenAIOAuthAccountCreatePostgresRestoresDeletedQualifiedProxy(t 
 	require.NoError(t, insertPreparedOpenAIOAuthAccount(t.Context(), secondTx, 202, second))
 	require.NoError(t, secondTx.Commit())
 
-	require.Equal(t, int64(7), requireProxyID(t, second.ProxyID))
-	require.EqualValues(t, int64(7), second.Extra[service.OpenAIOAuthQualifiedProxyExtraKey])
-	require.Equal(t, true, second.Extra[service.OpenAIDowngradeQualificationExtraKey])
-	require.False(t, second.Schedulable)
+	require.Nil(t, second.ProxyID)
+	require.NotContains(t, second.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+	require.NotContains(t, second.Extra, service.OpenAIDowngradeQualificationExtraKey)
+	require.True(t, second.Schedulable)
 
 	var activeCount int
-	var restoredProxyID int64
+	var restoredProxyID sql.NullInt64
 	var schedulable, qualificationPending bool
 	require.NoError(t, db.QueryRow(`
 		SELECT COUNT(*), max(proxy_id), bool_and(schedulable),
@@ -149,7 +149,7 @@ func TestPrepareOpenAIOAuthAccountCreatePostgresRestoresDeletedQualifiedProxy(t 
 	`, service.OpenAIDowngradeQualificationExtraKey).
 		Scan(&activeCount, &restoredProxyID, &schedulable, &qualificationPending))
 	require.Equal(t, 1, activeCount)
-	require.Equal(t, int64(7), restoredProxyID)
-	require.False(t, schedulable)
-	require.True(t, qualificationPending)
+	require.False(t, restoredProxyID.Valid)
+	require.True(t, schedulable)
+	require.False(t, qualificationPending)
 }

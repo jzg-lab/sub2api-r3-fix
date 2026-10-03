@@ -48,8 +48,6 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 	}
 	defer func() { _ = rows.Close() }()
 
-	var historicalProxyID int64
-	historyFound := false
 	for rows.Next() {
 		var (
 			credentialsJSON []byte
@@ -59,6 +57,9 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		)
 		if err := rows.Scan(&credentialsJSON, &extraJSON, &proxyID, &deletedAt); err != nil {
 			return err
+		}
+		if deletedAt.Valid {
+			continue
 		}
 		historical, err := openAIOAuthAccountFromJSON(credentialsJSON, extraJSON, proxyID)
 		if err != nil {
@@ -71,62 +72,26 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		if !identityOK || kind != identityKind || value != identityValue {
 			continue
 		}
-		if !deletedAt.Valid {
-			return service.ErrOpenAIOAuthIdentityExists
-		}
-		raw, exists := historical.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]
-		if !exists {
-			return service.ErrOpenAIOAuthHistoryBindingMissing
-		}
-		qualifiedProxyID, bindingOK := service.OpenAIOAuthQualifiedProxyID(historical.Extra)
-		if !bindingOK {
-			return service.ErrOpenAIOAuthProxyBindingCorrupt
-		}
-		if !historyFound {
-			historicalProxyID = qualifiedProxyID
-			historyFound = true
-		} else if historicalProxyID != qualifiedProxyID {
-			return service.ErrOpenAIOAuthHistoryBindingConflict
-		}
-		_ = raw
+		return service.ErrOpenAIOAuthIdentityExists
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-
-	if historyFound {
-		if account.ProxyID != nil && *account.ProxyID != historicalProxyID {
-			return service.ErrOpenAIOAuthProxyMismatch
-		}
-		account.ProxyID = int64Ptr(historicalProxyID)
-	}
-	if account.ProxyID == nil || *account.ProxyID <= 0 {
-		// A genuinely new identity without an authorization-time proxy may
-		// come from the credential-import workflow. Preserve r17k's automatic
-		// qualification/bucket assignment for that path. Deleted identities
-		// never reach this branch unless their historical binding was valid.
-		account.Extra = maps.Clone(account.Extra)
-		if account.Extra == nil {
-			account.Extra = make(map[string]any, 2)
-		}
-		account.Extra[service.OpenAIDowngradeQualificationExtraKey] = true
-		account.Schedulable = false
-		return nil
-	}
-	if err := lockValidOpenAIOAuthProxy(ctx, exec, *account.ProxyID); err != nil {
+	if err := rows.Close(); err != nil {
 		return err
 	}
-
+	if account.ProxyID != nil {
+		if *account.ProxyID == 0 {
+			account.ProxyID = nil
+		} else if *account.ProxyID < 0 {
+			return service.ErrOpenAIOAuthProxyInvalid
+		} else if err := lockValidOpenAIOAuthProxy(ctx, exec, *account.ProxyID); err != nil {
+			return err
+		}
+	}
 	account.Extra = maps.Clone(account.Extra)
-	if account.Extra == nil {
-		account.Extra = make(map[string]any, 2)
-	}
 	delete(account.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
-	if historyFound {
-		account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] = historicalProxyID
-	}
-	account.Extra[service.OpenAIDowngradeQualificationExtraKey] = true
-	account.Schedulable = false
+	delete(account.Extra, service.OpenAIDowngradeQualificationExtraKey)
 	return nil
 }
 
@@ -151,12 +116,7 @@ func validateOpenAIOAuthAccountUpdate(
 			next.Extra = make(map[string]any)
 		}
 		delete(next.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
-		if raw, exists := current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]; exists {
-			if _, ok := service.OpenAIOAuthQualifiedProxyID(current.Extra); !ok {
-				return service.ErrOpenAIOAuthProxyBindingCorrupt
-			}
-			next.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] = raw
-		}
+		delete(next.Extra, service.OpenAIDowngradeQualificationExtraKey)
 		if next.Schedulable {
 			if err := validateOpenAIOAuthQualification(ctx, exec, next); err != nil {
 				return err
@@ -244,7 +204,7 @@ func validateOpenAIOAuthBulkUpdate(
 		}
 		if updates.Schedulable != nil && *updates.Schedulable &&
 			service.IsOpenAIBrowserOAuthAccount(current) {
-			if err := validateOpenAIOAuthQualification(ctx, exec, current); err != nil {
+			if err := validateOpenAIOAuthQualification(ctx, exec, &next); err != nil {
 				return err
 			}
 		}
@@ -285,20 +245,16 @@ func validateOpenAIOAuthSchedulable(
 }
 
 func validateOpenAIOAuthQualification(ctx context.Context, exec sqlExecutor, account *service.Account) error {
-	if account == nil || account.ProxyID == nil || *account.ProxyID <= 0 {
-		return service.ErrOpenAIOAuthProxyRequired
+	if account == nil {
+		return service.ErrAccountNilInput
 	}
-	qualifiedProxyID, ok := service.OpenAIOAuthQualifiedProxyID(account.Extra)
-	if !ok {
-		if _, exists := account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]; exists {
-			return service.ErrOpenAIOAuthProxyBindingCorrupt
-		}
-		return service.ErrOpenAIOAuthQualificationRequired
+	if account.ProxyID == nil || *account.ProxyID == 0 {
+		return nil
 	}
-	if qualifiedProxyID != *account.ProxyID {
-		return service.ErrOpenAIOAuthProxyMismatch
+	if *account.ProxyID < 0 {
+		return service.ErrOpenAIOAuthProxyInvalid
 	}
-	return validateOpenAIOAuthProxy(ctx, exec, qualifiedProxyID)
+	return validateOpenAIOAuthProxy(ctx, exec, *account.ProxyID)
 }
 
 func validateOpenAIOAuthAccountReplacement(current, next *service.Account) error {
@@ -314,26 +270,6 @@ func validateOpenAIOAuthAccountReplacement(current, next *service.Account) error
 	nextKind, nextIdentity, nextOK := service.OpenAIOAuthStableIdentity(next)
 	if !currentOK || !nextOK || currentKind != nextKind || currentIdentity != nextIdentity {
 		return service.ErrOpenAIOAuthIdentityChanged
-	}
-	if !sameNullableInt64(current.ProxyID, next.ProxyID) {
-		// Fresh imports have no authorization binding yet and must be allowed
-		// to receive their first qualified proxy. Once any proxy or qualified
-		// binding exists, the authorization route is immutable.
-		_, currentQualified := service.OpenAIOAuthQualifiedProxyID(current.Extra)
-		if current.ProxyID != nil || currentQualified ||
-			current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] != nil {
-			return service.ErrOpenAIOAuthProxyBindingProtected
-		}
-	}
-	if raw, exists := current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]; exists {
-		qualifiedProxyID, ok := service.OpenAIOAuthQualifiedProxyID(current.Extra)
-		if !ok {
-			return service.ErrOpenAIOAuthProxyBindingCorrupt
-		}
-		if current.ProxyID == nil || *current.ProxyID != qualifiedProxyID {
-			return service.ErrOpenAIOAuthProxyMismatch
-		}
-		_ = raw
 	}
 	return nil
 }
@@ -466,83 +402,8 @@ func lockValidOpenAIOAuthProxy(ctx context.Context, exec sqlExecutor, proxyID in
 	return nil
 }
 
-func validateOpenAIOAuthProtectedProxyUpdate(
-	ctx context.Context,
-	exec sqlExecutor,
-	proxyID int64,
-	identityChanged bool,
-	nextExpiresAt *time.Time,
-) error {
-	protected, err := openAIOAuthProxyIsProtected(ctx, exec, proxyID)
-	if err != nil || !protected {
-		return err
-	}
-	var currentExpiresAt sql.NullTime
-	if err := scanSingleRow(ctx, exec, `
-		SELECT expires_at
-		FROM proxies
-		WHERE id = $1 AND deleted_at IS NULL
-	`, []any{proxyID}, &currentExpiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return service.ErrProxyNotFound
-		}
-		return err
-	}
-	if identityChanged || !sameNullableTime(currentExpiresAt, nextExpiresAt) {
-		return service.ErrOpenAIOAuthProxyBindingProtected
-	}
-	return nil
-}
-
-func validateOpenAIOAuthProtectedProxyDelete(ctx context.Context, exec sqlExecutor, proxyID int64) error {
-	protected, err := openAIOAuthProxyIsProtected(ctx, exec, proxyID)
-	if err != nil {
-		return err
-	}
-	if protected {
-		return service.ErrOpenAIOAuthProxyBindingProtected
-	}
-	return nil
-}
-
-func openAIOAuthProxyIsProtected(ctx context.Context, exec sqlExecutor, proxyID int64) (bool, error) {
-	var protected bool
-	err := scanSingleRow(ctx, exec, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM accounts
-			WHERE (`+openAIBrowserOAuthAccountSQL+`)
-				AND (
-					proxy_id = $1
-					OR extra ->> '`+service.OpenAIOAuthQualifiedProxyExtraKey+`' = $2
-				)
-		)
-	`, []any{proxyID, fmt.Sprint(proxyID)}, &protected)
-	return protected, err
-}
-
-func sameNullableTime(current sql.NullTime, next *time.Time) bool {
-	if !current.Valid || next == nil {
-		return !current.Valid && next == nil
-	}
-	return current.Time.Equal(*next)
-}
-
-func sameNullableInt64(left, right *int64) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
-}
-
 func int64Ptr(value int64) *int64 {
 	return &value
-}
-
-func isOpenAIOAuthProxyBindingError(err error) bool {
-	return errors.Is(err, service.ErrOpenAIOAuthProxyBindingProtected) ||
-		errors.Is(err, service.ErrOpenAIOAuthIdentityChanged) ||
-		errors.Is(err, service.ErrOpenAIOAuthProxyMismatch)
 }
 
 func validateOpenAIOAuthProxyMutation(
@@ -558,8 +419,11 @@ func validateOpenAIOAuthProxyMutation(
 	if !service.IsOpenAIBrowserOAuthAccount(current) {
 		return nil
 	}
-	if !sameNullableInt64(current.ProxyID, proxyID) {
-		return service.ErrOpenAIOAuthProxyBindingProtected
+	if proxyID != nil {
+		if *proxyID <= 0 {
+			return service.ErrOpenAIOAuthProxyInvalid
+		}
+		return validateOpenAIOAuthProxy(ctx, exec, *proxyID)
 	}
 	return nil
 }
@@ -576,13 +440,6 @@ func validateOpenAIOAuthProxyFallbackRevert(
 	if !service.IsOpenAIBrowserOAuthAccount(current) {
 		return nil
 	}
-	qualifiedProxyID, ok := service.OpenAIOAuthQualifiedProxyID(current.Extra)
-	if !ok {
-		if _, exists := current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]; exists {
-			return service.ErrOpenAIOAuthProxyBindingCorrupt
-		}
-		return service.ErrOpenAIOAuthQualificationRequired
-	}
 	var originProxyID sql.NullInt64
 	if err := scanSingleRow(ctx, exec, `
 		SELECT proxy_fallback_origin_id
@@ -594,8 +451,5 @@ func validateOpenAIOAuthProxyFallbackRevert(
 	if !originProxyID.Valid {
 		return service.ErrAccountNotInFallback
 	}
-	if originProxyID.Int64 != qualifiedProxyID {
-		return service.ErrOpenAIOAuthProxyBindingProtected
-	}
-	return validateOpenAIOAuthProxy(ctx, exec, qualifiedProxyID)
+	return validateOpenAIOAuthProxy(ctx, exec, originProxyID.Int64)
 }

@@ -322,7 +322,7 @@ func TestOpenAIProbePostgresCompletesRestoredOAuthQualification(t *testing.T) {
 	require.NoError(t, repo.CommitOpenAIDowngradeMutation(context.Background(), mutation))
 
 	var schedulable, qualificationPending bool
-	var qualifiedProxyID int64
+	var qualifiedProxyID sql.NullInt64
 	require.NoError(t, db.QueryRow(`
 		SELECT schedulable,
 			COALESCE((extra ->> $1)::boolean, FALSE),
@@ -332,7 +332,7 @@ func TestOpenAIProbePostgresCompletesRestoredOAuthQualification(t *testing.T) {
 		mutation.AccountID).Scan(&schedulable, &qualificationPending, &qualifiedProxyID))
 	require.True(t, schedulable)
 	require.False(t, qualificationPending)
-	require.Equal(t, *mutation.ExpectedProxyID, qualifiedProxyID)
+	require.False(t, qualifiedProxyID.Valid)
 
 	var outboxCount int
 	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM scheduler_outbox").Scan(&outboxCount))

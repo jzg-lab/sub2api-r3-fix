@@ -3478,7 +3478,7 @@
         :show-email-password-option="false"
         :show-manual-option="true"
         :initial-input-method="'manual'"
-        :show-auth-browser-launch="form.platform === 'openai'"
+        :show-auth-browser-launch="form.platform === 'openai' && !!form.proxy_id"
         :auth-browser-launching="authBrowserLaunching"
         @launch-auth-browser="handleLaunchAuthBrowser"
         :platform="form.platform"

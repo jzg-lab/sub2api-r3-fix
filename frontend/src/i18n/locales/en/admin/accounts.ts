@@ -1106,6 +1106,7 @@ export default {
           failedToExchangeCode: 'Failed to exchange OpenAI auth code',
           failedToValidateRT: 'Failed to validate refresh token',
           errors: {
+            OPENAI_OAUTH_PROXY_MISMATCH: 'The network route differs from the authorization session. Generate a new authorization URL.',
             OPENAI_OAUTH_PROXY_REQUIRED:
               'No proxy is configured and this server could not reach OpenAI directly, so the OpenAI OAuth request failed. Select a proxy that can access OpenAI and retry; if the authorization code has expired, regenerate the authorization URL.'
           },

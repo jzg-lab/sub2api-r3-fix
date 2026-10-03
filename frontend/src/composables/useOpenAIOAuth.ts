@@ -41,12 +41,10 @@ export function useOpenAIOAuth() {
   const loading = ref(false)
   const error = ref('')
   let requestVersion = 0
-  const proxyRequiredMessage = () =>
-    t('admin.accounts.oauth.openai.errors.OPENAI_OAUTH_PROXY_REQUIRED')
   const validProxyId = (proxyId?: number | null): proxyId is number =>
     Number.isSafeInteger(proxyId) && (proxyId ?? 0) > 0
   const rejectProxyContinuity = () => {
-    error.value = proxyRequiredMessage()
+    error.value = t('admin.accounts.oauth.openai.errors.OPENAI_OAUTH_PROXY_MISMATCH')
     appStore.showError(error.value)
   }
 
@@ -72,7 +70,7 @@ export function useOpenAIOAuth() {
     oauthState.value = ''
     authorizationProxyId.value = null
     error.value = ''
-    if (!validProxyId(proxyId)) {
+    if (proxyId != null && proxyId !== 0 && !validProxyId(proxyId)) {
       loading.value = false
       rejectProxyContinuity()
       return false
@@ -80,7 +78,8 @@ export function useOpenAIOAuth() {
     loading.value = true
 
     try {
-      const payload: Record<string, unknown> = { proxy_id: proxyId }
+      const payload: Record<string, unknown> = {}
+      if (validProxyId(proxyId)) payload.proxy_id = proxyId
       if (redirectUri) {
         payload.redirect_uri = redirectUri
       }
@@ -92,7 +91,7 @@ export function useOpenAIOAuth() {
       if (version !== requestVersion) return false
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
-      authorizationProxyId.value = proxyId
+      authorizationProxyId.value = validProxyId(proxyId) ? proxyId : null
       try {
         const parsed = new URL(response.auth_url)
         oauthState.value = parsed.searchParams.get('state') || ''
@@ -126,9 +125,8 @@ export function useOpenAIOAuth() {
     const boundProxyId = authorizationProxyId.value
     if (
       currentSessionId !== sessionId.value ||
-      !validProxyId(boundProxyId) ||
-      !validProxyId(proxyId) ||
-      proxyId !== boundProxyId
+      (proxyId != null && proxyId !== 0 && !validProxyId(proxyId)) ||
+      (proxyId || null) !== boundProxyId
     ) {
       loading.value = false
       rejectProxyContinuity()
@@ -144,15 +142,13 @@ export function useOpenAIOAuth() {
         code: code.trim(),
         state: state.trim()
       }
-      payload.proxy_id = boundProxyId
+      payload.proxy_id = boundProxyId ?? 0
 
       const tokenInfo = await adminAPI.accounts.exchangeCode(`${endpointPrefix}/exchange-code`, payload)
       if (version !== requestVersion) return null
       const result = tokenInfo as OpenAITokenInfo
-      if (!Number.isSafeInteger(result.proxy_id) || (result.proxy_id ?? 0) <= 0) {
-        throw new Error('Authorization response is missing its proxy assignment')
-      }
-      if (result.proxy_id !== boundProxyId) {
+      if ((boundProxyId !== null && result.proxy_id !== boundProxyId) ||
+          (boundProxyId === null && result.proxy_id != null && result.proxy_id !== 0)) {
         throw new Error('Authorization response proxy does not match the authorization session')
       }
       return result

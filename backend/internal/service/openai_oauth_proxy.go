@@ -13,7 +13,6 @@ import (
 )
 
 var (
-	errOpenAIOAuthProxyRequired    = errors.New("OpenAI OAuth requires an assigned proxy")
 	errOpenAIOAuthProxyUnavailable = errors.New("OpenAI OAuth assigned proxy is unavailable")
 	errOpenAIOAuthProxyInvalid     = errors.New("OpenAI OAuth assigned proxy is invalid")
 )
@@ -28,11 +27,14 @@ func openAIOAuthProxyRouteHash(route string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// OAuth auxiliary requests must not silently bypass the account's proxy.
-// This validates the assignment, not the proxy's observed public egress IP.
+// An absent assignment means direct traffic. A configured but invalid proxy
+// remains an error so callers cannot silently bypass the selected route.
 func resolveOpenAIOAuthProxyURL(ctx context.Context, repo openAIOAuthProxyLookup, proxyID *int64) (string, error) {
-	if proxyID == nil || *proxyID <= 0 {
-		return "", errOpenAIOAuthProxyRequired
+	if proxyID == nil || *proxyID == 0 {
+		return "", nil
+	}
+	if *proxyID < 0 {
+		return "", errOpenAIOAuthProxyInvalid
 	}
 	if repo == nil {
 		return "", errOpenAIOAuthProxyUnavailable
@@ -46,8 +48,11 @@ func resolveOpenAIOAuthProxyURL(ctx context.Context, repo openAIOAuthProxyLookup
 }
 
 func openAIOAuthProxySnapshotURL(p *Proxy, proxyID *int64) (string, error) {
-	if proxyID == nil || *proxyID <= 0 {
-		return "", errOpenAIOAuthProxyRequired
+	if proxyID == nil || *proxyID == 0 {
+		return "", nil
+	}
+	if *proxyID < 0 {
+		return "", errOpenAIOAuthProxyInvalid
 	}
 	if p == nil || p.ID != *proxyID || !p.IsActive() || p.IsExpired(time.Now()) {
 		return "", errOpenAIOAuthProxyUnavailable
@@ -89,11 +94,10 @@ func validateOpenAIAccountProxyRoute(account *Account, route string) error {
 	return nil
 }
 
-// Raw refresh callers must not turn an omitted or malformed route into direct
-// traffic. Assignment-based callers also validate the current proxy row above.
+// Empty routes are direct; nonempty routes must be valid proxy URLs.
 func validateOpenAIOAuthProxyURL(raw string) error {
-	if strings.TrimSpace(raw) == "" {
-		return errOpenAIOAuthProxyRequired
+	if raw == "" {
+		return nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u == nil || u.Opaque != "" || u.RawQuery != "" ||

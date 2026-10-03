@@ -1171,6 +1171,7 @@ export default {
           failedToExchangeCode: 'OpenAI 授权码兑换失败',
           failedToValidateRT: '验证 Refresh Token 失败',
           errors: {
+            OPENAI_OAUTH_PROXY_MISMATCH: '网络出口与生成授权链接时的选择不一致，请重新生成授权链接。',
             OPENAI_OAUTH_PROXY_REQUIRED:
               '未设置代理，当前服务器无法直连 OpenAI，导致 OpenAI OAuth 请求失败。请先选择可访问 OpenAI 的代理后重试；如果授权码已失效，请重新生成授权链接。'
           },

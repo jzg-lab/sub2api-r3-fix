@@ -858,6 +858,9 @@ func lockAndMergeAccountProbeExtra(
 		service.OpenAIDowngradeQualificationExtraKey: currentQualification,
 	} {
 		delete(extra, key)
+		if key == service.OpenAIDowngradeQualificationExtraKey && service.IsOpenAIBrowserOAuthAccount(account) {
+			continue
+		}
 		if value, ok, err := decodeAccountExtraJSON(raw); err != nil {
 			return nil, err
 		} else if ok {
@@ -2054,14 +2057,6 @@ func (r *accountRepository) schedulableAccountsQuery(now time.Time) *dbent.Accou
 			notExpiredPredicate(now),
 			dbaccount.Or(dbaccount.OverloadUntilIsNil(), dbaccount.OverloadUntilLTE(now)),
 			dbaccount.Or(dbaccount.RateLimitResetAtIsNil(), dbaccount.RateLimitResetAtLTE(now)),
-			// OpenAI OAuth 账号必须已绑定代理桶才可调度：无桶直连会把家用 IP
-			// 暴露给 chatgpt.com。新号由降智探针的资格流程在分钟级自动绑桶，
-			// 未绑定期间宁可不可用（用户政策：不绑桶不能用）。
-			dbaccount.Or(
-				dbaccount.ProxyIDNotNil(),
-				dbaccount.PlatformNEQ(service.PlatformOpenAI),
-				dbaccount.TypeNEQ(service.AccountTypeOAuth),
-			),
 		).
 		Order(dbent.Asc(dbaccount.FieldPriority))
 }
@@ -3354,12 +3349,6 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 					dbaccount.Or(dbaccount.RateLimitResetAtIsNil(), dbaccount.RateLimitResetAtLTE(now)),
 				)
 			}
-			// 与 schedulableAccountsQuery 同一政策：OpenAI OAuth 无桶不调度。
-			preds = append(preds, dbaccount.Or(
-				dbaccount.ProxyIDNotNil(),
-				dbaccount.PlatformNEQ(service.PlatformOpenAI),
-				dbaccount.TypeNEQ(service.AccountTypeOAuth),
-			))
 		}
 
 		if len(preds) > 0 {

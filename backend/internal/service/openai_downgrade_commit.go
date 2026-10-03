@@ -133,52 +133,18 @@ func (s *openAIProbeStaging) SetSchedulable(_ context.Context, id int64, value b
 	if err := s.checkAccount(id); err != nil {
 		return err
 	}
-	if value && IsOpenAIBrowserOAuthAccount(s.account) {
-		qualifiedProxyID, qualified := OpenAIOAuthQualifiedProxyID(s.account.Extra)
-		if qualified {
-			if s.account.ProxyID == nil || qualifiedProxyID != *s.account.ProxyID {
-				// 换票主线（r17u）：合格戳与现桶不一致时，若本 mutation 的
-				// 结果链证明探针已在现桶打出完整健康针（qualification-pass
-				// 级：传输OK+200+答对+rt 达标），视为「运营迁桶后现桶复检
-				// 合格」——放行并把合格戳随迁到现桶（复用 CompleteQualification
-				// 落账路径），而非 409 卡死恢复（生产实证：2026-09-21 动态
-				// 桶 332 恢复针被 409 回滚，332 白打）。无健康证据仍拒。
-				requalified := false
-				for _, result := range s.mutation.Results {
-					if result.IsQualificationPass() &&
-						sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) {
-						requalified = true
-						break
-					}
-				}
-				if !requalified {
-					return ErrOpenAIOAuthProxyMismatch
-				}
+	if value && isOpenAIDowngradeQualificationCandidate(s.account) {
+		// Retire a legacy qualification marker only after a healthy probe on
+		// the current route, which may be direct.
+		for _, result := range s.mutation.Results {
+			if result.IsQualificationPass() && (sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) ||
+				(s.mutation.ProxyChanged && sameOpenAIProbeProxy(result.ProxyID, s.mutation.ProxyID))) {
 				s.mutation.CompleteQualification = true
-			}
-		} else {
-			if _, exists := s.account.Extra[OpenAIOAuthQualifiedProxyExtraKey]; exists {
-				return ErrOpenAIOAuthProxyBindingCorrupt
-			}
-			if s.account.ProxyID == nil || *s.account.ProxyID <= 0 {
-				return ErrOpenAIOAuthProxyRequired
+				break
 			}
 		}
-		if !qualified || isOpenAIDowngradeQualificationCandidate(s.account) {
-			qualificationPassed := false
-			for _, result := range s.mutation.Results {
-				// 结果的代理须匹配「实际探测出口」:老号=snapshot 代理,
-				// 新号同轮分桶=mutation 目标代理(mutation.ProxyID)。
-				if result.IsQualificationPass() && (sameOpenAIProbeProxy(result.ProxyID, s.account.ProxyID) ||
-					(s.mutation.ProxyChanged && sameOpenAIProbeProxy(result.ProxyID, s.mutation.ProxyID))) {
-					qualificationPassed = true
-					break
-				}
-			}
-			if !qualificationPassed {
-				return ErrOpenAIOAuthQualificationRequired
-			}
-			s.mutation.CompleteQualification = true
+		if !s.mutation.CompleteQualification {
+			return ErrOpenAIOAuthQualificationRequired
 		}
 	}
 	s.mutation.Schedulable = &value
@@ -237,14 +203,8 @@ func (s *openAIProbeStaging) SetOpenAIAccountProxy(_ context.Context, id int64, 
 	if err := s.checkAccount(id); err != nil {
 		return err
 	}
-	if IsOpenAIBrowserOAuthAccount(s.account) && !sameOpenAIProbeProxy(s.account.ProxyID, proxyID) {
-		// 从未绑定过代理、也没有合格戳的新号允许首次分桶（r17b 自动
-		// 分桶工作流）；一旦绑定过或合格过，代理即受保护不可再改。
-		_, qualified := OpenAIOAuthQualifiedProxyID(s.account.Extra)
-		if s.account.ProxyID != nil || qualified ||
-			s.account.Extra[OpenAIOAuthQualifiedProxyExtraKey] != nil {
-			return ErrOpenAIOAuthProxyBindingProtected
-		}
+	if proxyID != nil && *proxyID <= 0 {
+		return ErrOpenAIOAuthProxyInvalid
 	}
 	s.mutation.ProxyChanged = true
 	s.mutation.ProxyID = cloneOpenAIProbePointer(proxyID)

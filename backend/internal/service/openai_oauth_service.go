@@ -69,12 +69,6 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	if s.sessionStore == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "openai oauth persistent session store is not configured")
 	}
-	// P0-14: 强制代理——授权浏览器出口、服务端 code→token 交换出口、账号常驻
-	// 出口三者必须一致，否则 OpenAI 可凭 IP 不一致拒绝或标记账号。
-	if proxyID == nil || *proxyID <= 0 {
-		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_REQUIRED", "a proxy is required for OpenAI OAuth")
-	}
-
 	// Generate PKCE values
 	state, err := openai.GenerateState()
 	if err != nil {
@@ -112,10 +106,12 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		CodeVerifier:   codeVerifier,
 		ClientID:       clientID,
 		RedirectURI:    redirectURI,
-		ProxyID:        *proxyID,
 		ProxyRouteHash: openAIOAuthProxyRouteHash(proxyURL),
 		Platform:       normalizedPlatform,
 		CreatedAt:      time.Now(),
+	}
+	if proxyID != nil {
+		session.ProxyID = *proxyID
 	}
 	session.ID = sessionID
 	if err := s.sessionStore.Create(ctx, session); err != nil {

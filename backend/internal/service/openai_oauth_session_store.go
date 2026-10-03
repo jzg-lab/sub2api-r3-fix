@@ -48,8 +48,8 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Create(ctx context.Context, session
 	if session == nil || strings.TrimSpace(session.ID) == "" {
 		return fmt.Errorf("openai oauth session is required")
 	}
-	if session.ProxyID <= 0 {
-		return fmt.Errorf("openai oauth session proxy is required")
+	if session.ProxyID < 0 {
+		return fmt.Errorf("openai oauth session proxy is invalid")
 	}
 
 	_, err := s.pending.CreatePendingSession(ctx, CreatePendingAuthSessionInput{
@@ -110,7 +110,7 @@ func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSe
 	}
 
 	proxyID, err := strconv.ParseInt(strings.TrimSpace(oauthSessionStringValue(raw["proxy_id"])), 10, 64)
-	if err != nil || proxyID <= 0 {
+	if err != nil || proxyID < 0 {
 		return nil, fmt.Errorf("openai oauth session proxy is invalid")
 	}
 	createdAt, err := time.Parse(time.RFC3339Nano, oauthSessionStringValue(raw["created_at"]))

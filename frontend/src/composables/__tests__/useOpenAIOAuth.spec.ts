@@ -181,12 +181,37 @@ describe('useOpenAIOAuth.exchangeAuthCode', () => {
 })
 
 describe('useOpenAIOAuth session generation', () => {
-  it('requires a valid proxy before generating an authorization URL', async () => {
+  it.each([undefined, null, 0])('generates an authorization URL without a proxy: %s', async (proxyId) => {
     const oauth = useOpenAIOAuth()
-
-    expect(await oauth.generateAuthUrl(null)).toBe(false)
-    expect(adminAPI.accounts.generateAuthUrl).not.toHaveBeenCalled()
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://example.test/?state=state', session_id: 'direct-session'
+    })
+    expect(await oauth.generateAuthUrl(proxyId)).toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith('/admin/openai/generate-auth-url', {})
     expect(oauth.authorizationProxyId.value).toBeNull()
+  })
+
+  it.each([-1, 1.5])('rejects an invalid proxy assignment: %s', async (proxyId) => {
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(proxyId)).toBe(false)
+    expect(adminAPI.accounts.generateAuthUrl).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, 0])('exchanges a direct authorization with response proxy %s', async (proxy_id) => {
+    const oauth = useOpenAIOAuth()
+    await bindOAuthSession(oauth, 0)
+    vi.mocked(adminAPI.accounts.exchangeCode).mockResolvedValueOnce({ proxy_id, access_token: 'direct-token' })
+    expect((await oauth.exchangeAuthCode('code', 'session-id', 'state', null))?.access_token).toBe('direct-token')
+    expect(adminAPI.accounts.exchangeCode).toHaveBeenCalledWith('/admin/openai/exchange-code', {
+      session_id: 'session-id', code: 'code', state: 'state', proxy_id: 0
+    })
+  })
+
+  it('requires a new authorization when changing from direct to proxy', async () => {
+    const oauth = useOpenAIOAuth()
+    await bindOAuthSession(oauth, 0)
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(adminAPI.accounts.exchangeCode).not.toHaveBeenCalled()
   })
 
   it('keeps the newer authorization when responses arrive in reverse order', async () => {

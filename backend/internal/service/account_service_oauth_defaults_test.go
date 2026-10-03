@@ -67,6 +67,10 @@ func TestAccountServiceCreatePreservesAuthorizationRoute(t *testing.T) {
 						require.Equal(t, wantProxy, *repo.account.ProxyID)
 					}
 					require.Equal(t, concurrency, repo.account.Concurrency)
+					if mode != "api-key" {
+						require.True(t, repo.account.Schedulable)
+						require.NotContains(t, repo.account.Extra, OpenAIDowngradeQualificationExtraKey)
+					}
 					require.Equal(t, 3, req.Concurrency)
 					if assigned == 0 {
 						require.Nil(t, req.ProxyID)

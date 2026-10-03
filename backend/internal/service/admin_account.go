@@ -416,14 +416,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Status:      StatusActive,
 		Schedulable: true,
 	}
-	// 新 OpenAI OAuth 账号先进入质检流水线（需求3）：默认不可调度，
-	// 由降智探针完成 2 次质检合格后自动分桶上岗。
 	if input.Platform == PlatformOpenAI && input.Type == AccountTypeOAuth {
-		if account.Extra == nil {
-			account.Extra = make(map[string]any)
-		}
-		account.Schedulable = false
-		account.Extra[openAIDowngradeQualificationExtraKey] = true
+		delete(account.Extra, openAIDowngradeQualificationExtraKey)
+		delete(account.Extra, OpenAIOAuthQualifiedProxyExtraKey)
 	}
 	NormalizeOpenAICodexFingerprintExtraForCreate(account)
 	NormalizeTLSFingerprintExtraForCreate(account)

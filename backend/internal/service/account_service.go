@@ -258,14 +258,10 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Status:      StatusActive,
 		ExpiresAt:   req.ExpiresAt,
 	}
-	// 新 OpenAI OAuth 账号先进入质检流水线（需求3）：默认不可调度，
-	// 由降智探针完成 2 次质检合格后自动分桶上岗。
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
-		if account.Extra == nil {
-			account.Extra = make(map[string]any, 1)
-		}
-		account.Schedulable = false
-		account.Extra[openAIDowngradeQualificationExtraKey] = true
+		account.Schedulable = true
+		delete(account.Extra, openAIDowngradeQualificationExtraKey)
+		delete(account.Extra, OpenAIOAuthQualifiedProxyExtraKey)
 	}
 	if req.AutoPauseOnExpired != nil {
 		account.AutoPauseOnExpired = *req.AutoPauseOnExpired

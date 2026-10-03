@@ -2291,10 +2291,9 @@ func TestProbeIneligibleLiveAccountYieldsQueueHead(t *testing.T) {
 	}
 }
 
-func TestOpenAIDowngradeProbeQualificationArmPausesAccountBeforeBinding(t *testing.T) {
+func TestOpenAIDowngradeProbeDirectAccountDoesNotArmQualification(t *testing.T) {
 	now := time.Date(2026, 9, 15, 3, 0, 0, 0, time.UTC)
-	// 新上传的号：schedulable=true、未绑桶。r15b 的调度闸只挡「未绑桶」，
-	// 资格流程首轮就会绑桶——若不在 arm 时落下认证闸，绑上的瞬间号即进调度。
+	// Direct imports stay schedulable while normal health checks are queued.
 	account := &Account{
 		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: true, ProxyID: nil,
@@ -2309,13 +2308,11 @@ func TestOpenAIDowngradeProbeQualificationArmPausesAccountBeforeBinding(t *testi
 	}
 
 	require.NoError(t, runner.RunOnce(context.Background()))
-	require.Equal(t, []bool{false}, repo.schedulableCalls,
-		"arming qualification must pause the account before first binding")
-	require.False(t, account.Schedulable)
+	require.Empty(t, repo.schedulableCalls)
+	require.True(t, account.Schedulable)
 	require.NotNil(t, store.state)
-	require.Equal(t, "qualification", store.state.ProbeMode)
-	require.True(t, !store.state.NextProbeAt.After(now),
-		"qualification must be probed immediately, got %v", store.state.NextProbeAt)
+	require.NotEqual(t, "qualification", store.state.ProbeMode)
+	require.True(t, store.state.NextProbeAt.After(now))
 }
 
 func TestOpenAIDowngradeProbeQualificationUsesAcceleratedCadence(t *testing.T) {

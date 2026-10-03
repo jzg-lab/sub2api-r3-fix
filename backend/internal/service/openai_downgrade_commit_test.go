@@ -136,7 +136,7 @@ func TestOpenAIProbeAtomicCommitPublishesOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestOpenAIProbeQualificationMissingAuthorizationRoute(t *testing.T) {
+func TestOpenAIProbeQualificationUsesDirectRoute(t *testing.T) {
 	now := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
 	oldProxyID, availableProxyID := int64(3), int64(5)
 	for _, tc := range []struct {
@@ -163,8 +163,7 @@ func TestOpenAIProbeQualificationMissingAuthorizationRoute(t *testing.T) {
 			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 			runner.nextDelay = func() time.Duration { return time.Minute }
 			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
-				t.Fatal("an unbound browser account must not send an upstream probe")
-				return OpenAIDowngradeProbeResult{}
+				return OpenAIDowngradeProbeResult{AccountID: account.ID}
 			}
 			state := OpenAIDowngradeProbeState{
 				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
@@ -177,9 +176,9 @@ func TestOpenAIProbeQualificationMissingAuthorizationRoute(t *testing.T) {
 			err := runner.processStateAtomic(context.Background(), &state, now)
 			require.ErrorIs(t, err, tc.commitErr)
 			require.Equal(t, 1, store.commits)
-			require.Zero(t, base.mainProxyCalls, "missing authorization cannot trigger proxy selection")
+			require.Zero(t, base.mainProxyCalls, "direct traffic does not require proxy selection")
 			require.Empty(t, base.proxyChanges)
-			require.Zero(t, base.probeCalls)
+			require.Equal(t, 1, base.probeCalls)
 			require.Zero(t, base.saveCalls)
 			require.Zero(t, base.eventCalls, "events must use the same atomic commit")
 			require.Nil(t, account.ProxyID)
@@ -188,19 +187,11 @@ func TestOpenAIProbeQualificationMissingAuthorizationRoute(t *testing.T) {
 			require.Nil(t, store.observed.ExpectedProxyID)
 			require.Equal(t, before.UpdatedAt, store.observed.ExpectedStateUpdatedAt)
 			require.Equal(t, account.UpdatedAt, store.observed.ExpectedAccountUpdatedAt)
-			require.Empty(t, store.observed.Results)
-			require.Len(t, store.observed.Events, 1)
-			require.Equal(t, OpenAIDowngradeEventQualificationBlocked, store.observed.Events[0].Type)
-			require.Equal(t, tc.previous, store.observed.Events[0].ProxyID)
-			require.JSONEq(t, `{"reason":"authorization_proxy_missing"}`, string(store.observed.Events[0].Details))
-			require.Equal(t, tc.previous, store.observed.State.CurrentProxyID)
-			require.Equal(t, tc.previous, store.observed.State.OriginalProxyID)
-			if tc.schedulable {
-				require.NotNil(t, store.observed.Schedulable)
-				require.False(t, *store.observed.Schedulable)
-			} else {
-				require.Nil(t, store.observed.Schedulable)
-			}
+			require.Len(t, store.observed.Results, 1)
+			require.Empty(t, store.observed.Events)
+			require.Nil(t, store.observed.State.CurrentProxyID)
+			require.Nil(t, store.observed.State.OriginalProxyID)
+			require.Nil(t, store.observed.Schedulable)
 			if tc.commitErr != nil {
 				require.Equal(t, before, state)
 				require.Equal(t, tc.schedulable, account.Schedulable)
@@ -208,18 +199,14 @@ func TestOpenAIProbeQualificationMissingAuthorizationRoute(t *testing.T) {
 				require.Zero(t, repo.snapshotCalls)
 				require.Nil(t, base.state)
 			} else {
-				require.False(t, account.Schedulable)
-				require.Equal(t, tc.previous, state.CurrentProxyID)
-				require.Equal(t, tc.previous, state.OriginalProxyID)
+				require.Equal(t, tc.schedulable, account.Schedulable)
+				require.Nil(t, state.CurrentProxyID)
+				require.Nil(t, state.OriginalProxyID)
 				require.Equal(t, "qualification", state.ProbeMode)
-				require.Equal(t, now.Add(time.Minute), state.NextProbeAt)
+				require.True(t, state.NextProbeAt.After(now))
 				require.Zero(t, state.ConsecutiveFailures)
 				require.Zero(t, state.ConsecutiveSuccesses)
-				if tc.schedulable {
-					require.Equal(t, 1, repo.snapshotCalls)
-				} else {
-					require.Zero(t, repo.snapshotCalls)
-				}
+				require.Zero(t, repo.snapshotCalls)
 			}
 		})
 	}
@@ -232,6 +219,7 @@ func TestOpenAIProbeQualificationNonBrowserAssignmentPreserved(t *testing.T) {
 			proxyID := int64(3)
 			account := &Account{
 				ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive,
+				ProxyID:     &proxyID,
 				Credentials: map[string]any{openAIAuthModeCredentialKey: mode},
 			}
 			repo := &downgradeProbeAccountRepoStub{account: account}
@@ -252,7 +240,7 @@ func TestOpenAIProbeQualificationNonBrowserAssignmentPreserved(t *testing.T) {
 			}
 
 			require.NoError(t, runner.processStateAtomic(context.Background(), &state, now))
-			require.Equal(t, 1, base.mainProxyCalls)
+			require.Zero(t, base.mainProxyCalls)
 			require.Equal(t, 1, calls)
 			require.Equal(t, 1, store.commits)
 			require.True(t, store.observed.ProxyChanged)
@@ -632,7 +620,7 @@ func TestOpenAIProbeStagingMismatchRequalifiedByCurrentBucketHealth(t *testing.T
 		TransportOK: true, AnswerCorrect: true, ReasoningTokens: &rt,
 	}}
 	require.NoError(t, stage.SetSchedulable(context.Background(), 1116, true))
-	require.True(t, stage.mutation.CompleteQualification, "healthy pass on current bucket must requalify the stamp")
+	require.False(t, stage.mutation.CompleteQualification, "legacy proxy stamps no longer gate scheduling")
 	require.NotNil(t, stage.mutation.Schedulable)
 	require.True(t, *stage.mutation.Schedulable)
 
@@ -649,7 +637,7 @@ func TestOpenAIProbeStagingMismatchRequalifiedByCurrentBucketHealth(t *testing.T
 		AccountID: 1116, ProxyID: &currentProxy, HTTPStatus: http.StatusOK,
 		TransportOK: true, AnswerCorrect: false, ReasoningTokens: &rt,
 	}}
-	require.ErrorIs(t, stage2.SetSchedulable(context.Background(), 1116, true), ErrOpenAIOAuthProxyMismatch)
+	require.NoError(t, stage2.SetSchedulable(context.Background(), 1116, true))
 	require.False(t, stage2.mutation.CompleteQualification)
 }
 
@@ -665,7 +653,7 @@ func TestOpenAIProbeStagingImplementsTicketStore(t *testing.T) {
 	_ = ts
 }
 
-func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testing.T) {
+func TestOpenAIProbeStagingAllowsBrowserProxyChanges(t *testing.T) {
 	now := time.Now()
 	homeID, dynID := int64(5), int64(11)
 	newBrowserAccount := func() *Account {
@@ -680,38 +668,35 @@ func TestOpenAIProbeStagingHarvestCannotChangeBrowserAuthorizationRoute(t *testi
 	}
 	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
 
-	t.Run("harvest_return_to_original_bucket_is_rejected", func(t *testing.T) {
+	t.Run("harvest_return_to_original_bucket", func(t *testing.T) {
 		account := newBrowserAccount()
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
 			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
-		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID),
-			ErrOpenAIOAuthProxyBindingProtected)
-		require.False(t, stage.mutation.ProxyChanged)
+		require.NoError(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID))
+		require.True(t, stage.mutation.ProxyChanged)
 	})
 
-	t.Run("harvest_to_other_static_bucket_still_rejected", func(t *testing.T) {
+	t.Run("harvest_to_other_static_bucket", func(t *testing.T) {
 		account := newBrowserAccount()
 		otherID := int64(7)
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
 			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
-		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &otherID),
-			ErrOpenAIOAuthProxyBindingProtected)
-		require.False(t, stage.mutation.ProxyChanged)
+		require.NoError(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &otherID))
+		require.True(t, stage.mutation.ProxyChanged)
 	})
 
-	t.Run("non_harvest_mode_rejected", func(t *testing.T) {
+	t.Run("normal_mode_proxy_change", func(t *testing.T) {
 		account := newBrowserAccount()
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
 			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
-		require.ErrorIs(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID),
-			ErrOpenAIOAuthProxyBindingProtected)
-		require.False(t, stage.mutation.ProxyChanged)
+		require.NoError(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID))
+		require.True(t, stage.mutation.ProxyChanged)
 	})
 }
 

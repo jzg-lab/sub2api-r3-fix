@@ -585,10 +585,7 @@ func TestAccountUpdateDoesNotWriteRuntimeCooldowns(t *testing.T) {
 	}
 }
 
-func TestLockAndMergeAccountProbeExtraPreservesDowngradeManagedKeys(t *testing.T) {
-	// fork PreserveAccountProtection 移植回归（repo 层）：sol_fallback /
-	// qualification 是探针系统管理键，行锁下读行内现值——行内有则保留现值，
-	// 行内没有时丢弃陈旧表单值（不得凭旧快照复活）。2026-09-17。
+func TestLockAndMergeAccountProbeExtraRetiresBrowserQualification(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -615,7 +612,7 @@ func TestLockAndMergeAccountProbeExtraPreservesDowngradeManagedKeys(t *testing.T
 	require.NoError(t, err)
 	require.NotContains(t, got, service.OpenAIDowngradeSolFallbackExtraKey,
 		"stale form value must not resurrect a system-managed key absent in the row")
-	require.Equal(t, true, got[service.OpenAIDowngradeQualificationExtraKey],
-		"row-current qualification must survive the edit")
+	require.NotContains(t, got, service.OpenAIDowngradeQualificationExtraKey,
+		"legacy browser qualification must not be restored during an edit")
 	require.Equal(t, "edited", got["note"])
 }

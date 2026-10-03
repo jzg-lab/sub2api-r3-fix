@@ -545,30 +545,28 @@ func NewOpenAIDowngradeProbeRunner(
 		// 不走本函数，仍保持各自紧凑节奏。均匀随机也防止池级同步探测。
 		return time.Duration(float64(runner.interval) * (0.5 + 2*probeRandomFloat()))
 	}
-	// 遥测出口兜底：转发链路构造的账号对象可能只带 ProxyID 而未预载 Proxy
-	// 关联，遥测发送期经此函数补齐代理出口；仍解析不出则遥测丢弃，绝不直连
-	// （openai_codex_telemetry.go 的 send 硬闸）。
+	// Reload the route before sending queued telemetry, including direct traffic.
 	openAICodexTelemetryGlobal.bindProxyLookup(runner.resolveTelemetryProxyURL)
 	return runner
 }
 
-func (r *OpenAIDowngradeProbeRunner) resolveTelemetryProxyURL(ctx context.Context, queued *Account) string {
-	if queued == nil || queued.ProxyID == nil || r.accountRepo == nil || ctx.Err() != nil {
-		return ""
+func (r *OpenAIDowngradeProbeRunner) resolveTelemetryProxyURL(ctx context.Context, queued *Account) (string, error) {
+	if queued == nil || r.accountRepo == nil || ctx.Err() != nil {
+		return "", errOpenAIOAuthProxyUnavailable
 	}
 	current, err := r.accountRepo.GetByID(ctx, queued.ID)
 	if err != nil || current == nil || current.ID != queued.ID ||
-		current.Status != StatusActive || current.ProxyID == nil || *current.ProxyID != *queued.ProxyID {
-		return ""
+		current.Status != StatusActive || !sameOpenAIProbeProxy(current.ProxyID, queued.ProxyID) {
+		return "", errOpenAIOAuthProxyUnavailable
 	}
 	route, err := resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, current.ProxyID)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	if queued.Proxy != nil && queued.Proxy.URL() != route {
-		return ""
+	if queued.ProxyID != nil && queued.Proxy != nil && queued.Proxy.URL() != route {
+		return "", errOpenAIOAuthProxyInvalid
 	}
-	return route
+	return route, nil
 }
 
 func (r *OpenAIDowngradeProbeRunner) Start() {
@@ -763,8 +761,7 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 				return ctx.Err()
 			}
 		}
-		qualification := isOpenAIDowngradeQualificationCandidate(&account) ||
-			account.ProxyID == nil
+		qualification := isOpenAIDowngradeQualificationCandidate(&account)
 		if !account.Schedulable && !qualification {
 			continue
 		}
@@ -976,26 +973,6 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	if state.ProbeMode == "qualification" && account.ProxyID == nil &&
-		state.OriginalProxyID != nil &&
-		IsOpenAIBrowserOAuthAccount(account) {
-		// A browser OAuth account that was already bound must retain its
-		// authorization route. A genuinely fresh import has no original
-		// binding and continues into automatic bucket assignment below.
-		if account.Schedulable {
-			if err := r.accountRepo.SetSchedulable(ctx, account.ID, false); err != nil {
-				return err
-			}
-		}
-		state.ConsecutiveFailures, state.ConsecutiveSuccesses = 0, 0
-		state.NextProbeAt = now.Add(r.nextDelay())
-		state.UpdatedAt = now
-		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
-			OpenAIDowngradeEventQualificationBlocked, map[string]any{"reason": "authorization_proxy_missing"}); err != nil {
-			return err
-		}
-		return r.store.SaveOpenAIDowngradeState(ctx, state)
-	}
 	if !sameOpenAIProbeProxy(state.CurrentProxyID, account.ProxyID) {
 		// A manual binding change invalidates counters from the old account/IP pair.
 		state.CurrentProxyID = account.ProxyID
@@ -1005,31 +982,6 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	}
 	if account.Proxy != nil && (account.ProxyID == nil || account.Proxy.ID != *account.ProxyID) {
 		account.Proxy = nil
-	}
-	if state.ProbeMode == "qualification" && account.ProxyID == nil {
-		mainProxyID, findErr := r.store.FindOpenAIDowngradeMainProxy(ctx, account.ID)
-		if findErr != nil {
-			return findErr
-		}
-		if mainProxyID == nil {
-			state.NextProbeAt = now.Add(r.nextDelay())
-			state.UpdatedAt = now
-			if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
-				OpenAIDowngradeEventQualificationBlocked, map[string]any{"reason": "no_available_main_bucket"}); err != nil {
-				return err
-			}
-			return r.store.SaveOpenAIDowngradeState(ctx, state)
-		}
-		if err := r.store.SetOpenAIAccountProxy(ctx, state.AccountID, mainProxyID); err != nil {
-			return err
-		}
-		account.ProxyID = mainProxyID
-		state.CurrentProxyID = mainProxyID
-		state.OriginalProxyID = mainProxyID
-		state.UpdatedAt = now
-		if err := r.store.SaveOpenAIDowngradeState(ctx, state); err != nil {
-			return err
-		}
 	}
 	if state.ProbeMode == "sol_fallback" && state.State != OpenAIDowngradeStateOnDuty {
 		return r.startSolFallback(ctx, account, state, now)
@@ -1274,11 +1226,11 @@ func (r *OpenAIDowngradeProbeRunner) beginReprobe(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	if account == nil || account.ProxyID == nil || *account.ProxyID <= 0 ||
+	if account == nil || (account.ProxyID != nil && *account.ProxyID <= 0) ||
 		!sameOpenAIProbeProxy(account.ProxyID, state.CurrentProxyID) {
 		return errOpenAIOAuthProxyUnavailable
 	}
-	// Recovery is not authorization to change a browser login's egress.
+	// Reprobe the current route, including direct traffic.
 	state.State = OpenAIDowngradeStateReprobe
 	state.ProbeMode = "normal"
 	state.ConsecutiveFailures = 0
@@ -1840,7 +1792,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 	var bucketProxy *Proxy
 	if r.proxyRepo != nil {
 		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
-		if err == nil && r.proxyRepo != nil {
+		if err == nil && account.ProxyID != nil {
 			bucketProxy, _ = r.proxyRepo.GetByID(ctx, *account.ProxyID)
 		}
 	} else {
@@ -1848,10 +1800,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		bucketProxy = account.Proxy
 	}
 	if err != nil {
-		// 出口硬闸：解析不出桶代理就不发探针。直连会把家用 IP 暴露给
-		// chatgpt.com，且裸 Go TLS 指纹与账号流量冲突；无结论（不奖不罚）
-		// 等下一轮资格流程绑桶后再探。
-		result.ErrorMessage = "probe requires account proxy bucket"
+		result.ErrorMessage = "account proxy unavailable"
 		result.Latency = time.Since(started)
 		return result
 	}

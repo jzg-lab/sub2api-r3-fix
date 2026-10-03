@@ -148,15 +148,6 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	if err != nil {
 		return nil, err
 	}
-	if err := validateOpenAIOAuthProtectedProxyUpdate(
-		ctx,
-		client,
-		proxyIn.ID,
-		currentIdentity != proxyProbeIdentityFromService(proxyIn),
-		proxyIn.ExpiresAt,
-	); err != nil {
-		return nil, err
-	}
 	builder := client.Proxy.UpdateOneID(proxyIn.ID).
 		SetName(proxyIn.Name).
 		SetProtocol(proxyIn.Protocol).
@@ -304,9 +295,6 @@ func (r *proxyRepository) Delete(ctx context.Context, id int64) error {
 		if errors.Is(err, service.ErrProxyNotFound) {
 			return nil
 		}
-		return err
-	}
-	if err := validateOpenAIOAuthProtectedProxyDelete(ctx, client, id); err != nil {
 		return err
 	}
 	if _, err := client.Proxy.Delete().Where(proxy.IDEQ(id)).Exec(ctx); err != nil {

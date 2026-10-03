@@ -24,9 +24,9 @@ func TestResolveOpenAIOAuthProxyURLRejectsUnusableAssignment(t *testing.T) {
 		mutate  func(*Proxy)
 		want    error
 	}{
-		{name: "unassigned", want: errOpenAIOAuthProxyRequired},
-		{name: "zero", id: &zero, want: errOpenAIOAuthProxyRequired},
-		{name: "negative", id: &negative, want: errOpenAIOAuthProxyRequired},
+		{name: "unassigned"},
+		{name: "zero", id: &zero},
+		{name: "negative", id: &negative, want: errOpenAIOAuthProxyInvalid},
 		{name: "deleted", id: &id, missing: true, want: errOpenAIOAuthProxyUnavailable},
 		{name: "lookup failure", id: &id, lookup: errors.New("private repository detail"), want: errOpenAIOAuthProxyUnavailable},
 		{name: "wrong row", id: &id, mutate: func(p *Proxy) { p.ID++ }, want: errOpenAIOAuthProxyUnavailable},
@@ -107,8 +107,8 @@ func TestValidateOpenAIOAuthProxyURLRejectsUnsafeRoutes(t *testing.T) {
 		raw  string
 		want error
 	}{
-		{"empty", "", errOpenAIOAuthProxyRequired},
-		{"blank", " \t", errOpenAIOAuthProxyRequired},
+		{"empty", "", nil},
+		{"blank", " \t", errOpenAIOAuthProxyInvalid},
 		{"relative", "localhost:8080", errOpenAIOAuthProxyInvalid},
 		{"unsupported", "direct://localhost:8080", errOpenAIOAuthProxyInvalid},
 		{"missing host", "http://:8080", errOpenAIOAuthProxyInvalid},
