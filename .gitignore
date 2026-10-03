@@ -97,6 +97,8 @@ __pycache__/
 dist/
 build/
 release/
+!deploy/codex-lb-cookie-pin/tools/release/
+!deploy/codex-lb-cookie-pin/tools/release/*.mjs
 
 # This directory contains Vite build source, not build output.
 !frontend/build/

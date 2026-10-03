@@ -67,14 +67,32 @@ build.sh               # 单测 → 5 个系统/架构构建 → 打包 → 冒�
 ## 构建
 
 ```sh
-./build.sh                                     # 未签名包（宿主需 allow_unsigned）
-S2PLUGIN_KEY=~/.s2plugin-keys/cookiepin.ed25519 ./build.sh   # 签名包
-go run ./tools/keygen -out ~/.s2plugin-keys/cookiepin.ed25519  # 首次生成密钥
+S2PLUGIN_KEY=/existing/publisher.key ./build.sh --release # 默认要求现有发布者签名
+./build.sh --allow-unsigned                     # 仅限隔离的本地开发
 ```
+
+两个 GoReleaser 配置均强制使用 `--release`。缺失、不可读或格式错误的签名密钥
+会在构建前终止，不覆盖已有包。`S2PLUGIN_KEY_ID` 可指定宿主已经信任的发布者 ID；
+省略时沿用公钥前 16 位十六进制 ID。不要为发布生成新信任根或开启生产
+`allow_unsigned`。部署前必须用目标宿主的原有信任配置验证签名、文件哈希和版本兼容性。
 
 产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.7.s2plugin`。
 包含 macOS amd64/arm64、Linux amd64/arm64、Windows amd64 的 runtimes 和 UI。
 不要通过删除平台绕过交付矩阵；宿主上传限制须在安装前核验。
+
+发布验收必须使用目标宿主的现有信任配置运行
+`TestRescuePluginRuntimeReauthorizationIsolation`。传入包路径
+`SUB2API_TEST_RESCUE_PLUGIN_PACKAGE`、配置路径
+`SUB2API_TEST_RESCUE_TRUST_CONFIG`、准确宿主版本
+`SUB2API_TEST_RESCUE_HOST_VERSION`，可用
+`SUB2API_TEST_RESCUE_PLUGIN_RECEIPT` 保存非敏感验收摘要。
+验收在临时目录使用真实安装器、RPC 和本地模拟上游，不安装到生产。
+
+升级前完成包与回滚包校验，再停用插件。上传被明确拒绝且旧包未改变时，
+直接重新启用原插件，不重复上传旧包。网络超时代表结果未知，必须先确认
+原宿主操作终止并核对安装记录，禁止与在途安装并发回滚。
+状态恢复逻辑的回归命令为
+`node --test tools/release/replace-plugin.test.mjs`。
 
 ## 测试（不装任何 sub2api）
 

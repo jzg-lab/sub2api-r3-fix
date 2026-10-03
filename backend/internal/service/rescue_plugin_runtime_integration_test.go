@@ -2,17 +2,22 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,10 +35,32 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	host := PluginHostInfo{Version: "0.3.0+r17bd-reauth-candidate", BuildType: "test"}
-	cfg := testPluginConfig(t.TempDir(), true)
+	hostVersion := os.Getenv("SUB2API_TEST_RESCUE_HOST_VERSION")
+	require.NotEmpty(t, hostVersion, "use the exact candidate host version")
+	host := PluginHostInfo{Version: hostVersion, BuildType: "test"}
+	cfg := testPluginConfig(t.TempDir(), false)
+	cfg.Plugins.MaxUploadBytes = 128 * 1024 * 1024
+	cfg.Plugins.MaxUncompressedBytes = 256 * 1024 * 1024
+	trustConfig := os.Getenv("SUB2API_TEST_RESCUE_TRUST_CONFIG")
+	require.NotEmpty(t, trustConfig, "a release package must be tested with the target host trust configuration")
+	loader := viper.New()
+	loader.SetConfigFile(trustConfig)
+	require.NoError(t, loader.ReadInConfig())
+	// Copy only publisher trust and archive limits; never use the live data root.
+	require.False(t, loader.GetBool("plugins.allow_unsigned"), "release verification must reject unsigned packages")
+	cfg.Plugins.TrustedPublishers = loader.GetStringMapString("plugins.trusted_publishers")
+	for key, target := range map[string]*int64{
+		"plugins.max_upload_bytes":       &cfg.Plugins.MaxUploadBytes,
+		"plugins.max_uncompressed_bytes": &cfg.Plugins.MaxUncompressedBytes,
+	} {
+		if loader.IsSet(key) {
+			*target = loader.GetInt64(key)
+		}
+	}
 	installation, err := NewPluginPackageInstaller(cfg, host).Install(ctx, packageFile, nil)
 	require.NoError(t, err)
+	require.Equal(t, PluginSignatureTrusted, installation.SignatureStatus)
+	require.True(t, installation.Compatibility.Compatible)
 	require.Equal(t, "lyunlong.codex.lb-cookie-pin", installation.PluginKey)
 	require.Equal(t, "0.3.7", installation.Version)
 	installation.ID = 7
@@ -211,4 +238,47 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 0, legacy.doCalls, "no direct/legacy fallback while plugin drains")
 	assert.Zero(t, runtime.inFlight.Load())
+
+	// Bind native acceptance to the exact bytes and trust policy, not a fixed
+	// package hash or a synthetic installer with allow_unsigned enabled.
+	if receiptPath := os.Getenv("SUB2API_TEST_RESCUE_PLUGIN_RECEIPT"); receiptPath != "" {
+		require.False(t, t.Failed(), "never publish a passing receipt after an assertion failed")
+		commit, commitErr := exec.Command("git", "rev-parse", "HEAD").Output()
+		require.NoError(t, commitErr)
+		require.NoError(t, exec.Command("git", "diff", "--quiet", "HEAD", "--").Run(),
+			"native release acceptance requires committed source")
+		source, readErr := os.ReadFile("rescue_plugin_runtime_integration_test.go")
+		require.NoError(t, readErr)
+		sum := func(data []byte) string {
+			value := sha256.Sum256(data)
+			return hex.EncodeToString(value[:])
+		}
+		policy, marshalErr := json.Marshal(cfg.Plugins.TrustedPublishers)
+		require.NoError(t, marshalErr)
+		trustSource, readErr := os.ReadFile(trustConfig)
+		require.NoError(t, readErr)
+		receipt, marshalErr := json.MarshalIndent(map[string]any{
+			"schema":                    "sub2api-rescue-native-acceptance.v1",
+			"status":                    "passed",
+			"recorded_at":               time.Now().UTC().Format(time.RFC3339),
+			"plugin_sha256":             sum(installation.ArtifactData),
+			"plugin_key":                installation.PluginKey,
+			"plugin_version":            installation.Version,
+			"host_version":              host.Version,
+			"host_commit":               strings.TrimSpace(string(commit)),
+			"signature_status":          installation.SignatureStatus,
+			"compatible":                installation.Compatibility.Compatible,
+			"allow_unsigned":            cfg.Plugins.AllowUnsigned,
+			"max_upload_bytes":          cfg.Plugins.MaxUploadBytes,
+			"max_uncompressed_bytes":    cfg.Plugins.MaxUncompressedBytes,
+			"trusted_publishers_sha256": sum(policy),
+			"trust_config_sha256":       sum(trustSource),
+			"test_source_sha256":        sum(source),
+			"checks": []string{"native_installer", "rpc", "gateway", "credential_rotation",
+				"stale_response", "account_isolation", "401", "reroll", "proxy_fail_closed", "drain"},
+			"production_adoption": false,
+		}, "", "  ")
+		require.NoError(t, marshalErr)
+		require.NoError(t, os.WriteFile(receiptPath, append(receipt, '\n'), 0o600))
+	}
 }

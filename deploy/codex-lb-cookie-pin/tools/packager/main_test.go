@@ -2,7 +2,10 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"io"
 	"os"
@@ -10,6 +13,62 @@ import (
 	"runtime"
 	"testing"
 )
+
+func TestSigningKeyRequiresExplicitPolicy(t *testing.T) {
+	if _, err := signingKey("", false); err == nil {
+		t.Fatal("default packaging accepted a missing signing key")
+	}
+	if key, err := signingKey("", true); err != nil || key != nil {
+		t.Fatal("explicit unsigned development mode failed")
+	}
+	if _, err := signingKey("not-read", true); err == nil {
+		t.Fatal("conflicting signing modes were accepted")
+	}
+	if _, err := signingKey(filepath.Join(t.TempDir(), "missing"), false); err == nil {
+		t.Fatal("missing signing key was accepted")
+	}
+}
+
+func TestLoadSigningKeyFormatsAndIntegrity(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x17}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	corrupt := append([]byte(nil), privateKey...)
+	corrupt[len(corrupt)-1] ^= 1
+	for _, tc := range []struct {
+		name  string
+		data  []byte
+		valid bool
+	}{
+		{"seed", seed, true},
+		{"private", privateKey, true},
+		{"base64_seed", []byte(base64.StdEncoding.EncodeToString(seed) + "\n"), true},
+		{"base64_private", []byte(base64.StdEncoding.EncodeToString(privateKey)), true},
+		{"mismatched_public_half", corrupt, false},
+		{"base64_mismatched_public_half", []byte(base64.StdEncoding.EncodeToString(corrupt)), false},
+		{"short", []byte("invalid"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyFile := filepath.Join(t.TempDir(), "fixture")
+			if err := os.WriteFile(keyFile, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			key, err := signingKey(keyFile, false)
+			if !tc.valid {
+				if err == nil {
+					t.Fatal("invalid key was accepted")
+				}
+				return
+			}
+			if err != nil || !bytes.Equal(key, privateKey) {
+				t.Fatalf("valid key did not round trip: %v", err)
+			}
+			message := []byte("manifest fixture")
+			if !ed25519.Verify(key.Public().(ed25519.PublicKey), message, ed25519.Sign(key, message)) {
+				t.Fatal("accepted signing key cannot produce verifiable signatures")
+			}
+		})
+	}
+}
 
 func TestCollectRuntimes(t *testing.T) {
 	root := t.TempDir()

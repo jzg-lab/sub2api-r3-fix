@@ -7,11 +7,12 @@
 //	go run ./tools/packager -out dist/lyunlong-codex-lb-cookie-pin-0.1.0.s2plugin \
 //	    -runtimes dist/runtimes -ui ui [-key ~/.s2plugin-keys/cookiepin.ed25519]
 //
-// -key 省略时产出未签名包（宿主需 allow_unsigned，仅限本地开发）。
+// 未签名的本地开发包必须显式传入 -allow-unsigned，发布默认要求签名。
 package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -53,10 +54,22 @@ func main() {
 		runtimesDir    = flag.String("runtimes", "dist/runtimes", "运行时目录（runtimes/<goos>-<goarch>/binary）")
 		uiDir          = flag.String("ui", "ui", "UI 目录")
 		outPath        = flag.String("out", "", "输出 .s2plugin 路径（默认 dist/<id>-<version>.s2plugin）")
-		keyPath        = flag.String("key", "", "Ed25519 私钥文件（raw 64B / seed 32B / base64 文本）。省略则不签名")
+		keyPath        = flag.String("key", "", "现有 Ed25519 私钥文件（raw 64B / seed 32B / base64 文本）")
 		keyID          = flag.String("key-id", "", "signature.json 的 key_id，默认公钥前 16 hex")
+		allowUnsigned  = flag.Bool("allow-unsigned", false, "显式允许未签名的本地开发包")
+		checkKey       = flag.Bool("check-key", false, "仅检查签名配置，不构建或输出插件包")
 	)
 	flag.Parse()
+
+	priv, err := signingKey(*keyPath, *allowUnsigned)
+	fatalIf(err, "检查签名配置")
+	if *checkKey {
+		if len(priv) == 0 {
+			fatal("-check-key 需要现有签名密钥", nil)
+		}
+		fmt.Println("签名密钥格式检查通过")
+		return
+	}
 
 	src, err := os.ReadFile(*sourceManifest)
 	fatalIf(err, "读清单源")
@@ -115,9 +128,7 @@ func main() {
 
 	// 签名对象 = manifest.json 的精确原始字节。
 	extra := ""
-	if *keyPath != "" {
-		priv, err := loadKey(*keyPath)
-		fatalIf(err, "读私钥")
+	if len(priv) != 0 {
 		pub := priv.Public().(ed25519.PublicKey)
 		id := *keyID
 		if id == "" {
@@ -136,6 +147,19 @@ func main() {
 		extra = "（未签名：宿主需 allow_unsigned，仅限本地开发）"
 	}
 	fmt.Printf("打包完成: %s\n  runtimes: %s\n  文件 %d 个 %s\n", *outPath, strings.Join(platforms, ", "), len(entries), extra)
+}
+
+func signingKey(path string, allowUnsigned bool) (ed25519.PrivateKey, error) {
+	if path == "" {
+		if allowUnsigned {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("发布必须提供 -key；未签名本地开发包需显式使用 -allow-unsigned")
+	}
+	if allowUnsigned {
+		return nil, fmt.Errorf("-key 与 -allow-unsigned 不能同时使用")
+	}
+	return loadKey(path)
 }
 
 func collectRuntimes(root string) ([]fileEntry, map[string]map[string]any, error) {
@@ -206,6 +230,9 @@ func decodeKey(raw []byte) ed25519.PrivateKey {
 	case ed25519.SeedSize:
 		return ed25519.NewKeyFromSeed(raw)
 	case ed25519.PrivateKeySize:
+		if !bytes.Equal(ed25519.NewKeyFromSeed(raw[:ed25519.SeedSize]), raw) {
+			return nil
+		}
 		return ed25519.PrivateKey(raw)
 	default:
 		return nil

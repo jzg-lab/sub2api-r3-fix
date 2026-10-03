@@ -64,8 +64,8 @@ func validateRescueRelease(data []byte, version string) error {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return err
 	}
-	if !slices.Contains(config.Before.Hooks, "sh deploy/codex-lb-cookie-pin/build.sh") {
-		return fmt.Errorf("release must build and validate the coupled rescue plugin")
+	if !slices.Contains(config.Before.Hooks, "sh deploy/codex-lb-cookie-pin/build.sh --release") {
+		return fmt.Errorf("release must build and validate the signed coupled rescue plugin")
 	}
 	if len(config.Archives) == 0 {
 		return fmt.Errorf("release has no binary archives")
@@ -139,7 +139,7 @@ func TestReleaseIncludesCurrentRescuePackage(t *testing.T) {
 }
 
 func TestReleaseRejectsIncompleteRescueBundle(t *testing.T) {
-	hook := "before:\n  hooks:\n    - sh deploy/codex-lb-cookie-pin/build.sh\n"
+	hook := "before:\n  hooks:\n    - sh deploy/codex-lb-cookie-pin/build.sh --release\n"
 	entry := func(version, destination string) string {
 		return "archives:\n  - files:\n      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-" +
 			version + ".s2plugin\n        dst: " + destination + "\n        strip_parent: true\n"
@@ -149,6 +149,8 @@ func TestReleaseRejectsIncompleteRescueBundle(t *testing.T) {
 		data string
 	}{
 		{"missing_build_hook", entry("0.3.7", "plugins")},
+		{"unsigned_build_hook", "before:\n  hooks:\n    - sh deploy/codex-lb-cookie-pin/build.sh --allow-unsigned\n" + entry("0.3.7", "plugins")},
+		{"implicit_release_hook", "before:\n  hooks:\n    - sh deploy/codex-lb-cookie-pin/build.sh\n" + entry("0.3.7", "plugins")},
 		{"missing_archives", hook},
 		{"missing_package", hook + "archives:\n  - files:\n      - README.md\n"},
 		{"stale_package", hook + entry("0.3.6", "plugins")},

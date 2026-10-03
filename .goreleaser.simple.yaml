@@ -5,7 +5,7 @@ project_name: sub2api
 
 before:
   hooks:
-    - sh deploy/codex-lb-cookie-pin/build.sh
+    - sh deploy/codex-lb-cookie-pin/build.sh --release
 
 builds:
   - id: sub2api
