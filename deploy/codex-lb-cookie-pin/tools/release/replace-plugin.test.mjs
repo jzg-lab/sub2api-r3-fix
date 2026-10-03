@@ -53,8 +53,10 @@ function fixture(overrides = {}) {
   };
   const calls = [];
   const records = [];
+  const ownership = { generation: 'release-1', holder: 'writer-1' };
   const options = {
     previous, candidate,
+    fence: { ...ownership, assertCurrent: async () => ({ ...ownership }) },
     preflight: async () => { calls.push('preflight'); },
     inspect: async () => structuredClone(state),
     disable: async () => {
@@ -78,7 +80,116 @@ function fixture(overrides = {}) {
     record: value => records.push(value),
     ...overrides
   };
-  return { options, calls, records, state: () => state };
+  return { options, calls, records, ownership, state: () => state };
+}
+
+for (const fence of [undefined, {}, { generation: '', holder: 'writer-1' },
+  { generation: 'release-1', holder: 'writer-1' }]) {
+  test(`missing deployment fence fails before any operation: ${JSON.stringify(fence)}`, async () => {
+    const f = fixture({ fence });
+    await assert.rejects(replacePlugin(f.options), /fence is required/);
+    assert.deepEqual(f.calls, []);
+  });
+}
+
+for (const field of ['generation', 'holder']) {
+  test(`stale ${field} fails even when artifact and configuration hashes match`, async () => {
+    const f = fixture();
+    f.ownership[field] = 'superseded';
+    await assert.rejects(replacePlugin(f.options), error => error.code === 'DEPLOYMENT_FENCE_LOST');
+    assert.deepEqual(f.calls, []);
+  });
+}
+
+test('every native callback receives the immutable generation and holder binding', async () => {
+  const f = fixture();
+  for (const name of ['preflight', 'inspect', 'disable', 'upload', 'enable']) {
+    const original = f.options[name];
+    f.options[name] = async (...args) => {
+      const binding = args.at(-1);
+      assert.deepEqual(binding, f.ownership);
+      assert.equal(Object.isFrozen(binding), true);
+      return original(...args);
+    };
+  }
+  await replacePlugin(f.options);
+});
+
+for (const action of ['disable', 'upload', 'enable']) {
+  test(`revocation during ${action} stops subsequent writes and automatic recovery`, async () => {
+    const f = fixture();
+    const original = f.options[action];
+    f.options[action] = async (...args) => {
+      const result = await original(...args);
+      f.ownership.generation = 'release-2';
+      return result;
+    };
+    await assert.rejects(replacePlugin(f.options), error =>
+      error.code === 'DEPLOYMENT_FENCE_LOST' && error.recovery === 'reconcile_after_fence_loss');
+    const expected = ['preflight', 'disable', 'upload:0.3.7', 'enable'];
+    assert.deepEqual(f.calls, expected.slice(0, { disable: 2, upload: 3, enable: 4 }[action]));
+    assert.equal(f.records[0].generation, 'release-1');
+    assert.equal(f.records[0].holder, 'writer-1');
+  });
+}
+
+test('revocation after a rejected upload cannot authorize recovery', async () => {
+  const f = fixture();
+  const failure = new Error('upload rejected');
+  f.options.upload = async () => {
+    f.ownership.holder = 'writer-2';
+    throw failure;
+  };
+  await assert.rejects(replacePlugin(f.options), error => error === failure &&
+    error.recovery === 'reconcile_after_fence_loss' &&
+    error.recoveryError.code === 'DEPLOYMENT_FENCE_LOST');
+  assert.deepEqual(f.calls, ['preflight', 'disable']);
+});
+
+test('revocation during the post-disable read prevents upload and recovery', async () => {
+  const f = fixture();
+  const inspect = f.options.inspect;
+  f.options.inspect = async (...args) => {
+    const state = await inspect(...args);
+    if (state.state === 'disabled') f.ownership.generation = 'release-2';
+    return state;
+  };
+  await assert.rejects(replacePlugin(f.options), error =>
+    error.code === 'DEPLOYMENT_FENCE_LOST' && error.recovery === 'reconcile_after_fence_loss');
+  assert.deepEqual(f.calls, ['preflight', 'disable']);
+});
+
+test('unavailable ownership authority fails closed before preflight', async () => {
+  const f = fixture();
+  f.options.fence.assertCurrent = async () => { throw new Error('lease unavailable'); };
+  await assert.rejects(replacePlugin(f.options), error =>
+    error.code === 'DEPLOYMENT_FENCE_LOST' && error.cause.message === 'lease unavailable');
+  assert.deepEqual(f.calls, []);
+});
+
+for (const action of ['disable', 'upload', 'enable']) {
+  test(`revocation during recovery ${action} prevents any following operation`, async () => {
+    const f = fixture();
+    const originalEnable = f.options.enable;
+    f.options.enable = async (...args) => {
+      await originalEnable(...args);
+      if (f.state().version === '0.3.7') f.state().runtime_healthy = false;
+    };
+    const original = f.options[action];
+    f.options[action] = async (...args) => {
+      const recovering = action === 'disable'
+        ? f.state().version === '0.3.7'
+        : action === 'upload' ? args[0].version === '0.3.6' : f.state().version === '0.3.6';
+      const result = await original(...args);
+      if (recovering) f.ownership.holder = 'writer-2';
+      return result;
+    };
+    await assert.rejects(replacePlugin(f.options), error =>
+      /acceptance failed/.test(error.message) && error.recovery === 'reconcile_after_fence_loss');
+    const expected = ['preflight', 'disable', 'upload:0.3.7', 'enable',
+      'disable', 'upload:0.3.6', 'enable'];
+    assert.deepEqual(f.calls, expected.slice(0, { disable: 5, upload: 6, enable: 7 }[action]));
+  });
 }
 
 test('preflight completes before disable, install and enable', async () => {

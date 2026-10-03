@@ -32,11 +32,37 @@ export async function readNativeResponse(response, route) {
 // Native installation requires a disabled plugin. Validate both artifacts
 // before stopping it, and reconcile an error before choosing a recovery write.
 export async function replacePlugin({
-  inspect, disable, upload, enable, preflight, candidate, previous, record = () => {}
+  inspect, disable, upload, enable, preflight, candidate, previous, fence, record = () => {}
 }) {
+  if (!fence || typeof fence.generation !== 'string' || !fence.generation.trim() ||
+      typeof fence.holder !== 'string' || !fence.holder.trim() ||
+      typeof fence.assertCurrent !== 'function') {
+    throw new Error('An active deployment generation and holder fence is required');
+  }
+  const binding = Object.freeze({ generation: fence.generation, holder: fence.holder });
+  const assertCurrent = fence.assertCurrent.bind(fence);
+  const checkFence = async () => {
+    try {
+      const current = await assertCurrent(binding);
+      if (current?.generation !== binding.generation || current?.holder !== binding.holder) {
+        throw new Error('Deployment generation or holder changed');
+      }
+    } catch (cause) {
+      throw Object.assign(new Error('Deployment ownership could not be verified', { cause }),
+        { code: 'DEPLOYMENT_FENCE_LOST' });
+    }
+  };
+  // The caller must hold its native mutex until all in-flight work terminates.
+  // Checks bracket every await so a revoked writer cannot begin another step.
+  const step = async (action, ...args) => {
+    await checkFence();
+    const result = await action(...args, binding);
+    await checkFence();
+    return result;
+  };
   const recordFailure = async (error, failure) => {
     try {
-      await record(failure);
+      await record({ ...failure, ...binding });
     } catch (recordError) {
       error.recordError = recordError;
     }
@@ -55,21 +81,21 @@ export async function replacePlugin({
   };
 
   // A rejected preflight cannot enter recovery or touch the running plugin.
-  await preflight(candidate, previous);
-  requireState(await inspect(), previous, healthy, 'Plugin baseline changed');
+  await step(preflight, candidate, previous);
+  requireState(await step(inspect), previous, healthy, 'Plugin baseline changed');
   let stage = 'disable';
   try {
-    await disable(previous.id);
-    requireState(await inspect(), previous, disabled, 'Plugin did not disable cleanly');
+    await step(disable, previous.id);
+    requireState(await step(inspect), previous, disabled, 'Plugin did not disable cleanly');
     stage = 'upload';
-    const installed = await upload(candidate);
+    const installed = await step(upload, candidate);
     if (installed.id !== previous.id || installed.version !== candidate.version) {
       throw new Error('Installed plugin identity/version mismatch');
     }
-    requireState(await inspect(), candidate, disabled, 'Candidate installation readback mismatch');
+    requireState(await step(inspect), candidate, disabled, 'Candidate installation readback mismatch');
     stage = 'enable';
-    await enable(previous.id);
-    const result = await inspect();
+    await step(enable, previous.id);
+    const result = await step(inspect);
     requireState(result, candidate, healthy, 'Candidate runtime acceptance failed');
     return result;
   } catch (error) {
@@ -86,36 +112,42 @@ export async function replacePlugin({
       await recordFailure(error, { ...failure, recovery: error.recovery });
       throw error;
     }
+    if (error.code === 'DEPLOYMENT_FENCE_LOST') {
+      error.recovery = 'reconcile_after_fence_loss';
+      await recordFailure(error, { ...failure, recovery: error.recovery });
+      throw error;
+    }
     try {
-      let current = await inspect();
+      let current = await step(inspect);
       if (identity(current, previous)) {
         if (!healthy(current)) {
           if (['enabled', 'error', 'incompatible'].includes(current.state)) {
-            await disable(previous.id);
-            current = await inspect();
+            await step(disable, previous.id);
+            current = await step(inspect);
           }
           requireState(current, previous, disabled, 'Previous plugin is not safely resumable');
-          await enable(previous.id);
-          current = await inspect();
+          await step(enable, previous.id);
+          current = await step(inspect);
           requireState(current, previous, healthy, 'Previous plugin did not recover');
         }
         error.recovery = 'previous_reenabled_without_upload';
       } else if (identity(current, candidate)) {
         if (['enabled', 'error', 'incompatible'].includes(current.state)) {
-          await disable(previous.id);
-          current = await inspect();
+          await step(disable, previous.id);
+          current = await step(inspect);
         }
         requireState(current, candidate, disabled, 'Candidate is not safely replaceable');
-        await upload(previous);
-        requireState(await inspect(), previous, disabled, 'Restored package readback mismatch');
-        await enable(previous.id);
-        requireState(await inspect(), previous, healthy, 'Restored runtime acceptance failed');
+        await step(upload, previous);
+        requireState(await step(inspect), previous, disabled, 'Restored package readback mismatch');
+        await step(enable, previous.id);
+        requireState(await step(inspect), previous, healthy, 'Restored runtime acceptance failed');
         error.recovery = 'previous_package_restored';
       } else {
         throw new Error('Plugin identity/configuration changed; recovery writes refused');
       }
     } catch (recoveryError) {
-      error.recovery = 'recovery_failed';
+      error.recovery = recoveryError.code === 'DEPLOYMENT_FENCE_LOST'
+        ? 'reconcile_after_fence_loss' : 'recovery_failed';
       error.recoveryError = recoveryError;
       failure.recovery_error = recoveryError.message;
     }

@@ -91,6 +91,13 @@ S2PLUGIN_KEY=/existing/publisher.key ./build.sh --release # 默认要求现有�
 升级前完成包与回滚包校验，再停用插件。上传被明确拒绝且旧包未改变时，
 直接重新启用原插件，不重复上传旧包。网络超时代表结果未知，必须先确认
 原宿主操作终止并核对安装记录，禁止与在途安装并发回滚。
+`replacePlugin` 必须接收本代 `fence.generation`、`fence.holder` 和
+`fence.assertCurrent(binding)`；后者必须从当前写权权威读取并返回相同的
+generation/holder，不得返回缓存或固定值。每个原生读写步骤前后均复核，
+失去写权或查询失败后停止后续写入，包括自动回滚；失败回执保留原始代次和持有者。
+这些复核不能代替原有互斥：调用者仍须持有原生部署锁直到所有在途操作终止，
+不得在旧操作未静止时转交租约。确认用户批准、绑定本代锁和回滚包后才能调用；
+旧运行脚本没有该绑定时会拒绝执行，不可复用旧批准。
 状态恢复逻辑的回归命令为
 `node --test tools/release/replace-plugin.test.mjs`。
 
