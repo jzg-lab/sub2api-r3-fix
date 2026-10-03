@@ -34,6 +34,13 @@ export async function readNativeResponse(response, route) {
 export async function replacePlugin({
   inspect, disable, upload, enable, preflight, candidate, previous, record = () => {}
 }) {
+  const recordFailure = async (error, failure) => {
+    try {
+      await record(failure);
+    } catch (recordError) {
+      error.recordError = recordError;
+    }
+  };
   const identity = (state, artifact) =>
     state.id === previous.id && state.version === artifact.version &&
     state.artifact_sha256 === artifact.sha256 &&
@@ -76,7 +83,7 @@ export async function replacePlugin({
     // with a second upload or enable request, even if a read sees the old row.
     if (error.outcomeUnknown) {
       error.recovery = 'reconcile_after_native_operation_quiescence';
-      record({ ...failure, recovery: error.recovery });
+      await recordFailure(error, { ...failure, recovery: error.recovery });
       throw error;
     }
     try {
@@ -112,7 +119,7 @@ export async function replacePlugin({
       error.recoveryError = recoveryError;
       failure.recovery_error = recoveryError.message;
     }
-    record({ ...failure, recovery: error.recovery });
+    await recordFailure(error, { ...failure, recovery: error.recovery });
     // Retain the original failure even when recovery itself fails.
     throw error;
   }

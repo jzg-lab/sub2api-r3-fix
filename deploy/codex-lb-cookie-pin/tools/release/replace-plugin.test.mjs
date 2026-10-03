@@ -192,3 +192,25 @@ test('recovery error never replaces original installation error', async () => {
     error === failure && error.recoveryError.message === 'recovery error');
   assert.equal(f.records[0].error, 'original rejection');
 });
+
+for (const outcomeUnknown of [false, true]) {
+  for (const asyncRecord of [false, true]) {
+    test(`receipt failure preserves original error: unknown=${outcomeUnknown}, async=${asyncRecord}`, async () => {
+      const failure = Object.assign(new Error('original upload error'), { outcomeUnknown });
+      const recordError = new Error('receipt storage unavailable');
+      const f = fixture({
+        record: asyncRecord
+          ? async () => { throw recordError; }
+          : () => { throw recordError; },
+        upload: async () => { throw failure; }
+      });
+      await assert.rejects(replacePlugin(f.options), error =>
+        error === failure && error.recordError === recordError &&
+        error.recovery === (outcomeUnknown
+          ? 'reconcile_after_native_operation_quiescence'
+          : 'previous_reenabled_without_upload'));
+      assert.deepEqual(f.calls, outcomeUnknown
+        ? ['preflight', 'disable'] : ['preflight', 'disable', 'enable']);
+    });
+  }
+}
