@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountStatusIndicator from '../AccountStatusIndicator.vue'
-import type { Account } from '@/types'
+import type { Account, AccountUsageInfo } from '@/types'
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
@@ -51,6 +51,57 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('shows the backend quota pause as a rate limit without a fabricated 429 marker', async () => {
+    vi.useFakeTimers()
+    const now = new Date('2026-10-04T00:00:00Z')
+    vi.setSystemTime(now)
+    const reset = new Date(now.getTime() + 2000).toISOString()
+    const wrapper = mount(AccountStatusIndicator, { props: {
+      account: makeAccount({ platform: 'openai', quota_rate_limit_reset_at: reset })
+    } })
+    try {
+      expect(wrapper.get('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
+      expect(wrapper.text()).toContain('admin.accounts.status.rateLimitedAutoResume')
+      expect(wrapper.text()).not.toContain('429')
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(wrapper.text()).toContain('admin.accounts.status.active')
+      expect(wrapper.find('.badge-warning').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses refreshed usage to clear an old quota limit and preserves a real 429', async () => {
+    const reset = '2099-10-04T00:00:00Z'
+    const account = makeAccount({ platform: 'openai', quota_rate_limit_reset_at: reset })
+    const wrapper = mount(AccountStatusIndicator, { props: { account } })
+    try {
+      await wrapper.setProps({ usage: { quota_rate_limit_reset_at: null } as AccountUsageInfo })
+      expect(wrapper.find('.badge-warning').exists()).toBe(false)
+      await wrapper.setProps({ account: { ...account, rate_limit_reset_at: reset } })
+      expect(wrapper.get('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
+      expect(wrapper.text()).toContain('429')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('adds a quota limit from refreshed usage and keeps error states visible', async () => {
+    const account = makeAccount({ platform: 'openai' })
+    const wrapper = mount(AccountStatusIndicator, { props: { account } })
+    try {
+      await wrapper.setProps({ usage: { quota_rate_limit_reset_at: '2099-10-04T00:00:00Z' } as AccountUsageInfo })
+      expect(wrapper.get('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
+      await wrapper.setProps({ account: { ...account, status: 'error' } })
+      expect(wrapper.get('.badge-danger').text()).toBe('admin.accounts.status.error')
+      await wrapper.setProps({ account: { ...account, status: 'inactive' } })
+      expect(wrapper.text()).toContain('admin.accounts.status.inactive')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('expires cooldown without waiting for an account refresh', async () => {
     vi.useFakeTimers()
     const now = new Date('2026-09-13T00:00:00Z')

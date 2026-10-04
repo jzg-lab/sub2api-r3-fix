@@ -1021,7 +1021,7 @@ func (r *accountRepository) List(ctx context.Context, params pagination.Paginati
 	return r.ListWithFilters(ctx, params, "", "", "", "", 0, "")
 }
 
-func (r *accountRepository) accountListFilteredQuery(platform, accountType, status, search string, groupID int64, privacyMode string) *dbent.AccountQuery {
+func (r *accountRepository) accountListFilteredQuery(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) (*dbent.AccountQuery, error) {
 	q := r.client.Account.Query()
 
 	if platform != "" {
@@ -1030,11 +1030,39 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 	if accountType != "" {
 		q = q.Where(dbaccount.TypeEQ(accountType))
 	}
+	quotaLimitedIDs := make([]int64, 0)
+	if (platform == "" || platform == service.PlatformOpenAI) &&
+		(status == service.StatusActive || status == "rate_limited" || status == "unschedulable") {
+		// ponytail: admin filters project quota candidates; index quota state if pools outgrow this scan.
+		candidates, err := q.Clone().Where(
+			dbaccount.PlatformEQ(service.PlatformOpenAI),
+			dbaccount.StatusEQ(service.StatusActive),
+			dbpredicate.Account(func(s *entsql.Selector) {
+				s.Where(sqljson.HasKey(s.C(dbaccount.FieldExtra), sqljson.Path("codex_7d_used_percent")))
+			}),
+		).Select(dbaccount.FieldID, dbaccount.FieldPlatform, dbaccount.FieldType, dbaccount.FieldExtra).All(ctx)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		for _, candidate := range candidates {
+			account := &service.Account{Platform: candidate.Platform, Type: candidate.Type, Extra: candidate.Extra}
+			if service.OpenAICodexQuotaRateLimitResetAt(account, now) != nil {
+				quotaLimitedIDs = append(quotaLimitedIDs, candidate.ID)
+			}
+		}
+	}
+	quotaLimited := dbpredicate.Account(func(s *entsql.Selector) {
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.Ident(s.C(dbaccount.FieldID)).WriteString(" = ANY(").Arg(pq.Array(quotaLimitedIDs)).WriteByte(')')
+		}))
+	})
 	if status != "" {
 		switch status {
 		case service.StatusActive:
 			q = q.Where(
 				dbaccount.StatusEQ(status),
+				dbaccount.Not(quotaLimited),
 				dbaccount.SchedulableEQ(true),
 				dbaccount.Or(
 					dbaccount.RateLimitResetAtIsNil(),
@@ -1051,14 +1079,16 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 		case "rate_limited":
 			q = q.Where(
 				dbaccount.StatusEQ(service.StatusActive),
-				dbaccount.RateLimitResetAtGT(time.Now()),
-				dbpredicate.Account(func(s *entsql.Selector) {
-					col := s.C("temp_unschedulable_until")
-					s.Where(entsql.Or(
-						entsql.IsNull(col),
-						entsql.LTE(col, entsql.Expr("NOW()")),
-					))
-				}),
+				dbaccount.Or(quotaLimited, dbaccount.And(
+					dbaccount.RateLimitResetAtGT(time.Now()),
+					dbpredicate.Account(func(s *entsql.Selector) {
+						col := s.C("temp_unschedulable_until")
+						s.Where(entsql.Or(
+							entsql.IsNull(col),
+							entsql.LTE(col, entsql.Expr("NOW()")),
+						))
+					}),
+				)),
 			)
 		case "temp_unschedulable":
 			q = q.Where(
@@ -1074,6 +1104,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 		case "unschedulable":
 			q = q.Where(
 				dbaccount.StatusEQ(service.StatusActive),
+				dbaccount.Not(quotaLimited),
 				dbaccount.SchedulableEQ(false),
 				dbaccount.Or(
 					dbaccount.RateLimitResetAtIsNil(),
@@ -1114,7 +1145,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 		}))
 	}
 
-	return q
+	return q, nil
 }
 
 func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
@@ -1123,7 +1154,10 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 		result   *pagination.PaginationResult
 	}
 	page, err := retryAccountSnapshotRead(ctx, func() (accountPage, error) {
-		q := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)
+		q, err := r.accountListFilteredQuery(ctx, platform, accountType, status, search, groupID, privacyMode)
+		if err != nil {
+			return accountPage{}, err
+		}
 		// Clone before Count so interceptor-appended predicates (SoftDeleteMixin's
 		// deleted_at IS NULL) don't accumulate on the shared builder and pollute the
 		// subsequent list query. Same pattern used in group_repo/promo_code_repo/user_repo
@@ -1162,7 +1196,11 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 
 func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
 	return retryAccountSnapshotRead(ctx, func() ([]service.Account, error) {
-		accounts, err := r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode).All(ctx)
+		q, err := r.accountListFilteredQuery(ctx, platform, accountType, status, search, groupID, privacyMode)
+		if err != nil {
+			return nil, err
+		}
+		accounts, err := q.All(ctx)
 		if err != nil {
 			return nil, err
 		}

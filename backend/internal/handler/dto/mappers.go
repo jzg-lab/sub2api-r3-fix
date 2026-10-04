@@ -267,6 +267,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		Schedulable:             a.Schedulable,
 		RateLimitedAt:           a.RateLimitedAt,
 		RateLimitResetAt:        a.RateLimitResetAt,
+		QuotaRateLimitResetAt:   service.OpenAICodexQuotaRateLimitResetAt(a, time.Now()),
 		OverloadUntil:           a.OverloadUntil,
 		TempUnschedulableUntil:  a.TempUnschedulableUntil,
 		TempUnschedulableReason: a.TempUnschedulableReason,

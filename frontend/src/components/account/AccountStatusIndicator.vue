@@ -1,6 +1,6 @@
 <template>
   <div class="flex items-center gap-2">
-    <!-- Rate Limit Display (429) - Two-line layout -->
+    <!-- Upstream and quota rate limits share the status badge. -->
     <div v-if="isRateLimited" class="flex flex-col items-center gap-1">
       <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rateLimited') }}</span>
       <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rateLimitResumeText }}</span>
@@ -62,7 +62,7 @@
     </div>
 
     <!-- Rate Limit Indicator (429) -->
-    <div v-if="isRateLimited" class="group relative">
+    <div v-if="isUpstreamRateLimited" class="group relative">
       <span
         class="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
       >
@@ -163,7 +163,7 @@ import { computed } from 'vue'
 import { useNow } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
-import type { Account } from '@/types'
+import type { Account, AccountUsageInfo } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
 
 const { t } = useI18n()
@@ -171,6 +171,7 @@ const currentTime = useNow({ interval: 1000 })
 
 const props = defineProps<{
   account: Account
+  usage?: AccountUsageInfo | null
 }>()
 
 const emit = defineEmits<{
@@ -178,10 +179,24 @@ const emit = defineEmits<{
 }>()
 
 // Computed: is rate limited (429)
-const isRateLimited = computed(() => {
+const isUpstreamRateLimited = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
   return new Date(props.account.rate_limit_reset_at) > currentTime.value
 })
+
+const rateLimitResetAt = computed(() => {
+  // A successful usage refresh (including null) supersedes the list snapshot.
+  const quotaResetAt = props.usage?.quota_rate_limit_reset_at !== undefined
+    ? props.usage.quota_rate_limit_reset_at
+    : props.account.quota_rate_limit_reset_at
+  const deadlines = [
+    props.account.rate_limit_reset_at,
+    props.account.status === 'active' ? quotaResetAt : null
+  ].filter((value): value is string => typeof value === 'string' && Date.parse(value) > currentTime.value.getTime())
+  return deadlines.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null
+})
+
+const isRateLimited = computed(() => rateLimitResetAt.value !== null)
 
 type AccountModelStatusItem = {
   kind: 'rate_limit' | 'credits_exhausted' | 'credits_active'
@@ -294,9 +309,10 @@ const isQuotaExceeded = computed(() => {
   )
 })
 
-// Computed: countdown text for rate limit (429)
+// Countdown follows the latest upstream or quota reset deadline.
 const rateLimitCountdown = computed(() => {
-  return formatCountdown(props.account.rate_limit_reset_at)
+  currentTime.value
+  return formatCountdown(rateLimitResetAt.value)
 })
 
 const rateLimitResumeText = computed(() => {

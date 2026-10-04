@@ -13,6 +13,18 @@ vi.mock('vue-i18n', async () => {
 })
 
 describe('UsageProgressBar', () => {
+  it('does not round an unexhausted usage window up to 100%', async () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: { label: '7d', utilization: 99.6, color: 'emerald' }
+    })
+    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('<100%')
+    await wrapper.setProps({ utilization: 100 })
+    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('100%')
+    await wrapper.setProps({ utilization: 99.6, remainingCapacity: true })
+    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('100%')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-17T00:00:00Z'))

@@ -608,11 +608,7 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 	}
 	disabled5h := resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled")
 	disabled7d := resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled")
-	// Both explicit disable flags form the user-facing Codex quota-overdraft
-	// switch. A partial per-window override remains supported but cannot bypass
-	// the provider-observed 7-day hard boundary.
-	quotaOverdraftEnabled := account.IsOpenAIOAuth() && disabled5h && disabled7d
-	if !quotaOverdraftEnabled && openAICodex7dQuotaResetActive(account.Extra, time.Now()) {
+	if OpenAICodexQuotaRateLimitResetAt(account, time.Now()) != nil {
 		return true, openAIQuotaAutoPauseDecision{
 			window:      "7d",
 			threshold:   1,
@@ -668,6 +664,24 @@ func shouldAutoPauseOpenAIAccountByQuota(ctx context.Context, account *Account) 
 		}
 	}
 	return false, openAIQuotaAutoPauseDecision{}
+}
+
+// OpenAICodexQuotaRateLimitResetAt shares the hard 7-day quota boundary between
+// scheduling and admin responses without changing persisted upstream 429 state.
+func OpenAICodexQuotaRateLimitResetAt(account *Account, now time.Time) *time.Time {
+	if account == nil || !account.IsOpenAI() {
+		return nil
+	}
+	// Both disable flags enable quota overdraft; a single flag cannot bypass 7d.
+	if account.IsOpenAIOAuth() && resolveAccountExtraBool(account.Extra, "auto_pause_5h_disabled") &&
+		resolveAccountExtraBool(account.Extra, "auto_pause_7d_disabled") {
+		return nil
+	}
+	if !openAICodex7dQuotaResetActive(account.Extra, now) {
+		return nil
+	}
+	resetAt, _ := parseTime(fmt.Sprint(account.Extra["codex_7d_reset_at"]))
+	return &resetAt
 }
 
 // openAICodex7dQuotaResetActive returns true only for the explicit, provider-

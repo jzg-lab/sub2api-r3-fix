@@ -1204,6 +1204,7 @@ export interface Account {
   schedulable: boolean
   rate_limited_at: string | null
   rate_limit_reset_at: string | null
+  quota_rate_limit_reset_at?: string | null
   overload_until: string | null
   temp_unschedulable_until: string | null
   temp_unschedulable_reason: string | null
@@ -1355,6 +1356,7 @@ export interface GrokBillingSummary {
 }
 
 export interface AccountUsageInfo {
+  quota_rate_limit_reset_at?: string | null
   source?: 'passive' | 'active'
   updated_at: string | null
   five_hour: UsageProgress | null

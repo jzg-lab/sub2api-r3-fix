@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import AccountsView from '../AccountsView.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import type { Account, AccountUsageInfo } from '@/types'
 
 const { getUsage, getBatchUsage, list } = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ vi.mock('@/api/admin', () => ({
     accounts: {
       list, listWithEtag: async () => ({ notModified: true }),
       getUsage, getBatchUsage,
+      listOpenAIAccountHealth: async () => ({ accounts: [] }),
       getBatchTodayStats: async () => ({ stats: {} }),
       getUpstreamBillingProbeSettings: async () => ({ enabled: false })
     },
@@ -68,7 +70,7 @@ function mountView(platform = 'anthropic') {
         TablePageLayout: { template: '<div><slot name="table" /></div>' },
         DataTable: {
           props: ['data'],
-          template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-usage" :row="row" /></div></div>'
+          template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-status" :row="row" /><slot name="cell-usage" :row="row" /></div></div>'
         },
         UsageProgressBar: {
           props: ['utilization'], template: '<span data-test="quota">{{ utilization }}</span>'
@@ -90,6 +92,19 @@ function request(options?: { force?: boolean; source?: 'active' }) {
 }
 
 describe('AccountsView usage refresh ownership', () => {
+  it('updates rate-limit status along with an active quota refresh', async () => {
+    const exhausted = { ...usage(100), quota_rate_limit_reset_at: '2099-10-04T00:00:00Z' }
+    getBatchUsage.mockResolvedValueOnce({ usage: { [current.id]: exhausted }, errors: {} })
+    getUsage.mockResolvedValueOnce({ ...usage(0), quota_rate_limit_reset_at: null })
+    mountView('openai')
+    await settle()
+    expect(wrapper.getComponent(AccountStatusIndicator).text()).toContain('admin.accounts.status.rateLimited')
+    await wrapper.getComponent(AccountUsageCell).get('button').trigger('click')
+    await settle()
+    expect(wrapper.getComponent(AccountStatusIndicator).text()).toContain('admin.accounts.status.active')
+    expect(wrapper.getComponent(AccountStatusIndicator).text()).not.toContain('admin.accounts.status.rateLimited')
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)

@@ -196,6 +196,9 @@ func TestAccountUsageService_GetOpenAIUsage_DoesNotPromoteCodexExtraToRateLimit(
 	if usage.SevenDay == nil || usage.SevenDay.Utilization != 100.0 {
 		t.Fatalf("预期 7 天用量仍然可见，实际为 %#v", usage.SevenDay)
 	}
+	if usage.QuotaRateLimitResetAt == nil || !usage.QuotaRateLimitResetAt.Equal(resetAt) {
+		t.Fatalf("quota rate limit reset = %v, want %v", usage.QuotaRateLimitResetAt, resetAt)
+	}
 	if account.RateLimitResetAt != nil {
 		t.Fatalf("不应让已耗尽的 codex extra 改写运行时限流状态: %v", account.RateLimitResetAt)
 	}

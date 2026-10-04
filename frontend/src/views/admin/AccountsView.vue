@@ -301,7 +301,11 @@
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
-              <AccountStatusIndicator :account="row" @show-temp-unsched="handleShowTempUnsched" />
+              <AccountStatusIndicator
+                :account="row"
+                :usage="usageBatchByAccountId[String(row.id)] ?? null"
+                @show-temp-unsched="handleShowTempUnsched"
+              />
             </div>
           </template>
           <template #cell-schedulable="{ row }">
