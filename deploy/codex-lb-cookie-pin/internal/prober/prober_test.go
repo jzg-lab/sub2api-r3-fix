@@ -238,7 +238,8 @@ func TestStatePassPath(t *testing.T) {
 // 验收：签捕获→上岗 ≈ 3×120s——前两针密集档、第三针达标出档回稳态档，
 // 出档清密集预算；再答错重开回合恢复密集预算。
 func TestBurstCadence(t *testing.T) {
-	cfg := testCfg() // burst 120s / until 3 / max 30
+	cfg := testCfg()
+	cfg.ProbeBurstUntilPasses = 3 // Explicit legacy cadence remains supported.
 	now := time.Now()
 	st := NewState(10)
 	// 第 1、2 针：未验证态，密集档。
@@ -275,6 +276,23 @@ func TestBurstCadence(t *testing.T) {
 	}
 	if !st.InBurst || st.BurstProbes != 1 {
 		t.Fatalf("新回合兜底应落密集档: in_burst=%v burst_probes=%d", st.InBurst, st.BurstProbes)
+	}
+}
+
+func TestDefaultBurstCoversFullGraduationThreshold(t *testing.T) {
+	cfg := testCfg()
+	now := time.Now()
+	st := NewState(10)
+	for passes := 1; passes <= 6; passes++ {
+		st.Record(VerdictPass, "bag_perm", "3", now, cfg)
+		expected := time.Duration(cfg.ProbeBurstIntervalSeconds) * time.Second
+		if passes == 6 {
+			expected = time.Duration(cfg.ProbeIntervalSeconds) * time.Second
+		}
+		if st.InBurst != (passes < 6) || !st.NextProbeAt.Equal(now.Add(expected)) {
+			t.Fatalf("passes=%d in_burst=%v next=%v expected_delay=%v", passes, st.InBurst, st.NextProbeAt, expected)
+		}
+		now = st.NextProbeAt
 	}
 }
 

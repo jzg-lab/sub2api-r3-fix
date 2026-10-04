@@ -11,6 +11,11 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('@/api/admin', () => ({ adminAPI: { accounts: api } }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => api }))
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({
+    t: (key: string) => key.endsWith('.OPENAI_OAUTH_FIXED_EGRESS_REQUIRED') ? 'Fixed route required' : key
+  })
+}))
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -59,12 +64,14 @@ describe('reauthorization browser launch', () => {
     const exchange = vi.fn()
     await test.session.run(exchange)
     expect(test.launching.value).toBe(true)
+    expect(test.ready.value).toBe(false)
     expect(exchange).not.toHaveBeenCalled()
     expect(api.launchAuthBrowser).toHaveBeenCalledOnce()
     expect(api.launchAuthBrowser).toHaveBeenCalledWith('session-old')
     pending.resolve(success)
     await first
     expect(test.launching.value).toBe(false)
+    expect(test.ready.value).toBe(true)
     expect(api.showSuccess).toHaveBeenCalledOnce()
     await test.session.run(async (operation) => {
       expect(operation.expectedUpdatedAt).toBe('2026-10-02T15:35:17.123456Z')
@@ -83,10 +90,14 @@ describe('reauthorization browser launch', () => {
     await test.launch()
     expect(test.clear).toHaveBeenCalledOnce()
     expect(test.oauth.generateAuthUrl).toHaveBeenCalledOnce()
-    expect(test.oauth.generateAuthUrl).toHaveBeenCalledWith(21)
+    expect(test.oauth.generateAuthUrl).toHaveBeenCalledWith(21, undefined, {
+      accountId: 41,
+      expectedUpdatedAt: '2026-10-02T15:35:17.123456Z'
+    })
     expect(api.launchAuthBrowser.mock.calls).toEqual([['session-old'], ['session-new']])
     expect(api.showError).not.toHaveBeenCalled()
     expect(test.launching.value).toBe(false)
+    expect(test.ready.value).toBe(true)
     test.scope.stop()
   })
 
@@ -100,7 +111,11 @@ describe('reauthorization browser launch', () => {
     test.scope.stop()
   })
 
-  it.each(['AUTH_BROWSER_PROXY_UNAVAILABLE', 'AUTH_BROWSER_LAUNCH_FAILED'])(
+  it.each([
+    'AUTH_BROWSER_PROXY_UNAVAILABLE', 'AUTH_BROWSER_LAUNCH_FAILED',
+    'OPENAI_OAUTH_LOGIN_IP_UNKNOWN', 'OPENAI_OAUTH_LOGIN_IP_CHANGED',
+    'OPENAI_OAUTH_LOGIN_IP_UNAVAILABLE', 'OPENAI_OAUTH_PROXY_MISMATCH'
+  ])(
     'does not regenerate or bypass a non-session failure: %s',
     async (reason) => {
       api.launchAuthBrowser.mockRejectedValue({ reason, message: 'fixture failure' })
@@ -112,6 +127,17 @@ describe('reauthorization browser launch', () => {
       test.scope.stop()
     }
   )
+
+  it('localizes fixed-route rejection without generating an unbound session', async () => {
+    api.launchAuthBrowser.mockRejectedValue({
+      reason: 'OPENAI_OAUTH_FIXED_EGRESS_REQUIRED', message: 'raw backend message'
+    })
+    const test = setup()
+    await test.launch()
+    expect(test.oauth.generateAuthUrl).not.toHaveBeenCalled()
+    expect(api.showError).toHaveBeenCalledWith(expect.stringContaining('Fixed route required'))
+    test.scope.stop()
+  })
 
   it.each(['close', 'reopen', 'account', 'proxy', 'unmount'] as const)(
     'ignores a late result after %s',
@@ -134,6 +160,7 @@ describe('reauthorization browser launch', () => {
       expect(api.showSuccess).not.toHaveBeenCalled()
       expect(api.showError).not.toHaveBeenCalled()
       expect(test.launching.value).toBe(false)
+      expect(test.ready.value).toBe(false)
       test.scope.stop()
     }
   )
@@ -177,6 +204,63 @@ describe('reauthorization browser launch', () => {
     await test.launch()
     expect(expected === 'success' ? api.showSuccess : api.showError).toHaveBeenCalledOnce()
     expect(test.oauth.generateAuthUrl).not.toHaveBeenCalled()
+    expect(test.ready.value).toBe(false)
+    test.scope.stop()
+  })
+
+  it.each(['session', 'close', 'reopen', 'account', 'proxy', 'unmount'] as const)(
+    'invalidates successful browser evidence after %s',
+    async (change) => {
+      api.launchAuthBrowser.mockResolvedValue(success)
+      const test = setup()
+      await test.launch()
+      expect(test.ready.value).toBe(true)
+      if (change === 'session') {
+        test.oauth.sessionId.value = 'replacement'
+        test.oauth.sessionId.value = 'session-old'
+      }
+      if (change === 'close') test.props.show = false
+      if (change === 'reopen') {
+        test.props.show = false
+        test.props.show = true
+      }
+      if (change === 'account') test.props.account = { ...test.props.account, id: 42 }
+      if (change === 'proxy') test.props.account = { ...test.props.account, proxy_id: 22 }
+      if (change === 'unmount') test.scope.stop()
+      expect(test.ready.value).toBe(false)
+      test.scope.stop()
+    }
+  )
+
+  it.each(['success', 'expired'] as const)(
+    'ignores a late %s when the OAuth session changed during launch',
+    async (outcome) => {
+      const pending = deferred<typeof success>()
+      api.launchAuthBrowser.mockReturnValue(pending.promise)
+      const test = setup()
+      const launch = test.launch()
+      test.oauth.sessionId.value = 'replacement'
+      if (outcome === 'success') pending.resolve(success)
+      else pending.reject(expired)
+      await launch
+      expect(test.ready.value).toBe(false)
+      expect(test.oauth.generateAuthUrl).not.toHaveBeenCalled()
+      expect(api.showSuccess).not.toHaveBeenCalled()
+      expect(api.showError).not.toHaveBeenCalled()
+      test.scope.stop()
+    }
+  )
+
+  it('revokes previous evidence while another launch is only in progress', async () => {
+    api.launchAuthBrowser.mockResolvedValueOnce(success).mockResolvedValueOnce({
+      launched: false, already_running: true
+    })
+    const test = setup()
+    await test.launch()
+    expect(test.ready.value).toBe(true)
+    await test.launch()
+    expect(test.ready.value).toBe(false)
+    expect(test.clear).toHaveBeenCalledTimes(2)
     test.scope.stop()
   })
 

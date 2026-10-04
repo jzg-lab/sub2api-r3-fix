@@ -26,6 +26,22 @@ def auth_url_for(character):
 
 
 class ProxyAddressTests(unittest.TestCase):
+    def test_original_exit_normalization_and_non_public_rejection(self):
+        self.assertEqual(
+            PROXY_ADDRESS.validate_exit_ip(
+                "::ffff:198.51.100.25", pinned_ip="198.51.100.25"
+            ),
+            "198.51.100.25",
+        )
+        for invalid in (
+            "127.0.0.1", "::ffff:127.0.0.1", "10.0.0.1", "192.168.1.3",
+            "172.16.1.1", "fe80::1%en0", "fc00::1", "::", "224.0.0.1",
+            "255.255.255.255",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    PROXY_ADDRESS.validate_exit_ip(invalid, pinned_ip=invalid)
+
     def test_supported_addresses(self):
         cases = {
             "192.0.2.10:8080": "http://192.0.2.10:8080",
@@ -188,6 +204,38 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("--disable-quic", chrome["args"])
         self.assertEqual(chrome["args"][-1], AUTH_URL)
         self.assertEqual(chrome["tz"], "America/New_York")
+
+    def test_original_login_ip_is_pinned_for_non_static_ingress(self):
+        result = self.launch(
+            self.profile_tag("a"), AUTH_URL, "127.0.0.1:8080", "198.51.100.25"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.chrome_record.exists())
+
+    def test_original_ip_mismatch_cannot_be_overridden_by_current_bucket(self):
+        result = self.launch(
+            self.profile_tag("a"), AUTH_URL, "127.0.0.1:17933", "198.51.100.99"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.chrome_record.exists())
+        self.assertFalse(self.profile_root.exists())
+
+    def test_bad_original_ip_never_launches_browser(self):
+        for original in ("", "invalid", "198.51.100.26"):
+            with self.subTest(original=original):
+                result = self.launch(
+                    self.profile_tag("a"), AUTH_URL, "127.0.0.1:8080", original
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.chrome_record.exists())
+
+    def test_original_ip_does_not_disable_ingress_identity_check(self):
+        self.env["SUB2API_AUTH_BROWSER_EXPECTED_EXIT_17933"] = "198.51.100.99"
+        result = self.launch(
+            self.profile_tag("a"), AUTH_URL, "127.0.0.1:17933", "198.51.100.25"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.chrome_record.exists())
 
     def test_socks_proxy_uses_proxy_dns(self):
         result = self.launch(

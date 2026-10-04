@@ -130,6 +130,8 @@ tests
 !deploy/tests/**
 !deploy/auth-browser/tests/
 !deploy/auth-browser/tests/**
+deploy/auth-browser/tests/__pycache__/
+deploy/auth-browser/tests/*.py[cod]
 CLAUDE.md
 .claude
 scripts

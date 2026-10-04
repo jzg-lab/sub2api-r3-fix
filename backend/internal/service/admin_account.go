@@ -650,6 +650,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	var mergedCredentials map[string]any
+	if len(input.Credentials) > 0 {
+		mergedCredentials = MergePreservingSensitiveCreds(account.Credentials, input.Credentials)
+		preserveOpenAIOAuthEditIdentity(account, mergedCredentials)
+	}
 	previousWasOpenAIOAuth := account.IsOpenAIOAuth()
 	previousFingerprintMode := account.GetCodexFingerprintMode()
 	var normalizedExtra map[string]any
@@ -700,6 +705,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 				"cannot change account type while it has a spark shadow; delete the shadow first")
 		}
 	}
+	if err := validateOpenAIOAuthAccountEdit(account, input.Type, mergedCredentials, input.openAIRefresh); err != nil {
+		return nil, err
+	}
 	if input.Name != "" {
 		account.Name = input.Name
 	}
@@ -714,7 +722,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	} else if len(input.Credentials) > 0 {
 		// 敏感子键采用"incoming 没提供就保留"的合并语义：前端响应已脱敏，
 		// 全对象 PUT 编辑时不会再带回 token，避免覆盖时清空已有凭证。
-		account.Credentials = MergePreservingSensitiveCreds(account.Credentials, input.Credentials)
+		account.Credentials = mergedCredentials
 		// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err
@@ -1017,6 +1025,16 @@ func (s *adminServiceImpl) ApplyOAuthCredentials(
 	if len(credentials) == 0 {
 		return nil, infraerrors.BadRequest("OAUTH_CREDENTIALS_REQUIRED", "OAuth credentials cannot be empty")
 	}
+	current, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil || !current.UpdatedAt.Equal(expectedUpdatedAt) {
+		return nil, ErrOAuthReauthorizationStale
+	}
+	if err := ValidateOpenAIOAuthReauthorizationCommit(ctx, current, credentials); err != nil {
+		return nil, err
+	}
 	SanitizeStoredCredentials("", credentials)
 	return repo.ApplyOAuthCredentials(
 		ctx,
@@ -1114,6 +1132,20 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
 					"spark shadow account %d cannot hold credentials; manage credentials on the parent account", acc.ID)
+			}
+		}
+		for _, accountID := range input.AccountIDs {
+			acc := targetsByID[accountID]
+			if acc == nil {
+				return nil, ErrAccountNotFound
+			}
+			credentials := maps.Clone(acc.Credentials)
+			if credentials == nil {
+				credentials = make(map[string]any)
+			}
+			maps.Copy(credentials, input.Credentials)
+			if err := validateOpenAIOAuthAccountEdit(acc, "", credentials, nil); err != nil {
+				return nil, err
 			}
 		}
 	}

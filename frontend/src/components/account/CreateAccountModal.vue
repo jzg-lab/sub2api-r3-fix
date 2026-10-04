@@ -3480,6 +3480,7 @@
         :initial-input-method="'manual'"
         :show-auth-browser-launch="form.platform === 'openai'"
         :auth-browser-launching="authBrowserLaunching"
+        :auth-browser-ready="authBrowserReady"
         @launch-auth-browser="handleLaunchAuthBrowser"
         :platform="form.platform"
         :show-project-id="geminiOAuthType === 'code_assist'"
@@ -3881,7 +3882,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
-import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
+import { extractApiErrorCode, extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -3999,6 +4000,11 @@ const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
 const openAIAccountCreationPending = ref(false)
 const authBrowserLaunching = ref(false)
+const confirmedBrowserSessionId = ref('')
+const authBrowserReady = computed(() =>
+  !!confirmedBrowserSessionId.value && confirmedBrowserSessionId.value === openaiOAuth.sessionId.value
+)
+watch(openaiOAuth.sessionId, () => { confirmedBrowserSessionId.value = '' }, { flush: 'sync' })
 let openAIExchangeVersion = 0
 let authBrowserLaunchVersion = 0
 const resetOpenAIFlow = () => {
@@ -4006,6 +4012,7 @@ const resetOpenAIFlow = () => {
   authBrowserLaunchVersion++
   openAIAccountCreationPending.value = false
   authBrowserLaunching.value = false
+  confirmedBrowserSessionId.value = ''
   openaiOAuth.resetState()
 }
 onBeforeUnmount(resetOpenAIFlow)
@@ -4593,6 +4600,15 @@ const form = reactive({
   expires_at: null as number | null
 })
 
+watch(
+  [() => props.show, () => form.platform, () => form.proxy_id, accountCategory],
+  () => {
+    resetOpenAIFlow()
+    oauthFlowRef.value?.reset()
+  },
+  { flush: 'sync' }
+)
+
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
   // Antigravity upstream 类型不需要 OAuth 流程
@@ -4622,7 +4638,7 @@ const expiresAtInput = computed({
 const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   if (form.platform === 'openai') {
-    return authCode.trim() && openaiOAuth.sessionId.value && !currentOAuthLoading.value
+    return authCode.trim() && authBrowserReady.value && !authBrowserLaunching.value && !currentOAuthLoading.value
   }
   if (form.platform === 'gemini') {
     return authCode.trim() && geminiOAuth.sessionId.value && !geminiOAuth.loading.value
@@ -5740,8 +5756,9 @@ const goBackToBasicInfo = () => {
 
 const handleGenerateUrl = async () => {
   if (form.platform === 'openai') {
-    if (openAIAccountCreationPending.value) return
+    if (openAIAccountCreationPending.value || authBrowserLaunching.value || openaiOAuth.loading.value) return
     resetOpenAIFlow()
+    oauthFlowRef.value?.reset()
     await openaiOAuth.generateAuthUrl(form.proxy_id)
   } else if (form.platform === 'gemini') {
     await geminiOAuth.generateAuthUrl(
@@ -5761,7 +5778,7 @@ const handleGenerateUrl = async () => {
 
 // 授权浏览器直拉（方案A）：后端读授权会话绑定的桶 → 本机 launch.sh →
 // Chrome 带桶代理+授权链接弹窗。失败（未配置/会话过期/链路断）走提示，
-// 手动 applet 路径不受影响。
+// 仅当前会话的成功启动回执可以解锁授权码兑换。
 const recoverableAuthBrowserSessionReasons = new Set([
   'AUTH_BROWSER_SESSION_NOT_FOUND',
   'AUTH_BROWSER_SESSION_EXPIRED',
@@ -5780,6 +5797,7 @@ const showAuthBrowserLaunchResult = (result: Awaited<ReturnType<typeof adminAPI.
 }
 
 const handleLaunchAuthBrowser = async () => {
+  if (!props.show || form.platform !== 'openai' || currentOAuthLoading.value) return
   let sessionId = openaiOAuth.sessionId.value
   if (!sessionId) {
     appStore.showError('授权会话缺失，请先重新生成授权链接')
@@ -5793,15 +5811,23 @@ const handleLaunchAuthBrowser = async () => {
     props.show &&
     form.platform === 'openai'
 
+  confirmedBrowserSessionId.value = ''
+  oauthFlowRef.value?.reset()
   authBrowserLaunching.value = true
   try {
     let refreshedSession = false
     while (isCurrent()) {
       try {
         const result = await adminAPI.accounts.launchAuthBrowser(sessionId)
-        if (isCurrent()) showAuthBrowserLaunchResult(result)
+        if (isCurrent() && openaiOAuth.sessionId.value === sessionId) {
+          if (result.launched === true && !result.already_running) {
+            confirmedBrowserSessionId.value = sessionId
+          }
+          showAuthBrowserLaunchResult(result)
+        }
         return
       } catch (err: unknown) {
+        if (!isCurrent() || openaiOAuth.sessionId.value !== sessionId) return
         const reason = extractApiErrorCode(err)
         if (
           !refreshedSession &&
@@ -6213,11 +6239,16 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
 // OpenAI OAuth 授权码兑换
 const handleOpenAIExchange = async (authCode: string) => {
   const oauthClient = openaiOAuth
-  if (!authCode.trim() || !oauthClient.sessionId.value || openAIAccountCreationPending.value) return
+  if (!authCode.trim() || !authBrowserReady.value || authBrowserLaunching.value ||
+    currentOAuthLoading.value) return
+  const credentialOptions: Record<string, unknown> = {}
+  // Validate editable options before consuming the one-use authorization code.
+  if (!applyTempUnschedConfig(credentialOptions)) return
   const version = ++openAIExchangeVersion
   const sessionId = oauthClient.sessionId.value
+  // Exchange consumes the session; dialog lifecycle owns cancellation afterward.
   const isCurrent = () => version === openAIExchangeVersion &&
-    props.show && form.platform === 'openai' && oauthClient.sessionId.value === sessionId
+    props.show && form.platform === 'openai'
 
   openAIAccountCreationPending.value = true
   oauthClient.error.value = ''
@@ -6257,10 +6288,7 @@ const handleOpenAIExchange = async (authCode: string) => {
       }
     }
 
-    // 应用临时不可调度配置
-    if (!applyTempUnschedConfig(credentials)) {
-      return
-    }
+    Object.assign(credentials, credentialOptions)
 
     if (shouldCreateOpenAI) {
       await adminAPI.accounts.create({
@@ -6271,6 +6299,7 @@ const handleOpenAIExchange = async (authCode: string) => {
         credentials,
         extra,
         proxy_id: tokenInfo.proxy_id,
+        initial_authorization_proof: tokenInfo.initial_authorization_proof,
         concurrency: form.concurrency,
         load_factor: form.load_factor ?? undefined,
         priority: form.priority,
@@ -6288,8 +6317,15 @@ const handleOpenAIExchange = async (authCode: string) => {
     handleClose()
   } catch (error: any) {
     if (!isCurrent()) return
-    oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
-    appStore.showError(oauthClient.error.value)
+    const message = extractI18nErrorMessage(
+      error, t, 'admin.accounts.oauth.openai.errors', t('admin.accounts.oauth.authFailed')
+    )
+    // The code was exchanged and the create proof may already be consumed.
+    // Preserve the form, but never offer a retry of the old OAuth result.
+    oauthClient.resetState()
+    oauthFlowRef.value?.reset()
+    step.value = 1
+    appStore.showError(`${message} ${t('admin.accounts.oauth.openai.createFailedRestart')}`)
   } finally {
     if (version === openAIExchangeVersion) openAIAccountCreationPending.value = false
   }

@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
+	"strings"
 	"time"
 )
 
@@ -40,6 +43,7 @@ type OpenAIDowngradeMutation struct {
 	RecoverOwnedError        bool
 	Results                  []OpenAIDowngradeProbeResult
 	Events                   []OpenAIDowngradeMutationEvent
+	expectedInputHash        [sha256.Size]byte
 }
 
 type OpenAIDowngradeRateLimitObservation struct {
@@ -118,8 +122,40 @@ func newOpenAIProbeStaging(r *OpenAIDowngradeProbeRunner, account *Account, stat
 			ExpectedProxyID:          cloneOpenAIProbePointer(account.ProxyID),
 			ExpectedStatus:           account.Status,
 			ExpectedSchedulable:      account.Schedulable,
+			expectedInputHash:        openAIProbeInputHash(account),
 		},
 	}
+}
+
+// A neutral usage update may advance updated_at, but credentials, rescue
+// episodes and OAuth bindings must never reuse an older probe's result.
+// Only the digest is retained in the mutation; no credential material is added.
+func openAIProbeInputHash(account *Account) [sha256.Size]byte {
+	extra := make(map[string]any)
+	for key, value := range account.Extra {
+		if strings.HasPrefix(key, "openai_rescue_") ||
+			strings.HasPrefix(key, "openai_oauth_") ||
+			strings.HasPrefix(key, "openai_downgrade_") {
+			extra[key] = value
+		}
+	}
+	input := struct {
+		Platform     string
+		Type         string
+		ParentID     *int64
+		Credentials  map[string]any
+		Extra        map[string]any
+		GroupIDs     []int64
+		ErrorMessage string
+	}{
+		account.Platform, account.Type, account.ParentAccountID,
+		account.Credentials, extra, account.GroupIDs, account.ErrorMessage,
+	}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return [sha256.Size]byte{}
+	}
+	return sha256.Sum256(payload)
 }
 
 func cloneOpenAIProbePointer[T any](value *T) *T {
@@ -323,7 +359,6 @@ func (s *openAIProbeStaging) CountOpenAIDowngradeEvents(ctx context.Context, id 
 	return count, nil
 }
 
-
 func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *OpenAIDowngradeProbeRunner {
 	// Do not copy the live runner's mutexes, sync.Once values or lifecycle.
 	return &OpenAIDowngradeProbeRunner{
@@ -332,6 +367,7 @@ func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *Op
 		tlsProfiles: r.tlsProfiles, interval: r.interval, now: r.now,
 		nextDelay: r.nextDelay, probeFn: r.probeFn, recentTraffic: r.recentTraffic,
 		deferCounts: maps.Clone(r.deferCounts),
+		rescueLane:  r.rescueLane,
 	}
 }
 
@@ -356,6 +392,14 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	}
 	stage := newOpenAIProbeStaging(r, account, state)
 	candidate := *state
+	// A committed qualification may survive a failed graduation or a restart.
+	// While its rescue marker remains, the next probe must renew qualification,
+	// not overwrite the only host signature with an ordinary health sample.
+	if GetOpenAIRescueLaneMarker(account) != nil &&
+		candidate.State == OpenAIDowngradeStateOnDuty && candidate.ProbeMode == "normal" {
+		candidate.ProbeMode = "qualification"
+		candidate.ConsecutiveSuccesses = 0
+	}
 	// A probe-owned authentication error can occur before a circuit opens.
 	// Requalify it on its current route instead of stranding an on_duty row.
 	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty {
@@ -397,6 +441,13 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 		r.deferCounts = runner.deferCounts
 		if runner.abuseSignal != nil {
 			openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(*runner.abuseSignal)
+		}
+		if r.rescueLane != nil && stage.mutation.Schedulable != nil &&
+			state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "normal" {
+			if gradErr := r.rescueLane.GraduateRescue(ctx, state.AccountID, "qualification_pass"); gradErr != nil &&
+				!errors.Is(gradErr, ErrRescueRecoveryUnverified) {
+				slog.Warn("openai_rescue_graduate_hook_failed", "account_id", state.AccountID, "error", gradErr)
+			}
 		}
 		// 救治区自动钩子（r17ax Phase 3.2）：判死提交生效即触发入区过滤。
 		// 异步执行——EnterRescue 含种子流量（真实上游请求，秒到分钟级），
@@ -528,6 +579,10 @@ func (r *OpenAIDowngradeProbeRunner) retryStaleCommit(
 	if freshAccount.Status != mutation.ExpectedStatus ||
 		freshAccount.Schedulable != mutation.ExpectedSchedulable ||
 		!sameOpenAIProbeProxy(freshAccount.ProxyID, mutation.ExpectedProxyID) {
+		return false, nil, false
+	}
+	if mutation.expectedInputHash == ([sha256.Size]byte{}) ||
+		openAIProbeInputHash(freshAccount) != mutation.expectedInputHash {
 		return false, nil, false
 	}
 	if allowed, aErr := r.canRunOpenAIProbe(ctx, mutation.AccountID); aErr != nil || !allowed {

@@ -223,7 +223,7 @@ func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
 					"id", "platform", "type", "credentials", "extra", "proxy_id",
 					"parent_account_id", "status", "schedulable", "updated_at",
 				}).AddRow(71, service.PlatformOpenAI, service.AccountTypeOAuth,
-					`{"email":"account@example.test"}`, tc.extra, 7, nil, service.StatusError, false, stamp))
+					`{"email":"account@example.test"}`, reauthHistoricalExtra(t, tc.extra), 7, nil, service.StatusError, false, stamp))
 			if tc.proxyStatus != "" {
 				query := mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM proxies.*expires_at > NOW`).
 					WithArgs(int64(7), service.StatusActive)
@@ -245,8 +245,9 @@ func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
 				expectReauthSnapshot(mock, stamp.Add(time.Second), false)
 				mock.ExpectCommit()
 			}
-			got, err := repo.ApplyOAuthCredentials(t.Context(), 71, stamp,
-				service.AccountTypeOAuth, map[string]any{"access_token": "new"},
+			credentials := map[string]any{"access_token": "new"}
+			got, err := repo.ApplyOAuthCredentials(reauthCommitContext(t, stamp, credentials), 71, stamp,
+				service.AccountTypeOAuth, credentials,
 				map[string]any{service.OpenAIOAuthQualifiedProxyExtraKey: 999})
 			if tc.wantError != nil {
 				require.ErrorIs(t, err, tc.wantError)
@@ -279,12 +280,12 @@ func TestApplyOAuthCredentialsPreservesRescueIsolation(t *testing.T) {
 					"id", "platform", "type", "credentials", "extra", "proxy_id",
 					"parent_account_id", "status", "schedulable", "updated_at",
 				}).AddRow(71, service.PlatformOpenAI, service.AccountTypeOAuth,
-					`{"email":"account@example.test"}`, tc.extra, 7, nil, service.StatusError, false, stamp))
+					`{"email":"account@example.test"}`, reauthHistoricalExtra(t, tc.extra), 7, nil, service.StatusError, false, stamp))
 			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM proxies.*expires_at > NOW`).
 				WithArgs(int64(7), service.StatusActive).
 				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 			var original map[string]any
-			require.NoError(t, json.Unmarshal([]byte(tc.extra), &original))
+			require.NoError(t, json.Unmarshal([]byte(reauthHistoricalExtra(t, tc.extra)), &original))
 			mock.ExpectExec(`(?s)UPDATE accounts.*AND updated_at = \$7`).
 				WithArgs(service.AccountTypeOAuth, sqlmock.AnyArg(), reauthJSONCheck(func(extra map[string]any) bool {
 					if len(extra) != len(original) {
@@ -296,8 +297,9 @@ func TestApplyOAuthCredentialsPreservesRescueIsolation(t *testing.T) {
 			mock.ExpectExec(`INSERT INTO scheduler_outbox`).WillReturnResult(sqlmock.NewResult(1, 1))
 			expectReauthSnapshot(mock, stamp.Add(time.Second), tc.schedulable)
 			mock.ExpectCommit()
-			got, err := repo.ApplyOAuthCredentials(t.Context(), 71, stamp,
-				service.AccountTypeOAuth, map[string]any{"access_token": "new"},
+			credentials := map[string]any{"access_token": "new"}
+			got, err := repo.ApplyOAuthCredentials(reauthCommitContext(t, stamp, credentials), 71, stamp,
+				service.AccountTypeOAuth, credentials,
 				map[string]any{
 					"openai_rescue_lane":             nil,
 					"openai_rescue_suspected":        false,

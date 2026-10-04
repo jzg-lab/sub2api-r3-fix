@@ -49,6 +49,7 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 	defer func() { _ = rows.Close() }()
 
 	var historicalProxyID int64
+	var historicalLoginIP string
 	historyFound := false
 	for rows.Next() {
 		var (
@@ -88,9 +89,23 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		} else if historicalProxyID != qualifiedProxyID {
 			return service.ErrOpenAIOAuthHistoryBindingConflict
 		}
+		if _, exists := historical.Extra[service.OpenAIOAuthLoginExitIPExtraKey]; exists {
+			ip, err := service.OpenAIOAuthLoginExitIP(historical)
+			if err != nil {
+				return err
+			}
+			if historicalLoginIP != "" && historicalLoginIP != ip {
+				return service.ErrOpenAIOAuthHistoryBindingConflict
+			}
+			historicalLoginIP = ip
+		}
 		_ = raw
 	}
 	if err := rows.Err(); err != nil {
+		return err
+	}
+	loginIP, err := service.OpenAIOAuthInitialLoginIPForCreate(ctx, account, historyFound, historicalLoginIP)
+	if err != nil {
 		return err
 	}
 
@@ -100,15 +115,22 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 		}
 		account.ProxyID = int64Ptr(historicalProxyID)
 	}
+	account.Extra = maps.Clone(account.Extra)
+	if account.Extra == nil {
+		account.Extra = make(map[string]any, 3)
+	}
+	delete(account.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+	delete(account.Extra, service.OpenAIOAuthLoginExitIPExtraKey)
+	if historicalLoginIP != "" {
+		account.Extra[service.OpenAIOAuthLoginExitIPExtraKey] = historicalLoginIP
+	} else if loginIP != "" {
+		account.Extra[service.OpenAIOAuthLoginExitIPExtraKey] = loginIP
+	}
 	if account.ProxyID == nil || *account.ProxyID <= 0 {
 		// A genuinely new identity without an authorization-time proxy may
 		// come from the credential-import workflow. Preserve r17k's automatic
 		// qualification/bucket assignment for that path. Deleted identities
 		// never reach this branch unless their historical binding was valid.
-		account.Extra = maps.Clone(account.Extra)
-		if account.Extra == nil {
-			account.Extra = make(map[string]any, 2)
-		}
 		account.Extra[service.OpenAIDowngradeQualificationExtraKey] = true
 		account.Schedulable = false
 		return nil
@@ -116,12 +138,21 @@ func prepareOpenAIOAuthAccountCreate(ctx context.Context, exec sqlExecutor, acco
 	if err := lockValidOpenAIOAuthProxy(ctx, exec, *account.ProxyID); err != nil {
 		return err
 	}
-
-	account.Extra = maps.Clone(account.Extra)
-	if account.Extra == nil {
-		account.Extra = make(map[string]any, 2)
+	if loginIP != "" {
+		// The share lock above fences configuration edits until this create
+		// commits; compare the full route, not just its numeric ID.
+		proxy := &service.Proxy{ID: *account.ProxyID, Status: service.StatusActive}
+		if err := scanSingleRow(ctx, exec, `
+			SELECT protocol, host, port, COALESCE(username, ''), COALESCE(password, '')
+			FROM proxies WHERE id = $1 AND deleted_at IS NULL
+		`, []any{proxy.ID}, &proxy.Protocol, &proxy.Host, &proxy.Port, &proxy.Username, &proxy.Password); err != nil {
+			return err
+		}
+		if err := service.ValidateOpenAIOAuthInitialLoginProxy(ctx, proxy); err != nil {
+			return err
+		}
 	}
-	delete(account.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+
 	if historyFound {
 		account.Extra[service.OpenAIOAuthQualifiedProxyExtraKey] = historicalProxyID
 	}
@@ -138,7 +169,13 @@ func validateOpenAIOAuthAccountUpdate(
 	if next == nil {
 		return service.ErrAccountNilInput
 	}
-	current, err := lockOpenAIOAuthAccount(ctx, exec, next.ID)
+	var current *service.Account
+	var err error
+	if service.IsOpenAIBrowserOAuthAccount(next) {
+		current, err = lockOAuthReauthorizationAccount(ctx, exec, next.ID)
+	} else {
+		current, err = lockOpenAIOAuthAccount(ctx, exec, next.ID)
+	}
 	if err != nil {
 		return err
 	}
@@ -146,11 +183,20 @@ func validateOpenAIOAuthAccountUpdate(
 		return err
 	}
 	if service.IsOpenAIBrowserOAuthAccount(current) {
+		// Admin validation happens before this transaction. A full-row edit
+		// must not restore old tokens after a concurrent refresh or callback.
+		if next.UpdatedAt.IsZero() || !current.UpdatedAt.Equal(next.UpdatedAt) {
+			return service.ErrOAuthReauthorizationStale
+		}
 		next.Extra = maps.Clone(next.Extra)
 		if next.Extra == nil {
 			next.Extra = make(map[string]any)
 		}
 		delete(next.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+		delete(next.Extra, service.OpenAIOAuthLoginExitIPExtraKey)
+		if originalIP, exists := current.Extra[service.OpenAIOAuthLoginExitIPExtraKey]; exists {
+			next.Extra[service.OpenAIOAuthLoginExitIPExtraKey] = originalIP
+		}
 		if raw, exists := current.Extra[service.OpenAIOAuthQualifiedProxyExtraKey]; exists {
 			if _, ok := service.OpenAIOAuthQualifiedProxyID(current.Extra); !ok {
 				return service.ErrOpenAIOAuthProxyBindingCorrupt
@@ -174,6 +220,9 @@ func validateOpenAIOAuthCredentialsUpdate(
 ) error {
 	current, err := lockOpenAIOAuthAccount(ctx, exec, accountID)
 	if err != nil {
+		return err
+	}
+	if err := service.ValidateOpenAIOAuthCredentialSnapshot(ctx, current); err != nil {
 		return err
 	}
 	next := *current

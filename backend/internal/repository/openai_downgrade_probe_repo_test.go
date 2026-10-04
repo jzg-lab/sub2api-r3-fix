@@ -40,6 +40,11 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 			// r17aq：auth 一振暂停（schedulable=false 是探针落的）必须继续
 			// 被 ListDue 拾取，否则暂停号永不再探=死锁。
 			"OR s.auth_consecutive_failures > 0",
+			"jsonb_typeof(a.extra->'openai_rescue_lane') = 'object'",
+			"a.extra->'openai_rescue_lane'->>'entered_at' ~",
+			"jsonb_path_query_first_tz(",
+			"'$.datetime()', '{}'::jsonb, true",
+			"COALESCE(a.extra->'openai_rescue_lane'->>'exit_reason', '') = ''",
 		} {
 			require.Contains(t, dueQuery, predicate, "ineligible rows must not occupy an IP rank")
 		}

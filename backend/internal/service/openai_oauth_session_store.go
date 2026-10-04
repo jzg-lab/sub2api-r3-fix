@@ -16,15 +16,23 @@ const openAIOAuthSessionTTL = 2 * time.Hour
 var ErrOpenAIOAuthSessionInvalid = errors.New("openai oauth session payload is invalid")
 
 type OpenAIOAuthSession struct {
-	ID             string
-	State          string
-	CodeVerifier   string
-	ClientID       string
-	RedirectURI    string
-	ProxyID        int64
-	ProxyRouteHash string
-	Platform       string
-	CreatedAt      time.Time
+	ID                              string
+	State                           string
+	CodeVerifier                    string
+	ClientID                        string
+	RedirectURI                     string
+	ProxyID                         int64
+	ProxyRouteHash                  string
+	Platform                        string
+	CreatedAt                       time.Time
+	ReauthorizationAccountID        int64
+	ReauthorizationRevision         string
+	ReauthorizationExitIP           string
+	ReauthorizationCredentialsHash  string
+	ReauthorizationBrowserSessionID string
+	LoginExitIP                     string
+	LoginBrowserSessionID           string
+	LoginCredentialsHash            string
 }
 
 type OpenAIOAuthSessionStore interface {
@@ -54,6 +62,9 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Create(ctx context.Context, session
 	if session.ProxyID <= 0 {
 		return fmt.Errorf("openai oauth session proxy is required")
 	}
+	if err := validateOpenAIOAuthReauthorizationBinding(session); err != nil {
+		return err
+	}
 
 	_, err := s.pending.CreatePendingSession(ctx, CreatePendingAuthSessionInput{
 		SessionToken: session.ID,
@@ -67,14 +78,22 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Create(ctx context.Context, session
 		ExpiresAt:  session.CreatedAt.UTC().Add(openAIOAuthSessionTTL),
 		LocalFlowState: map[string]any{
 			"openai_oauth": map[string]any{
-				"state":            session.State,
-				"code_verifier":    session.CodeVerifier,
-				"client_id":        session.ClientID,
-				"redirect_uri":     session.RedirectURI,
-				"proxy_id":         strconv.FormatInt(session.ProxyID, 10),
-				"proxy_route_hash": session.ProxyRouteHash,
-				"platform":         session.Platform,
-				"created_at":       session.CreatedAt.UTC().Format(time.RFC3339Nano),
+				"state":                              session.State,
+				"code_verifier":                      session.CodeVerifier,
+				"client_id":                          session.ClientID,
+				"redirect_uri":                       session.RedirectURI,
+				"proxy_id":                           strconv.FormatInt(session.ProxyID, 10),
+				"proxy_route_hash":                   session.ProxyRouteHash,
+				"platform":                           session.Platform,
+				"created_at":                         session.CreatedAt.UTC().Format(time.RFC3339Nano),
+				"reauthorization_account_id":         strconv.FormatInt(session.ReauthorizationAccountID, 10),
+				"reauthorization_revision":           session.ReauthorizationRevision,
+				"reauthorization_exit_ip":            session.ReauthorizationExitIP,
+				"reauthorization_credentials_hash":   session.ReauthorizationCredentialsHash,
+				"reauthorization_browser_session_id": session.ReauthorizationBrowserSessionID,
+				"login_exit_ip":                      session.LoginExitIP,
+				"login_browser_session_id":           session.LoginBrowserSessionID,
+				"login_credentials_hash":             session.LoginCredentialsHash,
 			},
 		},
 	})
@@ -121,7 +140,7 @@ func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSe
 		return nil, fmt.Errorf("%w: creation time is invalid", ErrOpenAIOAuthSessionInvalid)
 	}
 
-	return &OpenAIOAuthSession{
+	result := &OpenAIOAuthSession{
 		ID:             session.SessionToken,
 		State:          oauthSessionStringValue(raw["state"]),
 		CodeVerifier:   oauthSessionStringValue(raw["code_verifier"]),
@@ -131,7 +150,47 @@ func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSe
 		ProxyRouteHash: oauthSessionStringValue(raw["proxy_route_hash"]),
 		Platform:       oauthSessionStringValue(raw["platform"]),
 		CreatedAt:      createdAt,
-	}, nil
+	}
+	for key, target := range map[string]*string{
+		"login_exit_ip":                      &result.LoginExitIP,
+		"login_browser_session_id":           &result.LoginBrowserSessionID,
+		"login_credentials_hash":             &result.LoginCredentialsHash,
+		"reauthorization_browser_session_id": &result.ReauthorizationBrowserSessionID,
+	} {
+		if rawValue, exists := raw[key]; exists {
+			value, valid := rawValue.(string)
+			if !valid {
+				return nil, ErrOpenAIOAuthSessionInvalid
+			}
+			*target = value
+		}
+	}
+	rawID, hasID := raw["reauthorization_account_id"]
+	rawRevision, hasRevision := raw["reauthorization_revision"]
+	rawIP, hasIP := raw["reauthorization_exit_ip"]
+	if rawHash, exists := raw["reauthorization_credentials_hash"]; exists {
+		hash, ok := rawHash.(string)
+		if !ok {
+			return nil, ErrOpenAIOAuthSessionInvalid
+		}
+		result.ReauthorizationCredentialsHash = hash
+	}
+	if hasID || hasRevision || hasIP {
+		idText, idOK := rawID.(string)
+		revision, revisionOK := rawRevision.(string)
+		ip, ipOK := rawIP.(string)
+		id, parseErr := strconv.ParseInt(idText, 10, 64)
+		if !hasID || !hasRevision || !hasIP || !idOK || !revisionOK || !ipOK || parseErr != nil {
+			return nil, ErrOpenAIOAuthSessionInvalid
+		}
+		result.ReauthorizationAccountID = id
+		result.ReauthorizationRevision = revision
+		result.ReauthorizationExitIP = ip
+	}
+	if err := validateOpenAIOAuthReauthorizationBinding(result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func oauthSessionStringValue(value any) string {

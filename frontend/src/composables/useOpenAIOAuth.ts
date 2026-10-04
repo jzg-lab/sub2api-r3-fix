@@ -2,9 +2,11 @@ import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
+import { extractI18nErrorMessage } from '@/utils/apiError'
 
 export interface OpenAITokenInfo {
+  initial_authorization_proof?: string
+  reauthorization_proof?: string
   proxy_id?: number
   access_token?: string
   refresh_token?: string
@@ -49,14 +51,17 @@ export function useOpenAIOAuth() {
     error.value = proxyRequiredMessage()
     appStore.showError(error.value)
   }
-
-  // Reset state
-  const resetState = () => {
-    requestVersion++
+  const clearAuthorizationSession = () => {
     authUrl.value = ''
     sessionId.value = ''
     oauthState.value = ''
     authorizationProxyId.value = null
+  }
+
+  // Reset state
+  const resetState = () => {
+    requestVersion++
+    clearAuthorizationSession()
     loading.value = false
     error.value = ''
   }
@@ -64,13 +69,11 @@ export function useOpenAIOAuth() {
   // Generate auth URL for OpenAI OAuth
   const generateAuthUrl = async (
     proxyId?: number | null,
-    redirectUri?: string
+    redirectUri?: string,
+    reauthorization?: { accountId: number; expectedUpdatedAt: string }
   ): Promise<boolean> => {
     const version = ++requestVersion
-    authUrl.value = ''
-    sessionId.value = ''
-    oauthState.value = ''
-    authorizationProxyId.value = null
+    clearAuthorizationSession()
     error.value = ''
     if (!validProxyId(proxyId)) {
       loading.value = false
@@ -83,6 +86,10 @@ export function useOpenAIOAuth() {
       const payload: Record<string, unknown> = { proxy_id: proxyId }
       if (redirectUri) {
         payload.redirect_uri = redirectUri
+      }
+      if (reauthorization) {
+        payload.account_id = reauthorization.accountId
+        payload.expected_updated_at = reauthorization.expectedUpdatedAt
       }
 
       const response = await adminAPI.accounts.generateAuthUrl(
@@ -102,7 +109,12 @@ export function useOpenAIOAuth() {
       return true
     } catch (err: any) {
       if (version !== requestVersion) return false
-      error.value = extractApiErrorMessage(err, t('admin.accounts.oauth.openai.failedToGenerateUrl'))
+      error.value = extractI18nErrorMessage(
+        err,
+        t,
+        'admin.accounts.oauth.openai.errors',
+        t('admin.accounts.oauth.openai.failedToGenerateUrl')
+      )
       appStore.showError(error.value)
       return false
     } finally {
@@ -117,6 +129,7 @@ export function useOpenAIOAuth() {
     state: string,
     proxyId?: number | null
   ): Promise<OpenAITokenInfo | null> => {
+    if (loading.value) return null
     const version = ++requestVersion
     if (!code.trim() || !currentSessionId || !state.trim()) {
       loading.value = false
@@ -167,7 +180,12 @@ export function useOpenAIOAuth() {
       appStore.showError(error.value)
       return null
     } finally {
-      if (version === requestVersion) loading.value = false
+      if (version === requestVersion) {
+        // The server consumes the session before exchange. Even a lost response
+        // is not permission to replay the old code or reuse its browser proof.
+        clearAuthorizationSession()
+        loading.value = false
+      }
     }
   }
 

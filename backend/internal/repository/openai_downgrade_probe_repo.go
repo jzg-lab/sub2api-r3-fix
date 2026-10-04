@@ -129,7 +129,13 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 					OR s.probe_mode = 'qualification' OR a.status = 'error'
 					-- auth 一振暂停（r17aq）：schedulable=false 是探针落的，必须
 					-- 继续被拾取才能洗白/毕业，否则暂停号永不再探=死锁。
-					OR s.auth_consecutive_failures > 0)
+					OR s.auth_consecutive_failures > 0
+					-- Early host qualification does not release rescue isolation.
+					OR (jsonb_typeof(a.extra->'openai_rescue_lane') = 'object'
+						AND a.extra->'openai_rescue_lane'->>'entered_at' ~
+							'^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-][0-9]{2}:[0-5][0-9])$'
+						AND (`+ollamaCloudUsageParseRFC3339SQL("a.extra->'openai_rescue_lane'->>'entered_at'")+`) IS NOT NULL
+						AND COALESCE(a.extra->'openai_rescue_lane'->>'exit_reason', '') = ''))
 				AND (
 					a.proxy_id IS NULL
 					OR (
@@ -489,7 +495,6 @@ func (r *openAIDowngradeProbeRepository) FindOpenAIDowngradeMainProxy(
 		LIMIT 1
 	`, []any{openAIDowngradePerIPAccountCap})
 }
-
 
 func (r *openAIDowngradeProbeRepository) FindOpenAIDowngradeEscapeProxy(
 	ctx context.Context,

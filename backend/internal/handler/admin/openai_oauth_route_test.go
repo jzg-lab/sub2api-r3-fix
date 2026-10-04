@@ -99,6 +99,31 @@ func TestOpenAIOAuthHandlersRejectRouteChangeDuringExchange(t *testing.T) {
 	}
 }
 
+func TestOpenAIOAuthGenerateRejectsMalformedReauthorizationInsteadOfCreating(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{
+		`{"proxy_id":7,"account_id":"invalid"}`,
+		`{"proxy_id":7,"expected_updated_at":"2026-10-03T01:02:03Z"}`,
+		`{"proxy_id":7,"account_id":42,"expected_updated_at":"2026-10-03T01:02:03Z"}`,
+		`{"proxy_id":7,"account_id":0}`,
+		`{"proxy_id":7,`,
+	} {
+		store := &oauthRouteSessionStore{}
+		oauth := service.NewOpenAIOAuthService(&oauthRouteProxyRepo{}, &oauthRouteClient{})
+		oauth.SetSessionStore(store)
+		t.Cleanup(oauth.Stop)
+		handler := NewOpenAIOAuthHandler(oauth, nil, nil, nil)
+		router := gin.New()
+		router.POST("/admin/openai/generate-auth-url", handler.GenerateAuthURL)
+		request := httptest.NewRequest(http.MethodPost, "/admin/openai/generate-auth-url", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		require.Contains(t, []int{http.StatusBadRequest, http.StatusConflict}, response.Code)
+		require.Nil(t, store.session, "invalid reauthorization must not create an unbound session")
+	}
+}
+
 func TestCreateFromOAuthUsesSessionProxyWhenRequestOmitsIt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := &oauthRouteSessionStore{}

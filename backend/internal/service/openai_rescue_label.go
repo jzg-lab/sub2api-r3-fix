@@ -3,8 +3,9 @@ package service
 // 救治区标签计算（r17ax Phase 3.4）：把「救治区成员标记 + 插件桥 per-账号
 // 状态」折算成账号健康格标签与悬停注记。语义见 proposal.md 标签表：
 //   - 救治中     蓝紫  成员 + 插件状态=active（连过 < 阈值）      不可点
-//   - 已复活     绿    插件连过 ≥ 阈值（默认 6）                  可点→既有 reenable 考证
-//   - 疑似账号级 灰红  插件 in_backoff（连错达阈值停探退避）      不可点
+//   - 待复核     橙    插件连过达标、宿主资格证据尚缺             可点→既有 reenable 考证
+//   - 已复活     绿    当前插件与宿主资格双签通过                 不可点
+//   - 疑似账号级 灰红  插件有质量失败并进入退避                   不可点
 //   - 插件离线降级：桥缺席/离线 → 沿用救治中 + plugin_offline 注记（调度不变）
 // 退避期满插件复探（in_backoff 翻回 false）→ 回升「救治中」（proposal 出口表：
 // 退避期满复探给新机会）；suspect_account_level 是插件侧粘滞旗标，只进注记
@@ -41,6 +42,7 @@ type OpenAIPluginBridgeAccount struct {
 	InBackoff           bool
 	BackoffUntil        time.Time
 	LastProbeAt         time.Time
+	PreviousPassAt      time.Time
 	// LastVerdict 插件最近一针判定（pass/fail；空=尚无针）。
 	LastVerdict string
 }
@@ -71,6 +73,7 @@ func ParseOpenAIPluginBridgeProber(statusJSON string) *OpenAIPluginBridgeProber 
 				InBackoff           bool      `json:"in_backoff"`
 				BackoffUntil        time.Time `json:"backoff_until"`
 				LastProbeAt         time.Time `json:"last_probe_at"`
+				PreviousPassAt      time.Time `json:"previous_pass_at"`
 				LastVerdict         string    `json:"last_verdict"`
 			} `json:"accounts"`
 		} `json:"prober"`
@@ -95,6 +98,7 @@ func ParseOpenAIPluginBridgeProber(statusJSON string) *OpenAIPluginBridgeProber 
 			InBackoff:           raw.InBackoff,
 			BackoffUntil:        raw.BackoffUntil,
 			LastProbeAt:         raw.LastProbeAt,
+			PreviousPassAt:      raw.PreviousPassAt,
 			LastVerdict:         raw.LastVerdict,
 		}
 	}
@@ -141,24 +145,33 @@ func (l *OpenAIRescueLane) GraduationThreshold() int {
 
 // LabelOpenAIRescueAccount 纯函数：in-lane 账号的标签裁决（proposal 标签表）。
 // bridge=nil（桥缺席/账号未入插件视图/缓存也没有）按无插件证据处理 → 救治中。
-// 已复活在桥离线的缓存数据下仍可点：转正必须考证（冷针），过期数据的点击
-// 会被冷针拦下，不构成裸奔通道；真正离线的事实经注记 plugin_offline 透出。
+// 调用方只提供健康在线桥的证据；离线缓存只用于注记，不参与恢复判定。
 // 调用方保证 marker!=nil（不在区的账号不走本函数）。
 func LabelOpenAIRescueAccount(
 	marker *OpenAIRescueLaneMarker,
 	threshold int,
 	bridge *OpenAIPluginBridgeAccount,
+	host OpenAIProbeHealthSnapshot,
+	now time.Time,
 ) (label, color string, clickable bool, reason string) {
 	if threshold <= 0 {
 		threshold = openAIRescueDefaultCleanPasses
 	}
-	if bridge != nil && bridge.InBackoff {
+	if recovered, _ := rescueLaneRecoveryEvidence(bridge, host, marker, now); recovered &&
+		bridge.ConsecutivePasses >= threshold {
+		return OpenAIHealthLabelRevived, OpenAIHealthColorGreen, false, "plugin_and_host_pass"
+	}
+	if bridge != nil && bridge.InBackoff && bridge.ConsecFails >= 1 {
 		// 插件连错达阈值停探退避：疑似账号级。退避期满 in_backoff 翻回
 		// false → 回升救治中（复探给新机会）。
 		return OpenAIHealthLabelSuspected, OpenAIHealthColorGrayRed, false, "plugin_backoff"
 	}
-	if bridge != nil && bridge.ConsecutivePasses >= threshold {
-		return OpenAIHealthLabelRevived, OpenAIHealthColorGreen, true, "plugin_consecutive_passes"
+	if rescuePluginPassEvidence(bridge, marker, now) && bridge.ConsecutivePasses >= threshold {
+		return OpenAIHealthLabelReview, OpenAIHealthColorOrange,
+			host.State == OpenAIDowngradeStatePendingReplace, "plugin_ready_for_qualification"
+	}
+	if marker != nil && marker.Observation != nil && !marker.Observation.SuspectedAt.IsZero() {
+		return OpenAIHealthLabelSuspected, OpenAIHealthColorGrayRed, false, "recovery_unverified"
 	}
 	if bridge != nil {
 		return OpenAIHealthLabelRescuing, OpenAIHealthColorBluePurple, false, "in_rescue"

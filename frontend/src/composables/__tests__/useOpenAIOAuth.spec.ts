@@ -10,6 +10,7 @@ vi.mock('vue-i18n', () => ({
   useI18n: () => ({
     t: (key: string) => {
       const messages: Record<string, string> = {
+        'admin.accounts.oauth.openai.errors.OPENAI_OAUTH_LOGIN_IP_CHANGED': '原登录 IP 不匹配，已停止',
         'admin.accounts.oauth.openai.failedToExchangeCode': 'OpenAI 授权码兑换失败',
         'admin.accounts.oauth.openai.errors.OPENAI_OAUTH_PROXY_REQUIRED':
           '未设置代理，当前服务器无法直连 OpenAI，导致 OpenAI OAuth 请求失败。请先选择可访问 OpenAI 的代理后重试；如果授权码已失效，请重新生成授权链接。'
@@ -33,6 +34,45 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { adminAPI } from '@/api/admin'
 
 beforeEach(() => vi.clearAllMocks())
+
+describe('useOpenAIOAuth account-bound reauthorization', () => {
+  it('displays the translated original-IP failure without retrying', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockRejectedValueOnce({
+      status: 409, reason: 'OPENAI_OAUTH_LOGIN_IP_CHANGED', message: 'exit changed'
+    })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z'
+    })).toBe(false)
+    expect(oauth.error.value).toBe('原登录 IP 不匹配，已停止')
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends the account and its captured revision with the original proxy', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://example.test/?state=fixture', session_id: 'fixture'
+    })
+    const oauth = useOpenAIOAuth()
+    const expectedUpdatedAt = '2026-10-03T01:02:03.123456Z'
+    expect(await oauth.generateAuthUrl(7, undefined, { accountId: 42, expectedUpdatedAt })).toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith('/admin/openai/generate-auth-url', {
+      proxy_id: 7, account_id: 42, expected_updated_at: expectedUpdatedAt
+    })
+  })
+
+  it('does not downgrade an unknown original IP into an unbound create request', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockRejectedValueOnce({
+      response: { data: { message: 'original authorization IP is not recorded' } }
+    })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z'
+    })).toBe(false)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledTimes(1)
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+  })
+})
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -103,6 +143,30 @@ describe('useOpenAIOAuth.exchangeAuthCode', () => {
     await bindOAuthSession(oauth)
     const result = await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)
     expect(result?.proxy_id).toBe(7)
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+    expect(oauth.oauthState.value).toBe('')
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(adminAPI.accounts.exchangeCode).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    new Error('response lost'),
+    { response: { data: { code: 'OPENAI_OAUTH_REAUTH_PROOF_REQUIRED' } } },
+    { response: { data: { code: 'OPENAI_OAUTH_LOGIN_IP_CHANGED' } } }
+  ])('clears a possibly consumed exchange session without automatically reauthorizing', async (failure) => {
+    vi.mocked(adminAPI.accounts.exchangeCode).mockRejectedValueOnce(failure)
+    const oauth = useOpenAIOAuth()
+    await bindOAuthSession(oauth)
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockClear()
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+    expect(oauth.oauthState.value).toBe('')
+    expect(oauth.error.value).not.toBe('')
+    expect(adminAPI.accounts.generateAuthUrl).not.toHaveBeenCalled()
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(adminAPI.accounts.exchangeCode).toHaveBeenCalledTimes(1)
   })
 
   it.each([undefined, null, 0, -1, 1.5, '7'])('rejects an unbound exchange result: %s', async (proxy_id) => {
@@ -135,7 +199,9 @@ describe('useOpenAIOAuth.exchangeAuthCode', () => {
     const oauth = useOpenAIOAuth()
     await bindOAuthSession(oauth)
     const old = oauth.exchangeAuthCode('code', 'session-id', 'state', 7)
-    const current = oauth.exchangeAuthCode('code', 'session-id', 'state', 7)
+    oauth.resetState()
+    await bindOAuthSession(oauth, 7, 'replacement-session')
+    const current = oauth.exchangeAuthCode('code', 'replacement-session', 'state', 7)
     first.reject(new Error('obsolete'))
     expect(await old).toBeNull()
     expect(oauth.error.value).toBe('')
@@ -143,6 +209,30 @@ describe('useOpenAIOAuth.exchangeAuthCode', () => {
     second.resolve({ proxy_id: 7 })
     expect((await current)?.proxy_id).toBe(7)
     expect(oauth.loading.value).toBe(false)
+  })
+
+  it.each(['success', 'failure'])('does not replay an in-flight exchange before %s', async (outcome) => {
+    const response = deferred<Record<string, unknown>>()
+    vi.mocked(adminAPI.accounts.exchangeCode).mockReturnValueOnce(response.promise)
+    const oauth = useOpenAIOAuth()
+    await bindOAuthSession(oauth)
+    const pending = oauth.exchangeAuthCode('code', 'session-id', 'state', 7)
+
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(await oauth.exchangeAuthCode('', 'wrong-session', '', 8)).toBeNull()
+    expect(adminAPI.accounts.exchangeCode).toHaveBeenCalledTimes(1)
+    expect(oauth.loading.value).toBe(true)
+    expect(oauth.error.value).toBe('')
+
+    if (outcome === 'success') response.resolve({ proxy_id: 7 })
+    else response.reject(new Error('response lost'))
+    expect(await pending).toEqual(outcome === 'success' ? { proxy_id: 7 } : null)
+    expect(oauth.loading.value).toBe(false)
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+    expect(oauth.error.value === '').toBe(outcome === 'success')
+    expect(await oauth.exchangeAuthCode('code', 'session-id', 'state', 7)).toBeNull()
+    expect(adminAPI.accounts.exchangeCode).toHaveBeenCalledTimes(1)
   })
 
   it('shows a clear proxy hint when code exchange fails without a proxy', async () => {

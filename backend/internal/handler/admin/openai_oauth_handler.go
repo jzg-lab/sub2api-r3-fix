@@ -33,6 +33,7 @@ type OpenAIOAuthHandler struct {
 func (h *OpenAIOAuthHandler) SetAuthBrowserLauncher(l *service.OpenAIAuthBrowserLauncher) {
 	if h != nil {
 		h.authBrowserLauncher = l
+		l.SetReauthorizationService(h.openaiOAuthService)
 	}
 }
 
@@ -99,6 +100,9 @@ func NewOpenAIOAuthHandler(
 		openaiOAuthService: openaiOAuthService,
 		adminService:       adminService,
 	}
+	if openaiOAuthService != nil && adminService != nil {
+		openaiOAuthService.SetReauthorizationAccountLookup(adminService.GetAccount)
+	}
 	// Assign through explicit nil checks: storing a nil *Service in an interface
 	// field yields a non-nil interface, which would silently defeat the
 	// `== nil` capability guards below and panic instead of returning 400.
@@ -113,8 +117,10 @@ func NewOpenAIOAuthHandler(
 
 // OpenAIGenerateAuthURLRequest represents the request for generating OpenAI auth URL
 type OpenAIGenerateAuthURLRequest struct {
-	ProxyID     *int64 `json:"proxy_id"`
-	RedirectURI string `json:"redirect_uri"`
+	ProxyID           *int64 `json:"proxy_id"`
+	RedirectURI       string `json:"redirect_uri"`
+	AccountID         *int64 `json:"account_id"`
+	ExpectedUpdatedAt string `json:"expected_updated_at"`
 }
 
 // GenerateAuthURL generates OpenAI OAuth authorization URL
@@ -122,16 +128,28 @@ type OpenAIGenerateAuthURLRequest struct {
 func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 	var req OpenAIGenerateAuthURLRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		// Allow empty body
-		req = OpenAIGenerateAuthURLRequest{}
+		response.BadRequest(c, "invalid authorization request")
+		return
 	}
 
-	result, err := h.openaiOAuthService.GenerateAuthURL(
-		c.Request.Context(),
-		req.ProxyID,
-		req.RedirectURI,
-		oauthPlatformFromPath(c),
-	)
+	var result *service.OpenAIAuthURLResult
+	var err error
+	if req.AccountID != nil {
+		result, err = h.openaiOAuthService.GenerateReauthorizationAuthURL(
+			c.Request.Context(), *req.AccountID, req.ExpectedUpdatedAt,
+			req.ProxyID, req.RedirectURI, oauthPlatformFromPath(c),
+		)
+	} else if req.ExpectedUpdatedAt != "" {
+		response.BadRequest(c, "account_id is required for reauthorization")
+		return
+	} else {
+		result, err = h.openaiOAuthService.GenerateAuthURL(
+			c.Request.Context(),
+			req.ProxyID,
+			req.RedirectURI,
+			oauthPlatformFromPath(c),
+		)
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -169,6 +187,17 @@ func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
 	defer cancel()
 	result, err := h.authBrowserLauncher.Launch(ctx, req.SessionID)
 	if err != nil {
+		if errors.Is(err, service.ErrOAuthReauthorizationStale) ||
+			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnknown) ||
+			errors.Is(err, service.ErrOpenAIOAuthLoginIPChanged) ||
+			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnavailable) ||
+			errors.Is(err, service.ErrOpenAIOAuthFixedEgressRequired) ||
+			errors.Is(err, service.ErrOpenAIOAuthInitialLoginProofRequired) ||
+			errors.Is(err, service.ErrOpenAIOAuthProxyBindingCorrupt) ||
+			errors.Is(err, service.ErrOpenAIOAuthProxyMismatch) {
+			response.ErrorFrom(c, err)
+			return
+		}
 		statusCode := http.StatusInternalServerError
 		reason := "AUTH_BROWSER_LAUNCH_FAILED"
 		switch {
@@ -213,6 +242,20 @@ type OpenAIExchangeCodeRequest struct {
 	ProxyID     *int64 `json:"proxy_id"`
 }
 
+type openAIExchangeCodeResult struct {
+	*service.OpenAITokenInfo
+	Credentials map[string]any `json:"credentials,omitempty"`
+}
+
+func (h *OpenAIOAuthHandler) exchangeCodeResult(info *service.OpenAITokenInfo) openAIExchangeCodeResult {
+	result := openAIExchangeCodeResult{OpenAITokenInfo: info}
+	if info.ReauthorizationProof != "" {
+		// Keep the exact representation bound to the one-shot proof.
+		result.Credentials = h.openaiOAuthService.BuildAccountCredentials(info)
+	}
+	return result
+}
+
 // ExchangeCode exchanges OpenAI authorization code for tokens
 // POST /api/v1/admin/openai/exchange-code
 func (h *OpenAIOAuthHandler) ExchangeCode(c *gin.Context) {
@@ -234,7 +277,7 @@ func (h *OpenAIOAuthHandler) ExchangeCode(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, tokenInfo)
+	response.Success(c, h.exchangeCodeResult(tokenInfo))
 }
 
 // OpenAIRefreshTokenRequest represents the request for refreshing OpenAI token
@@ -349,9 +392,7 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 	}
 	newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
 
-	updatedAccount, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, &service.UpdateAccountInput{
-		Credentials: newCredentials,
-	})
+	updatedAccount, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, tokenInfo.AccountRefreshUpdate(newCredentials))
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -408,7 +449,15 @@ func (h *OpenAIOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 
 	// Create account
 	proxyID := tokenInfo.ProxyID
-	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
+	createCtx, err := h.openaiOAuthService.ConsumeInitialAuthorizationProof(
+		c.Request.Context(), tokenInfo.InitialAuthorizationProof, &service.Account{
+			Platform: platform, Type: service.AccountTypeOAuth, Credentials: credentials, ProxyID: &proxyID,
+		})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	account, err := h.adminService.CreateAccount(createCtx, &service.CreateAccountInput{
 		Name:        name,
 		Platform:    platform,
 		Type:        "oauth",

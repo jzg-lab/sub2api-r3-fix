@@ -99,6 +99,7 @@ const OAuthAuthorizationFlowStub = defineComponent({
     initialInputMethod: String,
     loading: Boolean,
     authBrowserLaunching: Boolean,
+    authBrowserReady: Boolean,
   },
   data: () => ({ inputMethod: 'manual', authCode: 'test-code', oauthState: 'test-state' }),
   methods: { reset() {} },
@@ -232,13 +233,17 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function startOAuthFlow(wrapper: ReturnType<typeof mountModal>) {
+async function startOAuthFlow(wrapper: ReturnType<typeof mountModal>, launch = false) {
   await selectButtonByText(wrapper, 'OpenAI')
   await wrapper.get('form#create-account-form input[type="text"]').setValue('OAuth account')
   wrapper.findComponent({ name: 'ProxySelector' }).vm.$emit('update:modelValue', 23)
   await wrapper.get('form#create-account-form').trigger('submit.prevent')
   await wrapper.get('[data-testid="generate-url"]').trigger('click')
   await flushPromises()
+  if (launch) {
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await flushPromises()
+  }
 }
 
 function authSubmit(wrapper: ReturnType<typeof mountModal>) {
@@ -433,15 +438,26 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
   })
 
   it('uses the exchange route and stays busy until account creation completes', async () => {
+    exchangeCodeMock.mockResolvedValueOnce({
+      proxy_id: 23,
+      initial_authorization_proof: 'initial-login-fixture',
+    })
     const creation = deferred<unknown>()
     createAccountMock.mockReturnValueOnce(creation.promise)
     const wrapper = mountModal()
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
 
-    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({ proxy_id: 23 }))
+    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({
+      proxy_id: 23,
+      initial_authorization_proof: 'initial-login-fixture',
+    }))
     expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await wrapper.get('[data-testid="generate-url"]').trigger('click')
+    expect(launchAuthBrowserMock).toHaveBeenCalledTimes(1)
+    expect(generateAuthUrlMock).toHaveBeenCalledTimes(1)
     expect(wrapper.findComponent(OAuthAuthorizationFlowStub).props('loading')).toBe(true)
     await authSubmit(wrapper).trigger('click')
     expect(exchangeCodeMock).toHaveBeenCalledTimes(1)
@@ -454,11 +470,38 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     wrapper.unmount()
   })
 
+  it.each(['OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED', 'OPENAI_OAUTH_LOGIN_IP_CHANGED', 'NETWORK_ERROR'])(
+    'returns to the preserved form without replaying consumed authorization after %s',
+    async (reason) => {
+      createAccountMock.mockRejectedValueOnce({ reason, message: 'creation was not confirmed' })
+      const wrapper = mountModal()
+      await startOAuthFlow(wrapper, true)
+      await authSubmit(wrapper).trigger('click')
+      await flushPromises()
+
+      expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
+      expect(showErrorMock).toHaveBeenLastCalledWith(
+        'creation was not confirmed admin.accounts.oauth.openai.createFailedRestart'
+      )
+      expect(wrapper.emitted('created')).toBeUndefined()
+      expect(wrapper.emitted('close')).toBeUndefined()
+      expect(exchangeCodeMock).toHaveBeenCalledTimes(1)
+      expect(createAccountMock).toHaveBeenCalledTimes(1)
+      expect(generateAuthUrlMock).toHaveBeenCalledTimes(1)
+
+      await selectButtonByText(wrapper, 'common.next')
+      await flushPromises()
+      expect(exchangeCodeMock).toHaveBeenCalledTimes(1)
+      expect(createAccountMock).toHaveBeenCalledTimes(1)
+      wrapper.unmount()
+    }
+  )
+
   it.each(['close', 'back', 'unmount'])('does not create after %s cancels an exchange', async (action) => {
     const exchange = deferred<unknown>()
     exchangeCodeMock.mockReturnValueOnce(exchange.promise)
     const wrapper = mountModal()
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     if (action === 'close') wrapper.findComponent(BaseDialogStub).vm.$emit('close')
     if (action === 'back') await selectButtonByText(wrapper, 'common.back')
@@ -475,7 +518,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     const newCreation = deferred<unknown>()
     createAccountMock.mockReturnValueOnce(oldCreation.promise).mockReturnValueOnce(newCreation.promise)
     const wrapper = mountModal()
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
     expect(createAccountMock).toHaveBeenCalledTimes(1)
@@ -485,10 +528,12 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
       auth_url: 'https://auth.example.invalid/authorize?state=test-state',
       session_id: 'next-session',
     })
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
     expect(createAccountMock).toHaveBeenCalledTimes(2)
+    expect(showSuccessMock).toHaveBeenCalledTimes(2)
+    showSuccessMock.mockClear()
 
     if (outcome === 'success') oldCreation.resolve({ id: 42 })
     else oldCreation.reject(new Error('older creation failed'))
@@ -509,7 +554,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
   it('rejects an exchange without a server-assigned proxy before creating', async () => {
     exchangeCodeMock.mockResolvedValueOnce({ expires_in: 3600 })
     const wrapper = mountModal()
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
     expect(createAccountMock).not.toHaveBeenCalled()
@@ -521,7 +566,7 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
   it('rejects an exchange assigned to a different proxy than the authorization link', async () => {
     exchangeCodeMock.mockResolvedValueOnce({ proxy_id: 17, expires_in: 3600 })
     const wrapper = mountModal()
-    await startOAuthFlow(wrapper)
+    await startOAuthFlow(wrapper, true)
     await authSubmit(wrapper).trigger('click')
     await flushPromises()
     expect(createAccountMock).not.toHaveBeenCalled()
@@ -533,6 +578,62 @@ describe('CreateAccountModal OpenAI authorization lifecycle', () => {
     const wrapper = mountModal()
     await startOAuthFlow(wrapper)
     expect(wrapper.findComponent({ name: 'ProxySelector' }).exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['missing', 'in-progress', 'failed', 'rejected'] as const)(
+    'blocks submission when browser launch is %s',
+    async (result) => {
+      const wrapper = mountModal()
+      await startOAuthFlow(wrapper)
+      if (result === 'rejected') launchAuthBrowserMock.mockRejectedValueOnce({ reason: 'AUTH_BROWSER_LAUNCH_FAILED' })
+      else launchAuthBrowserMock.mockResolvedValueOnce({
+        launched: false, already_running: result === 'in-progress'
+      })
+      if (result !== 'missing') {
+        await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+        await flushPromises()
+      }
+      expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+      // Check the handler as well as the disabled DOM control.
+      const actions = wrapper.vm.$.setupState as unknown as {
+        handleOpenAIExchange: (code: string) => Promise<void>
+      }
+      await actions.handleOpenAIExchange('test-code')
+      expect(exchangeCodeMock).not.toHaveBeenCalled()
+      expect(createAccountMock).not.toHaveBeenCalled()
+      wrapper.unmount()
+    }
+  )
+
+  it('invalidates a successful browser launch when regenerating the session', async () => {
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper, true)
+    expect(authSubmit(wrapper).attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="generate-url"]').trigger('click')
+    await flushPromises()
+    expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+    await authSubmit(wrapper).trigger('click')
+    expect(exchangeCodeMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('drops a late successful browser launch after returning to the form and changing proxy', async () => {
+    const launch = deferred<unknown>()
+    launchAuthBrowserMock.mockReturnValueOnce(launch.promise)
+    const wrapper = mountModal()
+    await startOAuthFlow(wrapper)
+    await wrapper.get('[data-testid="launch-auth-browser"]').trigger('click')
+    await selectButtonByText(wrapper, 'common.back')
+    wrapper.findComponent({ name: 'ProxySelector' }).vm.$emit('update:modelValue', 24)
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('[data-testid="generate-url"]').trigger('click')
+    await flushPromises()
+    launch.resolve({ launched: true })
+    await flushPromises()
+    expect(authSubmit(wrapper).attributes('disabled')).toBeDefined()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(exchangeCodeMock).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

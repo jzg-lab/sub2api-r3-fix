@@ -132,6 +132,7 @@
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         :show-auth-browser-launch="isOpenAI"
         :auth-browser-launching="authBrowserLaunching"
+        :auth-browser-ready="authBrowserReady"
         @generate-url="handleGenerateUrl"
         @launch-auth-browser="handleLaunchAuthBrowser"
         @cookie-auth="handleCookieAuth"
@@ -183,6 +184,7 @@
 </template>
 
 <script setup lang="ts">
+import { extractI18nErrorMessage } from '@/utils/apiError'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -240,7 +242,10 @@ const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
 const addMethod = ref<AddMethod>('oauth')
 const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('code_assist')
 const reauthSession = useReauthSession(props)
-const { launching: authBrowserLaunching, launch: handleLaunchAuthBrowser } =
+const {
+  launching: authBrowserLaunching, launch: handleLaunchAuthBrowser,
+  ready: authBrowserReady, invalidate: invalidateBrowser
+} =
   useReauthBrowserLaunch(reauthSession, openaiOAuth, () => oauthFlowRef.value?.reset())
 
 // Computed - check platform
@@ -287,11 +292,12 @@ const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   const sessionId = currentSessionId.value
   const loading = currentLoading.value
-  return authCode.trim() && sessionId && !loading
+  return authCode.trim() && sessionId && !loading && (!isOpenAI.value || authBrowserReady.value)
 })
 
 // Watchers
 function resetState() {
+  invalidateBrowser()
   addMethod.value = 'oauth'
   geminiOAuthType.value = 'code_assist'
   claudeOAuth.resetState()
@@ -303,7 +309,7 @@ function resetState() {
 onBeforeUnmount(resetState)
 
 watch(
-  () => [props.show, props.account?.id, props.account?.platform, props.account?.proxy_id] as const,
+  [() => props.show, () => props.account?.id, () => props.account?.platform, () => props.account?.proxy_id],
   ([newVal]) => {
     resetState()
     if (newVal && props.account) {
@@ -346,7 +352,8 @@ const applyReauthCredentials = async (
   operation: ReauthOperation,
   type: 'oauth' | 'setup-token',
   credentials: Record<string, unknown>,
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  reauthorizationProof?: string
 ): Promise<Account> => {
   if (!reauthSession.isCurrent(operation)) {
     throw new Error('Account is no longer available')
@@ -359,15 +366,21 @@ const applyReauthCredentials = async (
     type,
     credentials,
     extra,
+    ...(reauthorizationProof ? { reauthorization_proof: reauthorizationProof } : {}),
     expected_updated_at: expectedUpdatedAt
   })
 }
 
-const handleGenerateUrl = () => reauthSession.run(async () => {
+const handleGenerateUrl = () => reauthSession.run(async (operation) => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    invalidateBrowser()
+    oauthFlowRef.value?.reset()
+    await openaiOAuth.generateAuthUrl(operation.account.proxy_id, undefined, {
+      accountId: operation.account.id,
+      expectedUpdatedAt: operation.expectedUpdatedAt
+    })
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined
@@ -388,6 +401,7 @@ const handleExchangeCode = () => reauthSession.run(async (operation) => {
   if (!authCode.trim()) return
 
   if (isOpenAILike.value) {
+    if (!authBrowserReady.value) return
     // OpenAI OAuth flow
     const oauthClient = openaiOAuth
     const sessionId = oauthClient.sessionId.value
@@ -412,11 +426,13 @@ const handleExchangeCode = () => reauthSession.run(async (operation) => {
     const extra = oauthClient.buildExtraInfo(tokenInfo)
 
     try {
-      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra)
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra, tokenInfo.reauthorization_proof)
       completeReauth(operation, updatedAccount)
     } catch (error: any) {
       if (!reauthSession.isCurrent(operation)) return
-      oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+      oauthClient.error.value = extractI18nErrorMessage(
+        error, t, 'admin.accounts.oauth.openai.errors', t('admin.accounts.oauth.authFailed')
+      )
       appStore.showError(oauthClient.error.value)
     }
   } else if (isGemini.value) {

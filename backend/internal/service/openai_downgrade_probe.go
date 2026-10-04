@@ -599,6 +599,7 @@ type OpenAIDowngradeProbeRunner struct {
 	stopOnce  sync.Once
 	stopCh    chan struct{}
 	doneCh    chan struct{}
+	wakeCh    chan struct{}
 }
 
 func NewOpenAIDowngradeProbeRunner(
@@ -621,6 +622,7 @@ func NewOpenAIDowngradeProbeRunner(
 		deferCounts:   make(map[int64]int),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
+		wakeCh:        make(chan struct{}, 1),
 	}
 	runner.nextDelay = func() time.Duration {
 		// 15-75 分钟均匀随机（0.5x-2.5x）：探针体已复刻真实 codex 形态（数十 KB
@@ -712,17 +714,17 @@ func (r *OpenAIDowngradeProbeRunner) loop() {
 	for {
 		select {
 		case <-ticker.C:
-			// Bounded context: an uncancellable hang (DB/network) must not
-			// wedge every future tick behind runMu.
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			if err := r.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				logger.LegacyPrintf("service.openai_downgrade_probe",
-					"[OpenAIDowngradeProbe] scan failed: %v", err)
-			}
-			cancel()
+		case <-r.wakeCh:
 		case <-r.stopCh:
 			return
 		}
+		// Wakeups share the scan's lifecycle, serialization and exit throttles.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		if err := r.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.LegacyPrintf("service.openai_downgrade_probe",
+				"[OpenAIDowngradeProbe] scan failed: %v", err)
+		}
+		cancel()
 	}
 }
 
@@ -1031,7 +1033,7 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
 		state.ProbeMode != "qualification" &&
-		state.AuthConsecutiveFailures == 0 {
+		state.AuthConsecutiveFailures == 0 && !isOpenAIRescueAccountActive(account) {
 		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
 		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
 		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
@@ -1216,24 +1218,28 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	}
 	if state.ProbeMode == "qualification" && result.IsQualificationPass() &&
 		state.ConsecutiveSuccesses >= 1 {
+		if !r.rescueLane.qualificationReady(ctx, account, r.now()) {
+			// Keep the successful host result, but not an unpaired scheduling
+			// unlock. The original qualification cadence supplies the next check.
+			state.ConsecutiveSuccesses = 0
+			if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+				return err
+			}
+			return r.store.SaveOpenAIDowngradeState(ctx, state)
+		}
 		// 2026-09-15 用户裁定「新号一次检测合格就可以上岗，不要整那么多次」：
 		// 1 针通过即解锁 schedulable 并回归 normal 档，认证不再凑 2 连胜。
 		state.State = OpenAIDowngradeStateOnDuty
 		state.ProbeMode = "normal"
 		state.ConsecutiveSuccesses = 0
-		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+		// A rescue host pass is evidence, not permission to serve traffic.
+		// Graduation opens scheduling atomically with restoring the groups.
+		unlock := GetOpenAIRescueLaneMarker(account) == nil
+		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, unlock); err != nil {
 			return err
 		}
-		// r17ax 3.6 转正急挂钩：考证通过即刻改绑回原池组 + 清标记 + 打复活
-		// 徽标。同步直调但错误只记日志——转正是出口（design 0.4），不得反向
-		// 影响考证通过的提交；失败由对账清扫按同一判据（on_duty+normal+
-		// 标记在场）收敛兜底。
-		if r.rescueLane != nil {
-			if err := r.rescueLane.GraduateRescue(ctx, state.AccountID, "qualification_pass"); err != nil {
-				slog.Warn("openai_rescue_graduate_hook_failed",
-					"account_id", state.AccountID, "error", err)
-			}
-		}
+		// Graduation is a post-commit action; staging must never rebind groups
+		// or clear rescue markers before the qualification transaction succeeds.
 	}
 	if state.ProbeMode == "qualification" && transition.Circuit {
 		state.State = OpenAIDowngradeStatePendingReplace

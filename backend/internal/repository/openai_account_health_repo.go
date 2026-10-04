@@ -34,6 +34,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			a.extra->'openai_rescue_lane',
 			a.extra->>'openai_rescue_rescued_at',
 			a.extra->>'openai_rescue_rescue_count',
+			lp.id,
 			lp.at,
 			lp.mode,
 			lp.reasoning_tokens,
@@ -45,11 +46,11 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		LEFT JOIN openai_downgrade_probe_states s ON s.account_id = a.id
 		LEFT JOIN openai_downgrade_probe_controls c ON c.account_id = a.id
 		LEFT JOIN LATERAL (
-			SELECT pr.created_at AS at, pr.mode, pr.reasoning_tokens,
+			SELECT pr.id, pr.created_at AS at, pr.mode, pr.reasoning_tokens,
 			       pr.transport_ok, pr.answer_correct, pr.turn_state_len, pr.http_status
 			FROM openai_downgrade_probe_results pr
 			WHERE pr.account_id = a.id
-			ORDER BY pr.created_at DESC
+			ORDER BY pr.created_at DESC, pr.id DESC
 			LIMIT 1
 		) lp ON TRUE
 		WHERE a.id = ANY($1)
@@ -68,6 +69,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		var rescueMarkerJSON *string
 		var rescuedAtRaw *string
 		var rescueCountRaw *string
+		var lpID *int64
 		var lpAt *time.Time
 		var lpMode *string
 		var lpRT *int
@@ -79,7 +81,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			&snap.AccountID, &snap.State, &snap.ProbeMode, &snap.Schedulable,
 			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification, &rescueMarkerJSON,
 			&rescuedAtRaw, &rescueCountRaw,
-			&lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
+			&lpID, &lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -101,6 +103,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		}
 		if lpAt != nil {
 			ev := &service.OpenAIProbeLastEvidence{
+				ID:              *lpID,
 				At:              *lpAt,
 				ReasoningTokens: lpRT,
 				AnswerCorrect:   lpCorrect,

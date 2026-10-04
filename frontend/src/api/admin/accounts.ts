@@ -311,6 +311,7 @@ export async function applyOAuthCredentials(
     credentials: Record<string, unknown>
     extra?: Record<string, unknown>
     expected_updated_at: string
+    reauthorization_proof?: string
   }
 ): Promise<Account> {
   const { data } = await apiClient.post<Account>(

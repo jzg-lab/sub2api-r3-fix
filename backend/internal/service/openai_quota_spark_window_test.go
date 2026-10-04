@@ -371,6 +371,7 @@ func TestPrepareUpstreamCallShadowResolve(t *testing.T) {
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-access-token",
 	}}
+	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
 	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// privacyClientFactory 可以是任意合法工厂；prepareUpstreamCall 在返回前不调用它
@@ -759,6 +760,7 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-token-e2e",
 	}}
+	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
 	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// httptest server 记录收到的 chatgpt-account-id header，返回空 usage JSON

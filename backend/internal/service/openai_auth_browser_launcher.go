@@ -60,12 +60,15 @@ var (
 
 // openAIAuthBrowserLauncher 授权浏览器直拉服务。
 type OpenAIAuthBrowserLauncher struct {
-	launcherPath string
-	sessionStore OpenAIOAuthSessionStore
-	proxyRepo    ProxyRepository
-	now          func() time.Time
-	newCommand   func(context.Context, string, ...string) *exec.Cmd
-	timeout      time.Duration
+	launcherPath               string
+	sessionStore               OpenAIOAuthSessionStore
+	proxyRepo                  ProxyRepository
+	validateReauthorization    func(context.Context, *OpenAIOAuthSession, bool) error
+	recordAuthorizationBrowser func(context.Context, *OpenAIOAuthSession) error
+	fixedEgressRoutes          map[int64]config.AuthBrowserFixedEgressRoute
+	now                        func() time.Time
+	newCommand                 func(context.Context, string, ...string) *exec.Cmd
+	timeout                    time.Duration
 
 	mu       sync.Mutex
 	inFlight map[string]struct{}
@@ -86,14 +89,20 @@ func NewOpenAIAuthBrowserLauncher(
 	if sessionStore == nil || proxyRepo == nil {
 		return nil
 	}
+	routes := compileOpenAIFixedEgressRoutes(cfg.Gateway.AuthBrowserFixedEgressRoutes)
+	if len(cfg.Gateway.AuthBrowserFixedEgressRoutes) > 0 && routes == nil {
+		logger.LegacyPrintf("service.openai_auth_browser",
+			"Warning: invalid or duplicate fixed-egress configuration; reauthorization is disabled")
+	}
 	return &OpenAIAuthBrowserLauncher{
-		launcherPath: path,
-		sessionStore: sessionStore,
-		proxyRepo:    proxyRepo,
-		now:          time.Now,
-		newCommand:   exec.CommandContext,
-		timeout:      defaultAuthBrowserLauncherTimeout,
-		inFlight:     make(map[string]struct{}),
+		launcherPath:      path,
+		sessionStore:      sessionStore,
+		proxyRepo:         proxyRepo,
+		fixedEgressRoutes: routes,
+		now:               time.Now,
+		newCommand:        exec.CommandContext,
+		timeout:           defaultAuthBrowserLauncherTimeout,
+		inFlight:          make(map[string]struct{}),
 	}
 }
 
@@ -286,6 +295,9 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	if !validOpenAIAuthBrowserCodeVerifier(session.CodeVerifier) {
 		return nil, fmt.Errorf("%w: PKCE verifier is invalid", ErrOpenAIAuthBrowserSessionInvalid)
 	}
+	if err := validateOpenAIOAuthReauthorizationBinding(session); err != nil {
+		return nil, ErrOpenAIAuthBrowserSessionInvalid
+	}
 
 	proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
 	if err != nil {
@@ -301,9 +313,23 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
 		return nil, fmt.Errorf("%w; start a new authorization", ErrOpenAIAuthBrowserRouteChanged)
 	}
+	if session.ReauthorizationAccountID != 0 || session.LoginExitIP != "" {
+		if l.validateReauthorization == nil {
+			return nil, ErrOpenAIAuthBrowserSessionInvalid
+		}
+		if err := l.validateReauthorization(ctx, session, false); err != nil {
+			return nil, err
+		}
+	}
 	ingress := openAIAuthBrowserLocalIngress(proxy)
 	if ingress == "" {
 		return nil, fmt.Errorf("%w: proxy bucket %s", ErrOpenAIAuthBrowserIngressUnavailable, proxy.Name)
+	}
+	if session.ReauthorizationAccountID != 0 || session.LoginExitIP != "" {
+		pin, ok := l.fixedEgressRoutes[session.ProxyID]
+		if !ok || pin.BrowserIngress != ingress {
+			return nil, ErrOpenAIOAuthFixedEgressRequired
+		}
 	}
 
 	// 浏览器配置目录名使用完整 state 的 SHA-256 指纹：保留完整碰撞强度，
@@ -346,7 +372,13 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	if commandContext == nil {
 		commandContext = exec.CommandContext
 	}
-	cmd := commandContext(launchCtx, l.launcherPath, profileTag, authURL, ingress)
+	args := []string{profileTag, authURL, ingress}
+	if session.ReauthorizationAccountID != 0 {
+		args = append(args, session.ReauthorizationExitIP)
+	} else if session.LoginExitIP != "" {
+		args = append(args, session.LoginExitIP)
+	}
+	cmd := commandContext(launchCtx, l.launcherPath, args...)
 	output := newBoundedAuthBrowserOutput()
 	cmd.Stdout = output
 	cmd.Stderr = output
@@ -373,7 +405,23 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		return result, fmt.Errorf("auth browser launcher exited unsuccessfully: %w", err)
 	}
 
+	if session.ReauthorizationAccountID != 0 || session.LoginExitIP != "" {
+		if l.recordAuthorizationBrowser == nil {
+			return result, authorizationBrowserProofError(session)
+		}
+		if err := l.recordAuthorizationBrowser(launchCtx, session); err != nil {
+			return result, err
+		}
+	}
 	result.Launched = true
 	result.Output = "launcher completed"
 	return result, nil
+}
+
+func (l *OpenAIAuthBrowserLauncher) SetReauthorizationService(s *OpenAIOAuthService) {
+	if l != nil && s != nil {
+		s.fixedEgressRoutes = l.fixedEgressRoutes
+		l.validateReauthorization = s.validateReauthorizationSession
+		l.recordAuthorizationBrowser = s.recordAuthorizationBrowser
+	}
 }

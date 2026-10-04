@@ -64,6 +64,9 @@ func (r *accountRepository) ApplyOAuthCredentials(
 	if current.Platform != service.PlatformAnthropic && accountType != service.AccountTypeOAuth {
 		return nil, infraerrors.BadRequest("NOT_OAUTH", "setup-token is only supported for Anthropic")
 	}
+	if err := service.ValidateOpenAIOAuthReauthorizationCommit(txCtx, current, credentials); err != nil {
+		return nil, err
+	}
 
 	mergedExtra := maps.Clone(current.Extra)
 	if mergedExtra == nil {
@@ -74,7 +77,7 @@ func (r *accountRepository) ApplyOAuthCredentials(
 			continue
 		}
 		switch key {
-		case "codex_fingerprint_seed", service.OpenAIOAuthQualifiedProxyExtraKey,
+		case "codex_fingerprint_seed", service.OpenAIOAuthQualifiedProxyExtraKey, service.OpenAIOAuthLoginExitIPExtraKey,
 			service.OpenAIDowngradeSolFallbackExtraKey, service.OpenAIDowngradeQualificationExtraKey:
 			continue
 		}
@@ -145,7 +148,10 @@ func (r *accountRepository) ApplyOAuthCredentials(
 			extra = $3::jsonb,
 			status = $4,
 			error_message = '',
-			schedulable = $5,
+			schedulable = CASE WHEN platform = 'openai' AND EXISTS (
+				SELECT 1 FROM openai_downgrade_probe_controls c
+				WHERE c.account_id = accounts.id AND c.manual_paused
+			) THEN FALSE ELSE $5 END,
 			rate_limited_at = NULL,
 			rate_limit_reset_at = NULL,
 			overload_until = NULL,

@@ -215,7 +215,7 @@ func TestBurstDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("空对象应取默认")
 	}
-	if cfg.ProbeBurstIntervalSeconds != 120 || cfg.ProbeBurstUntilPasses != 3 || cfg.ProbeBurstMaxProbes != 30 {
+	if cfg.ProbeBurstIntervalSeconds != 120 || cfg.ProbeBurstUntilPasses != 6 || cfg.ProbeBurstMaxProbes != 30 {
 		t.Fatalf("密集档默认应 120/3/30: %+v", cfg)
 	}
 }

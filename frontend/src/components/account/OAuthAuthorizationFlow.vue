@@ -733,6 +733,7 @@
                 <div v-else class="space-y-3">
                   <div class="flex flex-wrap items-center gap-2">
                     <input
+                      v-if="!showAuthBrowserLaunch"
                       :value="authUrl"
                       readonly
                       type="text"
@@ -742,8 +743,8 @@
                       v-if="showAuthBrowserLaunch"
                       type="button"
                       class="btn btn-primary shrink-0 whitespace-nowrap text-xs"
-                      :class="{ 'cursor-not-allowed opacity-60': authBrowserLaunching }"
-                      :disabled="authBrowserLaunching"
+                      :class="{ 'cursor-not-allowed opacity-60': authBrowserLaunching || loading }"
+                      :disabled="authBrowserLaunching || loading"
                       :aria-busy="authBrowserLaunching"
                       title="Launch the activation browser with the bucket proxy bound to this authorization"
                       @click="emit('launch-auth-browser')"
@@ -757,6 +758,7 @@
                       {{ authBrowserLaunching ? '正在启动…' : '弹出激活浏览器' }}
                     </button>
                     <button
+                      v-if="!showAuthBrowserLaunch"
                       type="button"
                       class="btn btn-secondary shrink-0 p-2"
                       title="Copy URL"
@@ -787,6 +789,7 @@
                   </div>
                   <button
                     type="button"
+                    :disabled="loading || authBrowserLaunching"
                     class="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400"
                     @click="handleRegenerate"
                   >
@@ -810,10 +813,12 @@
               </div>
               <div class="min-w-0 flex-1">
                 <p class="mb-2 font-medium text-blue-900 dark:text-blue-200">
-                  {{ oauthStep2OpenUrl }}
+                  {{ showAuthBrowserLaunch ? t('admin.accounts.oauth.openai.browserTitle') : oauthStep2OpenUrl }}
                 </p>
                 <p class="text-sm text-blue-700 dark:text-blue-300">
-                  {{ oauthOpenUrlDesc }}
+                  {{ showAuthBrowserLaunch
+                    ? t(`admin.accounts.oauth.openai.${authBrowserReady ? 'browserReady' : 'browserRequired'}`)
+                    : oauthOpenUrlDesc }}
                 </p>
                 <!-- Local callback notice -->
                 <div
@@ -954,6 +959,7 @@ interface Props {
   showAuthBrowserLaunch?: boolean
   /** 授权浏览器启动请求正在提交，用于禁止重复点击。 */
   authBrowserLaunching?: boolean
+  authBrowserReady?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -971,6 +977,7 @@ const props = withDefaults(defineProps<Props>(), {
   showSessionTokenOption: false,
   showAuthBrowserLaunch: false,
   authBrowserLaunching: false,
+  authBrowserReady: false,
   showAccessTokenOption: false,
   showCodexSessionImportOption: false,
   showAgentIdentityOption: false,
@@ -1194,12 +1201,13 @@ const handleGenerateUrl = () => {
 }
 
 const handleCopyUrl = () => {
-  if (props.authUrl) {
+  if (props.authUrl && !props.showAuthBrowserLaunch) {
     copyToClipboard(props.authUrl, 'URL copied to clipboard')
   }
 }
 
 const handleRegenerate = () => {
+  if (props.loading || props.authBrowserLaunching) return
   authCodeInput.value = ''
   emit('generate-url')
 }

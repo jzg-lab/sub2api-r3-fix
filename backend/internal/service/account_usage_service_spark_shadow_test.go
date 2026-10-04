@@ -84,6 +84,7 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-access-token",
 	}}
+	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
 	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// httptest server: records the chatgpt-account-id header and returns a

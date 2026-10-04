@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -15,11 +16,14 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore         OpenAIOAuthSessionStore
-	proxyRepo            ProxyRepository
-	oauthClient          OpenAIOAuthClient
-	tlsProfiles          *TLSFingerprintProfileService
-	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	sessionStore                 OpenAIOAuthSessionStore
+	proxyRepo                    ProxyRepository
+	oauthClient                  OpenAIOAuthClient
+	tlsProfiles                  *TLSFingerprintProfileService
+	privacyClientFactory         PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	reauthorizationAccountLookup func(context.Context, int64) (*Account, error)
+	observeReauthorizationExitIP func(context.Context, string) (string, error)
+	fixedEgressRoutes            map[int64]config.AuthBrowserFixedEgressRoute
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
@@ -66,6 +70,10 @@ type OpenAIAuthURLResult struct {
 
 // GenerateAuthURL generates an OpenAI OAuth authorization URL
 func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string) (*OpenAIAuthURLResult, error) {
+	return s.generateAuthURL(ctx, proxyID, redirectURI, platform, nil)
+}
+
+func (s *OpenAIOAuthService) generateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string, binding *OpenAIOAuthSession) (*OpenAIAuthURLResult, error) {
 	if s.sessionStore == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "openai oauth persistent session store is not configured")
 	}
@@ -118,6 +126,22 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		CreatedAt:      time.Now(),
 	}
 	session.ID = sessionID
+	if binding == nil && normalizedPlatform == PlatformOpenAI {
+		if pin, ok := s.fixedEgressRoutes[session.ProxyID]; ok {
+			session.LoginExitIP = pin.ExitIP
+			if err := s.validateInitialLoginSession(ctx, session, true); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if binding != nil {
+		session.ReauthorizationAccountID = binding.ReauthorizationAccountID
+		session.ReauthorizationRevision = binding.ReauthorizationRevision
+		session.ReauthorizationExitIP = binding.ReauthorizationExitIP
+		if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.sessionStore.Create(ctx, session); err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_PERSIST_FAILED", "failed to persist oauth session: %v", err)
 	}
@@ -143,22 +167,25 @@ type OpenAIExchangeCodeInput struct {
 
 // OpenAITokenInfo represents the token information for OpenAI
 type OpenAITokenInfo struct {
-	AccessToken           string `json:"access_token"`
-	RefreshToken          string `json:"refresh_token"`
-	IDToken               string `json:"id_token,omitempty"`
-	ExpiresIn             int64  `json:"expires_in"`
-	ExpiresAt             int64  `json:"expires_at"`
-	ClientID              string `json:"client_id,omitempty"`
-	ProxyID               int64  `json:"proxy_id,omitempty"`
-	AuthMode              string `json:"auth_mode,omitempty"`
-	Email                 string `json:"email,omitempty"`
-	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
-	ChatGPTUserID         string `json:"chatgpt_user_id,omitempty"`
-	ChatGPTAccountFedRAMP bool   `json:"chatgpt_account_is_fedramp,omitempty"`
-	OrganizationID        string `json:"organization_id,omitempty"`
-	PlanType              string `json:"plan_type,omitempty"`
-	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
-	PrivacyMode           string `json:"privacy_mode,omitempty"`
+	accountRefresh            *openAIAccountRefreshBinding
+	ReauthorizationProof      string `json:"reauthorization_proof,omitempty"`
+	InitialAuthorizationProof string `json:"initial_authorization_proof,omitempty"`
+	AccessToken               string `json:"access_token"`
+	RefreshToken              string `json:"refresh_token"`
+	IDToken                   string `json:"id_token,omitempty"`
+	ExpiresIn                 int64  `json:"expires_in"`
+	ExpiresAt                 int64  `json:"expires_at"`
+	ClientID                  string `json:"client_id,omitempty"`
+	ProxyID                   int64  `json:"proxy_id,omitempty"`
+	AuthMode                  string `json:"auth_mode,omitempty"`
+	Email                     string `json:"email,omitempty"`
+	ChatGPTAccountID          string `json:"chatgpt_account_id,omitempty"`
+	ChatGPTUserID             string `json:"chatgpt_user_id,omitempty"`
+	ChatGPTAccountFedRAMP     bool   `json:"chatgpt_account_is_fedramp,omitempty"`
+	OrganizationID            string `json:"organization_id,omitempty"`
+	PlanType                  string `json:"plan_type,omitempty"`
+	SubscriptionExpiresAt     string `json:"subscription_expires_at,omitempty"`
+	PrivacyMode               string `json:"privacy_mode,omitempty"`
 }
 
 // ExchangeCode exchanges authorization code for tokens
@@ -198,6 +225,9 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_CHANGED", "oauth proxy configuration changed; start a new authorization")
 	}
+	if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
+		return nil, err
+	}
 	clientID := strings.TrimSpace(session.ClientID)
 	if clientID == "" {
 		clientID = openai.ClientID
@@ -213,9 +243,15 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	if session == nil || *session != expectedSession {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_CHANGED", "oauth session changed; start a new authorization")
 	}
+	if err := s.consumeAuthorizationBrowser(ctx, session); err != nil {
+		return nil, err
+	}
 	proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, &session.ProxyID)
 	if err != nil || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_PROXY_CHANGED", "oauth proxy configuration changed; start a new authorization")
+	}
+	if err := s.validateReauthorizationSession(ctx, session, false); err != nil {
+		return nil, err
 	}
 
 	// Exchange code for token
@@ -233,6 +269,9 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	}
 	if tokenResp == nil {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_OAUTH_EMPTY_RESPONSE", "oauth provider returned an empty response")
+	}
+	if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
+		return nil, err
 	}
 
 	// Parse ID token to get user info
@@ -268,6 +307,16 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 
 	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 
+	// Enrichment can outlive an account edit or an egress change.
+	if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
+		return nil, err
+	}
+	if err := s.issueReauthorizationProof(ctx, session, tokenInfo); err != nil {
+		return nil, err
+	}
+	if err := s.issueInitialAuthorizationProof(ctx, session, tokenInfo); err != nil {
+		return nil, err
+	}
 	return tokenInfo, nil
 }
 
@@ -414,7 +463,7 @@ func resolveChatGPTSubscriptionAccountID(tokenInfo *OpenAITokenInfo, orgID strin
 }
 
 // RefreshAccountToken refreshes token for an OpenAI OAuth account
-func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
+func (s *OpenAIOAuthService) refreshAccountToken(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
 	ctx = s.profileContext(ctx, account)
 	if account.Platform != PlatformOpenAI {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT", "account is not an OpenAI account")

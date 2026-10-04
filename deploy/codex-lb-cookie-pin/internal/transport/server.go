@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -30,11 +31,9 @@ const (
 	// PluginID 与 manifest.json 的 id 必须一致。
 	PluginID = "lyunlong.codex.lb-cookie-pin"
 	// PluginVersion 与 manifest.json 的 version 必须一致。
-	PluginVersion = "0.3.7"
-	// truncationFingerprintModulus 是社区实锤的思维链截断指纹模数：降智态的
-	// agent 推理 token 精确停在 518n−2（516/1034/1552/2070…，linux.do 与
-	// sub2api issue #3644，2026-10 救治针库 rt=516/2070 多针实证）。门槛 rt≥800
-	// 拦不住 1034/1552/2070 这些家族成员——命中指纹即判 Fail。
+	PluginVersion = "0.3.8"
+	// A 518n-2 usage pattern is an observation, not proof of model quality.
+	// Correct answers with this pattern neither reroll nor certify recovery.
 	truncationFingerprintModulus = 518
 	// kvNamespace 是宿主 KV 存储的命名空间（按插件隔离）。
 	kvNamespace = "lyunlong.codex.lb-cookie-pin"
@@ -203,6 +202,7 @@ func (s *Server) invalidateProbeLocked(accountID int64) {
 	}
 	if state := s.states[accountID]; state != nil {
 		state.ConsecPasses = 0
+		state.PreviousPassAt = time.Time{}
 		state.LastVerdict = ""
 		state.LastQuestionID = ""
 		state.LastAnswer = ""
@@ -558,6 +558,10 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 			s.probeMu.Unlock()
 			return
 		}
+		if nextState.TruncationRateAlert && !state.TruncationRateAlert {
+			slog.Warn("probe_truncation_rate_alert", "account_id", accountID,
+				"hits", nextState.TruncationWindowHits, "samples", nextState.TruncationWindowSamples)
+		}
 		*state = nextState
 		state.LastReasoningTokens = reasoningTokens
 		// v0.3.6：探针自捕的签不喂新签即探。探针响应（含 5xx/读错的响应头）
@@ -574,7 +578,7 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 		if live := s.templates[accountID]; live != nil {
 			live.SeenAt = now
 		}
-		if cfg.AdaptiveProbeScheduling && !decision.ProbeAgainNow && !decision.EnterBackoff {
+		if cfg.AdaptiveProbeScheduling && !state.InBurst && !decision.ProbeAgainNow && !decision.EnterBackoff {
 			// 卡点改排（v0.3）：按实测签寿命把下一针挪到预计死亡前；样本
 			// <MinAdaptiveSamples 或无签时 AdaptiveNextProbe 自退固定间隔。
 			// 锁序：probeMu → store.mu（store 从不反向持锁）。
@@ -606,8 +610,8 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 // 1227 实证；下一笔真实 Forward 自动用新鲜 token 重stash）；②判过钉推理门槛
 // （答对但 reasoning_tokens 低于 probe_min_reasoning_tokens 判 Fail 触发重摇，
 // 对齐宿主资格针「答对 + rt≥800」毕业判据——低 rt 节点撑不起宿主针，别让
-// 它吃掉连过计数）。v0.3.5：③518n−2 截断指纹判 Fail（答对但 rt 落在截断带
-// = 降智节点，详见 truncationFingerprintModulus）。
+// 它吃掉连过计数）。v0.3.8：答对但命中 518n-2 指纹只记中性观察，
+// 不计质量失败、不触发重摇，也不计入连续通过证据。
 func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemplate, q prober.Question, cfg pluginconfig.Config) (prober.Verdict, string, int) {
 	model := cfg.ProbeModel
 	if model == "" {
@@ -762,13 +766,9 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				return prober.VerdictError, "parse:missing-usage", 0
 			}
 			if usageKnown && (reasoningTokens+2)%truncationFingerprintModulus == 0 {
-				// 思维链截断指纹（v0.3.5）：答对但推理 token 精确落在
-				// 518n−2（516/1034/1552/2070…，2026-10-03 生产实测 2070 三连）
-				// = 社区实锤的降智截断带。
-				// 这样的节点撑不起真实推理——判 Fail 触发重摇，把连过证据
-				// 钉在「无指纹 + 预算够 + 答对」三重干净上（比宿主毕业判据
-				// 更严一格，方向安全：插件过的宿主必过）。摘要前缀 trunc-fp。
-				return prober.VerdictFail, "trunc-fp:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
+				// A correct but truncated response is inconclusive, not an
+				// incorrect answer. Never reroll or enter backoff on it alone.
+				return prober.VerdictError, "trunc-fp:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
 			}
 			if min := cfg.ProbeMinReasoningTokens; usageKnown && min > 0 && reasoningTokens < min {
 				// 答对但推理预算低于毕业门槛（v0.3.4）：宿主资格针要求

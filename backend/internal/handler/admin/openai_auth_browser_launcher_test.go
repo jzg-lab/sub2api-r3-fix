@@ -227,3 +227,76 @@ func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestLaunchAuthBrowserFixedEgressStartupBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, variant := range []string{"valid", "missing", "invalid", "duplicate", "changed ingress", "changed route", "changed IP"} {
+		t.Run(variant, func(t *testing.T) {
+			proxy := &service.Proxy{
+				ID: 901, Status: service.StatusActive, Protocol: "socks5h",
+				Host: "127.0.0.1", Port: 17923,
+			}
+			account := &service.Account{
+				ID: 42, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+				ProxyID: &proxy.ID, UpdatedAt: time.Now().UTC(),
+				Extra: map[string]any{service.OpenAIOAuthLoginExitIPExtraKey: "198.51.100.25"},
+			}
+			routeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(proxy.URL())))
+			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
+				ID: "session-1", State: strings.Repeat("a", 64), CodeVerifier: strings.Repeat("b", 128),
+				ProxyID: proxy.ID, ProxyRouteHash: routeHash,
+				Platform: service.PlatformOpenAI, CreatedAt: time.Now(),
+				ReauthorizationAccountID: account.ID,
+				ReauthorizationRevision:  account.UpdatedAt.Format(time.RFC3339Nano),
+				ReauthorizationExitIP:    "198.51.100.25",
+			}}
+			repo := &oauthRouteProxyRepo{proxy: proxy}
+			oauth := service.NewOpenAIOAuthService(repo, nil)
+			oauth.SetSessionStore(store)
+			oauth.SetReauthorizationAccountLookup(func(context.Context, int64) (*service.Account, error) {
+				return account, nil
+			})
+			cfg := &config.Config{Gateway: config.GatewayConfig{
+				AuthBrowserLauncher: "/usr/bin/true",
+				AuthBrowserFixedEgressRoutes: []config.AuthBrowserFixedEgressRoute{{
+					ProxyID: proxy.ID, ProxyRouteSHA256: routeHash,
+					BrowserIngress: "http://127.0.0.1:17933", ExitIP: "198.51.100.25",
+				}},
+			}}
+			switch variant {
+			case "missing":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes = nil
+			case "invalid":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes[0].ExitIP = "invalid"
+			case "duplicate":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes = append(cfg.Gateway.AuthBrowserFixedEgressRoutes,
+					cfg.Gateway.AuthBrowserFixedEgressRoutes[0])
+			case "changed ingress":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes[0].BrowserIngress = "http://127.0.0.1:17934"
+			case "changed route":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes[0].ProxyRouteSHA256 = strings.Repeat("0", 64)
+			case "changed IP":
+				cfg.Gateway.AuthBrowserFixedEgressRoutes[0].ExitIP = "198.51.100.26"
+			}
+			handler := &OpenAIOAuthHandler{openaiOAuthService: oauth}
+			handler.SetAuthBrowserLauncher(service.NewOpenAIAuthBrowserLauncher(cfg, store, repo))
+			router := gin.New()
+			router.POST("/admin/openai/launch-auth-browser", handler.LaunchAuthBrowser)
+			request := httptest.NewRequest(http.MethodPost, "/admin/openai/launch-auth-browser",
+				strings.NewReader(`{"session_id":"session-1"}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if variant == "valid" {
+				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				require.Contains(t, response.Body.String(), `"launched":true`)
+			} else {
+				require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+				require.Contains(t, response.Body.String(), `"reason":"OPENAI_OAUTH_FIXED_EGRESS_REQUIRED"`)
+				require.NotContains(t, response.Body.String(), `"launched":true`)
+			}
+			require.NotContains(t, response.Body.String(), routeHash)
+			require.NotContains(t, response.Body.String(), store.session.State)
+		})
+	}
+}

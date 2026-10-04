@@ -1182,6 +1182,9 @@ export default {
         batchFailed: '批量创建失败',
         // OpenAI specific
         openai: {
+          browserTitle: '授权浏览器',
+          browserReady: '本次授权会话的浏览器已启动',
+          browserRequired: '授权浏览器尚未启动',
           title: 'OpenAI 账户授权',
           followSteps: '请按照以下步骤完成 OpenAI 账户的授权：',
           step1GenerateUrl: '点击下方按钮生成授权链接',
@@ -1200,7 +1203,21 @@ export default {
           failedToGenerateUrl: '生成 OpenAI 授权链接失败',
           failedToExchangeCode: 'OpenAI 授权码兑换失败',
           failedToValidateRT: '验证 Refresh Token 失败',
+          createFailedRestart:
+            '账号创建尚未确认。请先检查账号列表，再重新发起浏览器授权；旧授权结果不能重复使用。',
           errors: {
+            OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
+              '请在已核验的固定出口浏览器中重新完成授权。首次登录证明缺失、过期、已使用或与当前账号不匹配。',
+            OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:
+              '重新授权需要与原登录 IP 一致、已核验的固定出口线路。线路配置缺失或变化时，不能仅凭当前 IP 检测结果继续授权。',
+            OPENAI_OAUTH_LOGIN_IP_UNKNOWN:
+              '缺少该账号原登录 IP 的可信记录，已停止重新授权。恢复历史记录后再试，不能用当前出口替代原 IP。',
+            OPENAI_OAUTH_LOGIN_IP_CHANGED:
+              '当前授权出口与该账号原登录 IP 不一致，已停止重新授权，原凭据未被覆盖。',
+            OPENAI_OAUTH_LOGIN_IP_UNAVAILABLE:
+              '无法核验该账号原登录出口，已停止重新授权，不会切换线路或直连。',
+            OPENAI_OAUTH_REAUTH_PROOF_REQUIRED:
+              '请通过原登录 IP 重新完成浏览器授权。授权结果缺失、过期或不匹配时，不会覆盖原凭据。',
             OPENAI_OAUTH_PROXY_REQUIRED:
               '未设置代理，当前服务器无法直连 OpenAI，导致 OpenAI OAuth 请求失败。请先选择可访问 OpenAI 的代理后重试；如果授权码已失效，请重新生成授权链接。'
           },

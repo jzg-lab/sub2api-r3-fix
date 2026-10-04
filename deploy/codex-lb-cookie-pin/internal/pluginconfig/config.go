@@ -28,10 +28,10 @@ const (
 	defaultProbeMinReasoningTokens = 800
 	// 卡点排程默认值：提前量 120 秒（在预计死亡前 2 分钟落针）。
 	defaultScheduleMarginSeconds = 120
-	// 密集档默认值（v0.3.2 救治提速）：未验证态 120 秒一针，连过 3 针出档，
-	// 单轮封顶 30 针防 error 空转。签捕获→上岗 ≈ 3×120s+毕业针 ≈ 8 分钟。
+	// 默认密集档覆盖宿主六连过门槛；三连过仅触发提前确认，不代表毕业。
+	// 显式配置继续优先，单轮封顶 30 针防 error 空转。
 	defaultProbeBurstIntervalSeconds = 120
-	defaultProbeBurstUntilPasses     = 3
+	defaultProbeBurstUntilPasses     = 6
 	defaultProbeBurstMaxProbes       = 30
 )
 

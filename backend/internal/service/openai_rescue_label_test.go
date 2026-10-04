@@ -95,7 +95,8 @@ func TestParseOpenAIRescueLaneMarkerJSON(t *testing.T) {
 }
 
 func TestLabelOpenAIRescueAccountMatrix(t *testing.T) {
-	marker := &OpenAIRescueLaneMarker{EnteredAt: time.Now().UTC(), Trigger: OpenAIRescueTriggerAuto}
+	now := time.Now().UTC()
+	marker := &OpenAIRescueLaneMarker{EnteredAt: now.Add(-time.Hour), Trigger: OpenAIRescueTriggerAuto}
 	cases := []struct {
 		name      string
 		threshold int
@@ -106,20 +107,48 @@ func TestLabelOpenAIRescueAccountMatrix(t *testing.T) {
 	}{
 		{"无插件证据→救治中", 6, nil, OpenAIHealthLabelRescuing, OpenAIHealthColorBluePurple, false},
 		{"连过不足→救治中", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 5}, OpenAIHealthLabelRescuing, OpenAIHealthColorBluePurple, false},
-		{"连过达标→已复活可点", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 6}, OpenAIHealthLabelRevived, OpenAIHealthColorGreen, true},
-		{"连过超额→已复活", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 9}, OpenAIHealthLabelRevived, OpenAIHealthColorGreen, true},
-		{"退避中→疑似账号级不可点", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 2, InBackoff: true}, OpenAIHealthLabelSuspected, OpenAIHealthColorGrayRed, false},
+		{"连过达标→待宿主复核", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 6}, OpenAIHealthLabelReview, OpenAIHealthColorOrange, true},
+		{"连过超额→仍待宿主复核", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 9}, OpenAIHealthLabelReview, OpenAIHealthColorOrange, true},
+		{"退避中且有失败→疑似账号级不可点", 6, &OpenAIPluginBridgeAccount{ConsecFails: 3, InBackoff: true}, OpenAIHealthLabelSuspected, OpenAIHealthColorGrayRed, false},
+		{"零失败退避→只观察", 6, &OpenAIPluginBridgeAccount{InBackoff: true}, OpenAIHealthLabelRescuing, OpenAIHealthColorBluePurple, false},
 		{"退避期满复探窗口（backoff 翻回 false）→回升救治中", 6, &OpenAIPluginBridgeAccount{ConsecutivePasses: 0, SuspectAccountLevel: true}, OpenAIHealthLabelRescuing, OpenAIHealthColorBluePurple, false},
-		{"阈值零→按默认 6 裁决", 0, &OpenAIPluginBridgeAccount{ConsecutivePasses: 6}, OpenAIHealthLabelRevived, OpenAIHealthColorGreen, true},
+		{"阈值零→按默认 6 裁决", 0, &OpenAIPluginBridgeAccount{ConsecutivePasses: 6}, OpenAIHealthLabelReview, OpenAIHealthColorOrange, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			label, color, clickable, _ := LabelOpenAIRescueAccount(marker, tc.threshold, tc.bridge)
+			if tc.bridge != nil && tc.bridge.ConsecutivePasses > 0 {
+				tc.bridge.LastVerdict, tc.bridge.LastProbeAt = "pass", now
+				tc.bridge.PreviousPassAt = now
+			}
+			host := OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace}
+			label, color, clickable, _ := LabelOpenAIRescueAccount(marker, tc.threshold, tc.bridge, host, now)
 			if label != tc.wantLabel || color != tc.wantColor || clickable != tc.wantClick {
 				t.Fatalf("label=%s color=%s clickable=%v, want %s/%s/%v",
 					label, color, clickable, tc.wantLabel, tc.wantColor, tc.wantClick)
 			}
 		})
+	}
+}
+
+func TestRescueLabelRequiresFullGraduationThreshold(t *testing.T) {
+	now := time.Now().UTC()
+	marker := &OpenAIRescueLaneMarker{EnteredAt: now.Add(-time.Hour)}
+	host := rescueRecoverySnapshot(7, now)
+	for _, passes := range []int{2, 3, 5, 6} {
+		bridge := &OpenAIPluginBridgeAccount{
+			ConsecutivePasses: passes, LastVerdict: "pass",
+			LastProbeAt: now, PreviousPassAt: now.Add(-2 * time.Minute),
+		}
+		label, _, clickable, _ := LabelOpenAIRescueAccount(marker, 6, bridge, host, now)
+		if passes < 6 && label == OpenAIHealthLabelRevived {
+			t.Fatalf("cp%d cannot report revival before cp6", passes)
+		}
+		if passes == 6 && label != OpenAIHealthLabelRevived {
+			t.Fatalf("full dual evidence should report revival, got %s", label)
+		}
+		if clickable {
+			t.Fatal("already qualified rescue must not offer a redundant qualification")
+		}
 	}
 }
 
@@ -196,14 +225,14 @@ func rescueLaneInLaneSnapshot(t *testing.T, accountID int64, mutate func(*OpenAI
 	return snapshot
 }
 
-func TestListOpenAIAccountHealthRescueRevivedOverride(t *testing.T) {
+func TestListOpenAIAccountHealthRescueRequiresHostQualification(t *testing.T) {
 	lane := newRescueLaneTestLane(&rescueLaneRepo{account: rescueLaneTestAccount()}, &rescueLaneSink{})
 	runner := rescueLaneHealthRunner(
 		rescueLaneInLaneSnapshot(t, 42, nil),
 		func(context.Context) *PluginBridgeStatus {
 			return &PluginBridgeStatus{
 				PluginID: 7, Running: true, Healthy: true, Offline: false,
-				StatusJSON: rescueLaneBridgeJSON(`{"account_id":42,"consecutive_passes":7,"consec_fails":0,"in_backoff":false}`),
+				StatusJSON: rescueLaneBridgeJSON(rescueLaneBridgeAccountJSON(42, false, 7, 0, false, "")),
 			}
 		},
 		lane,
@@ -214,8 +243,8 @@ func TestListOpenAIAccountHealthRescueRevivedOverride(t *testing.T) {
 		t.Fatalf("ListOpenAIAccountHealth: %v", err)
 	}
 	row := result.Accounts[0]
-	if row.Label != OpenAIHealthLabelRevived || row.LabelColor != OpenAIHealthColorGreen || !row.Clickable {
-		t.Fatalf("row=%+v, want revived/green/clickable", row)
+	if row.Label != OpenAIHealthLabelReview || row.LabelColor != OpenAIHealthColorOrange || !row.Clickable {
+		t.Fatalf("row=%+v, want review/orange/clickable, not revived", row)
 	}
 	if row.Rescue == nil || row.Rescue.ConsecutivePasses != 7 || row.Rescue.GraduationThreshold != 6 {
 		t.Fatalf("rescue=%+v, want annotation passes=7 threshold=6", row.Rescue)
@@ -283,9 +312,8 @@ func TestListOpenAIAccountHealthRescuingWithoutBridge(t *testing.T) {
 	}
 }
 
-func TestListOpenAIAccountHealthOfflineBridgeKeepsRevivedFromCache(t *testing.T) {
-	// 桥离线但缓存 status_json 连过达标：已复活仍可点（转正必须考证，冷针
-	// 拦截过期数据），离线事实经 plugin_offline 透出给前端角标。
+func TestListOpenAIAccountHealthOfflineBridgeCannotReviveFromCache(t *testing.T) {
+	// Cached counters remain visible, but cannot establish recovery.
 	lane := newRescueLaneTestLane(&rescueLaneRepo{account: rescueLaneTestAccount()}, &rescueLaneSink{})
 	runner := rescueLaneHealthRunner(
 		rescueLaneInLaneSnapshot(t, 42, nil),
@@ -303,8 +331,8 @@ func TestListOpenAIAccountHealthOfflineBridgeKeepsRevivedFromCache(t *testing.T)
 		t.Fatalf("ListOpenAIAccountHealth: %v", err)
 	}
 	row := result.Accounts[0]
-	if row.Label != OpenAIHealthLabelRevived || !row.Clickable {
-		t.Fatalf("row=%+v, want revived clickable from cached bridge data", row)
+	if row.Label != OpenAIHealthLabelRescuing || row.Clickable {
+		t.Fatalf("row=%+v, want rescuing without cached recovery authority", row)
 	}
 	if row.Rescue == nil || !row.Rescue.PluginOffline {
 		t.Fatalf("rescue=%+v, want plugin_offline=true", row.Rescue)

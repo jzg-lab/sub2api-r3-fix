@@ -59,6 +59,7 @@ type OpenAIAccountHealthListResult struct {
 // OpenAIProbeLastEvidence 最近一针证据行（人可自验标签没撒谎）：
 // `09-21 01:23 · rt 1532 · 答对 · ts 332 · gpt-6-astra`。
 type OpenAIProbeLastEvidence struct {
+	ID              int64     `json:"id,omitempty"`
 	At              time.Time `json:"at"`
 	Mode            string    `json:"mode"`
 	ReasoningTokens *int      `json:"reasoning_tokens,omitempty"`
@@ -308,6 +309,7 @@ func (r *OpenAIDowngradeProbeRunner) TriggerProbeNow(ctx context.Context, accoun
 		state.State != OpenAIDowngradeStateOnDuty ||
 		state.ProbeMode == "qualification" ||
 		account.Status == StatusError ||
+		isOpenAIRescueAccountActive(account) ||
 		// auth 一振暂停（r17aq）：schedulable=false 是探针落的，镜像
 		// ListDue 豁免，手动针走路径 A 全状态机（洗白/毕业）。
 		state.AuthConsecutiveFailures > 0)
@@ -394,6 +396,7 @@ func (r *OpenAIDowngradeProbeRunner) triggerDiagnosticProbeNow(
 		freshState.State != OpenAIDowngradeStateOnDuty ||
 		freshState.ProbeMode == "qualification" ||
 		freshAccount.Status == StatusError ||
+		isOpenAIRescueAccountActive(freshAccount) ||
 		// auth 一振暂停（r17aq）：与路径 A 判定镜像，limbo 号由调度器拾取。
 		freshState.AuthConsecutiveFailures > 0)
 	if schedulerWillPick {
@@ -465,9 +468,13 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 	pluginOffline := bridge == nil
 	if bridge != nil {
 		prober = ParseOpenAIPluginBridgeProber(bridge.StatusJSON)
-		pluginOffline = bridge.Offline
+		pluginOffline = bridge.Offline || !bridge.Running || !bridge.Healthy
+	}
+	if prober == nil || !prober.Enabled {
+		pluginOffline = true
 	}
 	threshold := r.rescueLane.GraduationThreshold()
+	now := r.now()
 	out := make([]OpenAIAccountHealth, 0, len(snapshots))
 	for i := range snapshots {
 		s := snapshots[i]
@@ -483,7 +490,11 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			if prober != nil {
 				bridgeAccount = prober.Accounts[s.AccountID]
 			}
-			label, color, clickable, reason = LabelOpenAIRescueAccount(s.RescueMarker, threshold, bridgeAccount)
+			evidence := bridgeAccount
+			if pluginOffline {
+				evidence = nil
+			}
+			label, color, clickable, reason = LabelOpenAIRescueAccount(s.RescueMarker, threshold, evidence, s, now)
 			if s.ManualPaused {
 				reason += "+manual_paused"
 			}
@@ -588,6 +599,22 @@ type ReenableOpenAIAccountResult struct {
 // 显式解除——专用解暂停只清 manual_paused 不动 schedulable（开调度解暂停
 // 会把死号直回流量池），解除动作独立落 manual_unpause 审计事件。
 func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, accountID int64, unpause bool) (*ReenableOpenAIAccountResult, error) {
+	return r.reenableOpenAIAccount(ctx, accountID, unpause, false)
+}
+
+// Automatic confirmation never releases a manual pause or customer isolation.
+func (r *OpenAIDowngradeProbeRunner) ConfirmOpenAIRescueAccount(ctx context.Context, accountID int64) error {
+	if _, err := r.reenableOpenAIAccount(ctx, accountID, false, true); err != nil {
+		return err
+	}
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (r *OpenAIDowngradeProbeRunner) reenableOpenAIAccount(ctx context.Context, accountID int64, unpause, rescueConfirmation bool) (*ReenableOpenAIAccountResult, error) {
 	if r == nil || r.store == nil {
 		return nil, errors.New("openai probe runner is not available")
 	}
@@ -620,6 +647,10 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 		// 改平台/改类型/影子/过期：与 probe-now 同判——探针体系对其无意义。
 		return nil, errOpenAIProbeNotEligible
 	}
+	if rescueConfirmation && (r.rescueLane == nil || !isOpenAIRescueAccountActive(account) ||
+		!r.rescueLane.confirmationReady(ctx, account, now)) {
+		return nil, ErrRescueRecoveryUnverified
+	}
 	// Control lookup is an explicit fail-closed preflight. The transaction
 	// repeats every gate under locks and distinguishes manual pause from other
 	// blockers; this read exists only to reject an unavailable control plane
@@ -646,6 +677,9 @@ func (r *OpenAIDowngradeProbeRunner) ReenableOpenAIAccount(ctx context.Context, 
 	// 认证针排近刻（散布几分钟内），扫描循环下一拍拾取。qualification 态
 	// 不受 pending_replace 排除闸影响，ListDue 正常拾取。
 	candidate.NextProbeAt = now.Add(r.jitter(openAIDowngradeQualificationInterval))
+	if rescueConfirmation {
+		candidate.NextProbeAt = now
+	}
 	candidate.UpdatedAt = now
 	unpaused, err := committer.CommitOpenAIAccountReenable(ctx, &OpenAIAccountReenableMutation{
 		AccountID:                accountID,

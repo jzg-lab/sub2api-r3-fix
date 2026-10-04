@@ -2816,6 +2816,7 @@ func (r *accountRepository) SetOpenAIDowngradeFallbackMode(ctx context.Context, 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	updates = copyJSONMap(stripCodexFingerprintSeedFromExtraUpdate(updates))
 	delete(updates, service.OpenAIOAuthQualifiedProxyExtraKey)
+	delete(updates, service.OpenAIOAuthLoginExitIPExtraKey)
 	if len(updates) == 0 {
 		return nil
 	}
@@ -3109,6 +3110,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	delete(updates.Extra, service.OpenAIDowngradeSolFallbackExtraKey)
 	delete(updates.Extra, service.OpenAIDowngradeQualificationExtraKey)
 	delete(updates.Extra, service.OpenAIOAuthQualifiedProxyExtraKey)
+	delete(updates.Extra, service.OpenAIOAuthLoginExitIPExtraKey)
 
 	setClauses := make([]string, 0, 8)
 	args := make([]any, 0, 8)

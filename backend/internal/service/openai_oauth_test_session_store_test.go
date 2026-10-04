@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"sync"
 )
 
@@ -30,8 +29,11 @@ func (s *testOpenAIOAuthSessionStore) Get(_ context.Context, sessionID string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
-	if !ok || s.consumed[sessionID] {
-		return nil, fmt.Errorf("session not found")
+	if !ok {
+		return nil, ErrPendingAuthSessionNotFound
+	}
+	if s.consumed[sessionID] {
+		return nil, ErrPendingAuthSessionConsumed
 	}
 	return session, nil
 }
@@ -40,8 +42,11 @@ func (s *testOpenAIOAuthSessionStore) Consume(_ context.Context, sessionID strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session, ok := s.sessions[sessionID]
-	if !ok || s.consumed[sessionID] {
-		return nil, fmt.Errorf("session already consumed")
+	if !ok {
+		return nil, ErrPendingAuthSessionNotFound
+	}
+	if s.consumed[sessionID] {
+		return nil, ErrPendingAuthSessionConsumed
 	}
 	s.consumed[sessionID] = true
 	return session, nil

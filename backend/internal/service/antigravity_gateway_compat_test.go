@@ -22,6 +22,18 @@ type antigravityCompatTokenCache struct {
 	token string
 }
 
+type antigravityCompatAccountRepo struct {
+	AccountRepository
+	account *Account
+}
+
+func (r *antigravityCompatAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	if r.account == nil || r.account.ID != id {
+		return nil, ErrAccountNotFound
+	}
+	return snapshotOAuthRefreshAccount(r.account), nil
+}
+
 type antigravityCompatErrorReader struct {
 	data []byte
 	off  int
@@ -65,6 +77,10 @@ func newAntigravityCompatService(cfg config.GatewayConfig, upstream HTTPUpstream
 		&antigravityCompatTokenCache{token: "fresh-oauth-token"},
 		nil,
 	)
+	// A newer cached token is usable only after the persisted account confirms it.
+	durable := newAntigravityCompatAccount(AccountTypeOAuth)
+	durable.Credentials["access_token"], _ = tokenProvider.tokenCache.GetAccessToken(context.Background(), "")
+	tokenProvider.accountRepo = &antigravityCompatAccountRepo{account: durable}
 	return NewAntigravityGatewayService(
 		nil,
 		nil,

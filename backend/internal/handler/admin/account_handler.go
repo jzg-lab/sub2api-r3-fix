@@ -112,22 +112,23 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
-	Name                    string         `json:"name" binding:"required"`
-	Notes                   *string        `json:"notes"`
-	Platform                string         `json:"platform" binding:"required"`
-	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials" binding:"required"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             int            `json:"concurrency"`
-	Priority                int            `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	GroupIDs                []int64        `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	InitialAuthorizationProof string         `json:"initial_authorization_proof"`
+	Name                      string         `json:"name" binding:"required"`
+	Notes                     *string        `json:"notes"`
+	Platform                  string         `json:"platform" binding:"required"`
+	Type                      string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials               map[string]any `json:"credentials" binding:"required"`
+	Extra                     map[string]any `json:"extra"`
+	ProxyID                   *int64         `json:"proxy_id"`
+	Concurrency               int            `json:"concurrency"`
+	Priority                  int            `json:"priority"`
+	RateMultiplier            *float64       `json:"rate_multiplier"`
+	LoadFactor                *int           `json:"load_factor"`
+	GroupIDs                  []int64        `json:"group_ids"`
+	ExpiresAt                 *int64         `json:"expires_at"`
+	AutoPauseOnExpired        *bool          `json:"auto_pause_on_expired"`
+	ProbeEnabled              *bool          `json:"upstream_billing_probe_enabled"`
+	ConfirmMixedChannelRisk   *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // UpdateAccountRequest represents update account request
@@ -846,6 +847,10 @@ func (h *AccountHandler) Create(c *gin.Context) {
 	var createdAccount *service.Account
 
 	result, err := executeAdminIdempotent(c, "admin.accounts.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		ctx, proofErr := h.consumeInitialAuthorizationProof(ctx, &req)
+		if proofErr != nil {
+			return nil, proofErr
+		}
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 			Name:                  req.Name,
 			Notes:                 req.Notes,
@@ -1214,6 +1219,7 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 	}
 
 	var newCredentials map[string]any
+	var openAIRefreshResult *service.OpenAITokenInfo
 
 	if account.IsOpenAI() {
 		tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(ctx, account)
@@ -1230,6 +1236,7 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 			}
 		}
 		newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
+		openAIRefreshResult = tokenInfo
 	} else if account.Platform == service.PlatformGemini {
 		tokenInfo, err := h.geminiOAuthService.RefreshAccountToken(ctx, account)
 		if err != nil {
@@ -1320,9 +1327,13 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		}
 	}
 
-	updatedAccount, err := h.adminService.UpdateAccount(ctx, account.ID, &service.UpdateAccountInput{
+	updateInput := &service.UpdateAccountInput{
 		Credentials: newCredentials,
-	})
+	}
+	if openAIRefreshResult != nil {
+		updateInput = openAIRefreshResult.AccountRefreshUpdate(newCredentials)
+	}
+	updatedAccount, err := h.adminService.UpdateAccount(ctx, account.ID, updateInput)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1377,10 +1388,11 @@ func (h *AccountHandler) Refresh(c *gin.Context) {
 
 // ApplyOAuthCredentialsRequest is the payload for persisting re-authorized OAuth credentials.
 type ApplyOAuthCredentialsRequest struct {
-	Type              string         `json:"type" binding:"required,oneof=oauth setup-token"`
-	Credentials       map[string]any `json:"credentials" binding:"required"`
-	Extra             map[string]any `json:"extra"`
-	ExpectedUpdatedAt string         `json:"expected_updated_at"`
+	ReauthorizationProof string         `json:"reauthorization_proof"`
+	Type                 string         `json:"type" binding:"required,oneof=oauth setup-token"`
+	Credentials          map[string]any `json:"credentials" binding:"required"`
+	Extra                map[string]any `json:"extra"`
+	ExpectedUpdatedAt    string         `json:"expected_updated_at"`
 }
 
 // ApplyOAuthCredentials 将"重新授权"得到的新凭据原子落库。
@@ -1433,6 +1445,16 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
+
+	if service.IsOpenAIBrowserOAuthAccount(existing) {
+		ctx, err = h.openaiOAuthService.ConsumeReauthorizationProof(
+			ctx, req.ReauthorizationProof, accountID, expectedUpdatedAt, req.Credentials,
+		)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
 
 	reauthService, ok := h.adminService.(service.OAuthReauthorizationService)
 	if !ok {
@@ -1875,7 +1897,13 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 
 			skipCheck := item.ConfirmMixedChannelRisk != nil && *item.ConfirmMixedChannelRisk
 
-			account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
+			createCtx, proofErr := h.consumeInitialAuthorizationProof(ctx, &item)
+			if proofErr != nil {
+				failed++
+				results = append(results, gin.H{"name": item.Name, "success": false, "error": proofErr.Error()})
+				continue
+			}
+			account, err := h.adminService.CreateAccount(createCtx, &service.CreateAccountInput{
 				Name:                  item.Name,
 				Notes:                 item.Notes,
 				Platform:              item.Platform,

@@ -737,7 +737,10 @@ func TestTokenRefreshService_RefreshWithRetry_UpdateFailed(t *testing.T) {
 
 	err := service.refreshWithRetry(context.Background(), account, refresher, refresher, time.Hour)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to save credentials")
+	require.ErrorIs(t, err, errOAuthRefreshCredentialPersist)
+	require.ErrorIs(t, err, repo.updateErr)
+	var contained *providerCycleContainmentRefreshError
+	require.ErrorAs(t, err, &contained)
 	require.Equal(t, 1, repo.updateCalls)
 	require.Equal(t, 0, invalidator.calls) // 更新失败时不应触发缓存失效
 }

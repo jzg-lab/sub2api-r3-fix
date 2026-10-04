@@ -23,11 +23,21 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 		return nil
 	}
 
-	account.Credentials = shallowCopyMap(credentials)
-	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
-		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)
+	ctx, err := bindOpenAIOAuthCredentialSnapshot(ctx, account)
+	if err != nil {
+		return err
 	}
-	return repo.Update(ctx, account)
+	next := *account
+	next.Credentials = shallowCopyMap(credentials)
+	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
+		if err := updater.UpdateCredentials(ctx, next.ID, next.Credentials); err != nil {
+			return err
+		}
+	} else if err := repo.Update(ctx, &next); err != nil {
+		return err
+	}
+	*account = next
+	return nil
 }
 
 // sparkShadowAllowedCredentialKeys 是 spark 影子账号唯一可写的凭据键集合(仅模型映射)。

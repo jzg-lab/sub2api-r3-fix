@@ -1115,6 +1115,9 @@ export default {
         batchFailed: 'Batch creation failed',
         // OpenAI specific
         openai: {
+          browserTitle: 'Authorization browser',
+          browserReady: 'Browser launched for this authorization session',
+          browserRequired: 'Authorization browser not yet launched',
           title: 'OpenAI Account Authorization',
           followSteps: 'Follow these steps to complete OpenAI account authorization:',
           step1GenerateUrl: 'Click the button below to generate the authorization URL',
@@ -1135,7 +1138,21 @@ export default {
           failedToGenerateUrl: 'Failed to generate OpenAI auth URL',
           failedToExchangeCode: 'Failed to exchange OpenAI auth code',
           failedToValidateRT: 'Failed to validate refresh token',
+          createFailedRestart:
+            'Account creation was not confirmed. Check the account list before starting a new browser authorization; the previous authorization result cannot be reused.',
           errors: {
+            OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
+              'Complete a new authorization in the verified fixed-egress browser. The initial-login proof is missing, expired, already used, or does not match this account.',
+            OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:
+              'Reauthorization requires a verified fixed-egress route matching the original login IP. Missing or changed route configuration cannot be replaced by a live IP check.',
+            OPENAI_OAUTH_LOGIN_IP_UNKNOWN:
+              'The original login IP has no verified record. Reauthorization stopped. Recover historical evidence; the current exit cannot replace the original IP.',
+            OPENAI_OAUTH_LOGIN_IP_CHANGED:
+              'The authorization exit differs from the original login IP. Reauthorization stopped without replacing the stored credentials.',
+            OPENAI_OAUTH_LOGIN_IP_UNAVAILABLE:
+              'The original authorization exit could not be verified. Reauthorization stopped without switching routes or connecting directly.',
+            OPENAI_OAUTH_REAUTH_PROOF_REQUIRED:
+              'Complete browser authorization on the original login IP again. A missing, expired or mismatched authorization result cannot replace the stored credentials.',
             OPENAI_OAUTH_PROXY_REQUIRED:
               'No proxy is configured and this server could not reach OpenAI directly, so the OpenAI OAuth request failed. Select a proxy that can access OpenAI and retry; if the authorization code has expired, regenerate the authorization URL.'
           },

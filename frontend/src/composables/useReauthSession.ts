@@ -8,18 +8,20 @@ export interface ReauthOperation {
 
 export function useReauthSession(props: { show: boolean; account: Account | null }) {
   const busy = ref(false)
+  const generation = ref(0)
   let active: ReauthOperation | undefined
   let open = false
   let expectedUpdatedAt = ''
 
   const invalidate = () => {
+    generation.value++
     active = undefined
     busy.value = false
     open = false
   }
 
   watch(
-    () => [props.show, props.account?.id, props.account?.platform, props.account?.proxy_id] as const,
+    [() => props.show, () => props.account?.id, () => props.account?.platform, () => props.account?.proxy_id],
     () => {
       invalidate()
       open = props.show && !!props.account
@@ -50,5 +52,5 @@ export function useReauthSession(props: { show: boolean; account: Account | null
     }
   }
 
-  return { busy, invalidate, isCurrent, run }
+  return { busy, generation, invalidate, isCurrent, run }
 }

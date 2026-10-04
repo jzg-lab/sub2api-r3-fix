@@ -401,6 +401,7 @@ type ShadowOptions struct {
 }
 
 type UpdateAccountInput struct {
+	openAIRefresh         *openAIAccountRefreshBinding
 	Name                  string
 	Notes                 *string
 	Type                  string // Account type: oauth, setup-token, apikey

@@ -399,12 +399,18 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 			// while the provider call was in flight. Return the durable row so
 			// post-refresh cache publication cannot restore that stale snapshot.
 			freshAccount = durableAccount
-		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
+		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, attemptedAccount, newCredentials); updateErr != nil {
 			slog.Error("oauth_refresh_update_failed",
 				"account_id", freshAccount.ID,
 				"error", updateErr,
 			)
-			return nil, fmt.Errorf("%w: %v", errOAuthRefreshCredentialPersist, updateErr)
+			// The upstream has already rotated credentials. A CAS miss or local
+			// write failure must not replay the now-consumed refresh token.
+			return nil, &providerCycleContainmentRefreshError{
+				err: fmt.Errorf("%w: %w", errOAuthRefreshCredentialPersist, updateErr),
+			}
+		} else {
+			freshAccount = attemptedAccount
 		}
 	}
 

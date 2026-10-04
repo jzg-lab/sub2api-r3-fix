@@ -7,8 +7,11 @@ import AccountModal from '@/components/account/ReAuthAccountModal.vue'
 
 const api = vi.hoisted(() => ({
   exchangeCode: vi.fn(),
+  exchangeAuthCode: vi.fn(),
   launchAuthBrowser: vi.fn(),
   applyOAuthCredentials: vi.fn(),
+  generateAuthUrl: vi.fn(),
+  sessionId: 'bound-session',
   showSuccess: vi.fn(),
   showError: vi.fn()
 }))
@@ -23,12 +26,15 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 function oauthClient() {
   return {
     authUrl: ref(''),
-    sessionId: ref(''),
+    sessionId: ref(api.sessionId),
     state: ref(''),
-    oauthState: ref(''),
+    oauthState: ref('bound-state'),
     loading: ref(false),
     error: ref(''),
     resetState: vi.fn(),
+    generateAuthUrl: api.generateAuthUrl,
+    exchangeAuthCode: api.exchangeAuthCode,
+    buildCredentials: () => ({ access_token: 'fixture' }),
     buildExtraInfo: () => undefined
   }
 }
@@ -46,10 +52,10 @@ const Dialog = defineComponent({
 })
 
 const Flow = defineComponent({
-  props: ['showAuthBrowserLaunch', 'authBrowserLaunching'],
+  props: ['showAuthBrowserLaunch', 'authBrowserLaunching', 'authBrowserReady', 'showRefreshTokenOption'],
   emits: ['launch-auth-browser'],
   setup(_, { expose }) {
-    expose({ reset: vi.fn() })
+    expose({ reset: vi.fn(), authCode: 'fixture', oauthState: 'bound-state' })
     return () => h('div')
   }
 })
@@ -79,7 +85,10 @@ describe.each([
   ['admin', AdminModal],
   ['account', AccountModal]
 ] as const)('%s reauthorization lifecycle', (_, component) => {
-  beforeEach(() => vi.resetAllMocks())
+  beforeEach(() => {
+    vi.resetAllMocks()
+    api.sessionId = 'bound-session'
+  })
 
   function setup() {
     const wrapper = mount(component, {
@@ -91,17 +100,107 @@ describe.each([
     const actions = wrapper.vm.$.setupState as unknown as {
       handleCookieAuth: (input: string) => Promise<void>
       handleClose: () => void
+      handleGenerateUrl: () => Promise<void>
+      handleLaunchAuthBrowser: () => Promise<void>
+      handleExchangeCode: () => Promise<void>
+      handleValidateRefreshToken: (input: string) => Promise<void>
     }
     return { wrapper, actions }
   }
 
+  it('passes the one-shot server proof with the same account revision', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    api.exchangeAuthCode.mockResolvedValue({ reauthorization_proof: 'bound-proof' })
+    api.applyOAuthCredentials.mockResolvedValue(original)
+    api.launchAuthBrowser.mockResolvedValue({ launched: true })
+    await actions.handleLaunchAuthBrowser()
+    await actions.handleExchangeCode()
+    expect(api.applyOAuthCredentials).toHaveBeenCalledWith(original.id, expect.objectContaining({
+      reauthorization_proof: 'bound-proof',
+      expected_updated_at: original.updated_at
+    }))
+    expect(wrapper.emitted('reauthorized')).toEqual([[original]])
+    wrapper.unmount()
+  })
+
+  it.each(['missing', 'failed', 'in-progress', 'rejected'] as const)(
+    'rejects programmatic submission with %s browser evidence',
+    async (result) => {
+      const { wrapper, actions } = setup()
+      await wrapper.setProps({ account: { ...account(), platform: 'openai', proxy_id: 7 } })
+      if (result === 'rejected') api.launchAuthBrowser.mockRejectedValue({ reason: 'AUTH_BROWSER_LAUNCH_FAILED' })
+      else api.launchAuthBrowser.mockResolvedValue({
+        launched: false, already_running: result === 'in-progress'
+      })
+      if (result !== 'missing') await actions.handleLaunchAuthBrowser()
+      await actions.handleExchangeCode()
+      expect(api.exchangeAuthCode).not.toHaveBeenCalled()
+      expect(api.applyOAuthCredentials).not.toHaveBeenCalled()
+      expect(wrapper.findComponent(Flow).props('authBrowserReady')).toBe(false)
+      wrapper.unmount()
+    }
+  )
+
+  it('keeps the captured revision and revokes browser evidence on regeneration', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    api.launchAuthBrowser.mockResolvedValue({ launched: true })
+    await actions.handleLaunchAuthBrowser()
+    await wrapper.setProps({ account: { ...original, updated_at: 'later-revision' } })
+    await actions.handleGenerateUrl()
+    expect(api.generateAuthUrl).toHaveBeenCalledWith(7, undefined, {
+      accountId: original.id, expectedUpdatedAt: original.updated_at
+    })
+    await actions.handleExchangeCode()
+    expect(api.exchangeAuthCode).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not expose unbound refresh-token import for OpenAI reauthorization', async () => {
+    const { wrapper, actions } = setup()
+    await wrapper.setProps({ account: { ...account(), platform: 'openai' as const } })
+    expect(wrapper.findComponent(Flow).props('showRefreshTokenOption')).not.toBe(true)
+    if (component === AdminModal) {
+      await actions.handleValidateRefreshToken('fixture')
+      expect(api.applyOAuthCredentials).not.toHaveBeenCalled()
+      expect(api.showError).toHaveBeenCalled()
+    }
+    wrapper.unmount()
+  })
+
+  it('binds authorization generation to the original account, revision and proxy', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    await actions.handleGenerateUrl()
+    expect(api.generateAuthUrl).toHaveBeenCalledWith(7, undefined, {
+      accountId: original.id, expectedUpdatedAt: original.updated_at
+    })
+    wrapper.unmount()
+  })
+
   it('exposes the bound browser launcher only for OpenAI reauthorization', async () => {
+    api.launchAuthBrowser.mockResolvedValue({ launched: true, already_running: false })
     const { wrapper } = setup()
     expect(wrapper.findComponent(Flow).props('showAuthBrowserLaunch')).toBe(false)
     await wrapper.setProps({ account: { ...account(), platform: 'openai' } })
     const flow = wrapper.findComponent(Flow)
     expect(flow.props('showAuthBrowserLaunch')).toBe(true)
     flow.vm.$emit('launch-auth-browser')
+    await flushPromises()
+    expect(api.launchAuthBrowser).toHaveBeenCalledWith('bound-session')
+    expect(api.showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not launch without an account-bound authorization session', async () => {
+    api.sessionId = ''
+    const { wrapper } = setup()
+    await wrapper.setProps({ account: { ...account(), platform: 'openai' } })
+    wrapper.findComponent(Flow).vm.$emit('launch-auth-browser')
     await flushPromises()
     expect(api.showError).toHaveBeenCalledWith('授权会话缺失，请先重新生成授权链接')
     expect(api.launchAuthBrowser).not.toHaveBeenCalled()

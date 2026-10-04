@@ -567,6 +567,35 @@ func TestProbeCycleKeepsTemplateAlive(t *testing.T) {
 
 // TestBurstExposedOnStatusBridge 密集档字段上桥：未验证态账号的 prober
 // 状态含 in_burst/burst_probes（宿主与前端可观测救治进度）。
+func TestAdaptiveSchedulingCannotOverrideBurst(t *testing.T) {
+	up := newFakeUpstream(t, "pass")
+	store := cookiestore.New()
+	cfg := probeTestConfig()
+	cfg.AdaptiveProbeScheduling = true
+	store.SetConfig(cfg)
+	now := time.Now()
+	for i := 0; i < 4; i++ {
+		store.Capture(42, []string{fmt.Sprintf("__cflb=sample-%d; Max-Age=7200", i)},
+			now.Add(time.Duration(i-4)*30*time.Minute))
+	}
+	srv := New(store)
+	stashFrom(srv, 42, up.server.URL, now)
+	tmpl := *srv.templates[42]
+	state := prober.NewState(42)
+	srv.states[42] = state
+	srv.runProbeCycle(t.Context(), 42, &tmpl, state, cfg)
+	if store.SignInfo(42, time.Now()).Stats.Samples < prober.MinAdaptiveSamples {
+		t.Fatal("fixture must exercise the adaptive scheduling branch")
+	}
+	if !state.InBurst || state.ConsecPasses != 1 {
+		t.Fatal("first successful probe must remain in burst")
+	}
+	want := state.LastProbeAt.Add(time.Duration(cfg.ProbeBurstIntervalSeconds) * time.Second)
+	if !state.NextProbeAt.Equal(want) {
+		t.Fatalf("burst schedule overwritten: got %s want %s", state.NextProbeAt, want)
+	}
+}
+
 func TestBurstExposedOnStatusBridge(t *testing.T) {
 	up := newFakeUpstream(t, "pass")
 	store := cookiestore.New()
@@ -867,11 +896,9 @@ func TestProbeGateDisabledAtOne(t *testing.T) {
 	}
 }
 
-// TestProbeTruncationFingerprintFails（v0.3.5）：答对但推理 token 落在
-// 518n−2 截断家族（516/1034/1552…，社区实锤降智指纹）→ 判 Fail 触发重摇，
-// 连过计数不吃截断针；指纹标记优先于 low-rt（rt=516 报 trunc-fp）。
-// 家族外邻近值（1033/1035）照常 pass——指纹是精确命中判定。
-func TestProbeTruncationFingerprintFails(t *testing.T) {
+// Correct fingerprint responses are inconclusive: no quality penalty and no
+// recovery credit. Adjacent non-fingerprint values retain normal grading.
+func TestProbeTruncationFingerprintIsNeutral(t *testing.T) {
 	for _, tc := range []struct {
 		rt     int
 		fail   bool
@@ -898,8 +925,14 @@ func TestProbeTruncationFingerprintFails(t *testing.T) {
 		srv.runProbeCycle(context.Background(), 56, srv.templates[56], state, cfg)
 
 		if tc.fail {
-			if state.LastVerdict != prober.VerdictFail {
-				t.Errorf("rt=%d 截断指纹应判 Fail，得 %s", tc.rt, state.LastVerdict)
+			if state.LastVerdict != prober.VerdictError {
+				t.Errorf("rt=%d: want inconclusive error, got %s", tc.rt, state.LastVerdict)
+			}
+			if state.Fails != 0 || state.QualityRerolls != 0 || state.ConsecFails != 0 || state.SuspectAccountLevel {
+				t.Fatalf("fingerprint was counted as a quality failure: %+v", state)
+			}
+			if state.Probes != 1 || state.TruncationObservations != 1 {
+				t.Fatalf("fingerprint must be observed once without immediate retry: %+v", state)
 			}
 			if !strings.HasPrefix(state.LastAnswer, tc.marker) {
 				t.Errorf("rt=%d 答案摘要应带 %s 前缀: %q", tc.rt, tc.marker, state.LastAnswer)

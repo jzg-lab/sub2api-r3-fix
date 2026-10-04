@@ -91,10 +91,16 @@ type State struct {
 	LastAnswer     string    `json:"last_answer"` // 模型输出前 80 字符（无敏感信息）
 	// LastReasoningTokens 最近一针 completed usage 的推理 token 数（v0.3.4）；
 	// 0 = 零推理量或未解析到 usage。仅观测上报，判定在 sendProbe 完成。
-	LastReasoningTokens int       `json:"last_reasoning_tokens"`
-	LastProbeAt         time.Time `json:"last_probe_at"`
-	NextProbeAt         time.Time `json:"next_probe_at"`
-	BackoffUntil        time.Time `json:"backoff_until"`
+	LastReasoningTokens     int       `json:"last_reasoning_tokens"`
+	LastProbeAt             time.Time `json:"last_probe_at"`
+	PreviousPassAt          time.Time `json:"previous_pass_at"`
+	NextProbeAt             time.Time `json:"next_probe_at"`
+	BackoffUntil            time.Time `json:"backoff_until"`
+	TruncationObservations  int64     `json:"truncation_observations"`
+	TruncationWindowSamples int       `json:"truncation_window_samples"`
+	TruncationWindowHits    int       `json:"truncation_window_hits"`
+	TruncationRateAlert     bool      `json:"truncation_rate_alert"`
+	truncationWindow        []bool
 }
 
 // NewState 为账号建初始状态。
@@ -128,14 +134,27 @@ type Decision struct {
 //     继续重摇纯属烧额度，停探退避；
 //   - error：非质量信号，不动失败计数，清连续通过证据，按档位重排。
 func (st *State) Record(v Verdict, questionID, answer string, now time.Time, cfg pluginconfig.Config) Decision {
+	// Preserve the failure evidence throughout backoff. Start a new attempt
+	// budget only when the first post-backoff observation actually arrives.
+	if !st.BackoffUntil.IsZero() && !now.Before(st.BackoffUntil) {
+		st.ConsecFails = 0
+		st.BackoffUntil = time.Time{}
+	}
+	previousProbeAt := st.LastProbeAt
 	st.Probes++
 	st.LastProbeAt = now
 	st.LastVerdict = v
 	st.LastQuestionID = questionID
 	st.LastAnswer = TruncateAnswer(answer)
+	st.recordTruncation(v == VerdictError && strings.HasPrefix(answer, "trunc-fp:"))
 	switch v {
 	case VerdictPass:
 		st.ConsecFails = 0
+		if st.ConsecPasses > 0 {
+			st.PreviousPassAt = previousProbeAt
+		} else {
+			st.PreviousPassAt = time.Time{}
+		}
 		st.ConsecPasses++
 		st.SuspectAccountLevel = false
 		if st.ConsecPasses >= cfg.ProbeBurstUntilPasses {
@@ -147,6 +166,7 @@ func (st *State) Record(v Verdict, questionID, answer string, now time.Time, cfg
 		st.Fails++
 		st.ConsecFails++
 		st.ConsecPasses = 0
+		st.PreviousPassAt = time.Time{}
 		st.BurstProbes = 0 // 新回合：密集档预算重置（fail 链由退避阈值封顶）
 		if st.ConsecFails >= cfg.MaxConsecutiveProbeFailures {
 			st.suspectEnterBackoff(now, cfg)
@@ -157,9 +177,33 @@ func (st *State) Record(v Verdict, questionID, answer string, now time.Time, cfg
 		return Decision{ShouldReroll: true, ProbeAgainNow: true}
 	default: // VerdictError
 		st.ConsecPasses = 0
+		st.PreviousPassAt = time.Time{}
 		st.NextProbeAt = now.Add(st.nextGap(cfg))
 		return Decision{}
 	}
+}
+
+// The last 20 probes provide a bounded rate signal, separate from quality
+// counters. Five observations and at least 50% truncation raise a warning.
+func (st *State) recordTruncation(truncated bool) {
+	if truncated {
+		st.TruncationObservations++
+	}
+	window := make([]bool, 0, 20)
+	previous := st.truncationWindow
+	if len(previous) >= 20 {
+		previous = previous[len(previous)-19:]
+	}
+	window = append(window, previous...)
+	window = append(window, truncated)
+	st.truncationWindow = window
+	st.TruncationWindowSamples, st.TruncationWindowHits = len(window), 0
+	for _, hit := range window {
+		if hit {
+			st.TruncationWindowHits++
+		}
+	}
+	st.TruncationRateAlert = len(window) >= 5 && st.TruncationWindowHits*2 >= len(window)
 }
 
 // nextGap 计算下一针间隔（v0.3.2 双档）：未验证态（连过 < 退出线且本轮密集
@@ -222,13 +266,11 @@ func AdaptiveNextProbe(now, capturedAt time.Time, p80Lifetime time.Duration, cfg
 	return now.Add(adaptiveMinGap + time.Duration(rnd()*float64(margin)))
 }
 
-// suspectEnterBackoff 判账号级疑似并进入退避：清连续计数（退避期满给新
-// 机会），SuspectAccountLevel 保留到下一次 pass 才摘帽。
+// Keep the failure count observable until backoff expires.
 func (st *State) suspectEnterBackoff(now time.Time, cfg pluginconfig.Config) {
 	st.SuspectAccountLevel = true
 	st.BackoffUntil = now.Add(time.Duration(cfg.ProbeBackoffSeconds) * time.Second)
 	st.NextProbeAt = st.BackoffUntil
-	st.ConsecFails = 0
 }
 
 // TruncateAnswer 截取答案摘要用于状态面板（模型输出无敏感信息，限长防刷屏）。

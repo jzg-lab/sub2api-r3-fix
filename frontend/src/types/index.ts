@@ -1450,6 +1450,7 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  initial_authorization_proof?: string
   name: string
   notes?: string | null
   platform: AccountPlatform

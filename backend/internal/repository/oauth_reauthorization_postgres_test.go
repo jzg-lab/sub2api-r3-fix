@@ -33,6 +33,7 @@ func newOAuthReauthorizationPostgres(t *testing.T) (*accountRepository, *sql.DB,
 	for _, name := range []string{
 		"036_scheduler_outbox.sql", "152_scheduler_outbox_dedup_key.sql",
 		"153_scheduler_outbox_pending_dedup_key_index_notx.sql",
+		"239_openai_probe_ownership.sql",
 	} {
 		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		require.NoError(t, err)

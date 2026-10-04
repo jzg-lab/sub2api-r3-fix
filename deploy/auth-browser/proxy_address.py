@@ -61,13 +61,35 @@ def normalize_proxy(value):
 
 def normalize_exit_ip(value):
     try:
-        return str(ipaddress.ip_address(value.strip()))
+        address = ipaddress.ip_address(value.strip())
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if (
+            "%" in str(address) or address.is_loopback or address.is_link_local
+            or address.is_multicast or address.is_unspecified
+            or str(address) == "255.255.255.255"
+        ):
+            raise ValueError("non-public address")
+        if any(address in network for network in (
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"),
+            ipaddress.ip_network("fc00::/7"),
+        )):
+            raise ValueError("private address")
+        return str(address)
     except ValueError:
         raise ValueError("代理没有返回有效的出口 IP。") from None
 
 
-def validate_exit_ip(value, proxy=None, environ=None):
+def validate_exit_ip(value, proxy=None, environ=None, pinned_ip=None):
     actual = normalize_exit_ip(value)
+    if pinned_ip is not None:
+        # This must come from the server's original account login evidence.
+        # Never learn a replacement baseline from a live proxy test.
+        expected_pin = normalize_exit_ip(pinned_ip)
+        if actual != expected_pin:
+            raise ValueError("重新授权出口与该账号原登录 IP 不一致，拒绝启动浏览器。")
     if proxy is None:
         return actual
 
@@ -210,7 +232,7 @@ def main(argv):
     if len(argv) == 4 and argv[0] == "--prune-profiles":
         print(prune_stale_profiles(argv[1], argv[2], argv[3]))
         return
-    if len(argv) not in (2, 3) or argv[0] not in (
+    if len(argv) not in (2, 3, 4) or argv[0] not in (
         "--proxy",
         "--exit-ip",
         "--auth-url",
@@ -226,7 +248,10 @@ def main(argv):
     elif argv[0] == "--auth-profile":
         print(auth_profile_tag(argv[1]))
     else:
-        print(validate_exit_ip(argv[1], argv[2] if len(argv) == 3 else None))
+        print(validate_exit_ip(
+            argv[1], argv[2] if len(argv) >= 3 else None,
+            pinned_ip=argv[3] if len(argv) == 4 else None,
+        ))
 
 
 if __name__ == "__main__":

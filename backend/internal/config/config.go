@@ -944,12 +944,22 @@ const (
 	ImageConcurrencyOverflowModeWait   = "wait"
 )
 
+// AuthBrowserFixedEgressRoute is an operator-reviewed route, not a live IP probe.
+// ProxyRouteSHA256 binds the complete proxy URL without publishing credentials.
+type AuthBrowserFixedEgressRoute struct {
+	ProxyID          int64  `mapstructure:"proxy_id"`
+	ProxyRouteSHA256 string `mapstructure:"proxy_route_sha256"`
+	BrowserIngress   string `mapstructure:"browser_ingress"`
+	ExitIP           string `mapstructure:"exit_ip"`
+}
+
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
 	// AuthBrowserLauncher 授权浏览器直拉（2026-09-22 方案A）：指向本机
 	// launch.sh 的绝对路径；非空才启用管理端 launch-auth-browser 接口。
 	// 环境变量 SUB2API_AUTH_BROWSER_LAUNCHER / 配置键 gateway.auth_browser_launcher。
-	AuthBrowserLauncher string `mapstructure:"auth_browser_launcher"`
+	AuthBrowserLauncher          string                        `mapstructure:"auth_browser_launcher"`
+	AuthBrowserFixedEgressRoutes []AuthBrowserFixedEgressRoute `mapstructure:"auth_browser_fixed_egress_routes"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`

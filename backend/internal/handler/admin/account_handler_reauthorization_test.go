@@ -20,6 +20,38 @@ type reauthorizationAdminService struct {
 	apply   func(context.Context) (*service.Account, error)
 }
 
+func TestApplyOAuthCredentialsBrowserRequiresOriginalIPProof(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	account := &service.Account{
+		ID: 42, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		UpdatedAt: time.Now().UTC(), Status: service.StatusError,
+	}
+	calls := 0
+	adminSvc := &reauthorizationAdminService{
+		account: account,
+		apply: func(context.Context) (*service.Account, error) {
+			calls++
+			return account, nil
+		},
+	}
+	handler := &AccountHandler{adminService: adminSvc}
+	router := gin.New()
+	router.POST("/accounts/:id/apply-oauth-credentials", handler.ApplyOAuthCredentials)
+	body, err := json.Marshal(ApplyOAuthCredentialsRequest{
+		Type: service.AccountTypeOAuth, ExpectedUpdatedAt: account.UpdatedAt.Format(time.RFC3339Nano),
+		Credentials: map[string]any{"access_token": "fixture"},
+	})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPost, "/accounts/42/apply-oauth-credentials", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusConflict, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "OPENAI_OAUTH_REAUTH_PROOF_REQUIRED")
+	require.Zero(t, calls)
+	require.Equal(t, service.StatusError, account.Status)
+}
+
 func (s *reauthorizationAdminService) GetAccount(context.Context, int64) (*service.Account, error) {
 	return s.account, nil
 }
@@ -49,7 +81,9 @@ func TestApplyOAuthCredentialsInvalidationAfterClientDisconnect(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			account := &service.Account{
 				ID: 42, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
-				UpdatedAt: time.Now().UTC(), Status: service.StatusActive,
+				// PAT has no browser proof; keep exercising OpenAI cache cleanup.
+				Credentials: map[string]any{"auth_mode": service.OpenAIAuthModePersonalAccessToken},
+				UpdatedAt:   time.Now().UTC(), Status: service.StatusActive,
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

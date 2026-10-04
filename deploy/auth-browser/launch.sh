@@ -25,6 +25,11 @@ fi
 NAME="${1:-}"
 AUTH_URL="${2:-}"
 RAW_PROXY="${3:-}"
+PINNED_EXIT_IP="${4:-}"
+if [ "$#" -gt 4 ] || { [ "$#" -eq 4 ] && [ -z "$PINNED_EXIT_IP" ]; }; then
+  echo "重新授权必须提供该账号原登录 IP，不能使用空绑定。" >&2
+  exit 1
+fi
 
 if [ -z "$NAME" ] || [ -z "$AUTH_URL" ] || [ -z "$RAW_PROXY" ]; then
   echo "用法: $0 <授权环境标识> <OpenAI授权链接> <免认证代理地址:端口>" >&2
@@ -93,7 +98,11 @@ if ! EXIT_IP="$("$CURL" -q --fail --silent --show-error --max-time 12 --connect-
   echo "【中止】授权代理无法连通，未切换到直连。" >&2
   exit 2
 fi
-if ! EXIT_IP="$("$PYTHON" "$BASE_DIR/proxy_address.py" --exit-ip "$EXIT_IP" "$PROXY" 2>/dev/null)"; then
+EXIT_CHECK_ARGS=(--exit-ip "$EXIT_IP" "$PROXY")
+if [ "$#" -eq 4 ]; then
+  EXIT_CHECK_ARGS+=("$PINNED_EXIT_IP")
+fi
+if ! EXIT_IP="$("$PYTHON" "$BASE_DIR/proxy_address.py" "${EXIT_CHECK_ARGS[@]}" 2>/dev/null)"; then
   echo "【中止】授权代理出口身份校验失败，未启动浏览器。" >&2
   exit 2
 fi
