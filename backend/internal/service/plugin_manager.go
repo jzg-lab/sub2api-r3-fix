@@ -55,6 +55,10 @@ type PluginManager struct {
 	reconcileCancel    context.CancelFunc
 	reconcileDone      chan struct{}
 	route              atomic.Pointer[pluginRoute]
+
+	statusMu    sync.RWMutex
+	statusCache map[int64]*PluginStatus
+	statusDone  chan struct{}
 }
 
 func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config, hostInfo PluginHostInfo) *PluginManager {
@@ -66,6 +70,7 @@ func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *con
 		installer:          NewPluginPackageInstaller(cfg, hostInfo),
 		runtimes:           make(map[int64]*pluginRuntime),
 		localInstallations: make(map[int64]*PluginInstallation),
+		statusCache:        make(map[int64]*PluginStatus),
 	}
 }
 
@@ -94,9 +99,12 @@ func (m *PluginManager) Start(ctx context.Context) error {
 	m.reconcileCancel = cancel
 	m.reconcileDone = make(chan struct{})
 	done := m.reconcileDone
+	statusDone := make(chan struct{})
+	m.statusDone = statusDone
 	m.mu.Unlock()
 	m.operationMu.Unlock()
 
+	go m.statusLoop(reconcileCtx, statusDone)
 	go m.reconcileLoop(reconcileCtx, done)
 	if err := m.reconcileOnce(reconcileCtx); err != nil {
 		slog.Warn("plugin_initial_reconcile_failed", "error", err)
@@ -108,14 +116,19 @@ func (m *PluginManager) Stop() {
 	m.mu.Lock()
 	cancel := m.reconcileCancel
 	done := m.reconcileDone
+	statusDone := m.statusDone
 	m.reconcileCancel = nil
 	m.reconcileDone = nil
+	m.statusDone = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if done != nil {
 		<-done
+	}
+	if statusDone != nil {
+		<-statusDone
 	}
 	m.operationMu.Lock()
 	m.mu.Lock()
@@ -811,6 +824,212 @@ func (m *PluginManager) Test(ctx context.Context, id int64) (*pluginv1.TestConfi
 		return nil, err
 	}
 	return runtime.api.TestConfig(testCtx, &pluginv1.TestConfigRequest{ConfigJson: configJSON})
+}
+
+// ---------- 插件运行时状态桥（救治区标签计算与插件 UI 桥的数据源） ----------
+
+const (
+	// pluginStatusPollPeriod 状态轮询周期：桥接缓存新鲜度上限。
+	pluginStatusPollPeriod = 30 * time.Second
+	// pluginStatusTimeout 单次 Health RPC 超时：轮询串行执行，逐插件受限。
+	pluginStatusTimeout = 5 * time.Second
+	// pluginBridgeOfflineAfter 离线判定窗口：距最近一次成功 Health RPC 超过
+	// 该时长即视为离线（救治区「插件离线」角标）。unhealthy 但仍应答 ≠ 离线
+	//——插件自报不健康只说明内部告警，RPC 通着就是可达。
+	pluginBridgeOfflineAfter = 2 * time.Minute
+)
+
+// PluginStatus 是插件运行时状态快照（只读观测，不为读状态拉起进程）。
+// StatusJSON 为插件自定义 JSON 字符串（lb-cookie-pin 0.3+ 携带探针/签寿命
+// 区段），旧插件无此字段时为空。保持字符串透传——插件 UI 侧自行 JSON.parse，
+// 与官方宿主的桥接协议同形。
+type PluginStatus struct {
+	PluginID int64  `json:"plugin_id"`
+	Running  bool   `json:"running"`
+	Healthy  bool   `json:"healthy"`
+	// Offline 读取时刻现算（withOffline）：距最近一次成功 Health RPC 超过
+	// pluginBridgeOfflineAfter。不随缓存冻结——离线是时间敏感判定。
+	Offline    bool      `json:"offline"`
+	Message    string    `json:"message,omitempty"`
+	StatusJSON string    `json:"status_json,omitempty"`
+	CheckedAt  time.Time `json:"checked_at"`
+	// LastHealthyAt 最近一次成功 Health RPC 的时刻（healthy=false 也算——
+	// RPC 通着就是可达）。零值=本进程内从未成功通信过，离线判定退化为
+	// 按 CheckedAt 计。
+	LastHealthyAt time.Time `json:"last_healthy_at,omitempty"`
+}
+
+// Status 返回插件状态：优先读轮询缓存，未命中（刚启动/未到首拍）现查一次
+// 并回填。插件未运行不是错误——disabled 插件天然无运行时。
+func (m *PluginManager) Status(ctx context.Context, id int64) (*PluginStatus, error) {
+	if _, err := m.repo.GetByID(ctx, id); err != nil {
+		return nil, err
+	}
+	return m.statusSnapshot(ctx, id), nil
+}
+
+// statusSnapshot 读状态快照：缓存优先，未命中现查。返回的是带读取时刻
+// 离线判定的浅拷贝，缓存本体不被下游修改。
+func (m *PluginManager) statusSnapshot(ctx context.Context, id int64) *PluginStatus {
+	m.statusMu.RLock()
+	cached := m.statusCache[id]
+	m.statusMu.RUnlock()
+	if cached != nil {
+		return cached.withOffline(time.Now())
+	}
+	status, _ := m.probeStatus(ctx, id)
+	return status.withOffline(time.Now())
+}
+
+// withOffline 返回带读取时刻离线判定的浅拷贝。离线 = 距最近一次成功
+// Health RPC（无则距最近一次任何探测证据 CheckedAt）超过
+// pluginBridgeOfflineAfter；两时间戳皆零（从未探测）视为不离线——
+// 无证据不下结论。
+func (s *PluginStatus) withOffline(now time.Time) *PluginStatus {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	last := out.LastHealthyAt
+	if last.IsZero() {
+		last = out.CheckedAt
+	}
+	out.Offline = !last.IsZero() && now.Sub(last) > pluginBridgeOfflineAfter
+	return &out
+}
+
+// probeStatus 现查一个插件的状态并回填缓存。Health RPC 失败记为不健康而非
+// 报错——状态桥要的是观测事实，不是异常冒泡。
+func (m *PluginManager) probeStatus(ctx context.Context, id int64) (*PluginStatus, error) {
+	m.mu.Lock()
+	runtime := m.runtimes[id]
+	m.mu.Unlock()
+	status := &PluginStatus{PluginID: id, CheckedAt: time.Now().UTC()}
+	// 离线证据保全：沿用缓存里最近一次成功 Health 的时刻（若有）。cacheStatus
+	// 整条替换，本轮失败若清零旧证据，「距最近成功通信 2 分钟」会被误判为
+	// 「从未通信」。本轮成功时下方覆盖为当前时刻。
+	m.statusMu.RLock()
+	if previous := m.statusCache[id]; previous != nil {
+		status.LastHealthyAt = previous.LastHealthyAt
+	}
+	m.statusMu.RUnlock()
+	if runtime == nil {
+		status.Message = "插件未运行"
+		m.cacheStatus(status)
+		return status, nil
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, pluginStatusTimeout)
+	defer cancel()
+	health, err := runtime.api.Health(healthCtx, &pluginv1.HealthRequest{})
+	if err != nil || health == nil {
+		status.Message = "插件健康检查失败"
+		if err != nil {
+			status.Message += ": " + err.Error()
+		}
+		m.cacheStatus(status)
+		return status, nil
+	}
+	status.Running = true
+	// RPC 成功即可达（healthy=false 也算——自报不健康只是内部告警），
+	// 推进离线判定的锚点。
+	status.LastHealthyAt = status.CheckedAt
+	status.Healthy = health.GetHealthy()
+	status.Message = health.GetMessage()
+	if raw := strings.TrimSpace(health.GetStatusJson()); raw != "" && json.Valid([]byte(raw)) {
+		status.StatusJSON = raw
+	}
+	m.cacheStatus(status)
+	return status, nil
+}
+
+func (m *PluginManager) cacheStatus(status *PluginStatus) {
+	m.statusMu.Lock()
+	m.statusCache[status.PluginID] = status
+	m.statusMu.Unlock()
+}
+
+// statusLoop 周期轮询全部在运行插件的状态。救治区标签计算与插件 UI 的
+// plugin.status 桥消息都读这份缓存，避免诊断面板直接压插件进程。
+func (m *PluginManager) statusLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(pluginStatusPollPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			ids := make([]int64, 0, len(m.runtimes))
+			for id := range m.runtimes {
+				ids = append(ids, id)
+			}
+			m.mu.Unlock()
+			for _, id := range ids {
+				if ctx.Err() != nil {
+					return
+				}
+				// 单插件查询失败只跳过本轮，不打断轮询回路。
+				_, _ = m.probeStatus(ctx, id)
+			}
+		}
+	}
+}
+
+// PluginBridgeStatus 救治区标签计算与健康快照共用的全局插件桥状态（当前
+// 启用的 OpenAI OAuth 出站插件）。无启用插件时整个块缺席（nil），前端据此
+// 判「救治区无插件可用」。Offline 与 PluginStatus 同源同规则。
+type PluginBridgeStatus struct {
+	PluginID      int64     `json:"plugin_id"`
+	Name          string    `json:"name"`
+	Version       string    `json:"version"`
+	Running       bool      `json:"running"`
+	Healthy       bool      `json:"healthy"`
+	Offline       bool      `json:"offline"`
+	Message       string    `json:"message,omitempty"`
+	StatusJSON    string    `json:"status_json,omitempty"`
+	CheckedAt     time.Time `json:"checked_at"`
+	LastHealthyAt time.Time `json:"last_healthy_at,omitempty"`
+}
+
+// BridgeStatus 返回当前启用的 OpenAI OAuth 出站插件的全局桥状态。无启用
+// 插件或仓库读失败 → nil：调用方按无桥处理，桥故障绝不拖垮健康快照。
+// 启用互斥由 Enable 路径保证（PluginStateEnabled + OpenAI 绑定唯一）。
+func (m *PluginManager) BridgeStatus(ctx context.Context) *PluginBridgeStatus {
+	if m == nil || m.repo == nil {
+		return nil
+	}
+	installations, err := m.repo.List(ctx)
+	if err != nil {
+		return nil
+	}
+	var enabled *PluginInstallation
+	for _, installation := range installations {
+		if installation != nil && installation.State == PluginStateEnabled &&
+			hasEnabledOpenAIBinding(installation.Bindings) {
+			enabled = installation
+			break
+		}
+	}
+	if enabled == nil {
+		return nil
+	}
+	status := m.statusSnapshot(ctx, enabled.ID)
+	if status == nil {
+		return nil
+	}
+	return &PluginBridgeStatus{
+		PluginID:      status.PluginID,
+		Name:          enabled.Name,
+		Version:       enabled.Version,
+		Running:       status.Running,
+		Healthy:       status.Healthy,
+		Offline:       status.Offline,
+		Message:       status.Message,
+		StatusJSON:    status.StatusJSON,
+		CheckedAt:     status.CheckedAt,
+		LastHealthyAt: status.LastHealthyAt,
+	}
 }
 
 type pluginUIAssetClaims struct {

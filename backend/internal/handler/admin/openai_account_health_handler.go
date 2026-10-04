@@ -87,8 +87,10 @@ func (h *OpenAIProbeHealthHandler) TriggerProbeNow(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// ReenableAccount POST /api/v1/admin/openai/accounts/:id/reenable
+// ReenableAccount POST /api/v1/admin/openai/accounts/:id/reenable?unpause=true
 // 手动启用判死号（r17x 选项A）：清标签 → qualification 1 针结业 → 上岗。
+// unpause=true（r17an）：manual_paused 刹车随本请求显式解除（专用解暂停，
+// 不动 schedulable），解除动作独立落 manual_unpause 审计事件。
 // 落 audit_logs（审计中间件自动记录 POST 变更类请求）。
 func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -96,7 +98,8 @@ func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 		response.BadRequest(c, "invalid account id")
 		return
 	}
-	result, err := h.runner.ReenableOpenAIAccount(c.Request.Context(), id)
+	unpause := c.Query("unpause") == "true" || c.Query("unpause") == "1"
+	result, err := h.runner.ReenableOpenAIAccount(c.Request.Context(), id, unpause)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -104,24 +107,22 @@ func (h *OpenAIProbeHealthHandler) ReenableAccount(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// StartHarvest POST /api/v1/admin/openai/accounts/:id/harvest
-// 问题号转打票线（相位B 自动打票）：迁动态桶采票 → 采到回静态复检 →
-// 通过恢复上岗。落 audit_logs（审计中间件自动记录 POST 变更类请求）。
-func (h *OpenAIProbeHealthHandler) StartHarvest(c *gin.Context) {
+// RescueAccount POST /api/v1/admin/openai/accounts/:id/rescue
+// 手动送入救治区（task 3.7）：判死号 → 绑救治组 + 开调度 + 种子流量，
+// 插件自动救号（连过阈值 → 已复活 → 点击转正）。已在区幂等返回
+// already_in_lane=true；种子吃凭据级拒绝（401/403）时号已回判死原位，
+// 以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED 说明「救不了，走删号重授权」。
+// 落 audit_logs（审计中间件自动记录 POST 变更类请求）。
+func (h *OpenAIProbeHealthHandler) RescueAccount(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		response.BadRequest(c, "invalid account id")
 		return
 	}
-	state, err := h.runner.StartHarvestOpenAIAccount(c.Request.Context(), id)
+	result, err := h.runner.RescueAccount(c.Request.Context(), id)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, gin.H{
-		"account_id":    state.AccountID,
-		"probe_mode":    state.ProbeMode,
-		"next_probe_at": state.NextProbeAt,
-		"harvest_attempts": state.HarvestAttempts,
-	})
+	response.Success(c, result)
 }

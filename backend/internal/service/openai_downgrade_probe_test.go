@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +28,7 @@ type downgradeProbeAccountRepoStub struct {
 	listByPlatformFn  func(context.Context, string) ([]Account, error)
 	getByIDFn         func(context.Context, int64) (*Account, error)
 	account           *Account
+	getByIDCalls      int
 	getByIDErr        error
 	schedulableErr    error
 	schedulableCalls  []bool
@@ -72,6 +75,7 @@ func (s *downgradeProbeAccountRepoStub) ListByPlatform(ctx context.Context, plat
 }
 
 func (s *downgradeProbeAccountRepoStub) GetByID(ctx context.Context, id int64) (*Account, error) {
+	s.getByIDCalls++
 	if s.getByIDFn != nil {
 		return s.getByIDFn(ctx, id)
 	}
@@ -127,10 +131,13 @@ type downgradeProbeStoreStub struct {
 	reconcileFn    func(context.Context, time.Time, time.Duration) (int64, error)
 	listDueFn      func(context.Context, time.Time, int) ([]OpenAIDowngradeProbeState, error)
 	eventCountFn   func(context.Context, int64, string, time.Time) (int, error)
+	getStateFn     func(context.Context, int64) (*OpenAIDowngradeProbeState, error)
 	state          *OpenAIDowngradeProbeState
 	ensureNextAt   time.Time
+	ensureCalls    int
 	due            []OpenAIDowngradeProbeState
 	saveCalls      int
+	getStateCalls  int
 	probeCalls     int
 	probeResults   []OpenAIDowngradeProbeResult
 	eventCalls     int
@@ -154,6 +161,7 @@ type downgradeProbeStoreStub struct {
 func (s *downgradeProbeStoreStub) EnsureOpenAIDowngradeState(
 	ctx context.Context, accountID int64, proxyID *int64, nextAt time.Time,
 ) (*OpenAIDowngradeProbeState, error) {
+	s.ensureCalls++
 	if s.ensureFn != nil {
 		return s.ensureFn(ctx, accountID, proxyID, nextAt)
 	}
@@ -208,7 +216,11 @@ func (s *downgradeProbeStoreStub) RecordOpenAIDowngradeProbe(_ context.Context, 
 
 // GetOpenAIDowngradeState 供代际失配重试(retryStaleCommit)读取新鲜状态行:
 // 未预置 state 时返回 nil,重试按"状态行不可用"让位。
-func (s *downgradeProbeStoreStub) GetOpenAIDowngradeState(context.Context, int64) (*OpenAIDowngradeProbeState, error) {
+func (s *downgradeProbeStoreStub) GetOpenAIDowngradeState(ctx context.Context, accountID int64) (*OpenAIDowngradeProbeState, error) {
+	s.getStateCalls++
+	if s.getStateFn != nil {
+		return s.getStateFn(ctx, accountID)
+	}
 	return s.state, nil
 }
 
@@ -543,6 +555,96 @@ func TestParseOpenAIDowngradeProbeResponseAcceptsItemDoneDelivery(t *testing.T) 
 	require.False(t, correct)
 	require.Nil(t, tokens)
 	require.Nil(t, juice)
+}
+
+// TestParseOpenAIDowngradeProbeCompletionReturnsAnswerText（r17am 留档配套）：
+// 判分无关内核必须返回与判分所用的同一份答案全文——条目终文 / 终态回显 /
+// legacy delta 三种交付形态都要拿到文本；一切结构失败路径统一空文本。
+// 此前留档只存响应尾 8KB，终态 usage 记录霸占尾部，答案文本几乎总被截掉
+// （9/28 团灭复盘实证），答错定性只能靠 rt 侧写。
+func TestParseOpenAIDowngradeProbeCompletionReturnsAnswerText(t *testing.T) {
+	itemDone := []byte(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"错答 7\"}]}}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"reasoning_tokens\":516}}}\n\n")
+	text, tokens, _ := parseOpenAIDowngradeProbeCompletion(itemDone)
+	require.Equal(t, "错答 7\n", text)
+	require.NotNil(t, tokens)
+
+	legacyEcho := []byte(
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是21\"}]}],\"usage\":{\"reasoning_tokens\":1992}}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(legacyEcho)
+	require.Equal(t, "答案是21\n", text)
+	require.NotNil(t, tokens)
+
+	legacyDelta := []byte("event: response.output_text.delta\n" +
+		"data: {\"delta\":\"答案是21\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"usage\":{\"reasoning_tokens\":1992}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(legacyDelta)
+	require.Equal(t, "答案是21", text)
+	require.NotNil(t, tokens)
+
+	// 无终态：空文本 + 零计数（与 wrapper 的 false,nil,nil 同形）。
+	noTerminal := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是21\"}]}}\n\n")
+	text, tokens, _ = parseOpenAIDowngradeProbeCompletion(noTerminal)
+	require.Empty(t, text)
+	require.Nil(t, tokens)
+}
+
+// TestApplyResponseGradedTextAndArchiveAnswerText（r17am）：applyResponse 把
+// 判分文本收进 gradedText；留档 JSONL 落 answer_text 字段。nil 判分正则的
+// 拒收语义保持（TransportOK=false，gradedText 空）。
+func TestApplyResponseGradedTextAndArchiveAnswerText(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"错答 7\"}]}}\n\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"reasoning_tokens\":675}}}\n\n")
+
+	result := OpenAIDowngradeProbeResult{HTTPStatus: 200}
+	result.applyResponse(sseBody, openAIDowngradeNumericAnswerPattern(21))
+	require.True(t, result.TransportOK)
+	require.False(t, result.AnswerCorrect)
+	require.Equal(t, "错答 7\n", result.gradedText)
+
+	// nil 正则 = 拒收：不产出可判定结果（r17f 教训回归）。
+	nilPattern := OpenAIDowngradeProbeResult{HTTPStatus: 200}
+	nilPattern.applyResponse(sseBody, nil)
+	require.False(t, nilPattern.TransportOK)
+	require.Nil(t, nilPattern.ReasoningTokens)
+	require.Empty(t, nilPattern.gradedText)
+
+	// 留档全链：answer_text 进 JSONL，超长保尾。
+	dir := t.TempDir()
+	t.Setenv("SUB2API_PROBE_ARCHIVE_DIR", dir)
+	question := openAIDowngradeProbeQuestion{
+		Domain: "candy", Text: "糖果题面", AnswerDisplay: "21",
+		AnswerPattern: openAIDowngradeNumericAnswerPattern(21),
+	}
+	archiveOpenAIDowngradeProbe(1195, "normal", question, &result, sseBody)
+	archiveOpenAIDowngradeProbe(1194, "normal", question, &result, sseBody)
+
+	raw, err := os.ReadFile(filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	require.Len(t, lines, 2)
+	var entry openAIDowngradeProbeArchiveEntry
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &entry))
+	require.Equal(t, int64(1194), entry.AccountID)
+	require.Equal(t, "错答 7\n", entry.AnswerText)
+	require.False(t, entry.AnswerCorrect)
+	require.Contains(t, entry.ResponseTail, "response.completed")
+
+	// 超长答案保尾截断（结论在末段）。
+	longAnswer := strings.Repeat("前段废话", 1024) + "最终答案 7"
+	longResult := OpenAIDowngradeProbeResult{HTTPStatus: 200, TransportOK: true}
+	longResult.gradedText = longAnswer
+	archiveOpenAIDowngradeProbe(1193, "normal", question, &longResult, nil)
+	raw, err = os.ReadFile(filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &entry))
+	require.Equal(t, int64(1193), entry.AccountID)
+	require.LessOrEqual(t, len(entry.AnswerText), openAIDowngradeArchiveAnswerCap)
+	require.Contains(t, entry.AnswerText, "最终答案 7")
 }
 
 func TestOpenAIProbeTurnStateSignal(t *testing.T) {
@@ -985,11 +1087,9 @@ func TestOpenAIDowngradeProbeBodyFailurePreservesHTTPEvidence(t *testing.T) {
 			store := runner.store.(*downgradeProbeStoreStub)
 			require.Equal(t, []OpenAIDowngradeProbeResult{result}, store.probeResults)
 			repo := runner.accountRepo.(*downgradeProbeAccountRepoStub)
-			if tc.status == http.StatusUnauthorized || tc.status == http.StatusForbidden {
-				require.Equal(t, []string{"OpenAI probe authentication failed"}, repo.errorMessages)
-			} else {
-				require.Empty(t, repo.errorMessages)
-			}
+			// r17aq：401/403 不再在记录入口一击 SetError——降级不杀策略在
+			// 状态机侧（applyOpenAIProbeAuthPolicy），记录路径零生命周期副作用。
+			require.Empty(t, repo.errorMessages)
 			state := &OpenAIDowngradeProbeState{
 				AccountID: account.ID, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 				ConsecutiveFailures: 1, ConsecutiveSuccesses: 3,
@@ -1659,7 +1759,7 @@ func TestOpenAIDowngradeProbeRejectsTerminalReplacementWithoutProxy(t *testing.T
 
 	// 普通 pending_replace 不再走 retryReplacement/beginReprobe（原实现无
 	// proxy 时报错），而是防御性让位：不探针、排远 7 天、零 probe 调用。
-	// harvest 的显式救援例外由 TestPendingReplaceHarvestReachesProbePipeline 锁定。
+	// 打票线已删除（2026-10-02）：pending_replace 无探针例外，救治区/手动启用是唯一救援入口。
 	require.NoError(t, runner.processState(context.Background(), state, time.Now()))
 	require.Zero(t, store.probeCalls)
 	require.True(t, state.NextProbeAt.After(time.Now().Add(6*24*time.Hour)),
@@ -2856,7 +2956,10 @@ func TestProbeFirstSolFallback429DefersWithoutReplacement(t *testing.T) {
 	for _, withReset := range []bool{false, true} {
 		t.Run(map[bool]string{false: "generic", true: "explicit_reset"}[withReset], func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
-			repo := &downgradeProbeAccountRepoStub{}
+			// r17aq：runProbeRecorded 在针后 GetByID 复读账号做新鲜度守卫，
+			// stub 必须回同一个账号，否则结果被当 stale 丢弃。
+			solAccount := &Account{ID: 1}
+			repo := &downgradeProbeAccountRepoStub{account: solAccount}
 			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 			resetAt := now.Add(time.Hour)
 			runner.probeFn = func(_ context.Context, _ *Account, mode string) OpenAIDowngradeProbeResult {
@@ -2872,7 +2975,7 @@ func TestProbeFirstSolFallback429DefersWithoutReplacement(t *testing.T) {
 				AccountID: 1, State: OpenAIDowngradeStateReprobe, ProbeMode: "normal",
 				ConsecutiveFailures: 2, ConsecutiveSuccesses: 1, NextProbeAt: now,
 			}
-			require.NoError(t, runner.startSolFallback(context.Background(), &Account{ID: 1}, state, now))
+			require.NoError(t, runner.startSolFallback(context.Background(), solAccount, state, now))
 			require.Equal(t, OpenAIDowngradeStateReprobe, state.State)
 			require.Equal(t, "sol_fallback", state.ProbeMode)
 			require.Equal(t, 2, state.ConsecutiveFailures)
@@ -2905,7 +3008,9 @@ func TestProbeFirstSolFallbackInconclusiveDoesNotReplace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
-			repo := &downgradeProbeAccountRepoStub{}
+			// 同上：新鲜度守卫要求 GetByID 能回同一账号。
+			solAccount := &Account{ID: 1}
+			repo := &downgradeProbeAccountRepoStub{account: solAccount}
 			runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
 				return tc.result
@@ -2914,7 +3019,7 @@ func TestProbeFirstSolFallbackInconclusiveDoesNotReplace(t *testing.T) {
 				AccountID: 1, State: OpenAIDowngradeStateReprobe,
 				ConsecutiveFailures: 2, NextProbeAt: now,
 			}
-			require.NoError(t, runner.startSolFallback(context.Background(), &Account{ID: 1}, state, now))
+			require.NoError(t, runner.startSolFallback(context.Background(), solAccount, state, now))
 			require.Equal(t, OpenAIDowngradeStateReprobe, state.State)
 			require.Equal(t, "sol_fallback", state.ProbeMode)
 			require.False(t, state.NextProbeAt.Before(now.Add(openAIDowngradeProbeProxyMinInterval)))

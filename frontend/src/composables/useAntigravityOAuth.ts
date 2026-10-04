@@ -13,8 +13,10 @@ export function useAntigravityOAuth() {
   const state = ref('')
   const loading = ref(false)
   const error = ref('')
+  let requestVersion = 0
 
   const resetState = () => {
+    requestVersion++
     authUrl.value = ''
     sessionId.value = ''
     state.value = ''
@@ -23,6 +25,7 @@ export function useAntigravityOAuth() {
   }
 
   const generateAuthUrl = async (proxyId: number | null | undefined): Promise<boolean> => {
+    const version = ++requestVersion
     loading.value = true
     authUrl.value = ''
     sessionId.value = ''
@@ -34,17 +37,19 @@ export function useAntigravityOAuth() {
       if (proxyId) payload.proxy_id = proxyId
 
       const response = await adminAPI.antigravity.generateAuthUrl(payload as any)
+      if (version !== requestVersion) return false
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
       state.value = response.state
       return true
     } catch (err: any) {
+      if (version !== requestVersion) return false
       error.value =
         err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToGenerateUrl')
       appStore.showError(error.value)
       return false
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 
@@ -60,6 +65,7 @@ export function useAntigravityOAuth() {
       return null
     }
 
+    const version = ++requestVersion
     loading.value = true
     error.value = ''
 
@@ -72,14 +78,15 @@ export function useAntigravityOAuth() {
       if (params.proxyId) payload.proxy_id = params.proxyId
 
       const tokenInfo = await adminAPI.antigravity.exchangeCode(payload as any)
-      return tokenInfo as AntigravityTokenInfo
+      return version === requestVersion ? tokenInfo as AntigravityTokenInfo : null
     } catch (err: any) {
+      if (version !== requestVersion) return null
       error.value =
         err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToExchangeCode')
       appStore.showError(error.value)
       return null
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 
@@ -92,6 +99,7 @@ export function useAntigravityOAuth() {
       return null
     }
 
+    const version = ++requestVersion
     loading.value = true
     error.value = ''
 
@@ -100,15 +108,16 @@ export function useAntigravityOAuth() {
         refreshToken.trim(),
         proxyId
       )
-      return tokenInfo as AntigravityTokenInfo
+      return version === requestVersion ? tokenInfo as AntigravityTokenInfo : null
     } catch (err: any) {
+      if (version !== requestVersion) return null
       error.value =
         err.response?.data?.detail || t('admin.accounts.oauth.antigravity.failedToValidateRT')
       // Don't show global error toast for batch validation to avoid spamming
       // appStore.showError(error.value)
       return null
     } finally {
-      loading.value = false
+      if (version === requestVersion) loading.value = false
     }
   }
 

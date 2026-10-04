@@ -38,6 +38,20 @@ func newTestBillingServiceWithOpenAILadderCatalog(t *testing.T) *BillingService 
 	return NewBillingService(&config.Config{}, newStubPricingServiceFromJSON(t, openAILadderCatalogJSON))
 }
 
+func TestGetModelPricingGPT61SolFailsClosedWithoutExplicitPrice(t *testing.T) {
+	for name, svc := range map[string]*BillingService{
+		"no_dynamic_catalog":               newTestBillingService(),
+		"catalog_with_other_openai_prices": newTestBillingServiceWithOpenAILadderCatalog(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			pricing, err := svc.GetModelPricing("gpt-6.1-sol")
+
+			require.ErrorIs(t, err, ErrModelPricingUnavailable)
+			require.Nil(t, pricing)
+		})
+	}
+}
+
 func TestCalculateCost_BasicComputation(t *testing.T) {
 	svc := newTestBillingService()
 

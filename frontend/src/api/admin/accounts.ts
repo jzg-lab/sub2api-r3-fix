@@ -310,6 +310,7 @@ export async function applyOAuthCredentials(
     type: 'oauth' | 'setup-token'
     credentials: Record<string, unknown>
     extra?: Record<string, unknown>
+    expected_updated_at: string
   }
 ): Promise<Account> {
   const { data } = await apiClient.post<Account>(
@@ -455,7 +456,6 @@ export async function launchAuthBrowser(
   profile_tag: string
   proxy_name: string
   exit_ingress: string
-  auth_url: string
   output: string
 }> {
   const { data } = await apiClient.post<{
@@ -464,7 +464,6 @@ export async function launchAuthBrowser(
     profile_tag: string
     proxy_name: string
     exit_ingress: string
-    auth_url: string
     output: string
   }>('/admin/openai/launch-auth-browser', { session_id: sessionId }, {
     // Allow the 5s preparation phase and 45s launcher deadline to return a result.
@@ -1004,6 +1003,28 @@ export interface OpenAIProbeLastEvidence {
   degraded: boolean
 }
 
+/** 救治区在区注记（连过计数/退避/插件离线角标；转正即清）。 */
+export interface OpenAIAccountRescueHealth {
+  entered_at: string
+  trigger: string
+  consecutive_passes: number
+  consec_fails: number
+  in_backoff: boolean
+  suspect_account_level: boolean
+  backoff_until?: string | null
+  plugin_offline: boolean
+  graduation_threshold: number
+  /** 插件侧最近一针（宿主证据行冻结在判死针，救治区活跃证据在插件）。 */
+  plugin_last_probe_at?: string | null
+  plugin_last_verdict?: string
+}
+
+/** 永久复活徽标（救治区毕业血统，转正时打、永不清除）。 */
+export interface OpenAIAccountRescuedBadge {
+  at: string
+  count: number
+}
+
 /** 单账号健康快照：探针状态机真值 + 最近一针实测，绝不读滞后的启用状态。 */
 export interface OpenAIAccountHealth {
   account_id: number
@@ -1018,13 +1039,42 @@ export interface OpenAIAccountHealth {
   clickable: boolean
   reason?: string
   last_probe?: OpenAIProbeLastEvidence | null
+  rescue?: OpenAIAccountRescueHealth | null
+  rescued?: OpenAIAccountRescuedBadge | null
 }
 
-/** 批量健康快照（账号列表页一次查齐）。 */
-export async function listOpenAIAccountHealth(ids: number[]): Promise<OpenAIAccountHealth[]> {
-  const { data } = await apiClient.get<OpenAIAccountHealth[]>('/admin/openai/accounts/health', {
-    params: { ids: ids.join(',') }
-  })
+/**
+ * 救治区插件桥状态（当前启用的 OpenAI OAuth 出站插件）。救治中标签的
+ * 离线角标以此为准；无启用插件时整个区块缺席。
+ */
+export interface OpenAIPluginBridge {
+  plugin_id: number
+  name: string
+  version: string
+  running: boolean
+  healthy: boolean
+  offline: boolean
+  message?: string
+  /** 插件自定义状态 JSON 字符串（签寿命/探针区段），透传不解析。 */
+  status_json?: string
+  checked_at: string
+  last_healthy_at?: string
+}
+
+/** 批量健康快照响应信封：账号列表 + 全局插件桥区块。 */
+export interface OpenAIAccountHealthListResult {
+  accounts: OpenAIAccountHealth[]
+  plugin_bridge?: OpenAIPluginBridge
+}
+
+/** 批量健康快照（账号列表页一次查齐，附带救治区插件桥区块）。 */
+export async function listOpenAIAccountHealth(
+  ids: number[]
+): Promise<OpenAIAccountHealthListResult> {
+  const { data } = await apiClient.get<OpenAIAccountHealthListResult>(
+    '/admin/openai/accounts/health',
+    { params: { ids: ids.join(',') } }
+  )
   return data
 }
 
@@ -1037,7 +1087,9 @@ export interface OpenAIProbeNowResult {
 }
 
 /** 主动检测：手动针与调度针完全同构，连点去重（already_flying）。
- * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。 */
+ * 暂停/停用号走同步诊断针（当场打完最长 2 分钟），超时须容纳探针全程。
+ * r17an：判死号（pending_replace 普通）同样走同步诊断针——只落证据行，
+ * 不动状态机。 */
 export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowResult> {
   const { data } = await apiClient.post<OpenAIProbeNowResult>(
     `/admin/openai/accounts/${id}/probe-now`,
@@ -1047,19 +1099,49 @@ export async function triggerOpenAIProbeNow(id: number): Promise<OpenAIProbeNowR
   return data
 }
 
-export interface OpenAIHarvestStartResult {
+export interface OpenAIReenableResult {
   account_id: number
-  probe_mode: string
+  reenabled_at: string
   next_probe_at: string
-  harvest_attempts: number
+  /** true = 认证针已排到近刻（下一拍扫描循环拾取）。 */
+  probe_queued: boolean
+  /** true = 本次请求实际解除了 manual_paused 刹车（r17an）。 */
+  unpaused?: boolean
 }
 
-/** 问题号转打票线（相位B）：迁动态桶采票循环，采到回静态复检。 */
-export async function startOpenAIHarvest(id: number): Promise<OpenAIHarvestStartResult> {
-  const { data } = await apiClient.post<OpenAIHarvestStartResult>(
-    `/admin/openai/accounts/${id}/harvest`,
+/** 手动启用判死号（pending_replace 专属，r17am 面板入口）：清标签回认证态，
+ * 认证针 1 针结业（答对即上岗）；结论针答错当场打回判死（一击退出，r17y），
+ * 无结论针（401/传输故障）5 分钟重试不烧唯一一击。不重置配额/限流。
+ * unpause=true（r17an）：随请求解除 manual_paused 静置刹车（专用解暂停，
+ * 不动 schedulable），解除动作独立落 manual_unpause 审计事件；不带则暂停号
+ * 仍被拒（OPENAI_REENABLE_PAUSED）。 */
+export async function reenableOpenAIAccount(id: number, unpause = false): Promise<OpenAIReenableResult> {
+  const { data } = await apiClient.post<OpenAIReenableResult>(
+    `/admin/openai/accounts/${id}/reenable`,
     undefined,
-    { timeout: 60000 }
+    { params: unpause ? { unpause: 'true' } : undefined }
+  )
+  return data
+}
+
+export interface OpenAIRescueResult {
+  account_id: number
+  /** true = 本次实际送入（绑救治组 + 开调度 + 种子流量）。 */
+  entered: boolean
+  /** true = 已在救治区（幂等返回，未重复操作）。 */
+  already_in_lane: boolean
+  trigger: string
+}
+
+/** 手动送入救治区（task 3.7）：判死号 → 绑救治组 + 开调度 + 种子流量喂插件，
+ * 插件自动救号（连过阈值 → 已复活 → 点击转正）。种子吃凭据级拒绝
+ * （401/403）时号已回判死原位，后端以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED
+ * 拒绝——提示走删号重新授权。超时须容纳种子全程（上游一轮对话）。 */
+export async function rescueOpenAIAccount(id: number): Promise<OpenAIRescueResult> {
+  const { data } = await apiClient.post<OpenAIRescueResult>(
+    `/admin/openai/accounts/${id}/rescue`,
+    undefined,
+    { timeout: 180000 }
   )
   return data
 }
@@ -1204,7 +1286,8 @@ export const accountsAPI = {
   resetOpenAIQuota,
   listOpenAIAccountHealth,
   triggerOpenAIProbeNow,
-  startOpenAIHarvest,
+  reenableOpenAIAccount,
+  rescueOpenAIAccount,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

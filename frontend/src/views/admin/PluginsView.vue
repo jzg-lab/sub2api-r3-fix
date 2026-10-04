@@ -611,7 +611,8 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
   const expectsResponse =
     message.type === "config.load" ||
     message.type === "config.save" ||
-    message.type === "config.test";
+    message.type === "config.test" ||
+    message.type === "plugin.status";
   if (expectsResponse) {
     if (!requestID || pendingBridgeRequests.has(requestID)) return;
     registerBridgeRequest(requestID);
@@ -655,6 +656,12 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
             result.message || t("admin.plugins.testSuccess"),
           );
         else appStore.showError(result.message || t("common.error"));
+        break;
+      }
+      case "plugin.status": {
+        // 插件 UI 每 5s 轮询一次：宿主读 30s 状态桥缓存应答，不压插件进程。
+        const status = await adminAPI.plugins.getStatus(configPlugin.value!.id);
+        postBridgeResult(message, { ok: true, result: status });
         break;
       }
       case "ui.resize": {

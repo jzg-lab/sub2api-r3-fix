@@ -183,6 +183,21 @@ func (h *PluginHandler) Test(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// Status 返回插件运行时状态快照（含 status_json：插件自定义的状态区段，
+// 救治区标签与插件 UI 状态面板的数据源）。只读观测，不触发任何插件生命周期。
+func (h *PluginHandler) Status(c *gin.Context) {
+	id, ok := pluginIDParam(c)
+	if !ok {
+		return
+	}
+	status, err := h.manager.Status(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, status)
+}
+
 func (h *PluginHandler) CreateUISession(c *gin.Context) {
 	id, ok := pluginIDParam(c)
 	if !ok {

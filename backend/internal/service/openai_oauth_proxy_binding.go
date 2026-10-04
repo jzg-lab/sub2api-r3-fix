@@ -56,6 +56,13 @@ var (
 		"OPENAI_OAUTH_QUALIFICATION_REQUIRED",
 		"the OpenAI OAuth authorization proxy must pass qualification before scheduling",
 	)
+	// ErrOpenAIOAuthRescueBindingRequired 救治区专用调度通道的放行条件不满足：
+	// 账号当前并非仅绑定救治组（未绑/还绑着客户池组）。全局资格闸语义不动，
+	// 救治放行只认「仅绑救治组」这一拓扑事实。
+	ErrOpenAIOAuthRescueBindingRequired = infraerrors.Conflict(
+		"OPENAI_OAUTH_RESCUE_BINDING_REQUIRED",
+		"rescue lane scheduling requires the account to be bound exclusively to the rescue group",
+	)
 )
 
 func IsOpenAIBrowserOAuthAccount(account *Account) bool {

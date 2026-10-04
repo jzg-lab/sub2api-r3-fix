@@ -34,7 +34,6 @@ func machineChainTurnMetadata(sessionID, threadID, windowID, parentThreadID stri
 // machineChainRequest 构造一次真实 Codex 窗口形态的下游请求（头 + body 同源）。
 func machineChainRequest(t *testing.T, path, sessionID, threadID, windowID, parentThreadID string) (*gin.Context, *httptest.ResponseRecorder, []byte) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	tm := machineChainTurnMetadata(sessionID, threadID, windowID, parentThreadID)
 	cmParent := ""
 	if parentThreadID != "" {
@@ -502,7 +501,6 @@ func TestCodexMachineChain_HTTP_MachineWithoutSeedBehavesLikeOff(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.2","stream":false,"prompt_cache_key":"` + testMachineChainRoot + `","instructions":"x","client_metadata":{"session_id":"` + testMachineChainRoot + `","thread_id":"` + testMachineChainRoot + `"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	run := func(t *testing.T, mode string) ([]byte, http.Header) {
 		t.Helper()
-		gin.SetMode(gin.TestMode)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))

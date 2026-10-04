@@ -14,6 +14,9 @@ var (
 	ErrOpenAIProbeControlStore    = errors.New("OpenAI probe control store unavailable")
 	ErrOpenAIProbeSnapshotStore   = errors.New("OpenAI probe account snapshot writer unavailable")
 	ErrOpenAIProbeSnapshotRefresh = errors.New("OpenAI probe committed; account snapshot refresh failed")
+	ErrOpenAIReenableNotDead      = errors.New("OpenAI account is not pending replacement")
+	ErrOpenAIReenablePaused       = errors.New("OpenAI account is manual-paused")
+	ErrOpenAIReenableBlocked      = errors.New("OpenAI account is not probe-runnable")
 )
 
 // A probe does network work without locks, then commits only if both database
@@ -53,6 +56,30 @@ type OpenAIDowngradeMutationEvent struct {
 
 type OpenAIDowngradeAtomicStore interface {
 	CommitOpenAIDowngradeMutation(context.Context, *OpenAIDowngradeMutation) error
+}
+
+// OpenAIAccountReenableMutation is the narrow transaction contract for
+// dead-account rescue. The repository rechecks the captured account and state
+// generations, eligibility, ownership and manual-pause gate before changing
+// anything.
+type OpenAIAccountReenableMutation struct {
+	AccountID                int64
+	ExpectedAccountUpdatedAt time.Time
+	ExpectedStateUpdatedAt   time.Time
+	ExpectedProxyID          *int64
+	ExpectedStatus           string
+	ExpectedSchedulable      bool
+	// AllowSchedulable 救治区豁免（r17ba）：在区号入区时被有意开调度
+	//（救治组收种子/测试流量），普通 reenable 闸把 schedulable=true 视为
+	// 异常态拒绝——复活点击（标签 revived → reenable 考证）必须放行。
+	AllowSchedulable bool
+	Unpause          bool
+	ReenabledAt      time.Time
+	State            *OpenAIDowngradeProbeState
+}
+
+type OpenAIAccountReenableStore interface {
+	CommitOpenAIAccountReenable(context.Context, *OpenAIAccountReenableMutation) (bool, error)
 }
 
 type OpenAIDowngradeAccountSnapshotStore interface {
@@ -256,34 +283,6 @@ func (s *openAIProbeStaging) CountOpenAIDowngradeEvents(ctx context.Context, id 
 	return count, nil
 }
 
-// 票接口直通（r17u）：stagedRunner 把 runner.store 换成 staging 后，probe()
-// 的 `r.store.(OpenAICodexTicketStore)` 断言在 staging 上失败 → 采票静默
-// 跳过（生产实证：2026-09-21 动态桶 332 针多根，票表恒 0 行零日志）。
-// 票是顺带观察哨，不参与 staging 事务——直通底层真 store，主判定回滚
-// 不拖累票（采到的 332 票不因探针 commit 409 而丢）。
-func (s *openAIProbeStaging) UpsertOpenAICodexTicket(ctx context.Context, ticket *OpenAICodexTicket) error {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return nil
-	}
-	return ts.UpsertOpenAICodexTicket(ctx, ticket)
-}
-
-func (s *openAIProbeStaging) GetOpenAICodexTicket(ctx context.Context, accountID int64, model string) (*OpenAICodexTicket, error) {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return nil, nil
-	}
-	return ts.GetOpenAICodexTicket(ctx, accountID, model)
-}
-
-func (s *openAIProbeStaging) DeleteExpiredOpenAICodexTickets(ctx context.Context, now time.Time) (int64, error) {
-	ts, ok := s.OpenAIDowngradeProbeStore.(OpenAICodexTicketStore)
-	if !ok {
-		return 0, nil
-	}
-	return ts.DeleteExpiredOpenAICodexTickets(ctx, now)
-}
 
 func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *OpenAIDowngradeProbeRunner {
 	// Do not copy the live runner's mutexes, sync.Once values or lifecycle.
@@ -319,12 +318,7 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 	candidate := *state
 	// A probe-owned authentication error can occur before a circuit opens.
 	// Requalify it on its current route instead of stranding an on_duty row.
-	// 打票线排除（2026-09-22 修正，1117 实证）：usage probe 的 401 会把
-	// 账号标 error，此分支把 probe_mode 抢改成 qualification，采票循环
-	// 被劫持。harvest 的 401 分诊（凭据失效→停打回原桶判死）在内层
-	// processState 的挂点执行，语义更强，不许被重认证覆盖。
-	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty &&
-		candidate.ProbeMode != "harvest" {
+	if account.Status == StatusError && candidate.State == OpenAIDowngradeStateOnDuty {
 		candidate.ConsecutiveSuccesses, candidate.ConsecutiveFailures = 0, 0
 		if candidate.ProbeMode == "sol_fallback" {
 			candidate.State = OpenAIDowngradeStateCircuitOpen
@@ -363,6 +357,25 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 		r.deferCounts = runner.deferCounts
 		if runner.abuseSignal != nil {
 			openAIAbuseRouteSignals.AcknowledgeRealTrafficSignal(*runner.abuseSignal)
+		}
+		// 救治区自动钩子（r17ax Phase 3.2）：判死提交生效即触发入区过滤。
+		// 异步执行——EnterRescue 含种子流量（真实上游请求，秒到分钟级），
+		// 不能阻塞探针扫描循环；mutation 拷贝值传递，避免提交后 staging
+		// 复用期的数据竞争。入区失败只记日志 + 对账清扫兜底（钩子内纪律）。
+		if stage.mutation.State != nil &&
+			stage.mutation.State.State == OpenAIDowngradeStatePendingReplace &&
+			r.rescueLane != nil {
+			mutation := stage.mutation
+			account, accountErr := r.accountRepo.GetByID(ctx, stage.mutation.AccountID)
+			if accountErr != nil {
+				account = nil
+			}
+			lane := r.rescueLane
+			go func() {
+				hookCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+				lane.MaybeAutoEnterRescue(hookCtx, &mutation, account)
+			}()
 		}
 		// committed && err != nil 只剩快照刷新失败（ErrOpenAIProbeSnapshotRefresh）：
 		// 提交已生效，错误照常上抛，让位分支不得介入。

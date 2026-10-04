@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,17 +54,31 @@ func TestOpenAIAuthBrowserLocalIngress(t *testing.T) {
 		proxy *Proxy
 		want  string
 	}{
-		{"static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17921"},
-		{"static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17924"},
-		{"first upstream with unrelated id", &Proxy{ID: 901, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17921"},
-		{"second upstream with unrelated id", &Proxy{ID: 42, Protocol: "SOCKS5H", Host: "127.0.0.1", Port: 17912}, "http://127.0.0.1:17922"},
-		{"third upstream with unrelated id", &Proxy{ID: 3, Protocol: "socks5h", Host: "127.0.0.1", Port: 17913}, "http://127.0.0.1:17923"},
-		{"last upstream with unrelated id", &Proxy{ID: 0, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17924"},
-		{"mapped upstream credentials stay local", &Proxy{ID: 99, Protocol: "socks5h", Host: "127.0.0.1", Port: 17912, Username: "u", Password: "p"}, "http://127.0.0.1:17922"},
+		{"static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17931"},
+		{"static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17934"},
+		{"first upstream with unrelated id", &Proxy{ID: 901, Protocol: "socks5h", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17931"},
+		{"second upstream with unrelated id", &Proxy{ID: 42, Protocol: "SOCKS5H", Host: "127.0.0.1", Port: 17912}, "http://127.0.0.1:17932"},
+		{"third upstream with unrelated id", &Proxy{ID: 3, Protocol: "socks5h", Host: "127.0.0.1", Port: 17913}, "http://127.0.0.1:17933"},
+		{"last upstream with unrelated id", &Proxy{ID: 0, Protocol: "socks5h", Host: "127.0.0.1", Port: 17914}, "http://127.0.0.1:17934"},
+		{"mapped upstream credentials stay local", &Proxy{ID: 99, Protocol: "socks5h", Host: "127.0.0.1", Port: 17912, Username: "u", Password: "p"}, "http://127.0.0.1:17932"},
+		{"mihomo static isp 13", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17921}, "http://127.0.0.1:17931"},
+		{"mihomo static isp 14 (production shape with creds)", &Proxy{ID: 14, Protocol: "socks5h", Host: "127.0.0.1", Port: 17922, Username: "BbFiEuhMZFmD", Password: "MXiwT1UHek"}, "http://127.0.0.1:17932"},
+		{"mihomo static isp 15", &Proxy{ID: 15, Protocol: "socks5h", Host: "127.0.0.1", Port: 17923}, "http://127.0.0.1:17933"},
+		{"mihomo static isp 16", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17924}, "http://127.0.0.1:17934"},
 		{"below mapping range", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17910}, "socks5h://127.0.0.1:17910"},
 		{"above mapping range", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17915}, "socks5h://127.0.0.1:17915"},
+		{"mihomo below range", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17920}, "socks5h://127.0.0.1:17920"},
+		{"mihomo above range", &Proxy{ID: 16, Protocol: "socks5h", Host: "127.0.0.1", Port: 17925}, "socks5h://127.0.0.1:17925"},
+		{"mihomo credentialed unmapped rejected", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17920, Username: "u"}, ""},
 		{"other host is not mapped", &Proxy{ID: 13, Protocol: "socks5h", Host: "192.0.2.1", Port: 17911}, "socks5h://192.0.2.1:17911"},
 		{"other protocol is not mapped", &Proxy{ID: 13, Protocol: "http", Host: "127.0.0.1", Port: 17911}, "http://127.0.0.1:17911"},
+		{"ipv6 plain", &Proxy{ID: 20, Protocol: "http", Host: "::1", Port: 8080}, "http://[::1]:8080"},
+		{"bracketed ipv6 plain", &Proxy{ID: 21, Protocol: "socks5h", Host: "[::1]", Port: 1080}, "socks5h://[::1]:1080"},
+		{"malformed bracketed host", &Proxy{ID: 21, Protocol: "socks5h", Host: "[proxy.example]", Port: 1080}, ""},
+		{"malformed ipv6 host", &Proxy{ID: 21, Protocol: "socks5h", Host: "not:ipv6", Port: 1080}, ""},
+		{"host whitespace", &Proxy{ID: 21, Protocol: "http", Host: "proxy example", Port: 8080}, ""},
+		{"invalid protocol", &Proxy{ID: 22, Protocol: "ftp", Host: "127.0.0.1", Port: 21}, ""},
+		{"invalid port", &Proxy{ID: 23, Protocol: "http", Host: "127.0.0.1", Port: 0}, ""},
 		{"credentialed unmapped upstream rejected", &Proxy{ID: 13, Protocol: "socks5h", Host: "127.0.0.1", Port: 17910, Username: "u"}, ""},
 		{"novproxy plain", &Proxy{ID: 11, Protocol: "http", Host: "127.0.0.1", Port: 17906}, "http://127.0.0.1:17906"},
 		{"credentialed rejected", &Proxy{ID: 99, Protocol: "http", Host: "1.2.3.4", Port: 8080, Username: "u", Password: "p"}, ""},
@@ -99,24 +115,99 @@ func TestLauncherLaunchRejectsMissingSessionAndExpired(t *testing.T) {
 	}
 }
 
+func TestLauncherLaunchRejectsChangedProxyRoute(t *testing.T) {
+	now := time.Now()
+	store := &launcherSessionStoreStub{session: &OpenAIOAuthSession{
+		ID:             "s",
+		State:          strings.Repeat("a", 64),
+		CodeVerifier:   strings.Repeat("b", openAIAuthBrowserCodeVerifierLength),
+		RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+		ProxyID:        13,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("socks5h://127.0.0.1:17912"),
+		Platform:       PlatformOpenAI,
+		CreatedAt:      now,
+	}}
+	l := &OpenAIAuthBrowserLauncher{
+		launcherPath: "/usr/bin/true",
+		sessionStore: store,
+		proxyRepo: &launcherProxyRepoStub{proxy: &Proxy{
+			ID: 13, Name: "isp-1", Protocol: "socks5h",
+			Host: "127.0.0.1", Port: 17911, Status: StatusActive,
+		}},
+		now: func() time.Time { return now },
+	}
+
+	_, err := l.Launch(context.Background(), "s")
+	if err == nil || !strings.Contains(err.Error(), "proxy configuration changed") {
+		t.Fatalf("changed proxy route must require a new authorization, got %v", err)
+	}
+}
+
+func TestLauncherLaunchRejectsInvalidPKCEVerifierBeforeExec(t *testing.T) {
+	now := time.Now()
+	store := &launcherSessionStoreStub{session: &OpenAIOAuthSession{
+		ID:             "s",
+		State:          strings.Repeat("a", openAIAuthBrowserStateLength),
+		CodeVerifier:   "invalid",
+		RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+		ProxyID:        13,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("socks5h://127.0.0.1:17911"),
+		Platform:       PlatformOpenAI,
+		CreatedAt:      now,
+	}}
+	l := &OpenAIAuthBrowserLauncher{
+		launcherPath: "/usr/bin/true",
+		sessionStore: store,
+		proxyRepo: &launcherProxyRepoStub{proxy: &Proxy{
+			ID: 13, Name: "isp-1", Protocol: "socks5h",
+			Host: "127.0.0.1", Port: 17911, Status: StatusActive,
+		}},
+		now: func() time.Time { return now },
+	}
+	called := false
+	l.newCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		called = true
+		return exec.CommandContext(ctx, name, args...)
+	}
+
+	_, err := l.Launch(context.Background(), "s")
+	if err == nil || !strings.Contains(err.Error(), "PKCE verifier is invalid") {
+		t.Fatalf("invalid PKCE verifier must be rejected, got %v", err)
+	}
+	if called {
+		t.Fatal("invalid PKCE verifier must be rejected before launcher execution")
+	}
+}
+
 // TestLauncherLaunchExecsScriptWithCorrectArgv：成功路径——argv 依次为
-// state 前 12 位目录名、重建的授权 URL（PKCE challenge 可派生）、本机入口。
+// 完整 state 的 SHA-256 指纹、重建的授权 URL（PKCE challenge 可派生）、
+// 本机入口。
 func TestLauncherLaunchExecsScriptWithCorrectArgv(t *testing.T) {
 	now := time.Now()
-	verifier := "test-verifier-0123456789"
+	verifier := strings.Repeat("c", openAIAuthBrowserCodeVerifierLength)
 	state := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	store := &launcherSessionStoreStub{session: &OpenAIOAuthSession{
 		ID: "sess-1", State: state, CodeVerifier: verifier,
-		RedirectURI: "https://chatgpt.com/api/auth/callback/login-web",
-		ProxyID:     13, Platform: "openai", CreatedAt: now,
+		RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+		ProxyID:        13,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("socks5h://127.0.0.1:17911"),
+		Platform:       "openai",
+		CreatedAt:      now,
 	}}
 	repo := &launcherProxyRepoStub{proxy: &Proxy{ID: 13, Name: "static-isp-x", Protocol: "socks5h", Host: "127.0.0.1", Port: 17911, Status: StatusActive}}
 
 	l := &OpenAIAuthBrowserLauncher{
-		launcherPath: "/usr/bin/true", // 恒成功；argv 正确性靠结果字段反推
+		launcherPath: "/usr/bin/true",
 		sessionStore: store,
 		proxyRepo:    repo,
 		now:          func() time.Time { return now },
+	}
+	var launcherPath string
+	var launcherArgs []string
+	l.newCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		launcherPath = name
+		launcherArgs = append([]string(nil), args...)
+		return exec.CommandContext(ctx, "/usr/bin/true")
 	}
 	result, err := l.Launch(context.Background(), "sess-1")
 	if err != nil {
@@ -128,18 +219,31 @@ func TestLauncherLaunchExecsScriptWithCorrectArgv(t *testing.T) {
 	if result.Output != "launcher completed" {
 		t.Fatalf("output = %q, want completed launch", result.Output)
 	}
-	if result.ProfileTag != "auth-"+state[:12] {
+	expectedProfileTag := fmt.Sprintf("auth-%x", sha256.Sum256([]byte(state)))
+	if result.ProfileTag != expectedProfileTag {
 		t.Fatalf("profile tag = %q", result.ProfileTag)
 	}
-	if result.ExitIngress != "http://127.0.0.1:17921" {
+	if strings.Contains(result.ProfileTag, state) {
+		t.Fatal("profile tag must not expose OAuth state")
+	}
+	if result.ExitIngress != "http://127.0.0.1:17931" {
 		t.Fatalf("ingress = %q", result.ExitIngress)
 	}
-	if !strings.Contains(result.AuthURL, "state="+state) {
-		t.Fatalf("auth url must carry state: %q", result.AuthURL)
+	if launcherPath != "/usr/bin/true" || len(launcherArgs) != 3 {
+		t.Fatalf("launcher invocation = %q %#v", launcherPath, launcherArgs)
+	}
+	if launcherArgs[0] != expectedProfileTag {
+		t.Fatalf("launcher profile tag = %q", launcherArgs[0])
+	}
+	if !strings.Contains(launcherArgs[1], "state="+state) {
+		t.Fatal("launcher auth url must carry state")
 	}
 	// PKCE challenge 必须在 URL 里（S256 of verifier）。
-	if !strings.Contains(result.AuthURL, "code_challenge=") {
+	if !strings.Contains(launcherArgs[1], "code_challenge=") {
 		t.Fatal("auth url must carry pkce code_challenge")
+	}
+	if launcherArgs[2] != result.ExitIngress {
+		t.Fatalf("launcher ingress = %q", launcherArgs[2])
 	}
 }
 
@@ -170,11 +274,57 @@ func TestOpenAIAuthBrowserLauncherHelperProcess(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+	if output := os.Getenv("AUTH_BROWSER_LAUNCHER_STDERR"); output != "" {
+		_, _ = os.Stderr.WriteString(output)
+	}
 	code, err := strconv.Atoi(os.Getenv("AUTH_BROWSER_LAUNCHER_EXIT_CODE"))
 	if err != nil {
 		os.Exit(2)
 	}
 	os.Exit(code)
+}
+
+func TestLauncherFailurePreservesBoundedStderr(t *testing.T) {
+	l := launcherTestService()
+	l.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := launcherTestHelperCommand(ctx, "", "", 23)
+		cmd.Env = append(cmd.Env,
+			"AUTH_BROWSER_LAUNCHER_STDERR=proxy preflight failed",
+		)
+		return cmd
+	}
+
+	_, err := l.Launch(context.Background(), "sess-detached")
+	if err == nil || !strings.Contains(err.Error(), "proxy preflight failed") {
+		t.Fatalf("launcher stderr must reach the admin error, got %v", err)
+	}
+
+	l.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := launcherTestHelperCommand(ctx, "", "", 23)
+		cmd.Env = append(cmd.Env,
+			"AUTH_BROWSER_LAUNCHER_STDERR="+strings.Repeat("x", maxAuthBrowserLauncherOutput*2),
+		)
+		return cmd
+	}
+	_, err = l.Launch(context.Background(), "sess-detached")
+	if err == nil || !strings.Contains(err.Error(), "[launcher output truncated]") {
+		t.Fatalf("oversized launcher stderr must be bounded, got %v", err)
+	}
+	if len(err.Error()) > maxAuthBrowserLauncherOutput+512 {
+		t.Fatalf("bounded launcher error is unexpectedly large: %d", len(err.Error()))
+	}
+}
+
+func TestBoundedAuthBrowserOutputDoesNotMarkExactLimitAsTruncated(t *testing.T) {
+	output := newBoundedAuthBrowserOutput()
+	payload := strings.Repeat("x", maxAuthBrowserLauncherOutput)
+	written, err := output.Write([]byte(payload))
+	if err != nil || written != len(payload) {
+		t.Fatalf("unexpected bounded output write result: written=%d err=%v", written, err)
+	}
+	if got := output.text(); got != payload {
+		t.Fatalf("exact-limit output must not be marked as truncated: len=%d", len(got))
+	}
 }
 
 func launcherTestHelperCommand(ctx context.Context, marker, release string, exitCode int) *exec.Cmd {
@@ -192,9 +342,13 @@ func launcherTestService() *OpenAIAuthBrowserLauncher {
 	now := time.Now()
 	state := strings.Repeat("b", 64)
 	store := &launcherSessionStoreStub{session: &OpenAIOAuthSession{
-		ID: "sess-detached", State: state, CodeVerifier: "detached-verifier",
-		RedirectURI: "https://chatgpt.com/api/auth/callback/login-web",
-		ProxyID:     13, Platform: "openai", CreatedAt: now,
+		ID: "sess-detached", State: state,
+		CodeVerifier:   strings.Repeat("d", openAIAuthBrowserCodeVerifierLength),
+		RedirectURI:    "https://chatgpt.com/api/auth/callback/login-web",
+		ProxyID:        13,
+		ProxyRouteHash: openAIOAuthProxyRouteHash("socks5h://127.0.0.1:17911"),
+		Platform:       "openai",
+		CreatedAt:      now,
 	}}
 	repo := &launcherProxyRepoStub{proxy: &Proxy{
 		ID: 13, Name: "static-isp-x", Protocol: "socks5h",

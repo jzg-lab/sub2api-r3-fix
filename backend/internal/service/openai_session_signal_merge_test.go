@@ -5,7 +5,6 @@ package service
 import (
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +20,6 @@ func newSessionSignalService(t *testing.T) *OpenAIGatewayService {
 // prompt_cache_key、无信号（content-seed 只进 hash 不进 sessionID）。
 func TestGenerateSessionHashAndSessionID_MatchesLegacyPair(t *testing.T) {
 	svc := newSessionSignalService(t)
-	gin.SetMode(gin.TestMode)
 
 	cases := []struct {
 		name string

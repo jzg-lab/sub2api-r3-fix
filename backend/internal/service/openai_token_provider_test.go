@@ -145,13 +145,13 @@ func TestOpenAITokenProvider_CacheHit(t *testing.T) {
 		},
 	}
 	cacheKey := OpenAITokenCacheKey(account)
-	cache.tokens[cacheKey] = "cached-token"
+	cache.tokens[cacheKey] = account.GetCredential("access_token")
 
 	provider := NewOpenAITokenProvider(nil, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, "cached-token", token)
+	require.Equal(t, account.GetCredential("access_token"), token)
 	require.Equal(t, int32(1), atomic.LoadInt32(&cache.getCalled))
 	require.Equal(t, int32(0), atomic.LoadInt32(&cache.setCalled))
 }
@@ -835,7 +835,9 @@ func TestOpenAITokenProvider_Real_LockRace_PollingHitsCache(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	latest := *account
+	latest.Credentials = map[string]any{"access_token": "winner-token"}
+	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, "winner-token", token)
@@ -892,7 +894,9 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockWaitHitAndSnapshot(t *testing.T)
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	latest := *account
+	latest.Credentials = map[string]any{"access_token": "winner-token"}
+	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, "winner-token", token)

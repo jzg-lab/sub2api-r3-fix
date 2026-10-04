@@ -287,6 +287,15 @@
               </div>
             </div>
           </template>
+          <template #cell-workspace="{ row }">
+            <!-- r17am：workspace（chatgpt_account_id）短码展示。同色点=同空间，
+                 连坐归因一眼可判；悬停看全 ID 与席位数。 -->
+            <div v-if="workspaceIdOf(row)" class="flex items-center gap-1.5" :title="workspaceTitle(row)">
+              <span :class="['h-2 w-2 flex-shrink-0 rounded-full', workspaceDotClass(row)]" />
+              <span class="font-mono text-xs text-gray-600 dark:text-gray-300">{{ workspaceShortId(row) }}</span>
+            </div>
+            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+          </template>
           <template #cell-capacity="{ row }">
             <AccountCapacityCell :account="row" />
           </template>
@@ -311,6 +320,27 @@
                   <span :class="['h-1.5 w-1.5 rounded-full', healthDotClass(accountHealthById[row.id])]" />
                   {{ t(`admin.accounts.health.labels.${accountHealthById[row.id].label}`) }}
                 </button>
+                <!-- task 4.4/4.5：永久复活徽标（转正后常驻血统）+ 签余量读秒
+                     芯片（救治中号独有；~ 前缀=插件 fallback 估计值）。 -->
+                <div
+                  v-if="accountHealthById[row.id].rescued || rescueSignChip(row.id)"
+                  class="flex flex-wrap items-center gap-1"
+                >
+                  <span
+                    v-if="accountHealthById[row.id].rescued"
+                    class="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300"
+                    :title="rescuedChipTitle(accountHealthById[row.id])"
+                  >
+                    ✿ {{ rescuedChipText(accountHealthById[row.id]) }}
+                  </span>
+                  <span
+                    v-if="rescueSignChip(row.id)"
+                    class="inline-flex items-center rounded-full border border-indigo-300 bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300"
+                    :title="rescueSignTitle(row.id)"
+                  >
+                    {{ rescueSignText(row.id) }}
+                  </span>
+                </div>
                 <span
                   v-if="accountHealthById[row.id].last_probe"
                   class="max-w-[11rem] truncate font-mono text-[10px] leading-4 text-gray-500 dark:text-gray-400"
@@ -323,8 +353,35 @@
                 </span>
               </template>
               <span v-else-if="healthLoading" class="text-[10px] text-gray-400 dark:text-dark-500">…</span>
+              <!-- r17an（2026-09-28 用户裁定「被判死的号也要可以主动检测、可以
+                   手动启用」）：判死号（pending_replace）双入口——
+                   ① 重新启用 = 复活唯一入口（认证针 1 针结业；静置暂停随请求
+                      显式解除，专用解暂停不动 schedulable）；
+                   ② 主动检测 = 诊断针（只落证据行不动状态机），满足「看看号
+                      回来没有」。 -->
               <button
-                class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
+                v-if="accountHealthById[row.id]?.state === 'pending_replace'"
+                class="rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-500/10"
+                :disabled="reenablingAccount === row.id"
+                :title="accountHealthById[row.id]?.manual_paused ? t('admin.accounts.health.reenablePausedHint') : t('admin.accounts.health.reenableHint')"
+                @click="handleReenable(row)"
+              >
+                {{ reenablingAccount === row.id ? t('admin.accounts.health.reenableRunning') : t('admin.accounts.health.reenable') }}
+              </button>
+              <!-- task 3.7：判死号第二救援入口——送入实验台（救治区）。与
+                   重新启用（认证针人工复活）互补：这条走插件自动救号。已在
+                   区（label=rescuing）不重复显示。 -->
+              <button
+                v-if="accountHealthById[row.id]?.state === 'pending_replace' && accountHealthById[row.id]?.label !== 'rescuing'"
+                class="rounded border border-indigo-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-500 dark:text-indigo-300 dark:hover:bg-indigo-500/10"
+                :disabled="rescuingAccount === row.id"
+                :title="t('admin.accounts.health.rescueHint')"
+                @click="handleRescue(row)"
+              >
+                {{ rescuingAccount === row.id ? t('admin.accounts.health.rescueRunning') : t('admin.accounts.health.rescue') }}
+              </button>
+              <button
+                class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] leading-4 text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
                 :disabled="probingAccounts.has(row.id)"
                 @click="handleProbeNow(row)"
               >
@@ -535,6 +592,7 @@ import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
+import { createOpenAIReenableLifecycle } from '@/composables/openAIReenableLifecycle'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
@@ -569,12 +627,16 @@ import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
 import type { Account, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
-import type { OpenAIAccountHealth } from '@/api/admin/accounts'
+import type {
+  OpenAIAccountHealth,
+  OpenAIPluginBridge,
+  OpenAIProbeLastEvidence,
+} from '@/api/admin/accounts'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -1003,13 +1065,140 @@ const refreshTodayStatsBatch = async () => {
 // 连点去重（already_flying）；不重置任何配额状态。
 // =============================================================================
 const accountHealthById = ref<Record<number, OpenAIAccountHealth>>({})
+// 救治区插件桥状态（r17ax Phase 2）：随健康快照批量接口带回，救治中标签的
+// 离线角标以此为准；无启用插件时为 null。
+const pluginBridge = ref<OpenAIPluginBridge | null>(null)
 const healthLoading = ref(false)
 const healthReqSeq = ref(0)
 const probingAccounts = ref(new Set<number>())
-// 打票线转线中的账号（防重复点击）。
-const harvestingAccount = ref<number | null>(null)
+// 判死号手动启用中的账号（防重复点击，r17am）。
+const reenablingAccount = ref<number | null>(null)
+const rescuingAccount = ref<number | null>(null)
 const showProbeConfirm = ref(false)
 const probingAcc = ref<Account | null>(null)
+
+// task 4.5：签余量读秒——桥 status_json prober.accounts 的签捕获/余量估计
+// （原文透传，前端解析）。健康批量刷新时重建 = 桥校准节奏；芯片秒针走
+// nowTick。无签（插件尚未捕获）不在表 → 不显芯片。
+interface RescueSignInfo {
+  capturedAt: number
+  estRemainingSec: number | null
+  basis: string
+}
+const rescueSignByAccount = ref<Record<number, RescueSignInfo>>({})
+// 秒针：仅在有救治中号且桥给了签数据时走钟（watch 启停，空转零成本）。
+const nowTick = ref(Date.now())
+let rescueClockTimer: ReturnType<typeof setInterval> | null = null
+
+const parseRescueSignInfo = (bridge: OpenAIPluginBridge | null | undefined): Record<number, RescueSignInfo> => {
+  const out: Record<number, RescueSignInfo> = {}
+  if (!bridge?.status_json) return out
+  try {
+    const parsed = JSON.parse(bridge.status_json) as {
+      prober?: {
+        accounts?: Array<{
+          account_id?: number
+          sign_captured_at?: string
+          estimated_remaining_seconds?: number | null
+          estimate_basis?: string
+        }>
+      }
+    }
+    for (const acc of parsed.prober?.accounts ?? []) {
+      if (!acc || typeof acc.account_id !== 'number' || !acc.sign_captured_at) continue
+      const capturedAt = Date.parse(acc.sign_captured_at)
+      if (!Number.isFinite(capturedAt)) continue
+      out[acc.account_id] = {
+        capturedAt,
+        estRemainingSec:
+          typeof acc.estimated_remaining_seconds === 'number' ? acc.estimated_remaining_seconds : null,
+        basis: acc.estimate_basis || 'none'
+      }
+    }
+  } catch {
+    // 坏 JSON → 按无签数据渲染（芯片缺席，不炸健康格）。
+  }
+  return out
+}
+
+// 只依赖健康表与签表（accounts 解构在本块之后，勿引用——TDZ）。
+const anyRescueSignChipVisible = computed(() => {
+  const signs = rescueSignByAccount.value
+  for (const health of Object.values(accountHealthById.value)) {
+    if (health.rescue && signs[health.account_id]) return true
+  }
+  return false
+})
+
+watch(
+  anyRescueSignChipVisible,
+  (visible) => {
+    if (visible && rescueClockTimer === null) {
+      rescueClockTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 1000)
+    } else if (!visible && rescueClockTimer !== null) {
+      clearInterval(rescueClockTimer)
+      rescueClockTimer = null
+    }
+  },
+  { immediate: true }
+)
+
+const fmtSignClock = (seconds: number): string => {
+  const total = Math.max(0, Math.floor(seconds))
+  const minutes = Math.floor(total / 60)
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60)
+    return `${hours}h${String(minutes % 60).padStart(2, '0')}`
+  }
+  return `${minutes}:${String(total % 60).padStart(2, '0')}`
+}
+
+// 余量以桥 checked_at 为锚扣除流逝（估计值是 Health RPC 时刻算的）。
+const rescueSignChip = (accountId: number): { age: string; remain: string | null; approx: boolean } | null => {
+  const info = rescueSignByAccount.value[accountId]
+  if (!info) return null
+  const now = nowTick.value
+  const age = fmtSignClock((now - info.capturedAt) / 1000)
+  let remain: string | null = null
+  if (info.estRemainingSec != null) {
+    const anchor = pluginBridge.value?.checked_at ? Date.parse(pluginBridge.value.checked_at) : now
+    const elapsed = Number.isFinite(anchor) ? (now - anchor) / 1000 : 0
+    remain = fmtSignClock(info.estRemainingSec - elapsed)
+  }
+  return { age, remain, approx: info.basis !== 'measured' }
+}
+
+const rescueSignText = (accountId: number): string => {
+  const chip = rescueSignChip(accountId)
+  if (!chip) return ''
+  const approx = chip.approx ? '~' : ''
+  return chip.remain != null
+    ? t('admin.accounts.health.signChip', { age: chip.age, remain: approx + chip.remain })
+    : t('admin.accounts.health.signAgeChip', { age: chip.age })
+}
+
+const rescueSignTitle = (accountId: number): string => {
+  const info = rescueSignByAccount.value[accountId]
+  if (!info) return ''
+  return t('admin.accounts.health.signChipTitle', {
+    at: formatDateTime(new Date(info.capturedAt)),
+    basis: info.basis
+  })
+}
+
+// task 4.4：永久复活徽标文案（悬停=复活时间+累计次数）。
+const rescuedChipText = (health: OpenAIAccountHealth): string =>
+  health.rescued ? t('admin.accounts.health.rescuedBadge', { count: health.rescued.count }) : ''
+
+const rescuedChipTitle = (health: OpenAIAccountHealth): string =>
+  health.rescued
+    ? t('admin.accounts.health.rescuedTitle', {
+        time: formatDateTime(health.rescued.at),
+        count: health.rescued.count
+      })
+    : ''
 
 const isOpenAIOAuthHealthAccount = (row: Account): boolean =>
   row.platform === 'openai' && row.type === 'oauth'
@@ -1022,6 +1211,8 @@ const refreshAccountHealthBatch = async () => {
   const reqSeq = ++healthReqSeq.value
   if (openAIIDs.length === 0) {
     accountHealthById.value = {}
+    pluginBridge.value = null
+    rescueSignByAccount.value = {}
     return
   }
   healthLoading.value = true
@@ -1029,8 +1220,10 @@ const refreshAccountHealthBatch = async () => {
     const result = await adminAPI.accounts.listOpenAIAccountHealth(openAIIDs)
     if (reqSeq !== healthReqSeq.value) return
     const next: Record<number, OpenAIAccountHealth> = {}
-    for (const item of result) next[item.account_id] = item
+    for (const item of result.accounts) next[item.account_id] = item
     accountHealthById.value = next
+    pluginBridge.value = result.plugin_bridge ?? null
+    rescueSignByAccount.value = parseRescueSignInfo(result.plugin_bridge)
   } catch (error) {
     if (reqSeq !== healthReqSeq.value) return
     console.error('Failed to load account health:', error)
@@ -1049,8 +1242,9 @@ const healthBadgeClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
     case 'blue':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-    case 'purple':
-      return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
+    case 'blue-purple':
+      // 救治中（r17ax Phase 3.4 标签表）：紫罗兰，与复检中的纯蓝区分。
+      return 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
     case 'gray-red':
       return 'bg-gray-100 text-red-700 dark:bg-dark-700 dark:text-red-400'
     default:
@@ -1068,8 +1262,8 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
       return 'bg-red-500'
     case 'blue':
       return 'bg-blue-500'
-    case 'purple':
-      return 'bg-purple-500'
+    case 'blue-purple':
+      return 'bg-violet-500'
     case 'gray-red':
       return 'bg-red-400'
     default:
@@ -1079,8 +1273,26 @@ const healthDotClass = (health: OpenAIAccountHealth): string => {
 
 const healthBadgeTitle = (health: OpenAIAccountHealth): string => {
   const label = t(`admin.accounts.health.labels.${health.label}`)
-  if (!health.clickable) return label
-  return `${label} · ${t('admin.accounts.health.clickHint')}`
+  let title = label
+  // 救治区注记：连过进度 + 插件侧最近一针（宿主证据行冻结在判死针，
+  // 活跃证据在插件——悬停里两本账并排，回应「检测时间没跟上」的观感差）。
+  if (health.rescue) {
+    title += ` · ${t('admin.accounts.health.rescueProgress', {
+      passes: health.rescue.consecutive_passes,
+      threshold: health.rescue.graduation_threshold
+    })}`
+    if (health.rescue.plugin_last_probe_at) {
+      const verdict = health.rescue.plugin_last_verdict === 'fail'
+        ? t('admin.accounts.health.answerWrong')
+        : t('admin.accounts.health.answerCorrect')
+      title += ` · ${t('admin.accounts.health.pluginProbeTitle', {
+        time: formatDateTime(health.rescue.plugin_last_probe_at),
+        verdict
+      })}`
+    }
+  }
+  if (!health.clickable) return title
+  return `${title} · ${t('admin.accounts.health.clickHint')}`
 }
 
 const lastProbeTitle = (health: OpenAIAccountHealth): string => {
@@ -1115,38 +1327,31 @@ const lastProbeEvidence = (health: OpenAIAccountHealth): string => {
   })
 }
 
-// 相位B（2026-09-21）：问题号标签点击 → 转打票线（迁动态桶采票，
-// 采到回静态复检，复检通过恢复上岗）。
+// r17am：判死号（pending_replace）标签点击 → 手动启用（认证针 1 针结业）。
+// 打票线已整体删除（2026-10-02 r17ax）：pending_replace 是唯一可点标签；
+// circuit_open 问题号由半开复检自动恢复，无手动救援动作。
 const onHealthBadgeClick = (health: OpenAIAccountHealth) => {
   if (!health.clickable) return
   const row = accounts.value.find((a) => a.id === health.account_id)
   if (!row) return
-  if (!confirm(t('admin.accounts.health.harvestConfirm', { name: row.name }))) return
-  harvestingAccount.value = row.id
-  adminAPI.accounts
-    .startOpenAIHarvest(row.id)
-    .then((result) => {
-      appStore.showSuccess(
-        t('admin.accounts.health.harvestStarted', { time: formatDateTime(result.next_probe_at) })
-      )
-      refreshAccountHealthBatch().catch(() => {})
-    })
-    .catch((error) => {
-      appStore.showError(`${t('admin.accounts.health.harvestFailed')}: ${extractApiErrorMessage(error)}`)
-    })
-    .finally(() => {
-      harvestingAccount.value = null
-    })
+  if (health.state === 'pending_replace') {
+    handleReenable(row)
+  }
 }
 
 const handleProbeNow = async (row: Account) => {
   if (probingAccounts.value.has(row.id)) return
-  // 限流号二次确认（spec 3.4）：会烧一次上游请求额度，且可能吃 429 顺延。
   const health = accountHealthById.value[row.id]
+  // 限流号二次确认（spec 3.4）：会烧一次上游请求额度，且可能吃 429 顺延。
   if (health?.rate_limited) {
     probingAcc.value = row
     showProbeConfirm.value = true
     return
+  }
+  // r17an：判死号诊断针二次确认——只落证据不复活，但反复测试可能使
+  // 惩罚窗升级（社区救援剧本），烧一次上游请求前先说清楚。
+  if (health?.state === 'pending_replace') {
+    if (!confirm(t('admin.accounts.health.probeDeadConfirm', { name: row.name }))) return
   }
   await runProbeNow(row)
 }
@@ -1180,6 +1385,124 @@ const runProbeNow = async (row: Account) => {
     probingAccounts.value = next
   }
 }
+
+// r17am：判死号手动启用。r17an（2026-09-28 用户裁定）：静置暂停不再前置
+// 拦截——unpause=true 随请求显式解除刹车（专用解暂停不动 schedulable），
+// 确认文案对暂停号说明「将一并解除静置」；后端解除+启用各落审计事件。
+const handleReenable = (row: Account) => {
+  if (reenablingAccount.value !== null) return
+  const health = accountHealthById.value[row.id]
+  if (health && health.state !== 'pending_replace') return
+  const confirmKey = health?.manual_paused
+    ? 'admin.accounts.health.reenablePausedConfirm'
+    : 'admin.accounts.health.reenableConfirm'
+  if (!confirm(t(confirmKey, { name: row.name }))) return
+  reenablingAccount.value = row.id
+  const paused = !!health?.manual_paused
+  void reenableLifecycle.runRequest({
+    accountId: row.id,
+    execute: () => adminAPI.accounts.reenableOpenAIAccount(row.id, true),
+    getReenabledAt: (result) => new Date(result.reenabled_at).getTime(),
+    onSuccess: (result) => {
+      if (paused || result.unpaused) {
+        appStore.showSuccess(t('admin.accounts.health.reenableUnpaused'))
+      }
+      appStore.showSuccess(
+        t('admin.accounts.health.reenableStarted', { time: formatDateTime(result.next_probe_at) })
+      )
+      refreshAccountHealthBatch().catch(() => {})
+    },
+    onError: (error) => {
+      appStore.showError(`${t('admin.accounts.health.reenableFailed')}: ${extractApiErrorMessage(error)}`)
+    },
+    onFinally: () => {
+      reenablingAccount.value = null
+    },
+  })
+}
+
+// task 3.7：判死号手动送入救治区（实验台）。与重新启用互补——这条走
+// 插件自动救号（绑救治组 + 开调度 + 种子流量）。种子吃凭据级拒绝
+// （401/403）时后端已把号退回判死原位，以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED
+// 说明；文案指引删号重新授权。clean-passes 阈值展示用后端默认（面板不
+// 拉救治区设置；后端设置改动不常见，文案略有出入可接受）。
+const RESCUE_CLEAN_PASSES_DEFAULT = 6
+
+const handleRescue = async (row: Account) => {
+  if (rescuingAccount.value !== null) return
+  const health = accountHealthById.value[row.id]
+  if (health && health.state !== 'pending_replace') return
+  if (!confirm(t('admin.accounts.health.rescueConfirm', { name: row.name, passes: RESCUE_CLEAN_PASSES_DEFAULT }))) return
+  rescuingAccount.value = row.id
+  try {
+    const result = await adminAPI.accounts.rescueOpenAIAccount(row.id)
+    if (result.already_in_lane) {
+      appStore.showInfo(t('admin.accounts.health.rescueAlready'))
+    } else {
+      appStore.showSuccess(t('admin.accounts.health.rescueStarted'))
+    }
+    refreshAccountHealthBatch().catch(() => {})
+  } catch (error) {
+    if (extractApiErrorCode(error) === 'OPENAI_RESCUE_SEED_AUTH_REJECTED') {
+      appStore.showError(t('admin.accounts.health.rescueAuthRejected'))
+    } else {
+      appStore.showError(`${t('admin.accounts.health.rescueFailed')}: ${extractApiErrorMessage(error)}`)
+    }
+  } finally {
+    rescuingAccount.value = null
+  }
+}
+
+// r17an：重新启用结果监视——reenable API 只报「针已排」，认证针异步落地
+// （jitter ≤10min + 扫描拍 ≤1min + 针程 ≤2min）。旧体验里答错回死完全
+// 静默（9/28 06:13 三号回死毫无感知 → 13:29 删号的直接原因）。这里盯到
+// 出结果为止：上岗弹通过，答错弹失败+证据（rt/票长），20s 一拍、15min
+// 封顶自动撤岗；无结论针（401/传输）继续盯 5min 重试。
+const REENABLE_WATCH_INTERVAL_MS = 20000
+const REENABLE_WATCH_DEADLINE_MS = 15 * 60 * 1000
+
+const reenableEvidenceText = (probe: OpenAIProbeLastEvidence | null | undefined): string => {
+  if (!probe) return ''
+  if (!probe.transport_ok) return t('admin.accounts.health.reenableEvidenceTransport')
+  if (probe.answer_correct === false) {
+    return t('admin.accounts.health.reenableEvidenceWrong', {
+      rt: probe.reasoning_tokens ?? '?',
+      ts: probe.turn_state_len || '?',
+    })
+  }
+  return t('admin.accounts.health.reenableEvidenceOther', { status: probe.http_status ?? '?' })
+}
+
+const reenableLifecycle = createOpenAIReenableLifecycle<OpenAIAccountHealth>({
+  intervalMs: REENABLE_WATCH_INTERVAL_MS,
+  deadlineMs: REENABLE_WATCH_DEADLINE_MS,
+  fetchHealth: async (accountId) => {
+    const [health] = (await adminAPI.accounts.listOpenAIAccountHealth([accountId])).accounts
+    return health
+  },
+  getProbeAt: (health) => health.last_probe ? new Date(health.last_probe.at).getTime() : 0,
+  classify: (health) => {
+    if (health.state === 'pending_replace') return 'failed'
+    if (health.state === 'on_duty' && health.probe_mode === 'normal') return 'passed'
+    return null
+  },
+  onOutcome: (accountId, outcome, health) => {
+    const name = accounts.value.find((a) => a.id === accountId)?.name ?? String(accountId)
+    if (outcome === 'failed') {
+      // 认证针结论=失败：一击退出回判死（r17y），把证据说给人听。
+      appStore.showError(t('admin.accounts.health.reenableProbeFailed', {
+        name,
+        evidence: reenableEvidenceText(health.last_probe),
+      }))
+      refreshAccountHealthBatch().catch(() => {})
+    } else {
+      // 认证针通过：上岗+复调度，行数据也该刷新。
+      appStore.showSuccess(t('admin.accounts.health.reenableProbePassed', { name }))
+      refreshAccountHealthBatch().catch(() => {})
+      refreshAccountsIncrementally().catch(() => {})
+    }
+  },
+})
 
 const autoRefreshIntervalLabel = (sec: number) => {
   if (sec === 5) return t('admin.accounts.refreshInterval5s')
@@ -1982,6 +2305,54 @@ function getOpenAIAuthMode(row: any): string | undefined {
   return typeof authMode === 'string' && authMode.trim() ? authMode : undefined
 }
 
+// =============================================================================
+// workspace 列辅助（r17am）：chatgpt_account_id 非敏感凭据（不在脱敏清单，
+// row.credentials 直达），短码+8 色哈希点做肉眼分组。影子号回退母号空间。
+// =============================================================================
+const WORKSPACE_DOT_CLASSES = [
+  'bg-rose-500',
+  'bg-orange-500',
+  'bg-amber-500',
+  'bg-emerald-500',
+  'bg-teal-500',
+  'bg-blue-500',
+  'bg-violet-500',
+  'bg-pink-500'
+] as const
+
+function workspaceIdOf(row: any): string {
+  if (!row || row.platform !== 'openai') return ''
+  const own = row.credentials?.chatgpt_account_id
+  if (typeof own === 'string' && own.trim()) return own.trim()
+  const parent = row.parent_chatgpt_account_id
+  return typeof parent === 'string' && parent.trim() ? parent.trim() : ''
+}
+
+function workspaceShortId(row: any): string {
+  const id = workspaceIdOf(row)
+  return id ? id.slice(-8) : ''
+}
+
+function workspaceDotClass(row: any): string {
+  const id = workspaceIdOf(row)
+  if (!id) return 'bg-gray-400'
+  let hash = 0
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return WORKSPACE_DOT_CLASSES[hash % WORKSPACE_DOT_CLASSES.length]
+}
+
+function workspaceTitle(row: any): string {
+  const id = workspaceIdOf(row)
+  if (!id) return ''
+  const seats = Number(row.extra?.seat_count)
+  const seatText = Number.isFinite(seats) && seats > 0
+    ? t('admin.accounts.workspaceTitle', { count: seats })
+    : ''
+  return seatText ? `${id} · ${seatText}` : id
+}
+
 // Antigravity 订阅等级辅助函数
 function getAntigravityTierFromRow(row: any): string | null {
   if (row.platform !== 'antigravity') return null
@@ -2082,6 +2453,9 @@ const allColumns = computed(() => {
     { key: 'name', label: t('admin.accounts.columns.name'), sortable: true },
     { key: 'id', label: t('admin.accounts.columns.id'), sortable: true },
     { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
+    // r17am：workspace 列——chatgpt_account_id 短码+哈希色点，供连坐案
+    // （1187/1192-1195）肉眼分组归因。数据已在 row.credentials，纯前端列。
+    { key: 'workspace', label: t('admin.accounts.columns.workspace'), sortable: false },
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
@@ -2869,6 +3243,11 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (rescueClockTimer !== null) {
+    clearInterval(rescueClockTimer)
+    rescueClockTimer = null
+  }
+  reenableLifecycle.dispose()
   upstreamBillingRateAbortController?.abort()
   invalidateBatchedUsageRequests()
   window.removeEventListener('scroll', handleScroll, true)

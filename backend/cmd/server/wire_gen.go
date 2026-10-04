@@ -173,20 +173,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// 相位B（2026-09-21）：票表与探针同 repo——探针顺带采票（类型断言取得
 	// 票能力，常开=观察哨，能看到本站账号票长度走势）；gateway 侧活票注入
 	// 默认不接线：上游 2026-09-19 前后修复了 292 票跨账号重放，同账号换新
-	// 票是否存活未知，待动态IP实测。启用=取消下一行注释+重启（约5分钟），
-	// 关闭=恢复注释，两向都是这一行。
-	// 2026-09-23 注入下线（r17ai）：9/22-23 一日 15 号中途降智（健康首针→
-	// 真实流量进场 ~1 分钟内 mismatch 风暴→复核针 356），注入是 r11 后唯一
-	// 新增的对真实流量出站头改写，且 9/21 已定案 turn-state 注入被官方定性
-	// anti-abuse。采票观察哨（探针侧）不受影响——它经 staging 类型断言取票
-	// 能力，与本行无关。恢复注入=取消下一行注释。
-	// openAIGatewayService.SetCodexTicketStore(repository.NewOpenAICodexTicketStore(db))
-	// r17ag 防回滚闸：票入库后账号又有真实流量 → 放行回带值（官方轮换已把
-	// 链推到票前头，替换=回滚会话链 → invalid_encrypted_content/312）。
-	openAIGatewayService.SetCodexTicketTrafficSince(func(ctx context.Context, accountID int64, since time.Time) bool {
-		logs, _, err := usageLogRepository.ListByAccountAndTimeRange(ctx, accountID, since, time.Now())
-		return err == nil && len(logs) > 0
-	})
+	// 2026-10-02 打票线整体删除（r17ax）：turn-state 活票注入与采票观察哨
+	// 一并退役——注入 r17ai 起已停用，票表已 DROP（migration 248），
+	// turn-state 跨账号剥离守卫保留。
 	openAIDowngradeProbe := service.ProvideOpenAIDowngradeProbeRunner(openAIDowngradeProbeRepository, accountRepository, proxyRepository, openAITokenProvider, httpUpstream, tlsFingerprintProfileService, usageLogRepository)
 	opsService := service.ProvideOpsService(opsRepository, settingRepository, configConfig, accountRepository, userRepository, concurrencyService, gatewayService, openAIGatewayService, geminiMessagesCompatService, antigravityGatewayService, opsSystemLogSink, openAIDowngradeProbeRepository, settingService, authCacheInvalidationWorker, apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, opsService, settingService)
@@ -226,7 +215,65 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginRepository := repository.NewPluginRepository(db)
 	pluginHostInfo := providePluginHostInfo(buildInfo)
 	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
+	// 救治区插件桥：健康快照 API 附带 plugin_bridge 区块（PluginManager 30s
+	// 轮询缓存 + 2min 离线判定）。桥读失败在源侧吞掉，不影响账号健康列表。
+	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
+	// 救治区编排器（r17ax Phase 3）：三入口（自动钩子/手动端点/对账清扫）
+	// 汇入 EnterRescue。config 走 settings 热更新（openai_rescue_lane 键，
+	// 每轮清扫/每次判死提交重读，改库即生效；键缺失 = 安全缺省关态）；
+	// 种子 = TestAccountConnection 内存直调（design 0.1，经插件 Forward 流
+	// 喂探针模板）。
+	openAIRescueLane := service.NewOpenAIRescueLane(
+		accountRepository,
+		openAIDowngradeProbeRepository,
+		func() service.OpenAIRescueLaneConfig {
+			return service.ResolveOpenAIRescueLaneConfig(
+				settingService.GetOpenAIRescueLaneSettings(context.Background()))
+		},
+		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
+	)
+	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
+	// 调度闸预检（r17ba）：与 ListDue 同源的 controls 闸（manual_paused/
+	// owned_error fail-closed）。唯一用途=清扫补进候选过滤——手动暂停的
+	// 判死号不被强拉入区（r17an 静置语义）。在区号已无任何开调度路径
+	//（用户裁定：入区即关调度，唯一开调度点=考证通过后的资格完成），
+	// 面板暂停被完整尊重，不再撞 DB 触发器刷 WARN。
+	if controlStore, ok := openAIDowngradeProbeRepository.(service.OpenAIDowngradeProbeControlStore); ok {
+		openAIRescueLane.SetSchedulingGate(controlStore.CanRunOpenAIDowngradeProbe)
+	}
+	// 对账清扫：批量探针状态经健康快照查询取（与账号健康列表同源）。
+	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），
+	// 与健康列表同款启动期断言；断言失败时清扫退化为只做标记侧自愈。
+	if healthLister, ok := openAIDowngradeProbeRepository.(service.OpenAIProbeHealthLister); ok {
+		openAIRescueLane.SetProbeStateSource(func(ctx context.Context, accountIDs []int64) (map[int64]service.OpenAIProbeHealthSnapshot, error) {
+			snapshots, err := healthLister.ListOpenAIProbeHealthSnapshots(ctx, accountIDs)
+			if err != nil {
+				return nil, err
+			}
+			states := make(map[int64]service.OpenAIProbeHealthSnapshot, len(snapshots))
+			for _, snapshot := range snapshots {
+				states[snapshot.AccountID] = snapshot
+			}
+			return states, nil
+		})
+	}
+	// 撤调/恢复桥证据（task 3.5）：与插件桥缓存同源（30s 轮询 + 离线沿用
+	// 最近成功缓存）；清扫据此撤调度/回暖恢复。
+	openAIRescueLane.SetBridgeSource(pluginManager.BridgeStatus)
+	// 救治号资格针走插件钉扎传输（r17bb）：1217 实证被 Cookie 钉扎救回的号
+	// 在裸 LB 路上 4 针全 200+错答——针不与真实流量同路就结构性测不出救治
+	// 效果。仅带救治标记的账号改道；插件未启用/未处理回退原直连。
+	openAIDowngradeProbe.SetPluginRoundTrip(pluginManager.RoundTripOpenAIOAuth)
+	// 自动资格针（r17bb）：清扫见插件连过达阈值且号仍在判死位 → 自动打针
+	// （unpause=true：r17ba 后入区即关调度，区里手动暂停是防调用保险丝，
+	// 留着会把针永远堵死——1217 试点实证死锁；针通过仍是上岗唯一前置，
+	// 不破坏「确认救活才进正式调用」的保证）。nil 安全：未注入不自动打。
+	openAIRescueLane.SetNeedleTrigger(func(ctx context.Context, accountID int64) error {
+		_, err := openAIDowngradeProbe.ReenableOpenAIAccount(ctx, accountID, true)
+		return err
+	})
+	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)
@@ -380,7 +427,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbe, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbe, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -454,6 +501,7 @@ func provideCleanup(
 	grokOAuth *service.GrokOAuthService,
 	openAIGateway *service.OpenAIGatewayService,
 	openAIDowngradeProbe *service.OpenAIDowngradeProbeRunner,
+	openAIRescueLane *service.OpenAIRescueLane,
 	scheduledTestRunner *service.ScheduledTestRunnerService,
 	backupSvc *service.BackupService,
 	paymentOrderExpiry *service.PaymentOrderExpiryService,
@@ -732,6 +780,12 @@ func provideCleanup(
 			{"OpenAIDowngradeProbeRunner", func() error {
 				if openAIDowngradeProbe != nil {
 					openAIDowngradeProbe.Stop()
+				}
+				return nil
+			}},
+			{"OpenAIRescueLane", func() error {
+				if openAIRescueLane != nil {
+					openAIRescueLane.Stop()
 				}
 				return nil
 			}},

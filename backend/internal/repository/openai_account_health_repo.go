@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -29,6 +31,9 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			COALESCE(c.manual_paused, FALSE),
 			a.rate_limited_at,
 			COALESCE(a.extra->>'openai_downgrade_qualification', '') = 'true',
+			a.extra->'openai_rescue_lane',
+			a.extra->>'openai_rescue_rescued_at',
+			a.extra->>'openai_rescue_rescue_count',
 			lp.at,
 			lp.mode,
 			lp.reasoning_tokens,
@@ -60,6 +65,9 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 	for rows.Next() {
 		var snap service.OpenAIProbeHealthSnapshot
 		var rateLimitedAt *time.Time
+		var rescueMarkerJSON *string
+		var rescuedAtRaw *string
+		var rescueCountRaw *string
 		var lpAt *time.Time
 		var lpMode *string
 		var lpRT *int
@@ -69,12 +77,28 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		var lpStatus *int
 		if err := rows.Scan(
 			&snap.AccountID, &snap.State, &snap.ProbeMode, &snap.Schedulable,
-			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification,
+			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification, &rescueMarkerJSON,
+			&rescuedAtRaw, &rescueCountRaw,
 			&lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
 		); err != nil {
 			return nil, err
 		}
 		snap.RateLimitedAt = rateLimitedAt
+		if rescueMarkerJSON != nil {
+			// 标记解析容错（malformed → nil=不在区），仓库不因坏 Extra 报错。
+			snap.RescueMarker = service.ParseOpenAIRescueLaneMarkerJSON(*rescueMarkerJSON)
+		}
+		// 永久复活徽标（task 4.4）：GraduateRescue 写 RFC3339 串 + 整数；
+		// 容错解析，坏值按无徽标处理（展示层字段，不值得炸整条查询）。
+		if rescuedAtRaw != nil {
+			if at, err := time.Parse(time.RFC3339, *rescuedAtRaw); err == nil {
+				snap.RescuedAt = &at
+				snap.RescueCount = 1
+				if n, err := strconv.Atoi(strings.TrimSpace(derefStr(rescueCountRaw))); err == nil && n > 0 {
+					snap.RescueCount = n
+				}
+			}
+		}
 		if lpAt != nil {
 			ev := &service.OpenAIProbeLastEvidence{
 				At:              *lpAt,
@@ -100,6 +124,13 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 func derefInt(p *int) int {
 	if p == nil {
 		return 0
+	}
+	return *p
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
 	}
 	return *p
 }

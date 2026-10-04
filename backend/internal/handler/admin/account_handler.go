@@ -1377,9 +1377,10 @@ func (h *AccountHandler) Refresh(c *gin.Context) {
 
 // ApplyOAuthCredentialsRequest is the payload for persisting re-authorized OAuth credentials.
 type ApplyOAuthCredentialsRequest struct {
-	Type        string         `json:"type" binding:"required,oneof=oauth setup-token"`
-	Credentials map[string]any `json:"credentials" binding:"required"`
-	Extra       map[string]any `json:"extra"`
+	Type              string         `json:"type" binding:"required,oneof=oauth setup-token"`
+	Credentials       map[string]any `json:"credentials" binding:"required"`
+	Extra             map[string]any `json:"extra"`
+	ExpectedUpdatedAt string         `json:"expected_updated_at"`
 }
 
 // ApplyOAuthCredentials 将"重新授权"得到的新凭据原子落库。
@@ -1424,58 +1425,32 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	expectedUpdatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.ExpectedUpdatedAt))
+	if err != nil || expectedUpdatedAt.IsZero() {
+		response.BadRequest(c, "Invalid expected_updated_at")
+		return
+	}
 
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
 
-	updatedAccount, err := h.adminService.UpdateAccount(ctx, accountID, &service.UpdateAccountInput{
+	reauthService, ok := h.adminService.(service.OAuthReauthorizationService)
+	if !ok {
+		response.ErrorFrom(c, infraerrors.InternalServer(
+			"OAUTH_REAUTH_UNSUPPORTED",
+			"OAuth re-authorization is not available",
+		))
+		return
+	}
+
+	updatedAccount, err := reauthService.ApplyOAuthCredentials(ctx, accountID, expectedUpdatedAt, &service.ApplyOAuthCredentialsInput{
 		Type:        req.Type,
 		Credentials: req.Credentials,
+		Extra:       req.Extra,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
-	}
-
-	// 增量合并 Extra（JSONB key 级 merge，绝不覆盖 base_rpm / window_cost_limit /
-	// max_sessions / quota_* / privacy_mode 等持久化键）。
-	// best-effort：失败仅记日志；下方 ClearAccountError 会从 DB 重新读取最新 account，
-	// 因此响应里的 extra 始终以 DB 为准——这里不需要手动维护内存快照。
-	if len(req.Extra) > 0 {
-		if extraErr := h.adminService.UpdateAccountExtra(ctx, accountID, req.Extra); extraErr != nil {
-			extraKeys := make([]string, 0, len(req.Extra))
-			for k := range req.Extra {
-				extraKeys = append(extraKeys, k)
-			}
-			slog.Error("apply_oauth_credentials.update_extra_failed",
-				"account_id", accountID,
-				"extra_keys", extraKeys,
-				"err", extraErr,
-			)
-		}
-	}
-
-	// Successful re-auth clears the soft spending-limit reauth flag for Grok.
-	if existing.Platform == service.PlatformGrok {
-		if clearErr := h.adminService.UpdateAccountExtra(ctx, accountID, map[string]any{
-			"grok_needs_reauth":        false,
-			"grok_needs_reauth_reason": "",
-			"grok_needs_reauth_at":     "",
-		}); clearErr != nil {
-			slog.Warn("apply_oauth_credentials.clear_grok_reauth_failed",
-				"account_id", accountID,
-				"err", clearErr,
-			)
-		}
-	}
-
-	if cleared, clearErr := h.adminService.ClearAccountError(ctx, accountID); clearErr != nil {
-		slog.Warn("apply_oauth_credentials.clear_error_failed",
-			"account_id", accountID,
-			"err", clearErr,
-		)
-	} else if cleared != nil {
-		updatedAccount = cleared
 	}
 
 	if h.tokenCacheInvalidator != nil && updatedAccount.IsOAuth() {

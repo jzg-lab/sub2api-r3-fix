@@ -648,10 +648,17 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	ctx := c.Request.Context()
 	mode = normalizeAccountTestMode(mode)
 
-	// Default to openai.DefaultTestModel for OpenAI testing
+	// Default to openai.DefaultTestModel for OpenAI testing. OAuth accounts
+	// ride the ChatGPT Codex upstream, which 400s on platform-only models
+	// (gpt-5.4); their empty-model default (SPA test button, rescue lane seed)
+	// must be a ChatGPT-valid model.
 	testModelID := modelID
 	if testModelID == "" {
-		testModelID = openai.DefaultTestModel
+		if account.IsOAuth() || account.IsCredentialShadow() {
+			testModelID = openai.DefaultChatGPTTestModel
+		} else {
+			testModelID = openai.DefaultTestModel
+		}
 	}
 
 	// Align test routing with gateway behavior: OpenAI accounts apply normal

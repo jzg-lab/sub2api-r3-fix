@@ -25,6 +25,28 @@ func TestNormalizeKnownOpenAICodexModelGPT6SolLuna(t *testing.T) {
 	}
 }
 
+func TestNormalizeKnownOpenAICodexModelGPT61SolPreservesIdentity(t *testing.T) {
+	for _, model := range []string{
+		"gpt-6.1-sol",
+		"openai/GPT_6.1_SOL",
+	} {
+		require.Equal(t, "gpt-6.1-sol", normalizeKnownOpenAICodexModel(model), model)
+	}
+
+	for _, model := range []string{
+		"gpt-6.1-sol-xhigh",
+		"gpt-6.1-sol-preview",
+	} {
+		require.Empty(t, normalizeKnownOpenAICodexModel(model), model)
+	}
+}
+
+func TestGPT61SolDoesNotInheritGPT6FamilyCapabilities(t *testing.T) {
+	require.False(t, isOpenAIGPT6Model("gpt-6.1-sol"))
+	require.False(t, isOpenAIGPT6AstraModel("gpt-6.1-sol"))
+	require.False(t, openAIModelSupportsPromptCacheOptions("gpt-6.1-sol"))
+}
+
 func TestNormalizeKnownOpenAICodexModel_BareGPT56RoutesToSol(t *testing.T) {
 	tests := map[string]string{
 		"gpt-5.6":            "gpt-5.6-sol",

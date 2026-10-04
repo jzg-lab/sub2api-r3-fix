@@ -501,7 +501,7 @@ func hasOpenAIOAuthCredentialMaterial(credentials map[string]any) bool {
 // 的保底键:上游导入工具(codex-auth-manager 等)携带的映射模板可能滞后于新
 // 模型发布(如 2026-09 的 gpt-6 批次),缺键会让测试连接面板与调度白名单看
 // 不到新模型。创建/更新时以恒等映射补齐;已存在的映射项永不覆盖。
-var openAICodexModelMappingFloorKeys = []string{"gpt-6", "gpt-6-astra"}
+var openAICodexModelMappingFloorKeys = []string{"gpt-6", "gpt-6-astra", "gpt-6.1-sol"}
 
 // ensureOpenAICodexModelMappingFloor 为 OpenAI OAuth 账号的
 // credentials.model_mapping 合并保底模型键(恒等映射)。仅在已有非空映射时
@@ -990,6 +990,37 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 		return nil
 	}
 	return s.accountRepo.UpdateExtra(ctx, id, updates)
+}
+
+func (s *adminServiceImpl) ApplyOAuthCredentials(
+	ctx context.Context,
+	id int64,
+	expectedUpdatedAt time.Time,
+	input *ApplyOAuthCredentialsInput,
+) (*Account, error) {
+	if input == nil {
+		return nil, ErrAccountNilInput
+	}
+	repo, ok := s.accountRepo.(OAuthReauthorizationRepository)
+	if !ok {
+		return nil, infraerrors.InternalServer(
+			"OAUTH_REAUTH_UNSUPPORTED",
+			"account repository does not support atomic OAuth re-authorization",
+		)
+	}
+	credentials := maps.Clone(input.Credentials)
+	if len(credentials) == 0 {
+		return nil, infraerrors.BadRequest("OAUTH_CREDENTIALS_REQUIRED", "OAuth credentials cannot be empty")
+	}
+	SanitizeStoredCredentials("", credentials)
+	return repo.ApplyOAuthCredentials(
+		ctx,
+		id,
+		expectedUpdatedAt,
+		input.Type,
+		credentials,
+		maps.Clone(input.Extra),
+	)
 }
 
 // BulkUpdateAccounts updates multiple accounts in one request.

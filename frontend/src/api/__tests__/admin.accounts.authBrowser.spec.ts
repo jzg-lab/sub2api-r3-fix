@@ -22,7 +22,6 @@ describe('admin auth browser launch API', () => {
       profile_tag: 'auth-example',
       proxy_name: 'local-bucket',
       exit_ingress: 'http://127.0.0.1:17921',
-      auth_url: '',
       output: 'launcher completed'
     }
     post.mockResolvedValue({ data: result })

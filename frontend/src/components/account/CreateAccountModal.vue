@@ -3881,6 +3881,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
 import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -3997,10 +3998,14 @@ const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
 const openAIAccountCreationPending = ref(false)
+const authBrowserLaunching = ref(false)
 let openAIExchangeVersion = 0
+let authBrowserLaunchVersion = 0
 const resetOpenAIFlow = () => {
   openAIExchangeVersion++
+  authBrowserLaunchVersion++
   openAIAccountCreationPending.value = false
+  authBrowserLaunching.value = false
   openaiOAuth.resetState()
 }
 onBeforeUnmount(resetOpenAIFlow)
@@ -4631,36 +4636,6 @@ const canExchangeCode = computed(() => {
   return authCode.trim() && oauth.sessionId.value && !oauth.loading.value
 })
 
-// Watchers
-watch(
-  () => props.show,
-  (newVal) => {
-    if (newVal) {
-      // Load TLS fingerprint profiles
-      adminAPI.tlsFingerprintProfiles.list()
-        .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
-        .catch(() => { tlsFingerprintProfiles.value = [] })
-      // Modal opened - fill related models
-      allowedModels.value = [...getModelsByPlatform(form.platform)]
-      // Antigravity: 默认使用映射模式并填充默认映射
-      if (form.platform === 'antigravity') {
-        antigravityModelRestrictionMode.value = 'mapping'
-        fetchAntigravityDefaultMappings().then(mappings => {
-          antigravityModelMappings.value = [...mappings]
-        })
-        antigravityWhitelistModels.value = []
-      } else {
-        antigravityWhitelistModels.value = []
-        antigravityModelMappings.value = []
-        antigravityModelRestrictionMode.value = 'mapping'
-      }
-    } else {
-      resetForm()
-    }
-  },
-  { immediate: true }
-)
-
 // Sync form.type based on accountCategory, addMethod, and platform-specific type
 watch(
   [accountCategory, addMethod, antigravityAccountType, () => form.platform],
@@ -5258,6 +5233,37 @@ const resetForm = () => {
   clearMixedChannelDialog()
 }
 
+// The immediate callback can reset a modal mounted closed.
+// Register it only after resetForm and its dependencies are initialized.
+watch(
+  () => props.show,
+  (newVal) => {
+    if (newVal) {
+      // Load TLS fingerprint profiles
+      adminAPI.tlsFingerprintProfiles.list()
+        .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
+        .catch(() => { tlsFingerprintProfiles.value = [] })
+      // Modal opened - fill related models
+      allowedModels.value = [...getModelsByPlatform(form.platform)]
+      // Antigravity: 默认使用映射模式并填充默认映射
+      if (form.platform === 'antigravity') {
+        antigravityModelRestrictionMode.value = 'mapping'
+        fetchAntigravityDefaultMappings().then(mappings => {
+          antigravityModelMappings.value = [...mappings]
+        })
+        antigravityWhitelistModels.value = []
+      } else {
+        antigravityWhitelistModels.value = []
+        antigravityModelMappings.value = []
+        antigravityModelRestrictionMode.value = 'mapping'
+      }
+    } else {
+      resetForm()
+    }
+  },
+  { immediate: true }
+)
+
 const handleClose = () => {
   resetOpenAIFlow()
   antigravityMixedChannelConfirmed.value = false
@@ -5756,29 +5762,76 @@ const handleGenerateUrl = async () => {
 // 授权浏览器直拉（方案A）：后端读授权会话绑定的桶 → 本机 launch.sh →
 // Chrome 带桶代理+授权链接弹窗。失败（未配置/会话过期/链路断）走提示，
 // 手动 applet 路径不受影响。
-const authBrowserLaunching = ref(false)
+const recoverableAuthBrowserSessionReasons = new Set([
+  'AUTH_BROWSER_SESSION_NOT_FOUND',
+  'AUTH_BROWSER_SESSION_EXPIRED',
+  'AUTH_BROWSER_SESSION_INVALID',
+  'AUTH_BROWSER_PROXY_ROUTE_STALE'
+])
+
+const showAuthBrowserLaunchResult = (result: Awaited<ReturnType<typeof adminAPI.accounts.launchAuthBrowser>>) => {
+  if (result.already_running) {
+    appStore.showSuccess('激活浏览器正在启动，请勿重复点击')
+  } else if (result.launched) {
+    appStore.showSuccess(`激活浏览器已启动（${result.proxy_name}），请在弹出的窗口完成 Google 登录`)
+  } else {
+    appStore.showError(`激活浏览器启动失败：${result.output || '未知原因'}`)
+  }
+}
+
 const handleLaunchAuthBrowser = async () => {
-  const sessionId = openaiOAuth.sessionId.value
+  let sessionId = openaiOAuth.sessionId.value
   if (!sessionId) {
     appStore.showError('授权会话缺失，请先重新生成授权链接')
     return
   }
   if (authBrowserLaunching.value) return
+
+  const launchVersion = ++authBrowserLaunchVersion
+  const isCurrent = () =>
+    launchVersion === authBrowserLaunchVersion &&
+    props.show &&
+    form.platform === 'openai'
+
   authBrowserLaunching.value = true
   try {
-    const result = await adminAPI.accounts.launchAuthBrowser(sessionId)
-    if (result.already_running) {
-      appStore.showSuccess('激活浏览器正在启动，请勿重复点击')
-    } else if (result.launched) {
-      appStore.showSuccess(`激活浏览器已启动（${result.proxy_name}），请在弹出的窗口完成 Google 登录`)
-    } else {
-      appStore.showError(`激活浏览器启动失败：${result.output || '未知原因'}`)
+    let refreshedSession = false
+    while (isCurrent()) {
+      try {
+        const result = await adminAPI.accounts.launchAuthBrowser(sessionId)
+        if (isCurrent()) showAuthBrowserLaunchResult(result)
+        return
+      } catch (err: unknown) {
+        const reason = extractApiErrorCode(err)
+        if (
+          !refreshedSession &&
+          reason &&
+          recoverableAuthBrowserSessionReasons.has(reason) &&
+          isCurrent()
+        ) {
+          refreshedSession = true
+          openAIExchangeVersion++
+          openAIAccountCreationPending.value = false
+          const generated = await openaiOAuth.generateAuthUrl(form.proxy_id)
+          if (!generated || !isCurrent()) return
+          sessionId = openaiOAuth.sessionId.value
+          if (!sessionId) {
+            appStore.showError('授权会话刷新失败，请重新生成授权链接')
+            return
+          }
+          continue
+        }
+
+        if (isCurrent()) {
+          appStore.showError(`弹出激活浏览器失败：${extractApiErrorMessage(err, '未知原因')}`)
+        }
+        return
+      }
     }
-  } catch (err: any) {
-    const detail = err?.response?.data?.message || err?.message || String(err)
-    appStore.showError(`弹出激活浏览器失败：${detail}`)
   } finally {
-    authBrowserLaunching.value = false
+    if (launchVersion === authBrowserLaunchVersion) {
+      authBrowserLaunching.value = false
+    }
   }
 }
 

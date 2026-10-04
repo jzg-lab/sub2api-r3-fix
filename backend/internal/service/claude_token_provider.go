@@ -67,10 +67,13 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 1) Try cache first.
 	if p.tokenCache != nil {
-		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
+		if token, err := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("claude_token_cache_hit", "account_id", account.ID)
 			return token, nil
 		} else if err != nil {
+			if errors.Is(err, errOAuthRefreshAccountStateChanged) {
+				return "", err
+			}
 			slog.Warn("claude_token_cache_get_failed", "account_id", account.ID, "error", err)
 		}
 	}
@@ -93,9 +96,11 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		} else if result.LockHeld {
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				time.Sleep(claudeLockWaitTime)
-				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {
+				if token, cacheErr := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); cacheErr == nil && strings.TrimSpace(token) != "" {
 					slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
 					return token, nil
+				} else if errors.Is(cacheErr, errOAuthRefreshAccountStateChanged) {
+					return "", cacheErr
 				}
 			}
 		} else {
@@ -111,9 +116,11 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			slog.Warn("claude_token_lock_failed", "account_id", account.ID, "error", lockErr)
 		} else {
 			time.Sleep(claudeLockWaitTime)
-			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
+			if token, err := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); err == nil && strings.TrimSpace(token) != "" {
 				slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
 				return token, nil
+			} else if errors.Is(err, errOAuthRefreshAccountStateChanged) {
+				return "", err
 			}
 		}
 	}
@@ -127,6 +134,9 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
+			if !oauthTokenAccountIdentityMatches(account, latestAccount) {
+				return "", errOAuthRefreshAccountStateChanged
+			}
 			slog.Debug("claude_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetCredential("access_token")
 			if strings.TrimSpace(accessToken) == "" {

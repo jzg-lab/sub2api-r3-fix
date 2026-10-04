@@ -272,12 +272,25 @@ func TestCompositeTokenCacheInvalidator_DeleteError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 新行为：删除失败只记录日志，不返回错误
-			// 这是因为缓存失效失败不应影响主业务流程
 			err := invalidator.InvalidateToken(context.Background(), tt.account)
-			require.NoError(t, err)
+			require.ErrorIs(t, err, expectedErr)
 		})
 	}
+}
+
+func TestCompositeTokenCacheInvalidatorAttemptsAllKeysAfterError(t *testing.T) {
+	expectedErr := errors.New("cache unavailable")
+	cache := &geminiTokenCacheStub{deleteErr: expectedErr}
+	invalidator := NewCompositeTokenCacheInvalidator(cache)
+	account := &Account{
+		ID: 701, Platform: PlatformGemini, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"project_id": "test-project"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.ErrorIs(t, invalidator.InvalidateToken(ctx, account), expectedErr)
+	require.Equal(t, []string{GeminiTokenCacheKey(account), "gemini:account:701"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_AllPlatformsIntegration(t *testing.T) {

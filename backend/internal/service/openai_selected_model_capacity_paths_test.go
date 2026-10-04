@@ -15,7 +15,6 @@ import (
 )
 
 func TestSelectedModelCapacitySSEBeforeAndAfterOutput(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, passthrough := range []bool{false, true} {
 		for _, committed := range []bool{false, true} {
 			name := map[bool]string{false: "native", true: "passthrough"}[passthrough] +

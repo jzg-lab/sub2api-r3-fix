@@ -17,9 +17,13 @@ import (
 type oauthRouteProxyRepo struct {
 	service.ProxyRepository
 	proxy *service.Proxy
+	err   error
 }
 
 func (r *oauthRouteProxyRepo) GetByID(context.Context, int64) (*service.Proxy, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
 	if r.proxy != nil {
 		copy := *r.proxy
 		return &copy, nil
@@ -29,6 +33,7 @@ func (r *oauthRouteProxyRepo) GetByID(context.Context, int64) (*service.Proxy, e
 
 type oauthRouteSessionStore struct {
 	session *service.OpenAIOAuthSession
+	err     error
 }
 
 func (s *oauthRouteSessionStore) Create(_ context.Context, session *service.OpenAIOAuthSession) error {
@@ -37,6 +42,9 @@ func (s *oauthRouteSessionStore) Create(_ context.Context, session *service.Open
 }
 
 func (s *oauthRouteSessionStore) Get(context.Context, string) (*service.OpenAIOAuthSession, error) {
+	if s.err != nil || s.session == nil {
+		return nil, s.err
+	}
 	copy := *s.session
 	return &copy, nil
 }

@@ -761,7 +761,6 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 	}
 
 	scanner, releaseScanBuf := s.newUpstreamSSEScanner(resp.Body)
-	defer releaseScanBuf()
 
 	streamInterval := time.Duration(0)
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
@@ -807,6 +806,7 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 	events := make(chan scanEvent, 16)
 	done := make(chan struct{})
 	go func() {
+		defer releaseScanBuf()
 		defer close(events)
 		for scanner.Scan() {
 			select {
@@ -822,7 +822,10 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 			}
 		}
 	}()
-	defer close(done)
+	defer func() {
+		close(done)
+		_ = resp.Body.Close()
+	}()
 
 	var parser openAICompatSSEFrameParser
 	for {
@@ -942,7 +945,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	countSearch := account != nil && account.IsGrok()
 
 	scanner, releaseScanBuf := s.newUpstreamSSEScanner(resp.Body)
-	defer releaseScanBuf()
 
 	streamInterval := time.Duration(0)
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
@@ -1186,6 +1188,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 	// ── No keepalive: fast synchronous path (no goroutine overhead) ──
 	if streamInterval <= 0 && keepaliveInterval <= 0 {
+		defer releaseScanBuf()
 		var parser openAICompatSSEFrameParser
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -1233,6 +1236,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 	}
 	go func() {
+		defer releaseScanBuf()
 		defer close(events)
 		for scanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
@@ -1244,7 +1248,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			_ = sendEvent(scanEvent{err: err})
 		}
 	}()
-	defer close(done)
+	defer func() {
+		close(done)
+		_ = resp.Body.Close()
+	}()
 
 	var keepaliveTicker *time.Ticker
 	if keepaliveInterval > 0 {

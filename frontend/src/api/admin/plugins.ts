@@ -77,6 +77,17 @@ export interface PluginTestResult {
   latency_ms: number
 }
 
+export interface PluginStatus {
+  plugin_id: number
+  running: boolean
+  healthy: boolean
+  message?: string
+  // 插件自定义状态 JSON 字符串（透传不解析；插件 UI 自行 JSON.parse，
+  // 与官方宿主桥接协议同形）。
+  status_json?: string
+  checked_at: string
+}
+
 export interface PluginUISession {
   url: string
   bridge_token: string
@@ -138,6 +149,12 @@ export async function test(id: number): Promise<PluginTestResult> {
   return data
 }
 
+// 插件运行时状态快照（只读观测；救治区标签与插件 UI 状态面板共用）。
+export async function getStatus(id: number): Promise<PluginStatus> {
+  const { data } = await apiClient.get<PluginStatus>(`/admin/plugins/${id}/status`)
+  return data
+}
+
 export async function createUISession(id: number): Promise<PluginUISession> {
   const { data } = await apiClient.post<PluginUISession>(`/admin/plugins/${id}/ui-session`)
   return data
@@ -152,5 +169,6 @@ export default {
   getConfig,
   saveConfig,
   test,
+  getStatus,
   createUISession
 }

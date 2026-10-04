@@ -89,8 +89,10 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 
 	// 1) Try cache first.
 	if p.tokenCache != nil {
-		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
+		if token, err := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); err == nil && strings.TrimSpace(token) != "" {
 			return token, nil
+		} else if errors.Is(err, errOAuthRefreshAccountStateChanged) {
+			return "", err
 		}
 	}
 
@@ -110,8 +112,10 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 			}
 		} else if result.LockHeld {
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
-				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {
+				if token, cacheErr := cachedOAuthAccessToken(ctx, p.tokenCache, cacheKey, account, p.accountRepo); cacheErr == nil && strings.TrimSpace(token) != "" {
 					return token, nil
+				} else if errors.Is(cacheErr, errOAuthRefreshAccountStateChanged) {
+					return "", cacheErr
 				}
 			}
 			// default policy: continue with existing token.
@@ -152,6 +156,9 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
+			if !oauthTokenAccountIdentityMatches(account, latestAccount) {
+				return "", errOAuthRefreshAccountStateChanged
+			}
 			slog.Debug("antigravity_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetCredential("access_token")
 			if strings.TrimSpace(accessToken) == "" {

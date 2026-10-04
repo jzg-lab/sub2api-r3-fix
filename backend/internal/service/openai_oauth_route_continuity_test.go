@@ -270,3 +270,25 @@ func TestOpenAIOAuthRouteBindingSurvivesSessionDecode(t *testing.T) {
 	require.Equal(t, int64(7), session.ProxyID)
 	require.Equal(t, hash, session.ProxyRouteHash)
 }
+
+func TestOpenAIOAuthSessionDecodeClassifiesDamagedPayload(t *testing.T) {
+	for _, session := range []*dbent.PendingAuthSession{
+		nil,
+		{SessionToken: "missing-payload"},
+		{
+			SessionToken: "invalid-proxy",
+			LocalFlowState: map[string]any{"openai_oauth": map[string]any{
+				"proxy_id": "invalid", "created_at": "2026-09-16T00:00:00Z",
+			}},
+		},
+		{
+			SessionToken: "invalid-created-at",
+			LocalFlowState: map[string]any{"openai_oauth": map[string]any{
+				"proxy_id": "7", "created_at": "invalid",
+			}},
+		},
+	} {
+		_, err := decodeOpenAIOAuthSession(session)
+		require.ErrorIs(t, err, ErrOpenAIOAuthSessionInvalid)
+	}
+}

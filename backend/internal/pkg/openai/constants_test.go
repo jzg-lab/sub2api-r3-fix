@@ -22,10 +22,22 @@ func TestDefaultModelsPreferConcreteGPT56SolForAccountTests(t *testing.T) {
 
 func TestDefaultModelsIncludeGPT6SolLunaAndGPTImage25(t *testing.T) {
 	modelIDs := DefaultModelIDs()
+	require.Contains(t, modelIDs, "gpt-6.1-sol")
 	require.Contains(t, modelIDs, "gpt-6-sol")
 	require.Contains(t, modelIDs, "gpt-6-luna")
 	require.Contains(t, modelIDs, "gpt-image-2.5-flare")
 	require.Contains(t, modelIDs, "gpt-image-2.5-sunburst")
+}
+
+func TestDefaultGPT61SolDoesNotGuessReleaseTimestamp(t *testing.T) {
+	for _, model := range DefaultModels {
+		if model.ID == "gpt-6.1-sol" {
+			require.Zero(t, model.Created)
+			require.Equal(t, "GPT-6.1 Sol", model.DisplayName)
+			return
+		}
+	}
+	t.Fatal("gpt-6.1-sol missing from default models")
 }
 
 func TestCanonicalizeOpenAIModelAliasSpelling(t *testing.T) {
@@ -61,5 +73,23 @@ func TestIsGPT6SolOrLunaModelSpelling(t *testing.T) {
 		"not-a-model",
 	} {
 		require.False(t, IsGPT6SolOrLunaModelSpelling(model), model)
+	}
+}
+
+func TestIsGPT61SolModelSpellingIsExact(t *testing.T) {
+	for _, model := range []string{
+		"gpt-6.1-sol",
+		"openai/GPT_6.1_SOL",
+	} {
+		require.True(t, IsGPT61SolModelSpelling(model), model)
+	}
+
+	for _, model := range []string{
+		"gpt-6.1-sol-xhigh",
+		"gpt-6.1",
+		"gpt-6-sol",
+		"gpt-6.1-sol-preview",
+	} {
+		require.False(t, IsGPT61SolModelSpelling(model), model)
 	}
 }

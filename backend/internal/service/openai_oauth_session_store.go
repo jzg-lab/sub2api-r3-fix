@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,6 +12,8 @@ import (
 )
 
 const openAIOAuthSessionTTL = 2 * time.Hour
+
+var ErrOpenAIOAuthSessionInvalid = errors.New("openai oauth session payload is invalid")
 
 type OpenAIOAuthSession struct {
 	ID             string
@@ -102,20 +105,20 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Consume(ctx context.Context, sessio
 
 func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSession, error) {
 	if session == nil {
-		return nil, fmt.Errorf("openai oauth session is required")
+		return nil, fmt.Errorf("%w: session is required", ErrOpenAIOAuthSessionInvalid)
 	}
 	raw, ok := session.LocalFlowState["openai_oauth"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("openai oauth session payload is invalid")
+		return nil, ErrOpenAIOAuthSessionInvalid
 	}
 
 	proxyID, err := strconv.ParseInt(strings.TrimSpace(oauthSessionStringValue(raw["proxy_id"])), 10, 64)
 	if err != nil || proxyID < 0 {
-		return nil, fmt.Errorf("openai oauth session proxy is invalid")
+		return nil, fmt.Errorf("%w: proxy is invalid", ErrOpenAIOAuthSessionInvalid)
 	}
 	createdAt, err := time.Parse(time.RFC3339Nano, oauthSessionStringValue(raw["created_at"]))
 	if err != nil {
-		return nil, fmt.Errorf("openai oauth session creation time is invalid")
+		return nil, fmt.Errorf("%w: creation time is invalid", ErrOpenAIOAuthSessionInvalid)
 	}
 
 	return &OpenAIOAuthSession{

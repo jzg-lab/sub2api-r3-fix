@@ -240,13 +240,13 @@ func TestClaudeTokenProvider_CacheHit(t *testing.T) {
 		},
 	}
 	cacheKey := ClaudeTokenCacheKey(account)
-	cache.tokens[cacheKey] = "cached-token"
+	cache.tokens[cacheKey] = account.GetCredential("access_token")
 
 	provider := NewClaudeTokenProvider(nil, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, "cached-token", token)
+	require.Equal(t, account.GetCredential("access_token"), token)
 	require.Equal(t, int32(1), atomic.LoadInt32(&cache.getCalled))
 	require.Equal(t, int32(0), atomic.LoadInt32(&cache.setCalled))
 }

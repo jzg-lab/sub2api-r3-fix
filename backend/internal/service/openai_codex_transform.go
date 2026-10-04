@@ -1230,6 +1230,9 @@ func normalizeOpenAIModelForUpstream(account *Account, model string) string {
 }
 
 func SupportsVerbosity(model string) bool {
+	if openai.IsGPT61SolModelSpelling(model) {
+		return false
+	}
 	if !strings.HasPrefix(model, "gpt-") {
 		return true
 	}

@@ -120,7 +120,6 @@ func TestEffectiveBillingUserAgent(t *testing.T) {
 // 一致——mimicry 场景 wire 是默认 UA 而非缓存指纹，透传场景是缓存指纹。
 // messages 与 count_tokens 两个构建路径都要覆盖。（上游 v0.2.6 移植）
 func TestBuildOAuthRequest_BillingMatchesWireUserAgent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, endpoint := range []string{"messages", "count_tokens"} {
 		for _, tc := range []struct {
 			name      string

@@ -48,6 +48,14 @@ const (
 	OpenAIDowngradeEventTurnStateDegraded        = "turn_state_degraded"
 	OpenAIDowngradeEventRealTrafficModelMismatch = "real_traffic_model_mismatch"
 	OpenAIDowngradeEventRealTrafficRecheckArmed  = "real_traffic_recheck_armed"
+	// 探针 auth 两振出局（r17aq，自 r17ap 移植）：401/403 不再一击判死。
+	// strike = 首次连击暂停调度；terminal = 达阈值 SetError；cleared =
+	// 非 auth 上游应答证明凭据被接受，自动解暂停；skipped_state_changed =
+	// 探针在飞窗内账号被人工/并发改动，结果只记遥测不进状态机。
+	OpenAIDowngradeEventProbeAuthStrike   = "probe_auth_strike"
+	OpenAIDowngradeEventProbeAuthTerminal = "probe_auth_terminal"
+	OpenAIDowngradeEventProbeAuthCleared  = "probe_auth_cleared"
+	OpenAIDowngradeEventProbeSkippedStale = "probe_skipped_state_changed"
 )
 
 const (
@@ -66,6 +74,11 @@ const (
 	openAIDowngradeSolFallbackExtraKey       = "openai_downgrade_sol_fallback"
 	openAIDowngradeProbeProxyMinInterval     = 10 * time.Minute
 	openAIDowngradeSolFallbackInterval       = 2 * time.Hour
+	// 探针 auth 两振出局（r17aq）：401/403 常是桶 IP 的瞬态旗而非账号死刑。
+	// 第一次连击只暂停调度；连续达 OpenAIDowngradeAuthStrikeThreshold 次才
+	// SetError，期间按分钟级快复检拿结论。
+	OpenAIDowngradeAuthStrikeThreshold = 2
+	openAIDowngradeAuthRetryInterval   = 10 * time.Minute
 	// 429 是「现在判不了」而非健康信号：被限流的账号若按常规 15-45 分钟排期，
 	// 整个忙时段都可能拿不到一针结论性探测，真实降智窗口被无限拉长。
 	// 限流后按短周期重探（经 jitter 后 2.5-7.5 分钟），尽快拿回结论。
@@ -180,6 +193,9 @@ type OpenAIDowngradeProbeResult struct {
 	// 零误报）。相位2：356 记事件 + 加速复查；与降智证据同针在场时双信号
 	// 熔断（2026-09-20 用户批准）。
 	TurnStateLen int
+	// gradedText 是该针判分所用的模型答案全文（applyResponse 填充；仅留档
+	// 层读取——unexported 对 encoding/json 与仓库层不可见，绝不入库）。
+	gradedText string
 }
 
 func (r OpenAIDowngradeProbeResult) answerVerdict() any {
@@ -224,6 +240,21 @@ func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
 		*r.ReasoningTokens >= OpenAIDowngradeFailureReasoningThreshold
 }
 
+// IsSuspectMiss r17al 滑误嫌疑针：答错但推理预算满血（rt≥恢复下限 1400）
+// 且无 356 票。2026-09-26 统计定案：two_dim 随机题对健康号固有 ~18% 滑误率
+// （rt1000-2000 带 52/296 答错；1187 rt4142 答错为全库唯一高 rt 孤例），而
+// 降智执法的形态学是低 rt（131:11）+ 356 票——执法削推理预算，不污染推理
+// 质量。嫌疑针不单针杀：清连胜 + 快复检（分钟级），两连错才熔断；铁证形态
+// （356 票/低 rt/截断指纹答对）的单针杀纪律不变（见 Apply 分层）。
+func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
+	return r.TransportOK &&
+		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
+		!r.AnswerCorrect &&
+		!isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) &&
+		r.ReasoningTokens != nil &&
+		*r.ReasoningTokens >= OpenAIDowngradeRecoveryReasoningMinimum
+}
+
 func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
 	return r.TransportOK &&
 		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
@@ -252,15 +283,51 @@ type OpenAIDowngradeProbeState struct {
 	SwapCount7d               int
 	LastSwapAt                *time.Time
 	LastProbeAt               *time.Time
+	AuthConsecutiveFailures   int
 	AstraConsecutiveFailures  int
 	AstraConsecutiveSuccesses int
 	AstraNextProbeAt          *time.Time
-	// 自动打票线（2026-09-21 相位B）：动态桶上的采票尝试计数。达到上限仍
-	// 无健康票 = 账号级降智，回 pending_replace（社区实证：账号级 312 永续
-	// = 换票无解，别硬打——"continuing is what escalated a 312 into a wall
-	// of 429s"）。
-	HarvestAttempts int
-	UpdatedAt       time.Time
+	UpdatedAt                 time.Time
+}
+
+// OpenAI proxy outcome kinds feed the per-proxy outcome statistics table
+// (proxy_outcome_stats), which auto-syncs proxies.bucket_risk_score.
+const (
+	OpenAIProxyOutcomeSuccess      = "success"
+	OpenAIProxyOutcomeDegraded     = "degraded"
+	OpenAIProxyOutcomeAuthError    = "auth_error"
+	OpenAIProxyOutcomeNetworkError = "network_error"
+	OpenAIProxyOutcomeInconclusive = "inconclusive"
+)
+
+// ClassifyOpenAIDowngradeProxyOutcome buckets one probe result into a
+// proxy-attributable outcome kind. Failures that happened before any proxy
+// contact (token unavailable, missing local dependencies) and non-auth
+// upstream rejections (429/5xx) are inconclusive: they say nothing about the
+// bucket and must not move its risk score.
+func ClassifyOpenAIDowngradeProxyOutcome(result *OpenAIDowngradeProbeResult) string {
+	if result == nil {
+		return OpenAIProxyOutcomeInconclusive
+	}
+	switch {
+	case result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden:
+		return OpenAIProxyOutcomeAuthError
+	case !result.TransportOK:
+		if result.HTTPStatus != 0 {
+			return OpenAIProxyOutcomeInconclusive
+		}
+		if strings.Contains(result.ErrorMessage, "token") ||
+			strings.Contains(result.ErrorMessage, "dependencies") {
+			return OpenAIProxyOutcomeInconclusive
+		}
+		return OpenAIProxyOutcomeNetworkError
+	case result.IsDegraded():
+		return OpenAIProxyOutcomeDegraded
+	case result.IsRecovered():
+		return OpenAIProxyOutcomeSuccess
+	default:
+		return OpenAIProxyOutcomeInconclusive
+	}
 }
 
 type OpenAIDowngradeTransition struct {
@@ -321,12 +388,19 @@ func ApplyOpenAIDowngradeProbeResult(
 	state.ConsecutiveSuccesses = 0
 	state.ConsecutiveFailures++
 	// 纯单针杀（2026-09-22 用户裁定，1143 弹跳形态实证：换 IP→答对→快速
-	// 再降智，拖第二针毫无意义）：normal 档任何一针降智证据当场熔断。
+	// 再降智，拖第二针毫无意义）：normal 档任何一针**铁证**降智当场熔断。
 	// qualification 新号线不叠加（2026-09-21 裁定 1115/1116 案保持）：
 	// 新号无历史基线，首针失败走 qualification_failed 既有判死分支。
+	// r17al 滑误分层（2026-09-26 1187 案）：满血答错（IsSuspectMiss）是
+	// 嫌疑不是铁证——铁证单针杀保留，嫌疑针两连错才熔断（下方通用
+	// ConsecutiveFailures>=2 分支自然涵盖）。误杀率从 ~18%（题库固有
+	// 滑误率）压到 ~3%（滑误独立近似），代价=真降智号多活一个分钟级
+	// 快复检窗口（processState 侧对嫌疑针按 suspectRecheckInterval 快排）。
+	hardEvidence := !result.IsSuspectMiss()
 	if state.State == OpenAIDowngradeStateOnDuty &&
 		state.ProbeMode != "qualification" &&
-		state.ConsecutiveFailures >= 1 {
+		state.ConsecutiveFailures >= 1 &&
+		(hardEvidence || state.ConsecutiveFailures >= 2) {
 		return OpenAIDowngradeTransition{
 			State:     state,
 			NextState: OpenAIDowngradeStateCircuitOpen,
@@ -337,7 +411,8 @@ func ApplyOpenAIDowngradeProbeResult(
 	if (state.State == OpenAIDowngradeStateCircuitOpen ||
 		state.State == OpenAIDowngradeStateReprobe) &&
 		state.ProbeMode != "qualification" &&
-		state.ConsecutiveFailures >= 1 {
+		state.ConsecutiveFailures >= 1 &&
+		(hardEvidence || state.ConsecutiveFailures >= 2) {
 		return OpenAIDowngradeTransition{
 			State:            state,
 			NextState:        OpenAIDowngradeStatePendingReplace,
@@ -471,11 +546,6 @@ const (
 	// 判死终态（r17x 选项A）防御性让位间隔：processState 兜底分支把误入的
 	// pending_replace 号排远，不参与正常调度节奏。
 	openAIDowngradeReplacedQuietSchedule = 7 * 24 * time.Hour
-	// 打票复活号观察窗（2026-09-22 用户裁定「通过打票复活的账号 频率就得
-	// 适当高一点」）：复活号弹性最差（刚从判死边缘捞回，弹跳概率高），
-	// 毕业后先进 accelerated 档（5min 级）盯防 2 小时，观察窗走完自然回
-	// 常规 90min 档。与 finishRescue 的 30min 窗区分：那是熔断救援的窗。
-	openAIDowngradeHarvestRevivalWatchWindow = 2 * time.Hour
 )
 
 // OpenAIDowngradeReplaceEventCounter 是用于判死重试退避的窄接口能力。
@@ -508,6 +578,20 @@ type OpenAIDowngradeProbeRunner struct {
 	// deferCounts 记录各账号连续顺延次数，仅在 runMu 临界区内访问。
 	recentTraffic func(ctx context.Context, accountID int64, within time.Duration) bool
 	deferCounts   map[int64]int
+	// pluginBridge 由装配层注入（PluginManager.BridgeStatus）；nil 时健康快照
+	// 不携带 plugin_bridge 区块（与未启用插件同形）。桥源读失败在源侧吞掉
+	// 返回 nil，绝不拖垮健康快照。
+	pluginBridge func(ctx context.Context) *PluginBridgeStatus
+	// rescueLane 救治区编排器（r17ax Phase 3）；nil 时判死提交不触发自动
+	// 入区（手动/对账入口不受影响）。自动钩子在 commit 通道 committed 块
+	// 异步触发，入区失败绝不反向影响探针提交。
+	rescueLane *OpenAIRescueLane
+	// pluginRoundTrip 由装配层注入（PluginManager.RoundTripOpenAIOAuth）；
+	// 救治区账号的资格针经它走插件钉扎传输（与真实流量同路）。1217 实证
+	// （2026-10-02）：被 Cookie 钉扎救回的号在未钉扎的裸 LB 路上 4 针全
+	// 200+错答，资格针不走插件 = 结构性测不出救治效果。nil 或未处理时
+	// 原路回退 DoProbeWithTLS，行为与合入前一致。
+	pluginRoundTrip func(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, bool, error)
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
@@ -747,20 +831,6 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		if !isOpenAIDowngradeProbeAccountEligible(&account, now) || account.Status != StatusActive {
 			continue
 		}
-		// 自动救援钩子（2026-09-22「都让自动」）：判死号静默期满自动进
-		// 打票线。挂在 schedulable 闸之前——判死号 schedulable=false 会被
-		// 下面的 continue 提前跳出，钩子永远够不着。进线成功后
-		// probe_mode='harvest'，由下方 qualification/harvest 路径正常接管。
-		if deadState, err := r.store.GetOpenAIDowngradeState(ctx, account.ID); err == nil && deadState != nil &&
-			deadState.State == OpenAIDowngradeStatePendingReplace {
-			if hookErr := r.maybeAutoHarvestDead(ctx, deadState, now); hookErr != nil {
-				logger.LegacyPrintf("service.openai_downgrade_probe",
-					"[OpenAIDowngradeProbe] auto-harvest failed account=%d: %v", account.ID, hookErr)
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-		}
 		qualification := isOpenAIDowngradeQualificationCandidate(&account)
 		if !account.Schedulable && !qualification {
 			continue
@@ -877,10 +947,6 @@ func isOpenAIDowngradeProbeStatusAllowed(status string, state *OpenAIDowngradePr
 		state.State == OpenAIDowngradeStateReprobe ||
 		state.State == OpenAIDowngradeStatePendingReplace ||
 		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "qualification") ||
-		// 打票线（2026-09-22 修正）：error 号在采票循环里必须继续被探测
-		// ——harvest 的 401 分诊（凭据失效→停打回原桶）正依赖探针把 401
-		// 带回来；被 status 闸拦掉的话循环空转、凭据死号永不落判死。
-		(state.State == OpenAIDowngradeStateOnDuty && state.ProbeMode == "harvest") ||
 		state.ProbeMode == "sol_fallback"
 }
 
@@ -952,23 +1018,23 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	if state.State == OpenAIDowngradeStatePendingReplace && state.ProbeMode != "harvest" {
-		// 普通判死态不再自动排探针。ListDue 已在 SQL 层排除
-		// pending_replace，理论到不了这里；防御性让位（NextProbeAt 推远）
-		// 防止其它路径把判死号又拉回普通探测循环。harvest 是显式救援态，
-		// 即使状态切换与调度并发留下 pending_replace，也必须继续完成采票针。
+	if state.State == OpenAIDowngradeStatePendingReplace {
+		// 判死终态不再自动排探针。ListDue 已在 SQL 层排除 pending_replace，
+		// 理论到不了这里；防御性让位（NextProbeAt 推远）防止其它路径把
+		// 判死号又拉回普通探测循环。判死号的唯一救援入口 = 手动启用/救治区。
 		state.NextProbeAt = now.Add(openAIDowngradeReplacedQuietSchedule)
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if state.State == OpenAIDowngradeStateOnDuty && !account.Schedulable &&
-		state.ProbeMode != "qualification" && state.ProbeMode != "harvest" {
+		state.ProbeMode != "qualification" &&
+		state.AuthConsecutiveFailures == 0 {
 		// 用户手动暂停的号不探测，但排期必须后移让出同 IP 的队首位置，
 		// 否则同 IP 的其它号会被永久饿死；30 分钟后回来看是否被重新启用。
 		// spread 错开同批暂停号的回访时刻，避免同一分钟集体回队。
-		// harvest 例外（2026-09-22 修正，1136 实证）：采票号进线时不设
-		// schedulable（问题号不接流量），但循环必须照常打针——不排除的话
-		// 每 30 分钟让位一次，永远打不了采票针。
+		// auth 一振暂停豁免（r17aq）：schedulable=false 是探针自己落的，
+		// 只有后续探针能洗白（非 auth 应答）或毕业到 error（二振）；
+		// 不豁免 = 暂停号永不再被探，死锁。
 		state.NextProbeAt = now.Add(r.spread(openAIDowngradeHalfOpenInterval))
 		state.UpdatedAt = now
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
@@ -1042,20 +1108,12 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		r.deferCounts[state.AccountID] = 0
 	}
 
-	result := r.runProbe(ctx, account, state.ProbeMode)
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, state.ProbeMode, now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
 		return err
-	}
-	// 自动打票线（2026-09-21 相位B）：harvest 模式的针走独立分诊（采到票回
-	// 静态复检/账号级放弃/继续换IP），不进 Apply 常规迁移——连败计数对采票
-	// 针无意义（降级长度正是预期的「没采到」信号，不是惩罚证据）。
-	if state.ProbeMode == "harvest" {
-		if handled, err := r.processHarvest(ctx, state, &result, now); handled {
-			return err
-		}
 	}
 	// 相位2（2026-09-20 用户批准）+ 纯单针杀（2026-09-22 用户裁定）：
 	// turn_state_len 落降智态（356±20）时记事件；normal 档单 356 即熔断
@@ -1098,6 +1156,16 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		now.Before(*state.RecoveryDeadline) {
 		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeAcceleratedInterval))
 	}
+	// r17al 滑误嫌疑针快复检：未熔断未判死的嫌疑针按分钟级快排，把「冤枉
+	// 一个健康号的摘调度窗口」从常规节奏压到分钟级；复检答对即清败洗白，
+	// 再错（任何形态）按两连熔断。qualification 档本身已是 5min 节奏，
+	// 不叠加。
+	if !transition.Circuit && !transition.NeedsReplacement &&
+		result.IsSuspectMiss() &&
+		state.ProbeMode == "normal" &&
+		state.State == OpenAIDowngradeStateOnDuty {
+		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeSuspectRecheckInterval))
+	}
 	if state.ProbeMode == "qualification" && result.IsQualificationPass() &&
 		state.ConsecutiveSuccesses >= 1 {
 		// 2026-09-15 用户裁定「新号一次检测合格就可以上岗，不要整那么多次」：
@@ -1107,6 +1175,16 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.ConsecutiveSuccesses = 0
 		if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
 			return err
+		}
+		// r17ax 3.6 转正急挂钩：考证通过即刻改绑回原池组 + 清标记 + 打复活
+		// 徽标。同步直调但错误只记日志——转正是出口（design 0.4），不得反向
+		// 影响考证通过的提交；失败由对账清扫按同一判据（on_duty+normal+
+		// 标记在场）收敛兜底。
+		if r.rescueLane != nil {
+			if err := r.rescueLane.GraduateRescue(ctx, state.AccountID, "qualification_pass"); err != nil {
+				slog.Warn("openai_rescue_graduate_hook_failed",
+					"account_id", state.AccountID, "error", err)
+			}
 		}
 	}
 	if state.ProbeMode == "qualification" && transition.Circuit {
@@ -1151,6 +1229,12 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 		state.RecoveryDeadline = nil
 		state.ProbeMode = "normal"
 	}
+	if state.AuthConsecutiveFailures > 0 &&
+		state.NextProbeAt.After(now.Add(openAIDowngradeAuthRetryInterval)) {
+		// auth 暂停 limbo 里的无结论针：保持分钟级快复检节奏，不吃常规
+		// 15-75 分钟排期。
+		state.NextProbeAt = now.Add(openAIDowngradeAuthRetryInterval)
+	}
 	return r.store.SaveOpenAIDowngradeState(ctx, state)
 }
 
@@ -1160,8 +1244,8 @@ func (r *OpenAIDowngradeProbeRunner) processReprobe(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "reprobe")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "reprobe", now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1199,8 +1283,8 @@ func (r *OpenAIDowngradeProbeRunner) processHalfOpen(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "half_open")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "half_open", now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1254,8 +1338,8 @@ func (r *OpenAIDowngradeProbeRunner) startSolFallback(
 	state *OpenAIDowngradeProbeState,
 	now time.Time,
 ) error {
-	result := r.runProbe(ctx, account, "sol_fallback")
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, "sol_fallback", now)
+	if stop {
 		return err
 	}
 	// Preserve the pending model track across an inconclusive attempt/restart.
@@ -1306,8 +1390,8 @@ func (r *OpenAIDowngradeProbeRunner) processSolFallback(
 	if astraDue {
 		mode = "sol_fallback_astra"
 	}
-	result := r.runProbe(ctx, account, mode)
-	if err := r.recordProbeResult(ctx, &result); err != nil {
+	result, stop, err := r.runProbeRecorded(ctx, account, state, mode, now)
+	if stop {
 		return err
 	}
 	if handled, err := r.applyRateLimitDeferral(ctx, account, state, result, now); handled {
@@ -1506,6 +1590,39 @@ func (r *OpenAIDowngradeProbeRunner) SetRecentTrafficChecker(
 		return
 	}
 	r.recentTraffic = fn
+}
+
+// SetPluginBridgeSource 注入救治区插件桥状态源（PluginManager.BridgeStatus）。
+// 未注入时健康快照响应不带 plugin_bridge 区块，行为与桥合入前一致。
+func (r *OpenAIDowngradeProbeRunner) SetPluginBridgeSource(
+	fn func(ctx context.Context) *PluginBridgeStatus,
+) {
+	if r == nil {
+		return
+	}
+	r.pluginBridge = fn
+}
+
+// SetRescueLane 注入救治区编排器（r17ax Phase 3）。未注入时判死提交不触发
+// 自动入区，行为与救治区合入前一致；手动端点与对账清扫入口不经此字段。
+func (r *OpenAIDowngradeProbeRunner) SetRescueLane(lane *OpenAIRescueLane) {
+	if r == nil {
+		return
+	}
+	r.rescueLane = lane
+}
+
+// SetPluginRoundTrip 注入插件钉扎传输（PluginManager.RoundTripOpenAIOAuth）。
+// 仅救治区账号（带 openai_rescue_lane 标记）的资格针改走该传输：针与真实
+// 流量同路，Cookie 钉扎的救治效果才能被资格针观测到。非救治账号与未注入/
+// 未处理路径保持原 DoProbeWithTLS 直连，行为与合入前一致。
+func (r *OpenAIDowngradeProbeRunner) SetPluginRoundTrip(
+	fn func(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, bool, error),
+) {
+	if r == nil {
+		return
+	}
+	r.pluginRoundTrip = fn
 }
 
 // applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户
@@ -1745,7 +1862,10 @@ func (r *OpenAIDowngradeProbeRunner) spread(base time.Duration) time.Duration {
 }
 
 func (r *OpenAIDowngradeProbeRunner) runProbe(ctx context.Context, account *Account, mode string) OpenAIDowngradeProbeResult {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// 3 分钟（2026-10-02 生产实证）：xhigh 满血针 53-100s 完成，但 4/16 落在
+	// 精确 120s 被 ctx 切断——流零产出（rt=0）不是质量信号，只是预算太紧。
+	// 180s 给 xhigh 推理留出头部空间；RunOnce 外层 5min 上限仍兜底。
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	probe := r.probeFn
 	if probe == nil {
@@ -1756,14 +1876,180 @@ func (r *OpenAIDowngradeProbeRunner) runProbe(ctx context.Context, account *Acco
 	return result
 }
 
-func (r *OpenAIDowngradeProbeRunner) recordProbeResult(ctx context.Context, result *OpenAIDowngradeProbeResult) error {
-	if err := r.store.RecordOpenAIDowngradeProbe(ctx, result); err != nil {
+// openAIProbeAccountUnchanged reports whether the admin-visible scheduling
+// surface of the account still matches the snapshot taken before the probe
+// spent up to two minutes in flight. Only the three fields that corrupt
+// state-machine attribution are compared: proxy binding, the schedulable
+// switch and lifecycle status. Cosmetic edits (name, Extra knobs) are
+// deliberately excluded — the probe outcome stays valid for attribution —
+// because comparing Extra would also break on this runner's own sol-fallback
+// Extra writes within the same tick.
+func openAIProbeAccountUnchanged(before, after *Account) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	return before.Status == after.Status &&
+		before.Schedulable == after.Schedulable &&
+		sameOpenAIProbeProxy(before.ProxyID, after.ProxyID)
+}
+
+// probeAccountFresh re-reads the account after an in-flight probe and reports
+// whether the pre-probe snapshot is still the scheduling truth.
+func (r *OpenAIDowngradeProbeRunner) probeAccountFresh(
+	ctx context.Context,
+	account *Account,
+) (bool, error) {
+	fresh, err := r.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return false, err
+	}
+	return openAIProbeAccountUnchanged(account, fresh), nil
+}
+
+// skipStaleProbeResult parks a probe result whose account changed mid-flight.
+// Telemetry was already recorded; every counter, transition and account
+// mutation is dropped so the next due run re-evaluates from the admin's
+// current truth instead of a stale snapshot.
+func (r *OpenAIDowngradeProbeRunner) skipStaleProbeResult(
+	ctx context.Context,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) error {
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	state.NextProbeAt = now.Add(r.nextDelay())
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventProbeSkippedStale, map[string]any{
+			"http_status": result.HTTPStatus,
+			"mode":        result.Mode,
+		}); err != nil {
 		return err
 	}
-	if result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden {
-		return r.accountRepo.SetError(ctx, result.AccountID, "OpenAI probe authentication failed")
+	return r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// applyOpenAIProbeAuthPolicy is the degrade-not-kill policy for probe
+// authentication failures. The first consecutive 401/403 puts the account
+// into auth-strike limbo: scheduling is paused and a fast recheck runs in
+// openAIDowngradeAuthRetryInterval. Limbo exits three ways:
+//   - another auth strike reaches OpenAIDowngradeAuthStrikeThreshold and the
+//     account graduates to error status (stop=true);
+//   - any upstream answer that is not 401/403 proves the credentials were
+//     accepted, so the pause is cleared and the normal state machine runs;
+//   - a no-answer result (network/token) proves nothing: limbo persists and
+//     the fast recheck cadence is kept.
+//
+// stop=true means the caller must not run the degradation state machine for
+// this result.
+func (r *OpenAIDowngradeProbeRunner) applyOpenAIProbeAuthPolicy(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
+	now time.Time,
+) (bool, error) {
+	isAuthFailure := !result.TransportOK &&
+		(result.HTTPStatus == http.StatusUnauthorized || result.HTTPStatus == http.StatusForbidden)
+	if !isAuthFailure {
+		if state.AuthConsecutiveFailures == 0 {
+			return false, nil
+		}
+		reachedUpstream := result.TransportOK ||
+			(result.HTTPStatus != 0 &&
+				result.HTTPStatus != http.StatusUnauthorized &&
+				result.HTTPStatus != http.StatusForbidden)
+		if !reachedUpstream {
+			return false, nil
+		}
+		// The upstream accepted the credentials: clear the strike pause. The
+		// unconditional re-enable deliberately favors auto-recovery over
+		// preserving a pause that was ours to begin with.
+		state.AuthConsecutiveFailures = 0
+		state.LastProbeAt = &now
+		state.UpdatedAt = now
+		if account.Status == StatusActive && !account.Schedulable {
+			if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, true); err != nil {
+				return true, err
+			}
+		}
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventProbeAuthCleared, map[string]any{
+				"http_status": result.HTTPStatus,
+			}); err != nil {
+			return true, err
+		}
+		return false, r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	return nil
+	state.AuthConsecutiveFailures++
+	state.LastProbeAt = &now
+	state.UpdatedAt = now
+	if state.AuthConsecutiveFailures >= OpenAIDowngradeAuthStrikeThreshold {
+		if err := r.accountRepo.SetError(ctx, account.ID, "OpenAI probe authentication failed"); err != nil {
+			return true, err
+		}
+		state.AuthConsecutiveFailures = 0
+		state.NextProbeAt = now.Add(openAIDowngradeReplacementWindow)
+		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+			OpenAIDowngradeEventProbeAuthTerminal, map[string]any{
+				"http_status": result.HTTPStatus,
+			}); err != nil {
+			return true, err
+		}
+		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+	}
+	if err := r.accountRepo.SetSchedulable(ctx, state.AccountID, false); err != nil {
+		return true, err
+	}
+	state.NextProbeAt = now.Add(openAIDowngradeAuthRetryInterval)
+	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
+		OpenAIDowngradeEventProbeAuthStrike, map[string]any{
+			"http_status": result.HTTPStatus,
+			"strikes":     state.AuthConsecutiveFailures,
+		}); err != nil {
+		return true, err
+	}
+	return true, r.store.SaveOpenAIDowngradeState(ctx, state)
+}
+
+// runProbeRecorded is the single guarded entry point for executing one probe:
+// it records telemetry, verifies the account did not change during the
+// in-flight window, then applies the auth-failure policy. stop=true means
+// the caller must not apply further state-machine transitions; err carries
+// the store failure when present.
+func (r *OpenAIDowngradeProbeRunner) runProbeRecorded(
+	ctx context.Context,
+	account *Account,
+	state *OpenAIDowngradeProbeState,
+	mode string,
+	now time.Time,
+) (result OpenAIDowngradeProbeResult, stop bool, err error) {
+	result = r.runProbe(ctx, account, mode)
+	if err := r.store.RecordOpenAIDowngradeProbe(ctx, &result); err != nil {
+		return result, true, err
+	}
+	fresh, err := r.probeAccountFresh(ctx, account)
+	if err != nil {
+		return result, true, err
+	}
+	if !fresh {
+		return result, true, r.skipStaleProbeResult(ctx, state, result, now)
+	}
+	authStopped, err := r.applyOpenAIProbeAuthPolicy(ctx, account, state, result, now)
+	if err != nil {
+		return result, true, err
+	}
+	if authStopped {
+		return result, true, nil
+	}
+	return result, false, nil
+}
+
+// recordProbeResult 只落遥测行。401/403 的降级不杀策略在状态机侧
+// （applyOpenAIProbeAuthPolicy，经 runProbeRecorded）——记录入口不再直接
+// SetError，诊断针（只落证据行不动状态机）复用本入口也安全。
+func (r *OpenAIDowngradeProbeRunner) recordProbeResult(ctx context.Context, result *OpenAIDowngradeProbeResult) error {
+	return r.store.RecordOpenAIDowngradeProbe(ctx, result)
 }
 
 func (r *OpenAIDowngradeProbeRunner) probe(
@@ -1789,15 +2075,10 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		return result
 	}
 	var proxyURL string
-	var bucketProxy *Proxy
 	if r.proxyRepo != nil {
 		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
-		if err == nil && account.ProxyID != nil {
-			bucketProxy, _ = r.proxyRepo.GetByID(ctx, *account.ProxyID)
-		}
 	} else {
 		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
-		bucketProxy = account.Proxy
 	}
 	if err != nil {
 		result.ErrorMessage = "account proxy unavailable"
@@ -1849,8 +2130,20 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		if r.tlsProfiles != nil {
 			probeProfile = r.tlsProfiles.ResolveTLSProfile(account)
 		}
+		// 救治区账号的资格针优先走插件钉扎传输（r17bb）：1217 实证被
+		// Cookie 钉扎救回的号在裸 LB 路上 4 针全 200+错答——资格针不与
+		// 真实流量同路就结构性测不出救治效果。插件未启用/未处理时回退
+		// 原一次性专用传输，非救治账号路径不变。
 		var resp *http.Response
-		resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+		if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(account) != nil {
+			var handled bool
+			resp, handled, requestErr = r.pluginRoundTrip(ctx, req, proxyURL, account)
+			if !handled {
+				resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+			}
+		} else {
+			resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
+		}
 		if requestErr != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -1875,6 +2168,12 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 	// 上游已实测拒绝非流式（HTTP 400 "Stream must be set to true"），
 	// 因此第一针直接走流式；非流式仅作为历史兼容路径保留在重试逻辑里。
 	status, respHeader, responseBody, requestErr := requestProbe(true)
+	// Once a request attempt has been made, archive exactly one final outcome.
+	// The archive contains only the fixed error class and response tail, never
+	// the request, credential, or raw transport error.
+	defer func() {
+		archiveOpenAIDowngradeProbe(account.ID, mode, question, &result, responseBody)
+	}()
 	result.Latency = time.Since(started)
 	failureStage := "probe transport failed: "
 	if requestErr == nil && shouldRetryOpenAIDowngradeStreamProbe(status, responseBody) {
@@ -1892,24 +2191,6 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 			"status_292", status292,
 			"current_turn_state_len", turnStateLen,
 			"codex_turn_state_len", codexTurnStateLen)
-	}
-	// 相位B（2026-09-21）：探针顺带采票——响应头本带 x-codex-turn-state，
-	// 零新增流量形态。仅 200 且长度过白名单（292/332 双口径）才入库；
-	// 任何失败只记日志，绝不影响探针主判定。采的是账号当前绑定的业务
-	// 出口上的票，出口指纹天然对齐（注入侧同指纹校验）。
-	// r17ae：Set-Cookie 的 __cflb+__oailb 对成套入库（堵实例粘性缺口），
-	// 空对不阻断采票。
-	if status == http.StatusOK {
-		if ticketStore, ok := r.store.(OpenAICodexTicketStore); ok {
-			harvestMode := OpenAICodexTicketHarvestProbe
-			if isOpenAIDynamicProxyBucket(bucketProxy) {
-				harvestMode = OpenAICodexTicketHarvestDynamic
-			}
-			HarvestOpenAICodexTicket(ctx, ticketStore, account.ID, account.ProxyID,
-				probeModel, extractOpenAICodexTurnState(respHeader),
-				ExtractOpenAICodexCookiePair(respHeader.Values("Set-Cookie")),
-				harvestMode, time.Now())
-		}
 	}
 	slog.Info("openai_probe_codex_turn_state_len",
 		"account_id", account.ID,
@@ -2015,7 +2296,16 @@ func openAIProbeCodexTurnStateLen(header http.Header) int {
 }
 
 func (r *OpenAIDowngradeProbeResult) applyResponse(body []byte, answerPattern *regexp.Regexp) {
-	r.AnswerCorrect, r.ReasoningTokens, r.Juice = parseOpenAIDowngradeProbeResponse(body, answerPattern)
+	text, reasoningTokens, juice := parseOpenAIDowngradeProbeCompletion(body)
+	if answerPattern == nil {
+		// nil 判分正则 = 拒收（与 parseOpenAIDowngradeProbeResponse 首行同形）：
+		// 不产出可判定结果，零计数。
+		text, reasoningTokens, juice = "", nil, nil
+	}
+	r.gradedText = text
+	r.AnswerCorrect = text != "" && answerPattern.MatchString(text)
+	r.ReasoningTokens = reasoningTokens
+	r.Juice = juice
 	// An incomplete body is not a wrong answer. Keep it out of all votes.
 	r.TransportOK = r.ReasoningTokens != nil
 	r.ErrorMessage = ""
@@ -2330,10 +2620,25 @@ func shouldRetryOpenAIDowngradeStreamProbe(status int, body []byte) bool {
 
 // parseOpenAIDowngradeProbeResponse 按该针题目专属的期望答案正则判分；
 // 正则由题域生成器构造（数字带边界 / 星期X 字面），见
-// openai_downgrade_probe_questions.go。
+// openai_downgrade_probe_questions.go。nil 正则 = 拒收（判分依赖缺席，
+// 与结构失败同形：false + 零计数）。
 func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp) (bool, *int, *int) {
-	if answerPattern == nil || len(body) > openAIDowngradeProbeMaxBodyBytes {
+	text, reasoningTokens, juice := parseOpenAIDowngradeProbeCompletion(body)
+	if answerPattern == nil || text == "" {
 		return false, nil, nil
+	}
+	return answerPattern.MatchString(text), reasoningTokens, juice
+}
+
+// parseOpenAIDowngradeProbeCompletion 是 parseOpenAIDowngradeProbeResponse 的
+// 判分无关内核（r17am）：解析 SSE / 终态 JSON，返回模型答案全文与用量计数。
+// 结构损坏、无 usage、无 reasoning 计数、答案文本为空等一切失败路径统一
+// 返回空文本——空文本即「无法判定」。留档层（probe-archive）直接调用本函数
+// 拿答案全文，不再依赖响应尾截断（终态 usage 记录霸占尾部，答案文本几乎
+// 总被截掉——9/28 事故复盘实证）。
+func parseOpenAIDowngradeProbeCompletion(body []byte) (string, *int, *int) {
+	if len(body) > openAIDowngradeProbeMaxBodyBytes {
+		return "", nil, nil
 	}
 	decode := func(data []byte) (map[string]any, bool) {
 		decoder := json.NewDecoder(bytes.NewReader(data))
@@ -2444,7 +2749,7 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 		for _, line := range strings.Split(strings.TrimSuffix(stream, "\n"), "\n") {
 			if line == "" {
 				if !consume() {
-					return false, nil, nil
+					return "", nil, nil
 				}
 				eventName, dataLines = "", nil
 				continue
@@ -2459,28 +2764,28 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 			}
 		}
 		if completion == nil || len(dataLines) != 0 {
-			return false, nil, nil
+			return "", nil, nil
 		}
 	}
 	if value, exists := completion["response"]; isJSON && exists {
 		nested, ok := value.(map[string]any)
 		if !ok || completion["type"] != "response.completed" {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		completion = nested
 	}
 	if kind, exists := completion["type"]; exists && kind != "response" && kind != "response.completed" {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if status, exists := completion["status"]; exists && status != "completed" {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if completion["error"] != nil || completion["incomplete_details"] != nil {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	usage, ok := completion["usage"].(map[string]any)
 	if !ok {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	// Do not search output, metadata or echoed input for usage counters.
 	var reasoningTokens, juice *int
@@ -2488,25 +2793,25 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 	if value, exists := usage["output_tokens_details"]; exists {
 		details, ok = value.(map[string]any)
 		if !ok {
-			return false, nil, nil
+			return "", nil, nil
 		}
 	}
 	for _, counters := range []map[string]any{usage, details} {
 		if value, exists := counters["reasoning_tokens"]; exists {
 			n, valid := jsonNumberAsInt(value)
 			if !valid || (reasoningTokens != nil && *reasoningTokens != n) {
-				return false, nil, nil
+				return "", nil, nil
 			}
 			reasoningTokens = &n
 		}
 	}
 	if reasoningTokens == nil {
-		return false, nil, nil
+		return "", nil, nil
 	}
 	if value, exists := usage["juice"]; exists {
 		n, valid := jsonNumberAsInt(value)
 		if !valid {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		juice = &n
 	}
@@ -2515,16 +2820,16 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 	if value, exists := completion["output"]; exists {
 		output, ok := value.([]any)
 		if !ok {
-			return false, nil, nil
+			return "", nil, nil
 		}
 		terminalOutputEmpty = len(output) == 0
 		for _, value := range output {
 			item, ok := value.(map[string]any)
 			if !ok {
-				return false, nil, nil
+				return "", nil, nil
 			}
 			if !appendOpenAIProbeItemOutputText(&text, item) {
-				return false, nil, nil
+				return "", nil, nil
 			}
 		}
 	}
@@ -2539,9 +2844,9 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 		text.WriteString(deltas.String())
 	}
 	if strings.TrimSpace(text.String()) == "" {
-		return false, nil, nil
+		return "", nil, nil
 	}
-	return answerPattern != nil && answerPattern.MatchString(text.String()), reasoningTokens, juice
+	return text.String(), reasoningTokens, juice
 }
 
 // appendOpenAIProbeItemOutputText 按终态 output 数组同款规则走查单个输出条目：

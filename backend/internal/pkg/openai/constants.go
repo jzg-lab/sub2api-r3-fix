@@ -19,6 +19,7 @@ type Model struct {
 // DefaultModels OpenAI models list
 var DefaultModels = []Model{
 	{ID: "gpt-5.6-sol", Object: "model", Created: 1780876800, OwnedBy: "openai", Type: "model", DisplayName: "GPT-5.6 Sol"},
+	{ID: "gpt-6.1-sol", Object: "model", Created: 0, OwnedBy: "openai", Type: "model", DisplayName: "GPT-6.1 Sol"},
 	{ID: "gpt-6-astra", Object: "model", Created: 1788480000, OwnedBy: "openai", Type: "model", DisplayName: "GPT-6 Astra"},
 	{ID: "gpt-6-sol", Object: "model", Created: 1790035200, OwnedBy: "openai", Type: "model", DisplayName: "GPT-6 Sol"},
 	{ID: "gpt-6-luna", Object: "model", Created: 1790035200, OwnedBy: "openai", Type: "model", DisplayName: "GPT-6 Luna"},
@@ -50,6 +51,13 @@ func DefaultModelIDs() []string {
 
 // DefaultTestModel default model for testing OpenAI accounts
 const DefaultTestModel = "gpt-5.4"
+
+// DefaultChatGPTTestModel is the empty-model default for OAuth (ChatGPT Codex)
+// account tests. The ChatGPT upstream rejects platform-only models with 400
+// ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT
+// account", 2026-10-02 production-proven on r17ba), so OAuth tests and rescue
+// lane seeds (which pass an empty modelID) must land on a ChatGPT-valid model.
+const DefaultChatGPTTestModel = "gpt-5.6-sol"
 
 // CodexUsageProbeModel is the model used for OAuth Codex usage probes.
 const CodexUsageProbeModel = "codex-auto-review"
@@ -166,4 +174,10 @@ func IsGPT6SolOrLunaModelSpelling(model string) bool {
 		}
 	}
 	return false
+}
+
+// IsGPT61SolModelSpelling recognizes only the verified upstream model ID.
+// Effort, preview, and dated suffixes remain distinct until upstream support is proven.
+func IsGPT61SolModelSpelling(model string) bool {
+	return CanonicalizeOpenAIModelAliasSpelling(model) == "gpt-6.1-sol"
 }

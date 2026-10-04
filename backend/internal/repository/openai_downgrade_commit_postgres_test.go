@@ -39,6 +39,11 @@ func newProbePostgresWithOwnership(t *testing.T, ownership bool) *sql.DB {
 		"241_openai_probe_turn_state_len.sql",
 		"244_openai_probe_harvest_mode.sql",
 		"246_openai_probe_nullable_verdict.sql",
+		// r17aq：RecordOpenAIDowngradeProbe 落账后同步聚合 proxy_outcome_stats；
+		// Save 写 auth_consecutive_failures 列。
+		"227_proxy_outcome_stats.sql",
+		"247_probe_auth_strikes.sql",
+		"248_drop_harvest_lane_and_codex_tickets.sql",
 	)
 	return newProbePostgresWithMigrations(t, migrations)
 }
@@ -80,7 +85,8 @@ func newProbePostgresWithMigrations(t *testing.T, migrations []string) *sql.DB {
 	_, err = db.Exec(`
 			CREATE TABLE proxies (
 				id BIGINT PRIMARY KEY, status VARCHAR(20) NOT NULL DEFAULT 'active',
-				deleted_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, exit_ip TEXT
+				deleted_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, exit_ip TEXT,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 			);
 			CREATE TABLE accounts (
 				id BIGINT PRIMARY KEY, platform VARCHAR(50) NOT NULL DEFAULT 'openai',
@@ -139,9 +145,22 @@ func seedProbePostgres(t *testing.T, db *sql.DB) *service.OpenAIDowngradeMutatio
 
 func probePostgresSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
+	proxyStats := "null"
+	var proxyStatsExists bool
+	require.NoError(t, db.QueryRow(
+		"SELECT to_regclass('proxy_outcome_stats') IS NOT NULL",
+	).Scan(&proxyStatsExists))
+	if proxyStatsExists {
+		require.NoError(t, db.QueryRow(`
+			SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY proxy_id), 'null'::jsonb)::text
+			FROM proxy_outcome_stats s
+		`).Scan(&proxyStats))
+	}
 	var snapshot string
 	err := db.QueryRow(`
 		SELECT jsonb_build_object(
+			'proxies', (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM proxies p),
+			'proxy_stats', $1::jsonb,
 			'accounts', (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM accounts a),
 			'controls', (SELECT jsonb_agg(to_jsonb(c) ORDER BY account_id) FROM openai_downgrade_probe_controls c),
 			'states', (SELECT jsonb_agg(to_jsonb(s) ORDER BY account_id) FROM openai_downgrade_probe_states s),
@@ -149,18 +168,21 @@ func probePostgresSnapshot(t *testing.T, db *sql.DB) string {
 			'events', (SELECT COUNT(*) FROM openai_downgrade_probe_events),
 			'outbox', (SELECT COUNT(*) FROM scheduler_outbox)
 		)::text
-	`).Scan(&snapshot)
+	`, proxyStats).Scan(&snapshot)
 	require.NoError(t, err)
 	return snapshot
 }
 
 func TestOpenAIProbeNullableVerdictMigrationAndWrites(t *testing.T) {
 	db := newProbePostgresWithMigrations(t, []string{
+		"227_proxy_outcome_stats.sql",
 		"237_openai_downgrade_probe.sql",
 		"239_openai_probe_ownership.sql",
 		"240_openai_probe_rate_limit_streak.sql",
 		"241_openai_probe_turn_state_len.sql",
 		"244_openai_probe_harvest_mode.sql",
+		"247_probe_auth_strikes.sql",
+		"248_drop_harvest_lane_and_codex_tickets.sql",
 	})
 	seedProbePostgres(t, db)
 	_, err := db.Exec(`
@@ -210,8 +232,8 @@ func TestOpenAIProbeNullableVerdictMigrationAndWrites(t *testing.T) {
 
 func TestOpenAIProbePostgresRollbackAtEveryWriteBoundary(t *testing.T) {
 	for _, table := range []string{
-		"accounts", "openai_downgrade_probe_results", "openai_downgrade_probe_events",
-		"openai_downgrade_probe_states", "scheduler_outbox",
+		"accounts", "openai_downgrade_probe_results", "proxy_outcome_stats", "proxies",
+		"openai_downgrade_probe_events", "openai_downgrade_probe_states", "scheduler_outbox",
 	} {
 		t.Run(table, func(t *testing.T) {
 			db := newProbePostgres(t)

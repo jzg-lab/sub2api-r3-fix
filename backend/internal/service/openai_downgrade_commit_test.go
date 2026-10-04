@@ -494,6 +494,9 @@ func TestOpenAIProbeAuthenticationFailureIsStaged(t *testing.T) {
 			state := &OpenAIDowngradeProbeState{
 				AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
 				CurrentProxyID: &proxyID, OriginalProxyID: &proxyID, UpdatedAt: now,
+				// r17aq：401/403 两振出局——预置一振，本针即终端振，
+				// SetError 仍只经 staging 落（不直击活账号）。
+				AuthConsecutiveFailures: 1,
 			}
 			before := *state
 			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
@@ -506,10 +509,40 @@ func TestOpenAIProbeAuthenticationFailureIsStaged(t *testing.T) {
 			require.Empty(t, repo.schedulableCalls)
 			require.Zero(t, base.probeCalls)
 			require.Equal(t, "OpenAI probe authentication failed", *store.observed.ErrorMessage)
-			require.NotNil(t, store.observed.Schedulable)
-			require.False(t, *store.observed.Schedulable)
 		})
 	}
+}
+
+// TestOpenAIProbeAuthStrikePauseIsStaged 回归 r17aq auth 两振出局的原子路径：
+// 首振只暂停调度（SetSchedulable(false) 经 staging），绝不直击活账号。
+func TestOpenAIProbeAuthStrikePauseIsStaged(t *testing.T) {
+	now := time.Now()
+	proxyID := int64(3)
+	account := &Account{
+		ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, ProxyID: &proxyID, UpdatedAt: now,
+	}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	base := &downgradeProbeStoreStub{}
+	store := &downgradeAtomicStoreStub{downgradeProbeStoreStub: base, commitErr: ErrOpenAIProbeStale}
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	state := &OpenAIDowngradeProbeState{
+		AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal",
+		CurrentProxyID: &proxyID, OriginalProxyID: &proxyID, UpdatedAt: now,
+	}
+	before := *state
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{AccountID: 7, ProxyID: &proxyID, HTTPStatus: http.StatusUnauthorized}
+	}
+	require.ErrorIs(t, runner.processStateAtomic(context.Background(), state, now), ErrOpenAIProbeStale)
+	require.Equal(t, before, *state)
+	require.Equal(t, StatusActive, account.Status, "first strike must not kill")
+	require.True(t, account.Schedulable, "staged pause must not touch the live account")
+	require.Empty(t, repo.schedulableCalls)
+	require.Zero(t, base.probeCalls)
+	require.Nil(t, store.observed.ErrorMessage, "first strike stages a pause, not an error")
+	require.NotNil(t, store.observed.Schedulable)
+	require.False(t, *store.observed.Schedulable)
 }
 
 // TestOpenAIProbeAtomicCommitRetriesOnceAfterNeutralGenerationBump 回归
@@ -641,18 +674,6 @@ func TestOpenAIProbeStagingMismatchRequalifiedByCurrentBucketHealth(t *testing.T
 	require.False(t, stage2.mutation.CompleteQualification)
 }
 
-// r17u 回归：stagedRunner 采票直通——staging 必须实现 OpenAICodexTicketStore
-// （生产实证：断言失败 → 动态桶 332 针多根票表恒空零日志）。
-func TestOpenAIProbeStagingImplementsTicketStore(t *testing.T) {
-	var _ OpenAICodexTicketStore = (*openAIProbeStaging)(nil)
-	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
-	stage := newOpenAIProbeStaging(runner, &Account{ID: 1}, &OpenAIDowngradeProbeState{AccountID: 1})
-	staged := runner.stagedRunner(stage)
-	ts, ok := staged.store.(OpenAICodexTicketStore)
-	require.True(t, ok, "staged runner store must satisfy ticket store for probe-side harvest")
-	_ = ts
-}
-
 func TestOpenAIProbeStagingAllowsBrowserProxyChanges(t *testing.T) {
 	now := time.Now()
 	homeID, dynID := int64(5), int64(11)
@@ -668,21 +689,21 @@ func TestOpenAIProbeStagingAllowsBrowserProxyChanges(t *testing.T) {
 	}
 	runner := NewOpenAIDowngradeProbeRunner(nil, nil, nil, nil, nil, nil)
 
-	t.Run("harvest_return_to_original_bucket", func(t *testing.T) {
+	t.Run("qualification_return_to_original_bucket", func(t *testing.T) {
 		account := newBrowserAccount()
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
-			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
 		require.NoError(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &homeID))
 		require.True(t, stage.mutation.ProxyChanged)
 	})
 
-	t.Run("harvest_to_other_static_bucket", func(t *testing.T) {
+	t.Run("qualification_to_other_static_bucket", func(t *testing.T) {
 		account := newBrowserAccount()
 		otherID := int64(7)
 		stage := newOpenAIProbeStaging(runner, account, &OpenAIDowngradeProbeState{
-			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+			AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 			CurrentProxyID: &dynID, OriginalProxyID: &homeID,
 		})
 		require.NoError(t, stage.SetOpenAIAccountProxy(context.Background(), 1136, &otherID))
@@ -713,7 +734,7 @@ func TestOpenAIProbeCommitFailureYieldsSchedule(t *testing.T) {
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	// 预置真库状态行：next_probe_at 在过去（冻结形态），UpdatedAt 与探针前提一致。
 	rowState := OpenAIDowngradeProbeState{
-		AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		AccountID: 1136, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
 		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
 	}
@@ -740,7 +761,7 @@ func TestOpenAIProbeCommitFailureYieldsSchedule(t *testing.T) {
 		"yielded schedule must be ~30min out, got %v", base.state.NextProbeAt.Sub(now))
 	require.True(t, base.state.NextProbeAt.Before(now.Add(45*time.Minute)))
 	// 让位只动排期，不动 state/proxy 实质。
-	require.Equal(t, "harvest", base.state.ProbeMode)
+	require.Equal(t, "qualification", base.state.ProbeMode)
 	require.Equal(t, proxyID, *base.state.CurrentProxyID)
 }
 
@@ -755,7 +776,7 @@ func TestOpenAIProbeCommitFailureYieldRespectsConcurrentAdvance(t *testing.T) {
 	}
 	repo := &downgradeProbeAccountRepoStub{account: account}
 	rowState := OpenAIDowngradeProbeState{
-		AccountID: 1137, State: OpenAIDowngradeStateOnDuty, ProbeMode: "harvest",
+		AccountID: 1137, State: OpenAIDowngradeStateOnDuty, ProbeMode: "qualification",
 		CurrentProxyID: &proxyID, OriginalProxyID: int64Ptr(5),
 		NextProbeAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
 	}

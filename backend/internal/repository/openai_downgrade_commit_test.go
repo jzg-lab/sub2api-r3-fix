@@ -34,8 +34,27 @@ func probeCommitFixture() *service.OpenAIDowngradeMutation {
 }
 
 func TestOpenAIProbeCommitRollbackAtEveryWriteBoundary(t *testing.T) {
-	steps := []string{"account_write", "result", "event", "state", "outbox"}
-	for _, failure := range append(append([]string{}, steps...), "begin", "commit", "success") {
+	// r17aq：result 落账后紧跟 proxy_outcome_stats 聚合（结果带 proxy 绑定
+	// 时：聚合 upsert + proxies.bucket_risk_score 同步两跳），它们同样是
+	// 事务内写边界，失败必须回滚。
+	type commitStep struct {
+		name  string
+		query string
+	}
+	steps := []commitStep{
+		{"account_write", "UPDATE accounts SET"},
+		{"result", "INSERT INTO openai_downgrade_probe_results"},
+		{"stats_upsert", "INSERT INTO proxy_outcome_stats"},
+		{"stats_score", "UPDATE proxies p"},
+		{"event", "INSERT INTO openai_downgrade_probe_events"},
+		{"state", "UPDATE openai_downgrade_probe_states"},
+		{"outbox", "INSERT INTO scheduler_outbox"},
+	}
+	names := make([]string, 0, len(steps))
+	for _, step := range steps {
+		names = append(names, step.name)
+	}
+	for _, failure := range append(append([]string{}, names...), "begin", "commit", "success") {
 		t.Run(failure, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
@@ -49,15 +68,10 @@ func TestOpenAIProbeCommitRollbackAtEveryWriteBoundary(t *testing.T) {
 				begin.WillReturnError(injected)
 			} else {
 				expectProbeCommitLocks(mock, mutation)
-				queries := []string{
-					"UPDATE accounts SET", "INSERT INTO openai_downgrade_probe_results",
-					"INSERT INTO openai_downgrade_probe_events", "UPDATE openai_downgrade_probe_states",
-					"INSERT INTO scheduler_outbox",
-				}
 				failedWrite := false
-				for i, step := range steps {
-					expect := mock.ExpectExec(queries[i])
-					if step == failure {
+				for _, step := range steps {
+					expect := mock.ExpectExec(step.query)
+					if step.name == failure {
 						expect.WillReturnError(injected)
 						failedWrite = true
 						break
@@ -221,6 +235,10 @@ func TestOpenAIProbeCommitQualificationWithFirstBucketAssignment(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO proxy_outcome_stats").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE proxies p").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE openai_downgrade_probe_states").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO scheduler_outbox").
@@ -256,6 +274,10 @@ func TestOpenAIProbeCommitCompletesQualificationAtomically(t *testing.T) {
 	mock.ExpectExec("UPDATE accounts SET.*openai_downgrade_qualification").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO proxy_outcome_stats").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE proxies p").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE openai_downgrade_probe_states").
 		WillReturnResult(sqlmock.NewResult(0, 1))

@@ -92,9 +92,13 @@ temp/
 # ===================
 # 构建产物
 # ===================
+__pycache__/
+*.py[cod]
 dist/
 build/
 release/
+!deploy/codex-lb-cookie-pin/tools/release/
+!deploy/codex-lb-cookie-pin/tools/release/*.mjs
 
 # This directory contains Vite build source, not build output.
 !frontend/build/
@@ -124,6 +128,8 @@ backend/.installed
 tests
 !deploy/tests/
 !deploy/tests/**
+!deploy/auth-browser/tests/
+!deploy/auth-browser/tests/**
 CLAUDE.md
 .claude
 scripts

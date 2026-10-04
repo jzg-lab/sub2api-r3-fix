@@ -220,6 +220,187 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 	return nil
 }
 
+func (r *openAIDowngradeProbeRepository) CommitOpenAIAccountReenable(
+	ctx context.Context,
+	mutation *service.OpenAIAccountReenableMutation,
+) (bool, error) {
+	if mutation == nil || mutation.State == nil || mutation.AccountID <= 0 ||
+		mutation.State.AccountID != mutation.AccountID ||
+		mutation.State.State != service.OpenAIDowngradeStateOnDuty ||
+		mutation.State.ProbeMode != "qualification" ||
+		mutation.ReenabledAt.IsZero() {
+		return false, errors.New("invalid OpenAI account reenable mutation")
+	}
+	beginner, ok := r.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	})
+	if !ok {
+		return false, service.ErrOpenAIProbeAtomicStore
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		accountUpdatedAt time.Time
+		proxyID          sql.NullInt64
+		status           string
+		schedulable      bool
+		platform         string
+		accountType      string
+		parentAccountID  sql.NullInt64
+		notExpired       bool
+		errorMessage     sql.NullString
+	)
+	err = scanSingleRow(ctx, tx, `
+		SELECT updated_at, proxy_id, status, schedulable, platform, type,
+			parent_account_id,
+			(auto_pause_on_expired IS NOT TRUE OR expires_at IS NULL OR expires_at > NOW()),
+			error_message
+		FROM accounts
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE
+	`, []any{mutation.AccountID}, &accountUpdatedAt, &proxyID, &status, &schedulable,
+		&platform, &accountType, &parentAccountID, &notExpired, &errorMessage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, service.ErrOpenAIProbeStale
+	}
+	if err != nil {
+		return false, err
+	}
+	if !accountUpdatedAt.Equal(mutation.ExpectedAccountUpdatedAt) ||
+		!nullableInt64MatchesPointer(proxyID, mutation.ExpectedProxyID) ||
+		status != mutation.ExpectedStatus ||
+		schedulable != mutation.ExpectedSchedulable {
+		return false, service.ErrOpenAIProbeStale
+	}
+
+	var (
+		manualPaused bool
+		ownedError   sql.NullString
+	)
+	err = scanSingleRow(ctx, tx, `
+		SELECT manual_paused, owned_error
+		FROM openai_downgrade_probe_controls
+		WHERE account_id = $1
+		FOR UPDATE
+	`, []any{mutation.AccountID}, &manualPaused, &ownedError)
+	if errors.Is(err, sql.ErrNoRows) {
+		manualPaused = false
+		ownedError = sql.NullString{}
+	} else if err != nil {
+		return false, err
+	}
+
+	ownedStatusError := status == service.StatusError &&
+		ownedError.Valid && errorMessage.Valid && ownedError.String == errorMessage.String
+	// schedulable 阻断项的救治区豁免（r17ba）：在区号入区即有意开调度
+	//（救治组喂种子/测试流量），复活点击 = revived 标签 → reenable 考证，
+	// 带 AllowSchedulable 放行；其余闸（平台/影子/过期/状态）不豁免。
+	if platform != service.PlatformOpenAI || accountType != service.AccountTypeOAuth ||
+		parentAccountID.Valid || !notExpired || (!mutation.AllowSchedulable && schedulable) ||
+		(status != service.StatusActive && !ownedStatusError) {
+		return false, service.ErrOpenAIReenableBlocked
+	}
+	if manualPaused && !mutation.Unpause {
+		return false, service.ErrOpenAIReenablePaused
+	}
+
+	var (
+		stateUpdatedAt time.Time
+		stateName      string
+	)
+	err = scanSingleRow(ctx, tx, `
+		SELECT updated_at, state
+		FROM openai_downgrade_probe_states
+		WHERE account_id = $1
+		FOR UPDATE
+	`, []any{mutation.AccountID}, &stateUpdatedAt, &stateName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, service.ErrOpenAIProbeStale
+	}
+	if err != nil {
+		return false, err
+	}
+	if !stateUpdatedAt.Equal(mutation.ExpectedStateUpdatedAt) {
+		return false, service.ErrOpenAIProbeStale
+	}
+	if stateName != service.OpenAIDowngradeStatePendingReplace {
+		return false, service.ErrOpenAIReenableNotDead
+	}
+
+	unpaused := manualPaused && mutation.Unpause
+	if unpaused {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE openai_downgrade_probe_controls
+			SET manual_paused = FALSE, updated_at = clock_timestamp()
+			WHERE account_id = $1 AND manual_paused IS TRUE
+		`, mutation.AccountID)
+		if err := requireOpenAIProbeUpdatedRow(result, err); err != nil {
+			return false, err
+		}
+		if err := appendOpenAIReenableEvent(ctx, tx, mutation.AccountID,
+			mutation.State.CurrentProxyID, "manual_unpause", map[string]any{
+				"via": "reenable",
+				"why": "dead-account rescue (r17an user ruling 2026-09-28)",
+			}); err != nil {
+			return false, err
+		}
+	}
+	if err := appendOpenAIReenableEvent(ctx, tx, mutation.AccountID,
+		mutation.State.CurrentProxyID, "manual_reenable", map[string]any{
+			"from_state":   service.OpenAIDowngradeStatePendingReplace,
+			"to_mode":      "qualification",
+			"next_probeat": mutation.State.NextProbeAt.Format(time.RFC3339),
+			"unpaused":     unpaused,
+		}); err != nil {
+		return false, err
+	}
+
+	state := *mutation.State
+	state.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	if !state.UpdatedAt.After(mutation.ExpectedStateUpdatedAt) {
+		state.UpdatedAt = mutation.ExpectedStateUpdatedAt.Add(time.Microsecond)
+	}
+	transactionRepo := &openAIDowngradeProbeRepository{db: tx}
+	if err := transactionRepo.SaveOpenAIDowngradeState(ctx, &state); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	*mutation.State = state
+	return unpaused, nil
+}
+
+func appendOpenAIReenableEvent(
+	ctx context.Context,
+	tx *sql.Tx,
+	accountID int64,
+	proxyID *int64,
+	eventType string,
+	details map[string]any,
+) error {
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details)
+		VALUES ($1, $2, $3, $4::jsonb)
+	`, accountID, proxyID, eventType, string(payload))
+	return err
+}
+
+func nullableInt64MatchesPointer(value sql.NullInt64, expected *int64) bool {
+	if expected == nil {
+		return !value.Valid
+	}
+	return value.Valid && value.Int64 == *expected
+}
+
 // Zero identifies a direct route when retiring a legacy qualification marker.
 func openAIQualificationProxyTarget(mutation *service.OpenAIDowngradeMutation) (int64, bool) {
 	if !mutation.ProxyChanged {
