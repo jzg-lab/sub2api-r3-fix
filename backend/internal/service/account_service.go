@@ -162,7 +162,8 @@ type AccountDuplicateRepository interface {
 	CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error
 }
 
-// AccountBillingSettingsRepository applies an admin edit without overwriting a
+// AccountBillingSettingsRepository preserves current scheduling during edits and
+// applies an admin edit without overwriting a
 // rate_multiplier that a successful upstream probe synchronized after the edit
 // form was loaded. A nil rateMultiplier means the request did not edit it.
 type AccountBillingSettingsRepository interface {
@@ -280,7 +281,7 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Platform:    req.Platform,
 		Type:        req.Type,
 		Credentials: SanitizeStoredCredentials(req.Platform, req.Credentials),
-		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra),
+		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, StripOpenAIRescueManagedExtra(req.Extra)),
 		ProxyID:     req.ProxyID,
 		Concurrency: req.Concurrency,
 		Priority:    req.Priority,
@@ -367,6 +368,11 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)
 	}
+	if req.GroupIDs != nil {
+		if err := ValidateOpenAIRescueGroupEdit(account, *req.GroupIDs); err != nil {
+			return nil, err
+		}
+	}
 
 	// 更新字段
 	if req.Name != nil {
@@ -389,6 +395,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		delete(extra, OllamaCloudUsageAutoRefreshExtraKey)
 		delete(extra, OllamaCloudUsageSnapshotExtraKey)
 		extra = PreserveModelRateLimitsForAccountEdit(account.Platform, account.Extra, extra)
+		extra = PreserveOpenAIRescueManagedExtra(account.Extra, extra)
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, extra)
 	} else {
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
@@ -423,12 +430,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		}
 	}
 
-	// 执行更新
-	if err := s.accountRepo.Update(ctx, account); err != nil {
-		return nil, fmt.Errorf("update account: %w", err)
-	}
-
-	// require_oauth_only 检查
+	// Validate OAuth-only groups before any account or group write.
 	if account.Type == AccountTypeAPIKey && req.GroupIDs != nil {
 		for _, gid := range *req.GroupIDs {
 			g, err := s.groupRepo.GetByID(ctx, gid)
@@ -441,8 +443,30 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		}
 	}
 
-	// 绑定分组
+	// 执行更新
+	groupsAppliedAtomically := false
 	if req.GroupIDs != nil {
+		if updater, ok := s.accountRepo.(AccountGroupEditRepository); ok {
+			if err := updater.UpdateWithAccountGroups(ctx, account, *req.GroupIDs, nil, nil, account.RateMultiplier); err != nil {
+				return nil, fmt.Errorf("update account: %w", err)
+			}
+			groupsAppliedAtomically = true
+		}
+	}
+	if !groupsAppliedAtomically {
+		var err error
+		if updater, ok := s.accountRepo.(AccountBillingSettingsRepository); ok {
+			err = updater.UpdateWithAccountBillingSettings(ctx, account, nil, nil, account.RateMultiplier)
+		} else {
+			err = s.accountRepo.Update(ctx, account)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("update account: %w", err)
+		}
+	}
+
+	// 绑定分组
+	if req.GroupIDs != nil && !groupsAppliedAtomically {
 		if err := s.accountRepo.BindGroups(ctx, account.ID, *req.GroupIDs); err != nil {
 			return nil, fmt.Errorf("bind groups: %w", err)
 		}

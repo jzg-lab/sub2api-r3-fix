@@ -2881,14 +2881,19 @@
       </div>
 
       <!-- Group Selection - 仅标准模式显示 -->
-      <GroupSelector
-        v-if="!authStore.isSimpleMode"
-        v-model="form.group_ids"
-        :groups="groups"
-        :platform="account?.platform"
-        :mixed-scheduling="mixedScheduling"
-        data-tour="account-form-groups"
-      />
+      <fieldset :disabled="account?.extra?.openai_rescue_lane != null">
+        <GroupSelector
+          v-if="!authStore.isSimpleMode"
+          v-model="form.group_ids"
+          :groups="groups"
+          :platform="account?.platform"
+          :mixed-scheduling="mixedScheduling"
+          data-tour="account-form-groups"
+        />
+      </fieldset>
+      <p v-if="!authStore.isSimpleMode && account?.extra?.openai_rescue_lane != null" class="mt-2 text-sm text-gray-500">
+        {{ t('admin.accounts.health.rescueGroupsLocked') }}
+      </p>
 
     </form>
 

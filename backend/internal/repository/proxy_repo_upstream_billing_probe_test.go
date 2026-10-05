@@ -198,7 +198,7 @@ func TestProxyDeleteAllowsHistoricalOpenAIOAuthBinding(t *testing.T) {
 		WithArgs(int64(9)).
 		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
 			AddRow("http", "same.example", 8080, "", "", service.StatusActive))
-	mock.ExpectExec(`(?s)UPDATE "proxies" SET "deleted_at"`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`(?s)UPDATE "proxies" SET .*"deleted_at"`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	repo := newProxyRepositoryWithSQL(client, db)

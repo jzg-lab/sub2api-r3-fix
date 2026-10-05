@@ -53,7 +53,7 @@ func TestAccountServiceUpdatePreservesModelRateLimits(t *testing.T) {
 		"stale form must not strip runtime model rate limits")
 }
 
-func TestAccountServiceCreateOpenAIOAuthStartsInQualification(t *testing.T) {
+func TestAccountServiceCreateOpenAIOAuthIsImmediatelySchedulable(t *testing.T) {
 	repo := &accountServiceCreateRepoStub{}
 	service := NewAccountService(repo, nil)
 
@@ -66,7 +66,7 @@ func TestAccountServiceCreateOpenAIOAuthStartsInQualification(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Same(t, repo.created, account)
-	require.False(t, account.Schedulable)
+	require.True(t, account.Schedulable)
 	require.Equal(t, 17, account.Priority)
-	require.Equal(t, true, account.Extra[openAIDowngradeQualificationExtraKey])
+	require.NotContains(t, account.Extra, openAIDowngradeQualificationExtraKey)
 }

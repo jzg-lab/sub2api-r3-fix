@@ -49,6 +49,24 @@ const getBodyText = () => document.body.textContent ?? ''
 const getBodyButtons = () => Array.from(document.body.querySelectorAll('button'))
 
 describe('AccountActionMenu — spark shadow 按钮可见性', () => {
+  it('shows termination only for a rescue-marked parent and emits its account', async () => {
+    const account = makeAccount({ extra: { openai_rescue_lane: {} } })
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account, position }, attachTo: document.body })
+    getBodyButtons().find(b => b.textContent?.includes('admin.accounts.health.terminateRescue'))!.click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('terminate-rescue')?.[0][0]).toEqual(account)
+    expect(wrapper.emitted('close')).toBeTruthy()
+    await wrapper.setProps({ account: makeAccount({ extra: { openai_rescue_lane: null } }) })
+    expect(getBodyText()).not.toContain('admin.accounts.health.terminateRescue')
+    await wrapper.setProps({ account: makeAccount({ extra: { openai_rescue_terminated_at: 'stopped' } }) })
+    getBodyButtons().find(b => b.textContent?.trim() === 'admin.accounts.health.rescue')!.click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('rescue')?.[0][0]).toMatchObject({ id: account.id })
+    await wrapper.setProps({ account: makeAccount({ parent_account_id: 42, extra: { openai_rescue_lane: {} } }) })
+    expect(getBodyText()).not.toContain('admin.accounts.health.terminateRescue')
+    wrapper.unmount()
+  })
+
   it('普通账号显示「复制账号」按钮', () => {
     const account = makeAccount({ platform: 'anthropic', type: 'apikey', parent_account_id: null })
     const wrapper = mount(AccountActionMenu, {

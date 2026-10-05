@@ -98,12 +98,21 @@ describe.each([
   it('exposes the bound browser launcher only for OpenAI reauthorization', async () => {
     const { wrapper } = setup()
     expect(wrapper.findComponent(Flow).props('showAuthBrowserLaunch')).toBe(false)
-    await wrapper.setProps({ account: { ...account(), platform: 'openai' } })
+    await wrapper.setProps({ account: { ...account(), platform: 'openai', proxy_id: 7 } })
     const flow = wrapper.findComponent(Flow)
     expect(flow.props('showAuthBrowserLaunch')).toBe(true)
     flow.vm.$emit('launch-auth-browser')
     await flushPromises()
     expect(api.showError).toHaveBeenCalledWith('授权会话缺失，请先重新生成授权链接')
+    expect(api.launchAuthBrowser).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps direct OpenAI reauthorization available without a proxy browser', async () => {
+    const { wrapper } = setup()
+    await wrapper.setProps({ account: { ...account(), platform: 'openai', proxy_id: null } })
+    expect(wrapper.findComponent(Flow).exists()).toBe(true)
+    expect(wrapper.findComponent(Flow).props('showAuthBrowserLaunch')).toBe(false)
     expect(api.launchAuthBrowser).not.toHaveBeenCalled()
     wrapper.unmount()
   })

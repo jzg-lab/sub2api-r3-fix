@@ -500,7 +500,7 @@ func (r *accountRepository) ListCRSAccountIDs(ctx context.Context) (map[string]i
 }
 
 func (r *accountRepository) Update(ctx context.Context, account *service.Account) error {
-	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier)
+	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier, nil, false)
 }
 
 // UpdateWithAccountBillingSettings applies an admin account edit while
@@ -513,7 +513,7 @@ func (r *accountRepository) UpdateWithAccountBillingSettings(
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
 ) error {
-	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier)
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, nil, true)
 }
 
 func (r *accountRepository) updateAccount(
@@ -522,6 +522,8 @@ func (r *accountRepository) updateAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	groupIDs *[]int64,
+	preserveScheduling bool,
 ) error {
 	if account == nil {
 		return nil
@@ -545,6 +547,11 @@ func (r *accountRepository) updateAccount(
 			client = tx.Client()
 		}
 	}
+	if groupIDs != nil {
+		if err := validateAccountRescueGroupEdit(ctx, client, account.ID, *groupIDs); err != nil {
+			return err
+		}
+	}
 	if err := validateOpenAIOAuthAccountUpdate(ctx, client, account); err != nil {
 		return err
 	}
@@ -556,12 +563,18 @@ func (r *accountRepository) updateAccount(
 		explicitProbeEnabled,
 		explicitRateSyncEnabled,
 		explicitRateMultiplier,
+		preserveScheduling,
 	)
 	if err != nil {
 		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
 	}
 	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, buildSchedulerGroupPayload(account.GroupIDs)); err != nil {
 		return err
+	}
+	if groupIDs != nil {
+		if err := replaceAccountGroupsInTx(ctx, client, account.ID, *groupIDs); err != nil {
+			return err
+		}
 	}
 	if tx != nil {
 		if err := tx.Commit(); err != nil {
@@ -571,6 +584,7 @@ func (r *accountRepository) updateAccount(
 
 	account.UpdatedAt = updated.UpdatedAt
 	account.Concurrency = updated.Concurrency
+	account.Schedulable = updated.Schedulable
 	account.RateLimitedAt = updated.RateLimitedAt
 	account.RateLimitResetAt = updated.RateLimitResetAt
 	// 普通账号编辑（如 model_mapping / credentials）也需要立即刷新单账号快照，
@@ -588,16 +602,17 @@ func (r *accountRepository) updateLockedAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	preserveScheduling bool,
 ) (*dbent.Account, error) {
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
 		return nil, err
 	}
 	account.Extra = extra
-
-	schedulable := account.Schedulable
-	if account.Status == service.StatusError {
-		schedulable = false
+	if !preserveScheduling && account.IsOpenAIOAuth() && account.Schedulable {
+		if err := validateOpenAIRescueScheduling(account); err != nil {
+			return nil, err
+		}
 	}
 
 	builder := client.Account.UpdateOneID(account.ID).
@@ -611,8 +626,13 @@ func (r *accountRepository) updateLockedAccount(
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
-		SetSchedulable(schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
+	// Scheduling belongs to explicit controls and qualification commits.
+	if account.Status == service.StatusError {
+		builder.SetSchedulable(false)
+	} else if !preserveScheduling {
+		builder.SetSchedulable(account.Schedulable)
+	}
 
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
@@ -710,7 +730,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'openai_downgrade_sol_fallback',
 			extra -> 'openai_downgrade_qualification',
 			extra -> 'model_rate_limits',
-			extra -> 'allow_overages'
+			extra -> 'allow_overages',
+			extra
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -740,6 +761,7 @@ func lockAndMergeAccountProbeExtra(
 		currentQualification         []byte
 		currentModelRateLimits       []byte
 		currentAllowOverages         []byte
+		currentExtraJSON             []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -755,6 +777,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentQualification,
 		&currentModelRateLimits,
 		&currentAllowOverages,
+		&currentExtraJSON,
 	); err != nil {
 		return nil, err
 	}
@@ -879,6 +902,13 @@ func lockAndMergeAccountProbeExtra(
 		}
 	}
 	extra = service.PreserveModelRateLimitsForAccountEdit(account.Platform, currentRateLimitExtra, extra)
+	var currentExtra map[string]any
+	if len(currentExtraJSON) > 0 {
+		if err := json.Unmarshal(currentExtraJSON, &currentExtra); err != nil {
+			return nil, err
+		}
+	}
+	extra = service.PreserveOpenAIRescueManagedExtra(currentExtra, extra)
 	return extra, nil
 }
 
@@ -2746,11 +2776,8 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 	return nil
 }
 
-// SetSchedulableInRescueLane 救治区专用调度开关（r17ax）。判死号入区开调度
-// 被全局 OAuth 资格闸拦（没过资格考的号无合格戳 → 409），而救治区救的正是
-// 这类号。校验走 validateOpenAIOAuthSchedulableInRescueLane：仅绑救治组时
-// 放行资格戳校验（救治组无客户订阅，闸保护的客户面不可能被触达），代理
-// 在场校验保留。其余行为与 SetSchedulable 一致（outbox 双发 + 快照同步）。
+// SetSchedulableInRescueLane retains the legacy group-bound control, but active
+// rescue and termination cannot bypass qualification through this entry point.
 func (r *accountRepository) SetSchedulableInRescueLane(ctx context.Context, id int64, rescueGroupID int64, schedulable bool) error {
 	baseCtx := ctx
 	contextTx := dbent.TxFromContext(ctx)
@@ -3138,6 +3165,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		return 0, errors.New("manual scheduling requires a schedulable value")
 	}
 	updates.Extra = copyJSONMap(stripCodexFingerprintSeedFromExtraUpdate(updates.Extra))
+	updates.Extra = service.StripOpenAIRescueManagedExtra(updates.Extra)
 	delete(updates.Extra, "model_rate_limits")
 	delete(updates.Extra, service.OpenAIDowngradeSolFallbackExtraKey)
 	delete(updates.Extra, service.OpenAIDowngradeQualificationExtraKey)

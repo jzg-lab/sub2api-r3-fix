@@ -60,8 +60,10 @@ func (c *antigravityCompatTokenCache) ReleaseRefreshLock(context.Context, string
 }
 
 func newAntigravityCompatService(cfg config.GatewayConfig, upstream HTTPUpstream) *AntigravityGatewayService {
+	persisted := newAntigravityCompatAccount(AccountTypeOAuth)
+	persisted.Credentials["access_token"] = "fresh-oauth-token"
 	tokenProvider := NewAntigravityTokenProvider(
-		nil,
+		&accountServiceUpdateRepoStub{account: persisted},
 		&antigravityCompatTokenCache{token: "fresh-oauth-token"},
 		nil,
 	)

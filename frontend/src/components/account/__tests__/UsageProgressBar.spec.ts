@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import UsageProgressBar from '../UsageProgressBar.vue'
-
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -189,7 +188,7 @@ describe('UsageProgressBar', () => {
     expect(label.classes()).not.toContain('max-w-[72px]')
 
     const percent = wrapper.get('.h-1\\.5 + span')
-    expect(percent.classes()).toContain('w-[32px]')
+    expect(percent.classes()).toContain('w-[36px]')
     expect(percent.classes()).toContain('text-right')
   })
 
@@ -208,11 +207,11 @@ describe('UsageProgressBar', () => {
     expect(label.classes()).toContain('max-w-[72px]')
     expect(label.classes()).toContain('truncate')
     expect(label.classes()).toContain('text-left')
-    expect(label.classes()).not.toContain('w-[32px]')
+    expect(label.classes()).not.toContain('w-[36px]')
     expect(label.classes()).not.toContain('text-center')
 
     const percent = wrapper.get('.h-1\\.5 + span')
-    expect(percent.classes()).toContain('w-[32px]')
+    expect(percent.classes()).toContain('w-[36px]')
     expect(percent.classes()).toContain('text-right')
   })
 })

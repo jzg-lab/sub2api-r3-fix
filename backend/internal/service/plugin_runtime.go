@@ -22,13 +22,16 @@ import (
 )
 
 type pluginRuntime struct {
-	installation *PluginInstallation
-	client       *hcplugin.Client
-	api          pluginv1.TransportPluginClient
-	inFlight     atomic.Int64
-	draining     atomic.Bool
-	done         chan struct{}
-	doneOnce     sync.Once
+	installation           *PluginInstallation
+	client                 *hcplugin.Client
+	api                    pluginv1.TransportPluginClient
+	inFlight               atomic.Int64
+	draining               atomic.Bool
+	done                   chan struct{}
+	doneOnce               sync.Once
+	pausedAccountIDsSource func(context.Context) ([]int64, error)
+	pausedAccountIDs       []int64
+	probeBaseConfig        []byte
 }
 
 func startPluginRuntime(ctx context.Context, installation *PluginInstallation, startTimeout time.Duration, socketDir string) (*pluginRuntime, error) {
@@ -106,6 +109,16 @@ func (r *pluginRuntime) validateAndApplyConfig(ctx context.Context, configJSON [
 }
 
 func (r *pluginRuntime) validateAndApplyNormalizedConfig(ctx context.Context, configJSON []byte) ([]byte, error) {
+	pausedIDs, err := r.loadPausedAccountIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if r.pausedAccountIDsSource != nil {
+		configJSON, err = withPluginProbePauses(configJSON, pausedIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
 	validation, err := r.api.ValidateConfig(ctx, &pluginv1.ValidateConfigRequest{ConfigJson: configJSON})
 	if err != nil {
 		return nil, fmt.Errorf("插件配置校验失败: %w", err)
@@ -133,12 +146,29 @@ func (r *pluginRuntime) validateAndApplyNormalizedConfig(ctx context.Context, co
 	if err != nil {
 		return nil, fmt.Errorf("序列化插件规范化配置: %w", err)
 	}
+	if r.pausedAccountIDsSource != nil {
+		configJSON, err = withPluginProbePauses(configJSON, pausedIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
 	applied, err := r.api.ApplyConfig(ctx, &pluginv1.ApplyConfigRequest{ConfigJson: configJSON})
 	if err != nil {
 		return nil, fmt.Errorf("应用插件配置失败: %w", err)
 	}
 	if !applied.Applied {
 		return nil, fmt.Errorf("插件拒绝应用配置: %s", applied.Message)
+	}
+	if r.pausedAccountIDsSource != nil {
+		configJSON, err = withPluginProbePauses(configJSON, nil)
+		if err != nil {
+			return nil, err
+		}
+		r.pausedAccountIDs = pausedIDs
+		r.probeBaseConfig, err = withoutPluginDropAction(configJSON)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return configJSON, nil
 }

@@ -215,6 +215,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginRepository := repository.NewPluginRepository(db)
 	pluginHostInfo := providePluginHostInfo(buildInfo)
 	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
+	if stoppedAccounts, ok := accountRepository.(service.OpenAIRescueTerminatedAccountLister); ok {
+		pluginManager.SetRescueTerminatedAccountSource(stoppedAccounts.ListOpenAIRescueTerminatedAccountIDs)
+	}
 	// 救治区插件桥：健康快照 API 附带 plugin_bridge 区块（PluginManager 30s
 	// 轮询缓存 + 2min 离线判定）。桥读失败在源侧吞掉，不影响账号健康列表。
 	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
@@ -234,6 +237,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
 	)
 	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
+	openAIRescueLane.SetPluginProbePauseSync(pluginManager.SyncRescueProbePauses)
 	// 调度闸预检（r17ba）：与 ListDue 同源的 controls 闸（manual_paused/
 	// owned_error fail-closed）。唯一用途=清扫补进候选过滤——手动暂停的
 	// 判死号不被强拉入区（r17an 静置语义）。在区号已无任何开调度路径
@@ -265,14 +269,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// 在裸 LB 路上 4 针全 200+错答——针不与真实流量同路就结构性测不出救治
 	// 效果。仅带救治标记的账号改道；插件未启用/未处理回退原直连。
 	openAIDowngradeProbe.SetPluginRoundTrip(pluginManager.RoundTripOpenAIOAuth)
-	// 自动资格针（r17bb）：清扫见插件连过达阈值且号仍在判死位 → 自动打针
-	// （unpause=true：r17ba 后入区即关调度，区里手动暂停是防调用保险丝，
-	// 留着会把针永远堵死——1217 试点实证死锁；针通过仍是上岗唯一前置，
-	// 不破坏「确认救活才进正式调用」的保证）。nil 安全：未注入不自动打。
-	openAIRescueLane.SetNeedleTrigger(func(ctx context.Context, accountID int64) error {
-		_, err := openAIDowngradeProbe.ReenableOpenAIAccount(ctx, accountID, true)
-		return err
-	})
+	// Automatic confirmation preserves manual pause and customer isolation.
+	openAIRescueLane.SetNeedleTrigger(openAIDowngradeProbe.ConfirmOpenAIRescueAccount)
 	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)

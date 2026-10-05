@@ -6,6 +6,7 @@ package pluginconfig
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -28,10 +29,10 @@ const (
 	defaultProbeMinReasoningTokens = 800
 	// 卡点排程默认值：提前量 120 秒（在预计死亡前 2 分钟落针）。
 	defaultScheduleMarginSeconds = 120
-	// 密集档默认值（v0.3.2 救治提速）：未验证态 120 秒一针，连过 3 针出档，
-	// 单轮封顶 30 针防 error 空转。签捕获→上岗 ≈ 3×120s+毕业针 ≈ 8 分钟。
+	// 默认密集档覆盖宿主六连过门槛；三连过仅触发提前确认，不代表毕业。
+	// 显式配置继续优先，单轮封顶 30 针防 error 空转。
 	defaultProbeBurstIntervalSeconds = 120
-	defaultProbeBurstUntilPasses     = 3
+	defaultProbeBurstUntilPasses     = 6
 	defaultProbeBurstMaxProbes       = 30
 )
 
@@ -55,6 +56,8 @@ type Config struct {
 	// 会随规范化输出保留（宿主用规范化产物回放 ApplyConfig）；Sanitized 才剥除，
 	// 因此重放仅触发无害的重复空 Drop。
 	DropAccountIDs []int64 `json:"drop_account_ids"`
+	// PausedAccountIDs is supplied by the host from durable rescue termination state.
+	PausedAccountIDs []int64 `json:"paused_account_ids,omitempty"`
 	// QualityProbeEnabled 开启质量探针自愈回路（v0.2）：定期用无歧义判别题
 	// 检测静默降智，答错自动丢 Cookie 重摇，连续答错判账号级退避。探针是
 	// 主动出站流量（与零探针反指纹原则冲突），默认关闭，显式开启。
@@ -151,6 +154,7 @@ type incomingConfig struct {
 	RerollOnFasterModel  *bool    `json:"reroll_on_faster_model"`
 	PersistKV            *bool    `json:"persist_kv"`
 	DropAccountIDs       []int64  `json:"drop_account_ids"`
+	PausedAccountIDs     []int64  `json:"paused_account_ids,omitempty"`
 
 	QualityProbeEnabled         *bool  `json:"quality_probe_enabled"`
 	ProbeIntervalSeconds        int    `json:"probe_interval_seconds"`
@@ -245,6 +249,14 @@ func Parse(raw []byte) (Config, string, bool) {
 		cfg.ProbeBurstMaxProbes = incoming.ProbeBurstMaxProbes
 	}
 	cfg.DropAccountIDs = incoming.DropAccountIDs
+	cfg.PausedAccountIDs = slices.Clone(incoming.PausedAccountIDs)
+	for _, id := range cfg.PausedAccountIDs {
+		if id <= 0 {
+			return Config{}, "paused_account_ids contains an invalid account ID", false
+		}
+	}
+	slices.Sort(cfg.PausedAccountIDs)
+	cfg.PausedAccountIDs = slices.Compact(cfg.PausedAccountIDs)
 
 	seen := map[string]struct{}{}
 	clean := make([]string, 0, len(cfg.CookieNames))

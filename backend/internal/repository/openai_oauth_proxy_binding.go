@@ -107,6 +107,9 @@ func validateOpenAIOAuthAccountUpdate(
 	if err != nil {
 		return err
 	}
+	if err := service.ValidateOpenAIOAuthCredentialSnapshot(ctx, current); err != nil {
+		return err
+	}
 	if err := validateOpenAIOAuthAccountReplacement(current, next); err != nil {
 		return err
 	}
@@ -134,6 +137,9 @@ func validateOpenAIOAuthCredentialsUpdate(
 ) error {
 	current, err := lockOpenAIOAuthAccount(ctx, exec, accountID)
 	if err != nil {
+		return err
+	}
+	if err := service.ValidateOpenAIOAuthCredentialSnapshot(ctx, current); err != nil {
 		return err
 	}
 	next := *current
@@ -204,6 +210,9 @@ func validateOpenAIOAuthBulkUpdate(
 		}
 		if updates.Schedulable != nil && *updates.Schedulable &&
 			service.IsOpenAIBrowserOAuthAccount(current) {
+			if err := validateOpenAIRescueScheduling(current); err != nil {
+				return err
+			}
 			if err := validateOpenAIOAuthQualification(ctx, exec, &next); err != nil {
 				return err
 			}
@@ -241,7 +250,20 @@ func validateOpenAIOAuthSchedulable(
 	if !service.IsOpenAIBrowserOAuthAccount(account) {
 		return nil
 	}
+	if err := validateOpenAIRescueScheduling(account); err != nil {
+		return err
+	}
 	return validateOpenAIOAuthQualification(ctx, exec, account)
+}
+
+func validateOpenAIRescueScheduling(account *service.Account) error {
+	if service.OpenAIRescueManuallyTerminated(account) {
+		return service.ErrOpenAIRescueTerminated
+	}
+	if account.Extra["openai_rescue_lane"] != nil {
+		return service.ErrOpenAIReenableBlocked
+	}
+	return nil
 }
 
 // accountBoundOnlyToGroup 账号当前是否仅绑定指定组。救治区放行的安全依据：
@@ -269,11 +291,8 @@ func accountBoundOnlyToGroup(ctx context.Context, exec sqlExecutor, accountID in
 	return only, rows.Err()
 }
 
-// validateOpenAIOAuthSchedulableInRescueLane 救治区专用调度校验（r17ax）：
-// 判死号入区要开调度，但救治区救的正是没过资格考（Extra 无合格戳）的号，
-// 全局资格闸会 409。放行条件收紧为「账号当前仅绑定救治组」——闸的语义
-// （未考证 OAuth 号不得进客户流量）在救治组拓扑下不可能被违反。
-// 无代理账号走直连；已配置代理仍须有效。
+// The legacy group-bound control must obey the same rescue and termination
+// gates as ordinary scheduling; direct routes and proxy validation are retained.
 func validateOpenAIOAuthSchedulableInRescueLane(
 	ctx context.Context,
 	exec sqlExecutor,
@@ -290,6 +309,9 @@ func validateOpenAIOAuthSchedulableInRescueLane(
 	}
 	if !service.IsOpenAIBrowserOAuthAccount(account) {
 		return nil
+	}
+	if err := validateOpenAIRescueScheduling(account); err != nil {
+		return err
 	}
 	if rescueGroupID <= 0 {
 		return service.ErrOpenAIOAuthRescueBindingRequired

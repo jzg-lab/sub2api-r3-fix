@@ -88,6 +88,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		WHERE id = $1 AND deleted_at IS NULL
 			AND platform = 'openai' AND type = 'oauth'
 			AND parent_account_id IS NULL
+			AND COALESCE(extra->'openai_rescue_terminated_at', 'null'::jsonb) = 'null'::jsonb
 			AND updated_at = $2
 			AND proxy_id IS NOT DISTINCT FROM $3::bigint
 			AND status = $4 AND schedulable = $5
@@ -261,6 +262,7 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIAccountReenable(
 			error_message
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
+			AND COALESCE(extra->'openai_rescue_terminated_at', 'null'::jsonb) = 'null'::jsonb
 		FOR UPDATE
 	`, []any{mutation.AccountID}, &accountUpdatedAt, &proxyID, &status, &schedulable,
 		&platform, &accountType, &parentAccountID, &notExpired, &errorMessage)

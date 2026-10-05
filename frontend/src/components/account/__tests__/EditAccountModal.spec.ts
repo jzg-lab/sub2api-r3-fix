@@ -323,6 +323,22 @@ function mountModal(account = buildAccount()) {
   })
 }
 
+describe('rescue group edit protection', () => {
+  it('locks group controls while rescuing and unlocks after exit', async () => {
+    authIsSimpleMode.value = false
+    const account = buildAccount()
+    account.extra = { openai_rescue_lane: {} }
+    const wrapper = mountModal(account)
+    await flushPromises()
+    expect(wrapper.get('fieldset').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('admin.accounts.health.rescueGroupsLocked')
+    await wrapper.setProps({ account: { ...account, extra: { openai_rescue_lane: null } } })
+    expect(wrapper.get('fieldset').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+    authIsSimpleMode.value = true
+  })
+})
+
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true

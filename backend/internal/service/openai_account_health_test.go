@@ -50,6 +50,11 @@ func TestLabelOpenAIAccountHealth(t *testing.T) {
 		reason string
 	}{
 		{
+			name:  "terminated without manual pause",
+			snap:  OpenAIProbeHealthSnapshot{RescueTerminated: true, State: OpenAIDowngradeStatePendingReplace},
+			label: OpenAIHealthLabelPaused, color: OpenAIHealthColorGray, reason: "rescue_terminated",
+		},
+		{
 			name:   "正常号: on_duty/normal + 最近一针健康",
 			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", LastProbe: &OpenAIProbeLastEvidence{TransportOK: true, HTTPStatus: 200, AnswerCorrect: boolPtr(true), ReasoningTokens: rtPtr(1532), TurnStateLen: 332}},
 			label:  OpenAIHealthLabelNormal,
@@ -413,6 +418,55 @@ func TestTriggerProbeNowCASSemantics(t *testing.T) {
 // 不当场打针（下一拍 processState 全状态机处理）；
 // 路径B（ListDue 永不拾取：manual_paused/停用 on_duty）→ 同步诊断针当场落
 // 证据行，状态机/排期/调度位分毫不动。
+func TestTriggerProbeNowIsolatedRescue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		paused bool
+		exited bool
+	}{
+		{name: "active_rescue_queues_stateful_probe"},
+		{name: "manual_pause_stays_diagnostic", paused: true},
+		{name: "exited_rescue_stays_diagnostic", exited: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			future := now.Add(time.Hour)
+			account := rescueLaneSweepAccount(7)
+			account.Schedulable = false
+			marker := OpenAIRescueLaneMarker{EnteredAt: now.Add(-time.Hour)}
+			if tc.exited {
+				marker.ExitReason = "auth_rejected"
+			}
+			rescueLaneApplyMarker(t, account, marker)
+			store := &triggerProbeStoreStub{
+				downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+					AccountID: 7, State: OpenAIDowngradeStateOnDuty, ProbeMode: "normal", NextProbeAt: future,
+				}},
+				allowed: !tc.paused,
+			}
+			runner := NewOpenAIDowngradeProbeRunner(store,
+				&downgradeProbeAccountRepoStub{account: account}, nil, nil, nil, nil)
+			runner.now = func() time.Time { return now }
+			runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+				return OpenAIDowngradeProbeResult{TransportOK: true, AnswerCorrect: true, HTTPStatus: http.StatusOK}
+			}
+			result, err := runner.TriggerProbeNow(t.Context(), account.ID)
+			require.NoError(t, err)
+			require.True(t, result.Accepted)
+			if tc.paused || tc.exited {
+				require.True(t, result.ProbedNow)
+				require.Equal(t, future, store.state.NextProbeAt)
+				require.Equal(t, 1, store.probeCalls)
+			} else {
+				require.False(t, result.ProbedNow)
+				require.Equal(t, now, store.state.NextProbeAt)
+				require.Zero(t, store.probeCalls)
+			}
+			require.False(t, account.Schedulable)
+		})
+	}
+}
+
 func TestTriggerProbeNowDualPath(t *testing.T) {
 	now := time.Date(2026, 9, 21, 6, 0, 0, 0, time.UTC)
 	proxyID := int64(1)

@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestParsePersistentProbePauses(t *testing.T) {
+	cfg, message, ok := Parse([]byte(`{"paused_account_ids":[42,7,42]}`))
+	if !ok || !reflect.DeepEqual(cfg.Sanitized().PausedAccountIDs, []int64{7, 42}) {
+		t.Fatalf("pause IDs must survive sanitization and be normalized: %v %s", cfg, message)
+	}
+	for _, raw := range []string{`{"paused_account_ids":[0]}`, `{"paused_account_ids":[-1]}`, `{"paused_account_ids":[1.5]}`} {
+		if _, _, ok := Parse([]byte(raw)); ok {
+			t.Fatalf("invalid pause accepted: %s", raw)
+		}
+	}
+}
+
 // testIncomingTagParity 锁住 incomingConfig 与 Config 的 json 标签一一对应，
 // 防止后续加字段时只改一边。
 func TestIncomingTagParity(t *testing.T) {
@@ -215,7 +227,7 @@ func TestBurstDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("空对象应取默认")
 	}
-	if cfg.ProbeBurstIntervalSeconds != 120 || cfg.ProbeBurstUntilPasses != 3 || cfg.ProbeBurstMaxProbes != 30 {
+	if cfg.ProbeBurstIntervalSeconds != 120 || cfg.ProbeBurstUntilPasses != 6 || cfg.ProbeBurstMaxProbes != 30 {
 		t.Fatalf("密集档默认应 120/3/30: %+v", cfg)
 	}
 }

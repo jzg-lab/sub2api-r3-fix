@@ -473,6 +473,7 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		openai.POST("/accounts/:id/reenable", h.Admin.OpenAIProbeHealth.ReenableAccount)
 		// 救治区手动入口（task 3.7）：判死号 → 插件实验台自动救号。
 		openai.POST("/accounts/:id/rescue", h.Admin.OpenAIProbeHealth.RescueAccount)
+		openai.POST("/accounts/:id/rescue/terminate", h.Admin.OpenAIProbeHealth.TerminateRescueAccount)
 	}
 }
 

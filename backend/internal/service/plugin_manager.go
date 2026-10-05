@@ -41,11 +41,12 @@ type pluginRoute struct {
 
 // PluginManager 管理插件安装、配置、进程生命周期和 OpenAI OAuth 能力绑定。
 type PluginManager struct {
-	repo      PluginRepository
-	encryptor SecretEncryptor
-	cfg       *config.Config
-	hostInfo  PluginHostInfo
-	installer *PluginPackageInstaller
+	repo                   PluginRepository
+	encryptor              SecretEncryptor
+	cfg                    *config.Config
+	hostInfo               PluginHostInfo
+	installer              *PluginPackageInstaller
+	pausedAccountIDsSource func(context.Context) ([]int64, error)
 
 	operationMu        sync.Mutex
 	mu                 sync.Mutex
@@ -319,6 +320,9 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 		!current.runtime.client.Exited() && current.rolloutPercent == rollout &&
 		current.runtime.installation.BinarySHA256 == enabled.BinarySHA256 &&
 		current.runtime.installation.ConfigEncrypted == enabled.ConfigEncrypted {
+		if err := m.syncRuntimeProbePauses(ctx, current); err != nil {
+			return err
+		}
 		healthCtx, cancel := context.WithTimeout(ctx, pluginHealthTimeout)
 		healthErr := current.runtime.checkHealth(healthCtx)
 		cancel()
@@ -844,9 +848,9 @@ const (
 // 区段），旧插件无此字段时为空。保持字符串透传——插件 UI 侧自行 JSON.parse，
 // 与官方宿主的桥接协议同形。
 type PluginStatus struct {
-	PluginID int64  `json:"plugin_id"`
-	Running  bool   `json:"running"`
-	Healthy  bool   `json:"healthy"`
+	PluginID int64 `json:"plugin_id"`
+	Running  bool  `json:"running"`
+	Healthy  bool  `json:"healthy"`
 	// Offline 读取时刻现算（withOffline）：距最近一次成功 Health RPC 超过
 	// pluginBridgeOfflineAfter。不随缓存冻结——离线是时间敏感判定。
 	Offline    bool      `json:"offline"`
@@ -1237,7 +1241,11 @@ func (m *PluginManager) newRuntime(ctx context.Context, installation *PluginInst
 		return nil, err
 	}
 	timeout := time.Duration(m.cfg.Plugins.StartTimeoutSeconds) * time.Second
-	return startPluginRuntime(ctx, installation, timeout, socketDir)
+	runtime, err := startPluginRuntime(ctx, installation, timeout, socketDir)
+	if err == nil && installation.PluginKey == rescueCookiePinPluginID {
+		runtime.pausedAccountIDsSource = m.pausedAccountIDsSource
+	}
+	return runtime, err
 }
 
 func (m *PluginManager) removeRuntimeLocked(id int64) *pluginRuntime {

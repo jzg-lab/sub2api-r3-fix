@@ -364,7 +364,7 @@
                    ② 主动检测 = 诊断针（只落证据行不动状态机），满足「看看号
                       回来没有」。 -->
               <button
-                v-if="accountHealthById[row.id]?.state === 'pending_replace'"
+                v-if="accountHealthById[row.id]?.state === 'pending_replace' && row.extra?.openai_rescue_terminated_at == null"
                 class="rounded border border-amber-400 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-amber-700 transition-colors hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-500 dark:text-amber-300 dark:hover:bg-amber-500/10"
                 :disabled="reenablingAccount === row.id"
                 :title="accountHealthById[row.id]?.manual_paused ? t('admin.accounts.health.reenablePausedHint') : t('admin.accounts.health.reenableHint')"
@@ -554,7 +554,7 @@
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" @terminate-rescue="handleTerminateRescue" @rescue="handleRescue" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -1396,7 +1396,7 @@ const runProbeNow = async (row: Account) => {
 const handleReenable = (row: Account) => {
   if (reenablingAccount.value !== null) return
   const health = accountHealthById.value[row.id]
-  if (health && health.state !== 'pending_replace') return
+  if (health && health.state !== 'pending_replace' && row.extra?.openai_rescue_terminated_at == null) return
   const confirmKey = health?.manual_paused
     ? 'admin.accounts.health.reenablePausedConfirm'
     : 'admin.accounts.health.reenableConfirm'
@@ -1425,18 +1425,12 @@ const handleReenable = (row: Account) => {
   })
 }
 
-// task 3.7：判死号手动送入救治区（实验台）。与重新启用互补——这条走
-// 插件自动救号（绑救治组 + 开调度 + 种子流量）。种子吃凭据级拒绝
-// （401/403）时后端已把号退回判死原位，以 409 OPENAI_RESCUE_SEED_AUTH_REJECTED
-// 说明；文案指引删号重新授权。clean-passes 阈值展示用后端默认（面板不
-// 拉救治区设置；后端设置改动不常见，文案略有出入可接受）。
-const RESCUE_CLEAN_PASSES_DEFAULT = 6
-
+// Rescue keeps scheduling disabled until qualification succeeds.
 const handleRescue = async (row: Account) => {
-  if (rescuingAccount.value !== null) return
+  if (rescuingAccount.value !== null || terminatingRescueAccount.value !== null) return
   const health = accountHealthById.value[row.id]
   if (health && health.state !== 'pending_replace') return
-  if (!confirm(t('admin.accounts.health.rescueConfirm', { name: row.name, passes: RESCUE_CLEAN_PASSES_DEFAULT }))) return
+  if (!confirm(t('admin.accounts.health.rescueConfirm', { name: row.name }))) return
   rescuingAccount.value = row.id
   try {
     const result = await adminAPI.accounts.rescueOpenAIAccount(row.id)
@@ -1445,6 +1439,7 @@ const handleRescue = async (row: Account) => {
     } else {
       appStore.showSuccess(t('admin.accounts.health.rescueStarted'))
     }
+    await refreshAccountsIncrementally()
     refreshAccountHealthBatch().catch(() => {})
   } catch (error) {
     if (extractApiErrorCode(error) === 'OPENAI_RESCUE_SEED_AUTH_REJECTED') {
@@ -1454,6 +1449,23 @@ const handleRescue = async (row: Account) => {
     }
   } finally {
     rescuingAccount.value = null
+  }
+}
+
+const terminatingRescueAccount = ref<number | null>(null)
+const handleTerminateRescue = async (row: Account) => {
+  if (terminatingRescueAccount.value !== null || rescuingAccount.value !== null) return
+  if (!confirm(t('admin.accounts.health.terminateRescueConfirm', { name: row.name }))) return
+  terminatingRescueAccount.value = row.id
+  try {
+    const result = await adminAPI.accounts.terminateOpenAIRescue(row.id)
+    appStore.showSuccess(t(result.terminated ? 'admin.accounts.health.rescueTerminated' : 'admin.accounts.health.rescueAlreadyEnded'))
+    await refreshAccountsIncrementally()
+    refreshAccountHealthBatch().catch(() => {})
+  } catch (error) {
+    appStore.showError(`${t('admin.accounts.health.terminateRescueFailed')}: ${extractApiErrorMessage(error)}`)
+  } finally {
+    terminatingRescueAccount.value = null
   }
 }
 

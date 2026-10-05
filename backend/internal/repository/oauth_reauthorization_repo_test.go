@@ -200,18 +200,21 @@ func TestApplyOAuthCredentialsReadsSnapshotBeforeCommit(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
+func TestApplyOAuthCredentialsOptionalProxyValidation(t *testing.T) {
 	injected := errors.New("qualification database unavailable")
 	for _, tc := range []struct {
 		name, extra string
+		proxyID     any
 		proxyStatus string
+		schedulable bool
 		wantError   error
 	}{
-		{"missing qualification", `{}`, "", nil},
-		{"inactive proxy", `{"openai_oauth_qualified_proxy_id":7}`, "inactive", nil},
-		{"database error", `{"openai_oauth_qualified_proxy_id":7}`, "error", injected},
-		{"corrupt binding", `{"openai_oauth_qualified_proxy_id":"corrupt"}`, "", service.ErrOpenAIOAuthProxyBindingCorrupt},
-		{"mismatched binding", `{"openai_oauth_qualified_proxy_id":8}`, "", service.ErrOpenAIOAuthProxyMismatch},
+		{"direct without qualification", `{}`, nil, "", true, nil},
+		{"proxy without qualification", `{}`, int64(7), service.StatusActive, true, nil},
+		{"inactive proxy", `{"openai_oauth_qualified_proxy_id":7}`, int64(7), "inactive", false, nil},
+		{"database error", `{"openai_oauth_qualified_proxy_id":7}`, int64(7), "error", false, injected},
+		{"retired corrupt binding", `{"openai_oauth_qualified_proxy_id":"corrupt"}`, int64(7), service.StatusActive, true, nil},
+		{"retired mismatched binding", `{"openai_oauth_qualified_proxy_id":8}`, int64(7), service.StatusActive, true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, mock := atomicCreateRepository(t)
@@ -223,10 +226,10 @@ func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
 					"id", "platform", "type", "credentials", "extra", "proxy_id",
 					"parent_account_id", "status", "schedulable", "updated_at",
 				}).AddRow(71, service.PlatformOpenAI, service.AccountTypeOAuth,
-					`{"email":"account@example.test"}`, tc.extra, 7, nil, service.StatusError, false, stamp))
+					`{"email":"account@example.test"}`, tc.extra, tc.proxyID, nil, service.StatusError, false, stamp))
 			if tc.proxyStatus != "" {
 				query := mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM proxies.*expires_at > NOW`).
-					WithArgs(int64(7), service.StatusActive)
+					WithArgs(tc.proxyID, service.StatusActive)
 				if tc.proxyStatus == "error" {
 					query.WillReturnError(injected)
 				} else {
@@ -239,10 +242,10 @@ func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
 			} else {
 				mock.ExpectExec(`(?s)UPDATE accounts.*AND updated_at = \$7`).
 					WithArgs(service.AccountTypeOAuth, sqlmock.AnyArg(), sqlmock.AnyArg(),
-						service.StatusActive, false, int64(71), stamp).
+						service.StatusActive, tc.schedulable, int64(71), stamp).
 					WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec(`INSERT INTO scheduler_outbox`).WillReturnResult(sqlmock.NewResult(1, 1))
-				expectReauthSnapshot(mock, stamp.Add(time.Second), false)
+				expectReauthSnapshot(mock, stamp.Add(time.Second), tc.schedulable)
 				mock.ExpectCommit()
 			}
 			got, err := repo.ApplyOAuthCredentials(t.Context(), 71, stamp,
@@ -253,8 +256,9 @@ func TestApplyOAuthCredentialsQualificationFailures(t *testing.T) {
 				require.Nil(t, got)
 			} else {
 				require.NoError(t, err)
-				require.False(t, got.Schedulable, "new credentials are not proof of route qualification")
+				require.Equal(t, tc.schedulable, got.Schedulable)
 			}
+			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
 }

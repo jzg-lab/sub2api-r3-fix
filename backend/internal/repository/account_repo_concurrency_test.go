@@ -74,8 +74,8 @@ func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
 			expectNonBrowserOpenAIOAuthPATAccountLock(mock, account.ID)
 			mock.ExpectQuery(`(?s)SELECT.*FOR NO KEY UPDATE`).
 				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, `{"auth_mode":"personalAccessToken"}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity", "group", "proxy", "probe", "sync", "snapshot", "session", "auto", "usage", "sol_fallback", "qualification", "model_rate_limits", "allow_overages"}).
-					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil))
+				WillReturnRows(sqlmock.NewRows([]string{"identity", "group", "proxy", "probe", "sync", "snapshot", "session", "auto", "usage", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
+					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 			mock.ExpectExec(`UPDATE "accounts"`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(`(?s)SELECT .* FROM "accounts" WHERE "id" = \$1`).
 				WithArgs(int64(71)).

@@ -143,6 +143,46 @@ func seedProbePostgres(t *testing.T, db *sql.DB) *service.OpenAIDowngradeMutatio
 	return mutation
 }
 
+func TestOpenAIProbePostgresTerminationBlocksEveryAutomaticGate(t *testing.T) {
+	db := newProbePostgres(t)
+	mutation := seedProbePostgres(t, db)
+	repo := &openAIDowngradeProbeRepository{db: db}
+	_, err := db.Exec(`UPDATE accounts SET extra=extra || '{"openai_rescue_terminated_at":"2026-10-05T00:00:00Z"}'::jsonb WHERE id=$1`, mutation.AccountID)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE openai_downgrade_probe_states SET next_probe_at=NOW()-INTERVAL '1 minute',probe_mode='qualification' WHERE account_id=$1`, mutation.AccountID)
+	require.NoError(t, err)
+	allowed, err := repo.CanRunOpenAIDowngradeProbe(t.Context(), mutation.AccountID)
+	require.NoError(t, err)
+	require.False(t, allowed)
+	due, err := repo.ListDueOpenAIDowngradeStates(t.Context(), time.Now(), 100)
+	require.NoError(t, err)
+	require.Empty(t, due)
+	health, err := repo.ListOpenAIProbeHealthSnapshots(t.Context(), []int64{mutation.AccountID})
+	require.NoError(t, err)
+	require.Len(t, health, 1)
+	require.True(t, health[0].RescueTerminated)
+	require.False(t, health[0].ManualPaused)
+	before := probePostgresSnapshot(t, db)
+	require.ErrorIs(t, repo.CommitOpenAIDowngradeMutation(t.Context(), mutation), service.ErrOpenAIProbeStale)
+	require.Equal(t, before, probePostgresSnapshot(t, db))
+	_, err = db.Exec(`UPDATE accounts SET schedulable=false WHERE id=$1`, mutation.AccountID)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE openai_downgrade_probe_states SET state='pending_replace' WHERE account_id=$1`, mutation.AccountID)
+	require.NoError(t, err)
+	reenable := reenableCommitFixture()
+	reenable.AccountID = mutation.AccountID
+	reenable.State.AccountID = mutation.AccountID
+	reenable.ExpectedProxyID = mutation.ExpectedProxyID
+	reenable.ExpectedSchedulable = false
+	reenable.Unpause = true
+	require.NoError(t, db.QueryRow(`SELECT updated_at FROM accounts WHERE id=$1`, mutation.AccountID).Scan(&reenable.ExpectedAccountUpdatedAt))
+	require.NoError(t, db.QueryRow(`SELECT updated_at FROM openai_downgrade_probe_states WHERE account_id=$1`, mutation.AccountID).Scan(&reenable.ExpectedStateUpdatedAt))
+	before = probePostgresSnapshot(t, db)
+	_, err = repo.CommitOpenAIAccountReenable(t.Context(), reenable)
+	require.ErrorIs(t, err, service.ErrOpenAIProbeStale)
+	require.Equal(t, before, probePostgresSnapshot(t, db))
+}
+
 func probePostgresSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	proxyStats := "null"

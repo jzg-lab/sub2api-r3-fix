@@ -48,6 +48,104 @@ func (s *accountReenableStoreStub) CommitOpenAIAccountReenable(
 	return s.unpaused, nil
 }
 
+func TestConfirmOpenAIRescueAccountQueuesWithoutUnpause(t *testing.T) {
+	f := newRescueConfirmationFixture(t, 3)
+	store := &accountReenableStoreStub{
+		downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+			AccountID: 81, State: OpenAIDowngradeStatePendingReplace,
+		}},
+		allowed: true,
+	}
+	runner := NewOpenAIDowngradeProbeRunner(store, f.repo, nil, nil, nil, nil)
+	runner.now, runner.rescueLane = f.lane.now, f.lane
+	t.Cleanup(runner.Stop)
+	require.NoError(t, runner.ConfirmOpenAIRescueAccount(t.Context(), 81))
+	require.Equal(t, runner.now(), store.state.NextProbeAt)
+	require.Equal(t, "qualification", store.state.ProbeMode)
+	require.False(t, store.observed.Unpause)
+	require.False(t, f.account.Schedulable)
+	require.Len(t, runner.wakeCh, 1)
+	require.ErrorIs(t, runner.ConfirmOpenAIRescueAccount(t.Context(), 81), errOpenAIReenableNotDead)
+	require.Equal(t, 1, store.commits)
+
+	// Multiple ready accounts share one pending scan rather than queuing scans.
+	store.state.State = OpenAIDowngradeStatePendingReplace
+	require.NoError(t, runner.ConfirmOpenAIRescueAccount(t.Context(), 81))
+	require.Len(t, runner.wakeCh, 1)
+	require.Equal(t, 2, store.commits)
+}
+
+func TestConfirmOpenAIRescueAccountRejectsStaleOrPausedCommit(t *testing.T) {
+	for _, failure := range []error{ErrOpenAIReenablePaused, ErrOpenAIProbeStale} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			f := newRescueConfirmationFixture(t, 3)
+			store := &accountReenableStoreStub{
+				downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+					AccountID: 81, State: OpenAIDowngradeStatePendingReplace,
+				}},
+				commitErr: failure,
+			}
+			runner := NewOpenAIDowngradeProbeRunner(store, f.repo, nil, nil, nil, nil)
+			runner.now, runner.rescueLane = f.lane.now, f.lane
+			t.Cleanup(runner.Stop)
+			expected := failure
+			if errors.Is(failure, ErrOpenAIReenablePaused) {
+				expected = errOpenAIReenablePaused
+			}
+			require.ErrorIs(t, runner.ConfirmOpenAIRescueAccount(t.Context(), 81), expected)
+			require.False(t, store.observed.Unpause)
+			require.Empty(t, runner.wakeCh)
+			require.Equal(t, OpenAIDowngradeStatePendingReplace, store.state.State)
+			require.False(t, f.account.Schedulable)
+		})
+	}
+}
+
+func TestConfirmOpenAIRescueAccountRequiresCurrentPluginEvidence(t *testing.T) {
+	for _, passes := range []int{0, 2} {
+		f := newRescueConfirmationFixture(t, passes)
+		store := &accountReenableStoreStub{
+			downgradeProbeStoreStub: &downgradeProbeStoreStub{state: &OpenAIDowngradeProbeState{
+				AccountID: 81, State: OpenAIDowngradeStatePendingReplace,
+			}},
+		}
+		runner := NewOpenAIDowngradeProbeRunner(store, f.repo, nil, nil, nil, nil)
+		runner.now, runner.rescueLane = f.lane.now, f.lane
+		t.Cleanup(runner.Stop)
+		require.ErrorIs(t, runner.ConfirmOpenAIRescueAccount(t.Context(), 81), ErrRescueRecoveryUnverified)
+		require.Zero(t, store.commits)
+		require.Empty(t, runner.wakeCh)
+	}
+}
+
+func TestOpenAIDowngradeProbeWakeUsesCancelableScan(t *testing.T) {
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	repo := &downgradeProbeAccountRepoStub{
+		listByPlatformFn: func(ctx context.Context, _ string) ([]Account, error) {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		},
+	}
+	runner := NewOpenAIDowngradeProbeRunner(&downgradeProbeStoreStub{}, repo, nil, nil, nil, nil)
+	t.Cleanup(runner.Stop)
+	runner.Start()
+	runner.wakeCh <- struct{}{}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake did not trigger the existing scan")
+	}
+	runner.Stop()
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("stop did not cancel the woken scan")
+	}
+}
+
 // 判死号手动启用:清标签回 qualification、计数归零、排近刻认证针。
 func TestReenableOpenAIAccount_FromPendingReplace(t *testing.T) {
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
@@ -237,7 +335,6 @@ func TestTriggerProbeNow_DeadAccountRunsDiagnostic(t *testing.T) {
 	require.Equal(t, future, store.state.NextProbeAt)
 	require.Zero(t, store.saveCalls)
 }
-
 
 // 状态不存在的号:账号不存在哨兵。
 func TestReenableOpenAIAccount_NoStateNotFound(t *testing.T) {
