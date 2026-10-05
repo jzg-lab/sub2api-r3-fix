@@ -1141,6 +1141,13 @@ export default {
           createFailedRestart:
             'Account creation was not confirmed. Check the account list before starting a new browser authorization; the previous authorization result cannot be reused.',
           errors: {
+            ACCOUNT_NOT_FOUND: 'This account no longer exists. Refresh the account list.',
+            OAUTH_REAUTH_STALE_ACCOUNT:
+              'The account changed. Generate a new authorization link; old results will not be submitted and the original login IP will not change. If its type or proxy changed, close and reopen this dialog.',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE:
+              'Account state is temporarily unavailable. Try generating a new authorization link later. Existing credentials and the original login IP are unchanged.',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNSUPPORTED:
+              'This browser reauthorization flow only supports primary OpenAI OAuth accounts.',
             OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
               'Complete a new authorization in the verified fixed-egress browser. The initial-login proof is missing, expired, already used, or does not match this account.',
             OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:

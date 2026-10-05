@@ -35,8 +35,10 @@ func TestReauthorizationIPProofCommitAndReplay(t *testing.T) {
 
 	changed := *account
 	changed.UpdatedAt = account.UpdatedAt.Add(time.Microsecond)
+	require.NoError(t, ValidateOpenAIOAuthReauthorizationCommit(ctx, &changed, credentials))
+	changed.Credentials = map[string]any{"access_token": "newer-fixture"}
 	require.ErrorIs(t, ValidateOpenAIOAuthReauthorizationCommit(ctx, &changed, credentials),
-		ErrOpenAIOAuthReauthorizationProofRequired)
+		ErrOAuthReauthorizationStale)
 	changed = *account
 	changed.Extra = map[string]any{OpenAIOAuthLoginExitIPExtraKey: "198.51.100.26"}
 	require.ErrorIs(t, ValidateOpenAIOAuthReauthorizationCommit(ctx, &changed, credentials),

@@ -228,6 +228,7 @@ type Account struct {
 	AutoPauseOnExpired      bool                           `json:"auto_pause_on_expired"`
 	CreatedAt               time.Time                      `json:"created_at"`
 	UpdatedAt               time.Time                      `json:"updated_at"`
+	ReauthorizationRevision string                         `json:"reauthorization_revision,omitempty"`
 
 	Schedulable bool `json:"schedulable"`
 

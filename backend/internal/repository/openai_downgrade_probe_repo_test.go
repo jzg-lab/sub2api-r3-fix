@@ -53,7 +53,8 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		require.Equal(t, 2, strings.Count(dueQuery, "'proxy:' || a.proxy_id::text"))
 		require.Contains(t, dueQuery, "recent.proxy_id = a.proxy_id")
 		require.NotContains(t, dueQuery, "p.id = s.current_proxy_id")
-		require.Contains(t, query, "ORDER BY next_probe_at, account_id LIMIT $2")
+		require.Contains(t, query, "ORDER BY first_qualification DESC, next_probe_at, account_id LIMIT $2")
+		require.Equal(t, 2, strings.Count(query, "AND recent.http_status <> 429 THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END"))
 		return nil
 	})
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))

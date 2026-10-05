@@ -616,6 +616,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, account, groups); err != nil {
 		return nil, err
 	}
+	if IsOpenAIBrowserOAuthAccount(account) && s.openAIProbeWakeup != nil {
+		// Admin uploads and OAuth creation converge here. Wake only after the
+		// account and groups commit; retain eligibility and cooldown checks.
+		s.openAIProbeWakeup()
+	}
 
 	// OAuth 账号：创建后异步设置隐私。
 	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
@@ -1029,10 +1034,7 @@ func (s *adminServiceImpl) ApplyOAuthCredentials(
 	if err != nil {
 		return nil, err
 	}
-	if current == nil || !current.UpdatedAt.Equal(expectedUpdatedAt) {
-		return nil, ErrOAuthReauthorizationStale
-	}
-	if err := ValidateOpenAIOAuthReauthorizationCommit(ctx, current, credentials); err != nil {
+	if err := ValidateOAuthReauthorizationUpdate(ctx, current, expectedUpdatedAt, credentials); err != nil {
 		return nil, err
 	}
 	SanitizeStoredCredentials("", credentials)

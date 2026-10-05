@@ -15,8 +15,8 @@ import (
 )
 
 // ApplyOAuthCredentials replaces OAuth credentials and clears recoverable
-// runtime state in one transaction. The row lock and updated_at predicate
-// protect against a late browser callback overwriting a newer account edit.
+// runtime state in one transaction. The row lock protects the authorization
+// identity check and the subsequent replacement from concurrent credential edits.
 func (r *accountRepository) ApplyOAuthCredentials(
 	ctx context.Context,
 	id int64,
@@ -55,16 +55,13 @@ func (r *accountRepository) ApplyOAuthCredentials(
 	if err != nil {
 		return nil, err
 	}
-	if !current.UpdatedAt.Equal(expectedUpdatedAt) {
-		return nil, service.ErrOAuthReauthorizationStale
-	}
 	if !current.IsOAuth() || current.IsCredentialShadow() {
 		return nil, infraerrors.BadRequest("NOT_OAUTH", "account does not own OAuth credentials")
 	}
 	if current.Platform != service.PlatformAnthropic && accountType != service.AccountTypeOAuth {
 		return nil, infraerrors.BadRequest("NOT_OAUTH", "setup-token is only supported for Anthropic")
 	}
-	if err := service.ValidateOpenAIOAuthReauthorizationCommit(txCtx, current, credentials); err != nil {
+	if err := service.ValidateOAuthReauthorizationUpdate(txCtx, current, expectedUpdatedAt, credentials); err != nil {
 		return nil, err
 	}
 
@@ -161,7 +158,7 @@ func (r *accountRepository) ApplyOAuthCredentials(
 		WHERE id = $6
 			AND deleted_at IS NULL
 			AND updated_at = $7
-	`, accountType, string(credentialJSON), string(extraJSON), status, schedulable, id, expectedUpdatedAt)
+	`, accountType, string(credentialJSON), string(extraJSON), status, schedulable, id, current.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

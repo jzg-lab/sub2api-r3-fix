@@ -1123,6 +1123,7 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 			states = fetched
 		}
 	}
+	var reseed []*Account
 	for _, account := range marked {
 		if err := ctx.Err(); err != nil {
 			return entered, healed, withdrawn, err
@@ -1226,14 +1227,19 @@ func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, heal
 				gap = openAIRescueSeedSlowInterval
 			}
 			if marker.LastSeedAt.IsZero() || now.Sub(marker.LastSeedAt) >= gap {
-				if err := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); err != nil {
-					if errors.Is(err, ErrRescueSeedAuthRejected) {
-						// 已出区（号回判死原位），事件与日志在 seedAndAccount 内。
-						continue
-					}
-					// 其余失败已在 seedAndAccount 内 Warn，下轮按 attempts 继续。
-				}
+				reseed = append(reseed, account)
 			}
+		}
+	}
+	// Containment, graduation and confirmation for the whole snapshot precede
+	// slow upstream work. Each deferred seed still reserves its original CAS.
+	for _, account := range reseed {
+		if err := ctx.Err(); err != nil {
+			return entered, healed, withdrawn, err
+		}
+		if seedErr := l.seedAndAccount(ctx, account, OpenAIRescueTriggerReconcile); seedErr != nil &&
+			!errors.Is(seedErr, ErrRescueSeedAuthRejected) && !errors.Is(seedErr, ErrOpenAIProbeStale) {
+			slog.Warn("openai_rescue_reseed_failed", "account_id", account.ID, "error", seedErr)
 		}
 	}
 	for _, id := range candidateIDs {

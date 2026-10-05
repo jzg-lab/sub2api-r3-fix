@@ -102,6 +102,17 @@ type Config struct {
 	ProbeBurstMaxProbes int `json:"probe_burst_max_probes"`
 }
 
+// MarshalJSON preserves the explicit disabled effort through normalize/save/load.
+// An empty incoming value means "use the default", not "disable reasoning".
+func (c Config) MarshalJSON() ([]byte, error) {
+	type wireConfig Config
+	wire := wireConfig(c)
+	if wire.ProbeReasoningEffort == "" {
+		wire.ProbeReasoningEffort = "none"
+	}
+	return json.Marshal(wire)
+}
+
 // Default 返回带完整默认值的配置。
 func Default() Config {
 	names := strings.Split(DefaultCookieNames, ",")

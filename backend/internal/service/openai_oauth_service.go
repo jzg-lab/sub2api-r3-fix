@@ -137,6 +137,7 @@ func (s *OpenAIOAuthService) generateAuthURL(ctx context.Context, proxyID *int64
 	if binding != nil {
 		session.ReauthorizationAccountID = binding.ReauthorizationAccountID
 		session.ReauthorizationRevision = binding.ReauthorizationRevision
+		session.ReauthorizationAccountRevision = binding.ReauthorizationAccountRevision
 		session.ReauthorizationExitIP = binding.ReauthorizationExitIP
 		if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
 			return nil, err

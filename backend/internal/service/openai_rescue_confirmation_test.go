@@ -226,6 +226,53 @@ func TestRescueConfirmationSharesSweepLock(t *testing.T) {
 	require.Equal(t, []int64{81}, f.calls)
 }
 
+func TestRescueSweepConfirmsReadyAccountsBeforeReseeding(t *testing.T) {
+	f := newRescueConfirmationFixture(t, 3)
+	unseeded := rescueLaneSweepAccount(80)
+	unseeded.GroupIDs, unseeded.Schedulable = []int64{99}, false
+	rescueLaneApplyMarker(t, unseeded, OpenAIRescueLaneMarker{
+		EnteredAt: f.lane.now().Add(-time.Hour), OrigGroupIDs: []int64{3},
+	})
+	f.repo.roster = []Account{*unseeded, *f.account}
+	seeds := 0
+	f.lane.seed = func(_ context.Context, id int64) error {
+		seeds++
+		require.Equal(t, int64(80), id)
+		require.Equal(t, []int64{81}, f.calls, "ready account must not wait behind an upstream seed")
+		return nil
+	}
+	_, _, _, err := f.lane.RunReconcileSweep(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, seeds)
+	require.True(t, GetOpenAIRescueLaneMarker(f.repo.resolve(80)).SeedOK)
+	require.False(t, f.repo.resolve(81).Schedulable, "early confirmation is not graduation")
+}
+
+func TestRescueSweepDeferredSeedRetainsRevisionFence(t *testing.T) {
+	f := newRescueConfirmationFixture(t, 3)
+	unseeded := rescueLaneSweepAccount(80)
+	unseeded.GroupIDs, unseeded.Schedulable = []int64{99}, false
+	rescueLaneApplyMarker(t, unseeded, OpenAIRescueLaneMarker{
+		EnteredAt: f.lane.now().Add(-time.Hour), OrigGroupIDs: []int64{3},
+	})
+	f.repo.roster = []Account{*unseeded, *f.account}
+	seeds := 0
+	f.lane.seed = func(context.Context, int64) error {
+		seeds++
+		return nil
+	}
+	f.lane.SetNeedleTrigger(func(_ context.Context, _ int64) error {
+		// A concurrent reauthorization after the roster read invalidates its seed.
+		account := f.repo.resolve(80)
+		account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+		return nil
+	})
+	_, _, _, err := f.lane.RunReconcileSweep(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, seeds, "a stale queued account must be rejected before upstream work")
+	require.Zero(t, GetOpenAIRescueLaneMarker(f.repo.resolve(80)).SeedAttempts)
+}
+
 func TestRescueLaneConcurrentStartStop(t *testing.T) {
 	lane := NewOpenAIRescueLane(&rescueLaneRepo{}, nil, nil, nil)
 	var workers sync.WaitGroup

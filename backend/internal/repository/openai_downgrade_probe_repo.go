@@ -75,6 +75,12 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 	if limit <= 0 {
 		limit = 100
 	}
+	// First qualification is admission work, not routine polling. Retain an
+	// exit-wide one-minute floor, including deleted accounts' history, and the
+	// full ten-minute floor for 429s and all repeat probes.
+	firstQualification := "(s.probe_mode = 'qualification' AND s.last_probe_at IS NULL)"
+	recentInterval := `CASE WHEN ` + firstQualification + ` AND recent.http_status <> 429
+		THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END`
 	rows, err := r.db.QueryContext(ctx, `
 		WITH due AS (
 			SELECT
@@ -85,6 +91,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				s.last_swap_at, s.last_probe_at, s.auth_consecutive_failures,
 				s.astra_consecutive_failures, s.astra_consecutive_successes, s.astra_next_probe_at,
 				s.updated_at, s.consecutive_429s,
+				`+firstQualification+` AS first_qualification,
 				CASE
 					WHEN p.exit_ip IS NOT NULL AND TRIM(p.exit_ip) <> ''
 						THEN 'ip:' || TRIM(p.exit_ip)
@@ -100,7 +107,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 							THEN 'proxy:' || a.proxy_id::text
 						ELSE 'account:' || s.account_id::text
 					END
-					ORDER BY s.next_probe_at, s.account_id
+					ORDER BY `+firstQualification+` DESC, s.next_probe_at, s.account_id
 				) AS probe_rank
 			FROM openai_downgrade_probe_states s
 			JOIN accounts a ON a.id = s.account_id
@@ -144,7 +151,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 							SELECT 1
 							FROM openai_downgrade_probe_results recent
 							JOIN proxies recent_proxy ON recent_proxy.id = recent.proxy_id
-							WHERE recent.created_at > $1 - INTERVAL '10 minutes'
+							WHERE recent.created_at > $1 - (`+recentInterval+`)
 								AND recent_proxy.exit_ip IS NOT NULL
 								AND TRIM(recent_proxy.exit_ip) = TRIM(p.exit_ip)
 						)
@@ -155,7 +162,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 							SELECT 1
 							FROM openai_downgrade_probe_results recent
 							WHERE recent.proxy_id = a.proxy_id
-								AND recent.created_at > $1 - INTERVAL '10 minutes'
+								AND recent.created_at > $1 - (`+recentInterval+`)
 						)
 					)
 				)
@@ -169,7 +176,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			updated_at, consecutive_429s
 		FROM due
 		WHERE probe_rank = 1
-		ORDER BY next_probe_at, account_id
+		ORDER BY first_qualification DESC, next_probe_at, account_id
 		LIMIT $2
 	`, now, limit)
 	if err != nil {

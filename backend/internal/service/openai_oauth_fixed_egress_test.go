@@ -114,7 +114,7 @@ func TestOpenAIFixedEgressDeniesBeforeProbeAndTokenExchange(t *testing.T) {
 			store := svc.sessionStore.(*testOpenAIOAuthSessionStore)
 			before := len(store.sessions)
 			result, err := svc.GenerateReauthorizationAuthURL(t.Context(), account.ID,
-				account.UpdatedAt.Format(time.RFC3339Nano), account.ProxyID, "", PlatformOpenAI)
+				account.UpdatedAt.Format(time.RFC3339Nano), account.ProxyID, "", PlatformOpenAI, "")
 			require.ErrorIs(t, err, ErrOpenAIOAuthFixedEgressRequired)
 			require.Nil(t, result)
 			require.Len(t, store.sessions, before)

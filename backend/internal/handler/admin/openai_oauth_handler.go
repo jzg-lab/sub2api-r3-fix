@@ -117,10 +117,11 @@ func NewOpenAIOAuthHandler(
 
 // OpenAIGenerateAuthURLRequest represents the request for generating OpenAI auth URL
 type OpenAIGenerateAuthURLRequest struct {
-	ProxyID           *int64 `json:"proxy_id"`
-	RedirectURI       string `json:"redirect_uri"`
-	AccountID         *int64 `json:"account_id"`
-	ExpectedUpdatedAt string `json:"expected_updated_at"`
+	ProxyID                       *int64 `json:"proxy_id"`
+	RedirectURI                   string `json:"redirect_uri"`
+	AccountID                     *int64 `json:"account_id"`
+	ExpectedUpdatedAt             string `json:"expected_updated_at"`
+	ExpectedAuthorizationRevision string `json:"expected_authorization_revision"`
 }
 
 // GenerateAuthURL generates OpenAI OAuth authorization URL
@@ -137,9 +138,9 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 	if req.AccountID != nil {
 		result, err = h.openaiOAuthService.GenerateReauthorizationAuthURL(
 			c.Request.Context(), *req.AccountID, req.ExpectedUpdatedAt,
-			req.ProxyID, req.RedirectURI, oauthPlatformFromPath(c),
+			req.ProxyID, req.RedirectURI, oauthPlatformFromPath(c), req.ExpectedAuthorizationRevision,
 		)
-	} else if req.ExpectedUpdatedAt != "" {
+	} else if req.ExpectedUpdatedAt != "" || req.ExpectedAuthorizationRevision != "" {
 		response.BadRequest(c, "account_id is required for reauthorization")
 		return
 	} else {

@@ -72,6 +72,22 @@ describe('useOpenAIOAuth account-bound reauthorization', () => {
     expect(oauth.sessionId.value).toBe('')
     expect(oauth.authUrl.value).toBe('')
   })
+
+  it('sends the stable authorization revision separately from runtime updated_at', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://example.test/?state=fixture', session_id: 'fixture'
+    })
+    const oauth = useOpenAIOAuth()
+    const revision = `oauth-v1:${'a'.repeat(64)}`
+    await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z',
+      expectedAuthorizationRevision: revision
+    })
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith('/admin/openai/generate-auth-url', {
+      proxy_id: 7, account_id: 42, expected_updated_at: '2026-10-03T01:02:03Z',
+      expected_authorization_revision: revision
+    })
+  })
 })
 
 function deferred<T>() {

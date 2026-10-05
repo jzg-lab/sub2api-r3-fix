@@ -583,24 +583,14 @@ func validateOpenAIOAuthProtectedProxyUpdate(
 	exec sqlExecutor,
 	proxyID int64,
 	identityChanged bool,
-	nextExpiresAt *time.Time,
 ) error {
 	protected, err := openAIOAuthProxyIsProtected(ctx, exec, proxyID)
 	if err != nil || !protected {
 		return err
 	}
-	var currentExpiresAt sql.NullTime
-	if err := scanSingleRow(ctx, exec, `
-		SELECT expires_at
-		FROM proxies
-		WHERE id = $1 AND deleted_at IS NULL
-	`, []any{proxyID}, &currentExpiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return service.ErrProxyNotFound
-		}
-		return err
-	}
-	if identityChanged || !sameNullableTime(currentExpiresAt, nextExpiresAt) {
+	// Availability and renewal do not change the historical authorization exit.
+	// Connection changes still require a separate, verified same-exit workflow.
+	if identityChanged {
 		return service.ErrOpenAIOAuthProxyBindingProtected
 	}
 	return nil
@@ -631,13 +621,6 @@ func openAIOAuthProxyIsProtected(ctx context.Context, exec sqlExecutor, proxyID 
 		)
 	`, []any{proxyID, fmt.Sprint(proxyID)}, &protected)
 	return protected, err
-}
-
-func sameNullableTime(current sql.NullTime, next *time.Time) bool {
-	if !current.Valid || next == nil {
-		return !current.Valid && next == nil
-	}
-	return current.Time.Equal(*next)
 }
 
 func sameNullableInt64(left, right *int64) bool {

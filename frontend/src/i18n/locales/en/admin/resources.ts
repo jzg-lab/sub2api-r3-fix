@@ -133,6 +133,7 @@ export default {
       batchDeleteSkipped: 'Skipped {skipped} proxies',
       batchDeleteFailed: 'Batch delete failed',
       deleteBlockedInUse: 'This proxy is in use and cannot be deleted',
+      historyBindingProtected: 'Current or historical OpenAI authorization records still reference this proxy. Deletion and unverified connection changes are blocked. You can deactivate or renew it in Edit; historical bindings and the original login IP are retained.',
       accountsTitle: 'Accounts using this IP',
       accountsEmpty: 'No accounts are using this proxy',
       accountsFailed: 'Failed to load accounts list',

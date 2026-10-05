@@ -41,7 +41,7 @@ func reauthorizationIPFixture(t *testing.T) (*OpenAIOAuthService, *Account, *Ope
 	}}
 	NewOpenAIAuthBrowserLauncher(cfg, svc.sessionStore, svc.proxyRepo).SetReauthorizationService(svc)
 	result, err := svc.GenerateReauthorizationAuthURL(t.Context(), account.ID,
-		account.UpdatedAt.Format(time.RFC3339Nano), account.ProxyID, "", PlatformOpenAI)
+		account.UpdatedAt.Format(time.RFC3339Nano), account.ProxyID, "", PlatformOpenAI, "")
 	require.NoError(t, err)
 	session, err := svc.sessionStore.Get(t.Context(), result.SessionID)
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestReauthorizationIPGenerationRejectsMissingHistoryAndChangedAccount(t *te
 			}
 			store := svc.sessionStore.(*testOpenAIOAuthSessionStore)
 			before := len(store.sessions)
-			result, err := svc.GenerateReauthorizationAuthURL(t.Context(), 42, revision, &proxyID, "", PlatformOpenAI)
+			result, err := svc.GenerateReauthorizationAuthURL(t.Context(), 42, revision, &proxyID, "", PlatformOpenAI, "")
 			require.Error(t, err)
 			require.Nil(t, result)
 			require.Len(t, store.sessions, before)
@@ -94,7 +94,7 @@ func TestReauthorizationIPGenerationRejectsMissingHistoryAndChangedAccount(t *te
 }
 
 func TestReauthorizationIPDriftStopsExchangeBeforeCredentialsLeave(t *testing.T) {
-	for _, mutation := range []string{"exit", "unavailable", "route", "account", "revision", "baseline", "missing baseline"} {
+	for _, mutation := range []string{"exit", "unavailable", "route", "account", "credentials", "baseline", "missing baseline"} {
 		t.Run(mutation, func(t *testing.T) {
 			svc, account, session, proxy, client := reauthorizationIPFixture(t)
 			switch mutation {
@@ -106,8 +106,8 @@ func TestReauthorizationIPDriftStopsExchangeBeforeCredentialsLeave(t *testing.T)
 				proxy.Port++
 			case "account":
 				account.ID++
-			case "revision":
-				account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+			case "credentials":
+				account.Credentials = map[string]any{"access_token": "newer-fixture"}
 			case "baseline":
 				account.Extra[OpenAIOAuthLoginExitIPExtraKey] = "198.51.100.99"
 			case "missing baseline":
@@ -156,6 +156,21 @@ func TestReauthorizationIPUnchangedExchangeAndReplay(t *testing.T) {
 	require.EqualValues(t, 1, atomic.LoadInt32(&client.exchangeCalled))
 }
 
+func TestReauthorizationRuntimeUpdatesDoNotInvalidateSession(t *testing.T) {
+	svc, account, session, _, client := reauthorizationIPFixture(t)
+	account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+	account.Status = StatusError
+	account.ErrorMessage = "fixture: expired authorization"
+	account.Extra["openai_rescue_probe_at"] = account.UpdatedAt.Format(time.RFC3339Nano)
+	launchReauthorizationFixture(t, svc, session)
+	result, err := svc.ExchangeCode(t.Context(), &OpenAIExchangeCodeInput{
+		SessionID: session.ID, State: session.State, Code: "fixture",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.ReauthorizationProof)
+	require.EqualValues(t, 1, atomic.LoadInt32(&client.exchangeCalled))
+}
+
 func TestReauthorizationIPLauncherPinsOriginalIPAndRejectsStaleAccount(t *testing.T) {
 	svc, account, session, proxy, _ := reauthorizationIPFixture(t)
 	session.CodeVerifier = strings.Repeat("a", openAIAuthBrowserCodeVerifierLength)
@@ -179,7 +194,7 @@ func TestReauthorizationIPLauncherPinsOriginalIPAndRejectsStaleAccount(t *testin
 	require.Equal(t, proxy.URL(), args[2])
 	require.Equal(t, "198.51.100.25", args[3])
 	args = nil
-	account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+	account.Credentials = map[string]any{"access_token": "newer-fixture"}
 	_, err = launcher.Launch(t.Context(), session.ID)
 	require.ErrorIs(t, err, ErrOAuthReauthorizationStale)
 	require.Empty(t, args)
@@ -260,7 +275,7 @@ func TestReauthorizationIPChangesDuringEnrichmentDoNotPublish(t *testing.T) {
 				enrichmentReached = true
 				switch mutation {
 				case "account":
-					account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+					account.Credentials = map[string]any{"access_token": "newer-fixture"}
 				case "exit":
 					svc.observeReauthorizationExitIP = func(context.Context, string) (string, error) {
 						return "198.51.100.99", nil

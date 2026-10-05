@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -595,11 +596,12 @@ type OpenAIDowngradeProbeRunner struct {
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
-	startOnce sync.Once
-	stopOnce  sync.Once
-	stopCh    chan struct{}
-	doneCh    chan struct{}
-	wakeCh    chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	stopCh      chan struct{}
+	doneCh      chan struct{}
+	wakeCh      chan struct{}
+	wakeVersion atomic.Uint64
 }
 
 func NewOpenAIDowngradeProbeRunner(
@@ -664,6 +666,19 @@ func (r *OpenAIDowngradeProbeRunner) Start() {
 	r.startOnce.Do(func() {
 		go r.loop()
 	})
+}
+
+// Wake coalesces committed imports and recovery requests without starting a
+// second scan or waiting on network work in the caller.
+func (r *OpenAIDowngradeProbeRunner) Wake() {
+	if r == nil || r.IsStopped() {
+		return
+	}
+	r.wakeVersion.Add(1)
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 func (r *OpenAIDowngradeProbeRunner) Stop() {
@@ -796,6 +811,7 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		return nil
 	}
 	defer r.runMu.Unlock()
+	wakeVersion := r.wakeVersion.Load()
 	r.lifecycleMu.Lock()
 	if r.stopped {
 		r.lifecycleMu.Unlock()
@@ -916,6 +932,11 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 	for i := range due {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Finish an in-flight probe, then rescan committed imports before
+		// starting more work from an older queue. Never cancel its result.
+		if r.wakeVersion.Load() != wakeVersion {
+			break
 		}
 		err := r.processStateAtomic(ctx, &due[i], now)
 		if ctx.Err() != nil {

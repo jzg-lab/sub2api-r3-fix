@@ -1206,6 +1206,13 @@ export default {
           createFailedRestart:
             '账号创建尚未确认。请先检查账号列表，再重新发起浏览器授权；旧授权结果不能重复使用。',
           errors: {
+            ACCOUNT_NOT_FOUND: '该账号已不存在，请刷新账号列表。',
+            OAUTH_REAUTH_STALE_ACCOUNT:
+              '账号状态已变化，请重新生成授权链接。不会提交旧授权结果或切换原登录 IP；若账号类型或代理已变更，请关闭窗口后重新打开。',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE:
+              '暂时无法读取账号状态，请稍后重新生成授权链接。原凭据和原登录 IP 未被修改。',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNSUPPORTED:
+              '该账号类型不支持此浏览器重授权流程，仅支持 OpenAI OAuth 主账号。',
             OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
               '请在已核验的固定出口浏览器中重新完成授权。首次登录证明缺失、过期、已使用或与当前账号不匹配。',
             OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:

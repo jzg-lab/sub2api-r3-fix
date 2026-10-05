@@ -70,7 +70,7 @@ export function useOpenAIOAuth() {
   const generateAuthUrl = async (
     proxyId?: number | null,
     redirectUri?: string,
-    reauthorization?: { accountId: number; expectedUpdatedAt: string }
+    reauthorization?: { accountId: number; expectedUpdatedAt: string; expectedAuthorizationRevision?: string }
   ): Promise<boolean> => {
     const version = ++requestVersion
     clearAuthorizationSession()
@@ -90,6 +90,9 @@ export function useOpenAIOAuth() {
       if (reauthorization) {
         payload.account_id = reauthorization.accountId
         payload.expected_updated_at = reauthorization.expectedUpdatedAt
+        if (reauthorization.expectedAuthorizationRevision) {
+          payload.expected_authorization_revision = reauthorization.expectedAuthorizationRevision
+        }
       }
 
       const response = await adminAPI.accounts.generateAuthUrl(

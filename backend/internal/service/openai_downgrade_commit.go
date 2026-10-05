@@ -367,7 +367,7 @@ func (r *OpenAIDowngradeProbeRunner) stagedRunner(stage *openAIProbeStaging) *Op
 		tlsProfiles: r.tlsProfiles, interval: r.interval, now: r.now,
 		nextDelay: r.nextDelay, probeFn: r.probeFn, recentTraffic: r.recentTraffic,
 		deferCounts: maps.Clone(r.deferCounts),
-		rescueLane:  r.rescueLane,
+		rescueLane:  r.rescueLane, pluginRoundTrip: r.pluginRoundTrip,
 	}
 }
 

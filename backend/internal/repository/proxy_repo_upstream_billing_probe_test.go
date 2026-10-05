@@ -27,8 +27,8 @@ func TestProxyUpdateInvalidatesBoundProbeSnapshotsAndEnqueuesOutboxAtomically(t 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "old.example", 8080, "user", "pass", service.StatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+			AddRow("http", "old.example", 8080, "user", "pass", service.StatusActive, nil))
 	expectOpenAIOAuthProxyProtection(mock, 9, false)
 	mock.ExpectExec(`(?s)UPDATE "proxies" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE "proxies" SET "backup_proxy_id" = NULL WHERE "backup_proxy_id" = \$1`).
@@ -38,6 +38,7 @@ func TestProxyUpdateInvalidatesBoundProbeSnapshotsAndEnqueuesOutboxAtomically(t 
 	mock.ExpectQuery(`(?s)UPDATE accounts.*- 'upstream_billing_probe'.*- 'ollama_cloud_usage_snapshot'.*type = 'apikey'.*extra \? 'upstream_billing_probe'.*platform IN \('openai', 'anthropic', 'kimi', 'zhipu', 'deepseek'\).*extra \? 'ollama_cloud_usage_snapshot'.*RETURNING id`).
 		WithArgs(int64(9)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)).AddRow(int64(18)))
+	expectProxyAccountTouch(mock, 9, 17, 18)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)")).
 		WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, accountIDsPayloadMatcher{want: []int64{17, 18}}).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -71,8 +72,8 @@ func TestProxyUpdateRollsBackWhenProbeInvalidationOutboxFails(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "old.example", 8080, "", "", service.StatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+			AddRow("http", "old.example", 8080, "", "", service.StatusActive, nil))
 	expectOpenAIOAuthProxyProtection(mock, 9, false)
 	mock.ExpectExec(`(?s)UPDATE "proxies" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE "proxies" SET "backup_proxy_id" = NULL WHERE "backup_proxy_id" = \$1`).
@@ -82,6 +83,7 @@ func TestProxyUpdateRollsBackWhenProbeInvalidationOutboxFails(t *testing.T) {
 	mock.ExpectQuery(`(?s)UPDATE accounts.*- 'upstream_billing_probe'.*- 'ollama_cloud_usage_snapshot'.*type = 'apikey'.*extra \? 'upstream_billing_probe'.*platform IN \('openai', 'anthropic', 'kimi', 'zhipu', 'deepseek'\).*extra \? 'ollama_cloud_usage_snapshot'.*RETURNING id`).
 		WithArgs(int64(9)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)))
+	expectProxyAccountTouch(mock, 9, 17)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)")).
 		WillReturnError(errors.New("outbox failed"))
 	mock.ExpectRollback()
@@ -105,8 +107,8 @@ func TestProxyUpdateSkipsProbeInvalidationForNonIdentityChange(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "same.example", 8080, "", "", service.StatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+			AddRow("http", "same.example", 8080, "", "", service.StatusActive, nil))
 	expectOpenAIOAuthProxyProtection(mock, 9, false)
 	mock.ExpectExec(`(?s)UPDATE "proxies" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE "proxies" SET "backup_proxy_id" = NULL WHERE "backup_proxy_id" = \$1`).
@@ -134,12 +136,9 @@ func TestProxyUpdateRejectsRouteChangeForHistoricalOpenAIOAuthBinding(t *testing
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "old.example", 8080, "", "", service.StatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+			AddRow("http", "old.example", 8080, "", "", service.StatusActive, nil))
 	expectOpenAIOAuthProxyProtection(mock, 9, true)
-	mock.ExpectQuery(`(?s)SELECT expires_at.*FROM proxies`).
-		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"expires_at"}).AddRow(nil))
 	mock.ExpectRollback()
 
 	repo := newProxyRepositoryWithSQL(client, db)
@@ -154,36 +153,55 @@ func TestProxyUpdateRejectsRouteChangeForHistoricalOpenAIOAuthBinding(t *testing
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestProxyUpdateRejectsExpiryChangeForHistoricalOpenAIOAuthBinding(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
-	t.Cleanup(func() { _ = client.Close() })
-
-	currentExpiry := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Microsecond)
-	nextExpiry := currentExpiry.Add(24 * time.Hour)
-	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
-		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "same.example", 8080, "", "", service.StatusActive))
-	expectOpenAIOAuthProxyProtection(mock, 9, true)
-	mock.ExpectQuery(`(?s)SELECT expires_at.*FROM proxies`).
-		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"expires_at"}).AddRow(currentExpiry))
-	mock.ExpectRollback()
-
-	repo := newProxyRepositoryWithSQL(client, db)
-	proxy := &service.Proxy{
-		ID: 9, Name: "proxy", Protocol: "http", Host: "same.example", Port: 8080,
-		Status: service.StatusActive, ExpiresAt: &nextExpiry,
+func TestProxyUpdateAllowsAvailabilityAndRenewalForHistoricalOpenAIOAuthBinding(t *testing.T) {
+	nextExpiry := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Microsecond)
+	for _, tc := range []struct {
+		name, before, after string
+		expiry              *time.Time
+	}{
+		{"renew", service.StatusActive, service.StatusActive, &nextExpiry},
+		{"no_expiry", service.StatusActive, service.StatusActive, nil},
+		{"deactivate", service.StatusActive, "inactive", &nextExpiry},
+		{"renew_archived", "inactive", "inactive", &nextExpiry},
+		{"reactivate", "inactive", service.StatusActive, &nextExpiry},
+		{"renew_expired", service.StatusExpired, service.StatusActive, &nextExpiry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+			t.Cleanup(func() { _ = client.Close() })
+			mock.ExpectBegin()
+			mock.ExpectQuery(`(?s)SELECT protocol, host, port.*FOR NO KEY UPDATE`).
+				WithArgs(int64(9)).
+				WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+					AddRow("http", "same.example", 8080, "", "", tc.before, nil))
+			expectOpenAIOAuthProxyProtection(mock, 9, true)
+			mock.ExpectExec(`(?s)UPDATE "proxies" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(`UPDATE "proxies" SET "backup_proxy_id" = NULL WHERE "backup_proxy_id" = \$1`).
+				WithArgs(int64(9)).WillReturnResult(sqlmock.NewResult(0, 0))
+			expectProxyUpdateReloadState(mock, 9, "same.example", "", "", tc.after, tc.expiry)
+			if tc.before != tc.after || tc.expiry != nil {
+				mock.ExpectQuery(`(?s)UPDATE accounts.*upstream_billing_probe.*RETURNING id`).
+					WithArgs(int64(9)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+				expectProxyAccountTouch(mock, 9, 1207)
+				mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)")).
+					WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, accountIDsPayloadMatcher{want: []int64{1207}}).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			}
+			mock.ExpectCommit()
+			repo := newProxyRepositoryWithSQL(client, db)
+			proxy := &service.Proxy{
+				ID: 9, Name: "proxy", Protocol: "http", Host: "same.example", Port: 8080,
+				Status: tc.after, ExpiresAt: tc.expiry,
+			}
+			require.NoError(t, repo.Update(context.Background(), proxy))
+			require.Equal(t, tc.after, proxy.Status)
+			require.Equal(t, tc.expiry, proxy.ExpiresAt)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
 	}
-
-	err = repo.Update(context.Background(), proxy)
-
-	require.ErrorIs(t, err, service.ErrOpenAIOAuthProxyBindingProtected)
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestProxyDeleteRejectsHistoricalOpenAIOAuthBinding(t *testing.T) {
@@ -196,8 +214,8 @@ func TestProxyDeleteRejectsHistoricalOpenAIOAuthBinding(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)` + regexp.QuoteMeta("SELECT protocol, host, port") + `.*` + regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status"}).
-			AddRow("http", "same.example", 8080, "", "", service.StatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"protocol", "host", "port", "username", "password", "status", "expires_at"}).
+			AddRow("http", "same.example", 8080, "", "", service.StatusActive, nil))
 	expectOpenAIOAuthProxyProtection(mock, 9, true)
 	mock.ExpectRollback()
 
@@ -208,6 +226,15 @@ func TestProxyDeleteRejectsHistoricalOpenAIOAuthBinding(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func expectProxyAccountTouch(mock sqlmock.Sqlmock, proxyID int64, ids ...int64) {
+	rows := sqlmock.NewRows([]string{"id"})
+	for _, id := range ids {
+		rows.AddRow(id)
+	}
+	mock.ExpectQuery(`(?s)UPDATE accounts SET updated_at=GREATEST.*WHERE proxy_id=\$1 AND deleted_at IS NULL RETURNING id`).
+		WithArgs(proxyID).WillReturnRows(rows)
+}
+
 func expectOpenAIOAuthProxyProtection(mock sqlmock.Sqlmock, proxyID int64, protected bool) {
 	mock.ExpectQuery(`(?s)SELECT EXISTS .*openai_oauth_qualified_proxy_id`).
 		WithArgs(proxyID, strconv.FormatInt(proxyID, 10)).
@@ -215,6 +242,10 @@ func expectOpenAIOAuthProxyProtection(mock sqlmock.Sqlmock, proxyID int64, prote
 }
 
 func expectProxyUpdateReload(mock sqlmock.Sqlmock, id int64, host, username, password string) {
+	expectProxyUpdateReloadState(mock, id, host, username, password, service.StatusActive, nil)
+}
+
+func expectProxyUpdateReloadState(mock sqlmock.Sqlmock, id int64, host, username, password, status string, expiry *time.Time) {
 	now := time.Now()
 	mock.ExpectQuery(`(?s)SELECT .* FROM "proxies" WHERE "id" = \$1`).
 		WithArgs(id).
@@ -223,7 +254,7 @@ func expectProxyUpdateReload(mock sqlmock.Sqlmock, id int64, host, username, pas
 			"username", "password", "status", "expires_at", "fallback_mode", "backup_proxy_id", "expiry_warn_days",
 		}).AddRow(
 			id, now, now, nil, "proxy", "http", host, 8080,
-			username, password, service.StatusActive, nil, service.FallbackModeNone, nil, 0,
+			username, password, status, expiry, service.FallbackModeNone, nil, 0,
 		))
 }
 

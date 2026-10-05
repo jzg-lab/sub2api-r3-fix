@@ -120,17 +120,36 @@ func (s *OpenAIOAuthService) ConsumeReauthorizationProof(
 	return context.WithValue(ctx, openAIReauthorizationProofKey{}, expected), nil
 }
 
-// The repository must atomically compare this same account revision when
-// committing. The context value is never decoded from client JSON.
+// ValidateOAuthReauthorizationUpdate is used both before and under the row lock.
+// Only a consumed, account-bound proof can replace the legacy timestamp guard.
+func ValidateOAuthReauthorizationUpdate(ctx context.Context, current *Account, expected time.Time, credentials map[string]any) error {
+	if current == nil || expected.IsZero() {
+		return ErrOAuthReauthorizationStale
+	}
+	proof, bound := ctx.Value(openAIReauthorizationProofKey{}).(OpenAIOAuthSession)
+	if bound && proof.ReauthorizationAccountRevision != "" {
+		if proof.ReauthorizationRevision != expected.UTC().Format(time.RFC3339Nano) {
+			return ErrOpenAIOAuthReauthorizationProofRequired
+		}
+	} else if !current.UpdatedAt.Equal(expected) {
+		return ErrOAuthReauthorizationStale
+	}
+	return ValidateOpenAIOAuthReauthorizationCommit(ctx, current, credentials)
+}
+
+// The context value is never decoded from client JSON. Keep the same identity
+// comparison at commit as at browser launch, exchange and proof consumption.
 func ValidateOpenAIOAuthReauthorizationCommit(ctx context.Context, current *Account, credentials map[string]any) error {
+	proof, ok := ctx.Value(openAIReauthorizationProofKey{}).(OpenAIOAuthSession)
 	if !IsOpenAIBrowserOAuthAccount(current) {
+		if ok {
+			return ErrOAuthReauthorizationStale
+		}
 		return nil
 	}
-	proof, ok := ctx.Value(openAIReauthorizationProofKey{}).(OpenAIOAuthSession)
 	if !ok || proof.ReauthorizationAccountID != current.ID ||
 		validateOpenAIOAuthReauthorizationBinding(&proof) != nil ||
 		current.ProxyID == nil || proof.ProxyID != *current.ProxyID ||
-		proof.ReauthorizationRevision != current.UpdatedAt.UTC().Format(time.RFC3339Nano) ||
 		proof.CreatedAt.IsZero() || proof.CreatedAt.After(time.Now()) ||
 		!time.Now().Before(proof.CreatedAt.Add(openAIReauthorizationProofTTL)) {
 		return ErrOpenAIOAuthReauthorizationProofRequired
@@ -138,6 +157,13 @@ func ValidateOpenAIOAuthReauthorizationCommit(ctx context.Context, current *Acco
 	ip, err := OpenAIOAuthLoginExitIP(current)
 	if err != nil || ip != proof.ReauthorizationExitIP {
 		return ErrOpenAIOAuthLoginIPChanged
+	}
+	if proof.ReauthorizationAccountRevision != "" {
+		if OpenAIOAuthAccountRevision(current) != proof.ReauthorizationAccountRevision {
+			return ErrOAuthReauthorizationStale
+		}
+	} else if proof.ReauthorizationRevision != current.UpdatedAt.UTC().Format(time.RFC3339Nano) {
+		return ErrOpenAIOAuthReauthorizationProofRequired
 	}
 	hash, err := openAIReauthorizationCredentialsHash(credentials)
 	if err != nil || hash != proof.ReauthorizationCredentialsHash {

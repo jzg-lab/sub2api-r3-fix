@@ -307,7 +307,13 @@ const currentLoading = computed(() => {
   return claudeOAuth.loading.value
 })
 const currentError = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.error.value
+  if (isOpenAILike.value) {
+    const history = reauthSession.account.value?.extra?.openai_oauth_login_exit_ip
+    return openaiOAuth.error.value || (
+      typeof history !== 'string' || !history.trim()
+        ? t('admin.accounts.oauth.openai.errors.OPENAI_OAUTH_LOGIN_IP_UNKNOWN') : ''
+    )
+  }
   if (isGemini.value) return geminiOAuth.error.value
   if (isAntigravity.value) return antigravityOAuth.error.value
   if (isGrok.value) return grokOAuth.error.value
@@ -352,7 +358,7 @@ function resetState() {
 onBeforeUnmount(resetState)
 
 watch(
-  [() => props.show, () => props.account?.id, () => props.account?.platform, () => props.account?.proxy_id],
+  [() => props.show, () => props.account?.id, () => props.account?.platform, () => props.account?.type, () => props.account?.proxy_id],
   ([newVal]) => {
     resetState()
     if (newVal && props.account) {
@@ -420,10 +426,21 @@ const handleGenerateUrl = () => reauthSession.run(async (operation) => {
   if (isOpenAILike.value) {
     invalidateBrowser()
     oauthFlowRef.value?.reset()
-    await openaiOAuth.generateAuthUrl(operation.account.proxy_id, undefined, {
-      accountId: operation.account.id,
-      expectedUpdatedAt: operation.expectedUpdatedAt
-    })
+    openaiOAuth.resetState()
+    try {
+      if (!await reauthSession.refreshForNewAuthorization(operation, adminAPI.accounts.getById)) return
+      await openaiOAuth.generateAuthUrl(operation.account.proxy_id, undefined, {
+        accountId: operation.account.id,
+        expectedUpdatedAt: operation.expectedUpdatedAt,
+        expectedAuthorizationRevision: operation.account.reauthorization_revision
+      })
+    } catch (error: unknown) {
+      if (!reauthSession.isCurrent(operation)) return
+      openaiOAuth.error.value = extractI18nErrorMessage(
+        error, t, 'admin.accounts.oauth.openai.errors', t('admin.accounts.oauth.authFailed')
+      )
+      appStore.showError(openaiOAuth.error.value)
+    }
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined

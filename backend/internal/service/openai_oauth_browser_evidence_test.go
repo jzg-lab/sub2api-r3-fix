@@ -51,7 +51,7 @@ func TestReauthorizationBrowserRequiredBeforeExchange(t *testing.T) {
 				require.Error(t, err)
 			case "different session":
 				other, err := svc.GenerateReauthorizationAuthURL(t.Context(), account.ID,
-					session.ReauthorizationRevision, account.ProxyID, "", PlatformOpenAI)
+					session.ReauthorizationRevision, account.ProxyID, "", PlatformOpenAI, "")
 				require.NoError(t, err)
 				result, err := reauthorizationBrowserLauncher(t, svc, true).Launch(t.Context(), other.SessionID)
 				require.NoError(t, err)
@@ -105,17 +105,36 @@ func TestReauthorizationBrowserEvidenceRejectsChangedBinding(t *testing.T) {
 }
 
 func TestReauthorizationBrowserRechecksAccountAfterLauncher(t *testing.T) {
-	svc, account, session, _, _ := reauthorizationIPFixture(t)
-	launcher := reauthorizationBrowserLauncher(t, svc, true)
-	launcher.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		account.UpdatedAt = account.UpdatedAt.Add(time.Second)
-		return exec.CommandContext(ctx, "/usr/bin/true")
+	for _, identityChanged := range []bool{false, true} {
+		name := "runtime update preserves authorization"
+		if identityChanged {
+			name = "credential update invalidates authorization"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, account, session, _, _ := reauthorizationIPFixture(t)
+			launcher := reauthorizationBrowserLauncher(t, svc, true)
+			launcher.newCommand = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				account.UpdatedAt = account.UpdatedAt.Add(time.Second)
+				if identityChanged {
+					account.Credentials = map[string]any{"refresh_token": "changed-fixture"}
+				}
+				return exec.CommandContext(ctx, "/usr/bin/true")
+			}
+			result, err := launcher.Launch(t.Context(), session.ID)
+			if identityChanged {
+				require.ErrorIs(t, err, ErrOAuthReauthorizationStale)
+				require.False(t, result.Launched)
+				_, err = svc.sessionStore.Get(t.Context(), authorizationBrowserEvidence(session).ID)
+				require.ErrorIs(t, err, ErrPendingAuthSessionNotFound)
+			} else {
+				require.NoError(t, err)
+				require.True(t, result.Launched)
+				evidence, err := svc.sessionStore.Get(t.Context(), authorizationBrowserEvidence(session).ID)
+				require.NoError(t, err)
+				require.Equal(t, session.ReauthorizationAccountRevision, evidence.ReauthorizationAccountRevision)
+			}
+		})
 	}
-	result, err := launcher.Launch(t.Context(), session.ID)
-	require.ErrorIs(t, err, ErrOAuthReauthorizationStale)
-	require.False(t, result.Launched)
-	_, err = svc.sessionStore.Get(t.Context(), authorizationBrowserEvidence(session).ID)
-	require.ErrorIs(t, err, ErrPendingAuthSessionNotFound)
 }
 
 func TestReauthorizationBrowserConcurrentExchangeHasOneWinner(t *testing.T) {

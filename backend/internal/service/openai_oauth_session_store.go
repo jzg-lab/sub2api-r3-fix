@@ -27,6 +27,7 @@ type OpenAIOAuthSession struct {
 	CreatedAt                       time.Time
 	ReauthorizationAccountID        int64
 	ReauthorizationRevision         string
+	ReauthorizationAccountRevision  string
 	ReauthorizationExitIP           string
 	ReauthorizationCredentialsHash  string
 	ReauthorizationBrowserSessionID string
@@ -88,6 +89,7 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Create(ctx context.Context, session
 				"created_at":                         session.CreatedAt.UTC().Format(time.RFC3339Nano),
 				"reauthorization_account_id":         strconv.FormatInt(session.ReauthorizationAccountID, 10),
 				"reauthorization_revision":           session.ReauthorizationRevision,
+				"reauthorization_account_revision":   session.ReauthorizationAccountRevision,
 				"reauthorization_exit_ip":            session.ReauthorizationExitIP,
 				"reauthorization_credentials_hash":   session.ReauthorizationCredentialsHash,
 				"reauthorization_browser_session_id": session.ReauthorizationBrowserSessionID,
@@ -156,6 +158,7 @@ func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSe
 		"login_browser_session_id":           &result.LoginBrowserSessionID,
 		"login_credentials_hash":             &result.LoginCredentialsHash,
 		"reauthorization_browser_session_id": &result.ReauthorizationBrowserSessionID,
+		"reauthorization_account_revision":   &result.ReauthorizationAccountRevision,
 	} {
 		if rawValue, exists := raw[key]; exists {
 			value, valid := rawValue.(string)

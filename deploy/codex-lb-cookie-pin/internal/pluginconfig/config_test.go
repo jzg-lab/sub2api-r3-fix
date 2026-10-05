@@ -40,6 +40,35 @@ func TestParseEmptyUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizedConfigRoundTripPreservesReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"none", "medium", "xhigh"} {
+		t.Run(effort, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{
+				"probe_reasoning_effort": effort, "adaptive_probe_scheduling": false,
+				"probe_burst_until_passes": 9,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, message, ok := Parse(raw)
+			if !ok {
+				t.Fatal(message)
+			}
+			normalized, err := json.Marshal(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, message, ok := Parse(normalized)
+			if !ok {
+				t.Fatal(message)
+			}
+			if !reflect.DeepEqual(first, second) {
+				t.Fatal("normalized configuration changed after reload")
+			}
+		})
+	}
+}
+
 // 核心：省略的布尔字段不得把默认 true 冲成 false（mock 全链路曾踩过的坑）。
 func TestParseOmittedBooleansKeepDefaults(t *testing.T) {
 	cfg, _, ok := Parse([]byte(`{"enabled":true,"inject_scope":"all"}`))

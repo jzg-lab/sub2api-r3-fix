@@ -43,7 +43,9 @@ export function isRecoveryAccount(account) {
 function captureAccount(account) {
   const instant = revisionInstant(account?.updated_at)
   if (!isRecoveryAccount(account) || !positiveID(account.id) ||
-      !positiveID(account.proxy_id) || instant === null) {
+      !positiveID(account.proxy_id) || instant === null ||
+      (account.reauthorization_revision !== undefined &&
+        !/^oauth-v1:[a-f0-9]{64}$/.test(account.reauthorization_revision))) {
     fail('REAUTH_ACCOUNT_NOT_ELIGIBLE')
   }
   // Do not hold a mutable account object or refresh this revision at upload.
@@ -51,13 +53,17 @@ function captureAccount(account) {
     id: account.id,
     proxyID: account.proxy_id,
     revision: account.updated_at,
+    authorizationRevision: account.reauthorization_revision,
     instant,
   })
 }
 
 function assertCurrent(account, binding) {
   if (!isRecoveryAccount(account) || account.id !== binding.id ||
-      account.proxy_id !== binding.proxyID || account.updated_at !== binding.revision) {
+      account.proxy_id !== binding.proxyID ||
+      (binding.authorizationRevision
+        ? account.reauthorization_revision !== binding.authorizationRevision
+        : account.updated_at !== binding.revision)) {
     fail('REAUTH_ACCOUNT_CHANGED')
   }
 }
@@ -207,6 +213,8 @@ export async function recoverAccount({
     const session = authorizationSession(await call('/api/v1/admin/openai/generate-auth-url', {
       account_id: binding.id,
       expected_updated_at: binding.revision,
+      ...(binding.authorizationRevision
+        ? { expected_authorization_revision: binding.authorizationRevision } : {}),
       proxy_id: binding.proxyID,
     }))
     listener = await listen({ ...session, signal })

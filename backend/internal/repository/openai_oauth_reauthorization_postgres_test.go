@@ -41,7 +41,53 @@ func openAIPostgresProof(t *testing.T, account *service.Account, credentials map
 	ctx := reauthCommitContext(t, account.UpdatedAt, credentials)
 	ctx.proof.ReauthorizationAccountID = account.ID
 	ctx.proof.ProxyID = *account.ProxyID
+	ctx.proof.ReauthorizationAccountRevision = service.OpenAIOAuthAccountRevision(account)
 	return ctx
+}
+
+func TestOpenAIReauthorizationPostgresAllowsRuntimeUpdatesUnderLock(t *testing.T) {
+	repo, db, account := newOpenAIReauthorizationPostgres(t)
+	credentials := map[string]any{"access_token": "fixture", "email": "reauth@example.test"}
+	proof := openAIPostgresProof(t, account, credentials)
+	require.NoError(t, repo.BatchUpdateLastUsed(t.Context(), map[int64]time.Time{account.ID: time.Now()}))
+	require.NoError(t, repo.UpdateExtra(t.Context(), account.ID, map[string]any{"runtime_fixture": "retained"}))
+	latest, err := repo.GetByID(t.Context(), account.ID)
+	require.NoError(t, err)
+	require.False(t, account.UpdatedAt.Equal(latest.UpdatedAt))
+	updated, err := repo.ApplyOAuthCredentials(proof, account.ID, account.UpdatedAt,
+		service.AccountTypeOAuth, credentials, nil)
+	require.NoError(t, err)
+	require.Equal(t, "retained", updated.Extra["runtime_fixture"])
+	require.Equal(t, latest.LastUsedAt, updated.LastUsedAt)
+	require.Equal(t, account.ProxyID, updated.ProxyID)
+	require.Equal(t, account.Extra[service.OpenAIOAuthLoginExitIPExtraKey],
+		updated.Extra[service.OpenAIOAuthLoginExitIPExtraKey])
+	_, err = repo.ApplyOAuthCredentials(proof, account.ID, account.UpdatedAt,
+		service.AccountTypeOAuth, credentials, nil)
+	require.ErrorIs(t, err, service.ErrOAuthReauthorizationStale)
+	var events int
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		"SELECT count(*) FROM scheduler_outbox WHERE account_id = $1 AND event_type = 'account_changed'",
+		account.ID).Scan(&events))
+	require.Positive(t, events)
+}
+
+func TestOpenAIReauthorizationPostgresRejectsCredentialChangeWithoutTimestamp(t *testing.T) {
+	repo, db, account := newOpenAIReauthorizationPostgres(t)
+	credentials := map[string]any{"access_token": "fixture", "email": "reauth@example.test"}
+	proof := openAIPostgresProof(t, account, credentials)
+	_, err := db.ExecContext(t.Context(), `
+		UPDATE accounts SET credentials = jsonb_set(credentials, '{access_token}', '"newer-fixture"') WHERE id = $1
+	`, account.ID)
+	require.NoError(t, err)
+	current, err := repo.GetByID(t.Context(), account.ID)
+	require.NoError(t, err)
+	require.True(t, current.UpdatedAt.Equal(account.UpdatedAt))
+	updated, err := repo.ApplyOAuthCredentials(proof, account.ID, account.UpdatedAt,
+		service.AccountTypeOAuth, credentials, nil)
+	require.ErrorIs(t, err, service.ErrOAuthReauthorizationStale)
+	require.Nil(t, updated)
+	assertOpenAIReauthUnchanged(t, repo, db, current)
 }
 
 func assertOpenAIReauthUnchanged(t *testing.T, repo *accountRepository, db *sql.DB, before *service.Account) {

@@ -112,6 +112,32 @@ test('mutating the supplied account cannot move the captured version forward', a
   assert.equal(f.calls.some((call) => call.path.endsWith('/exchange-code')), false)
 })
 
+for (const change of ['runtime', 'authorization', 'missing revision']) {
+  test(`identity-bound recovery handles ${change} updates during login`, async () => {
+    const f = fixture()
+    const revision = `oauth-v1:${opaque(64)}`
+    f.observed.reauthorization_revision = revision
+    f.current.reauthorization_revision = revision
+    f.onCall = (path) => {
+      if (path.endsWith('/launch-auth-browser')) {
+        f.current.updated_at = '2026-10-04T01:03:00Z'
+        if (change === 'authorization') f.current.reauthorization_revision = `oauth-v1:${opaque(64)}`
+        if (change === 'missing revision') delete f.current.reauthorization_revision
+      }
+    }
+    if (change === 'runtime') {
+      assert.equal((await f.run()).committed, true)
+      const generated = f.calls.find((call) => call.path.endsWith('/generate-auth-url')).body
+      assert.equal(generated.expected_authorization_revision, revision)
+      const committed = f.calls.find((call) => call.path.endsWith('/apply-oauth-credentials')).body
+      assert.equal(committed.expected_updated_at, f.observed.updated_at)
+    } else {
+      await assert.rejects(f.run(), { code: 'REAUTH_ACCOUNT_CHANGED' })
+      assert.equal(f.calls.some((call) => call.path.endsWith('/apply-oauth-credentials')), false)
+    }
+  })
+}
+
 test('explicit rescue-account reauthorization does not send scheduling or rescue changes', async () => {
   const f = fixture()
   f.current.schedulable = f.observed.schedulable = false

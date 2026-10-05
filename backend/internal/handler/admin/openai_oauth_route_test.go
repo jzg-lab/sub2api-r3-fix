@@ -101,26 +101,32 @@ func TestOpenAIOAuthHandlersRejectRouteChangeDuringExchange(t *testing.T) {
 
 func TestOpenAIOAuthGenerateRejectsMalformedReauthorizationInsteadOfCreating(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, body := range []string{
-		`{"proxy_id":7,"account_id":"invalid"}`,
-		`{"proxy_id":7,"expected_updated_at":"2026-10-03T01:02:03Z"}`,
-		`{"proxy_id":7,"account_id":42,"expected_updated_at":"2026-10-03T01:02:03Z"}`,
-		`{"proxy_id":7,"account_id":0}`,
-		`{"proxy_id":7,`,
+	for _, tc := range []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{"invalid account type", `{"proxy_id":7,"account_id":"invalid"}`, http.StatusBadRequest},
+		{"missing account", `{"proxy_id":7,"expected_updated_at":"2026-10-03T01:02:03Z"}`, http.StatusBadRequest},
+		{"lookup unavailable", `{"proxy_id":7,"account_id":42,"expected_updated_at":"2026-10-03T01:02:03Z"}`, http.StatusServiceUnavailable},
+		{"nonexistent account", `{"proxy_id":7,"account_id":0}`, http.StatusNotFound},
+		{"malformed JSON", `{"proxy_id":7,`, http.StatusBadRequest},
 	} {
-		store := &oauthRouteSessionStore{}
-		oauth := service.NewOpenAIOAuthService(&oauthRouteProxyRepo{}, &oauthRouteClient{})
-		oauth.SetSessionStore(store)
-		t.Cleanup(oauth.Stop)
-		handler := NewOpenAIOAuthHandler(oauth, nil, nil, nil)
-		router := gin.New()
-		router.POST("/admin/openai/generate-auth-url", handler.GenerateAuthURL)
-		request := httptest.NewRequest(http.MethodPost, "/admin/openai/generate-auth-url", bytes.NewBufferString(body))
-		request.Header.Set("Content-Type", "application/json")
-		response := httptest.NewRecorder()
-		router.ServeHTTP(response, request)
-		require.Contains(t, []int{http.StatusBadRequest, http.StatusConflict}, response.Code)
-		require.Nil(t, store.session, "invalid reauthorization must not create an unbound session")
+		t.Run(tc.name, func(t *testing.T) {
+			store := &oauthRouteSessionStore{}
+			oauth := service.NewOpenAIOAuthService(&oauthRouteProxyRepo{}, &oauthRouteClient{})
+			oauth.SetSessionStore(store)
+			t.Cleanup(oauth.Stop)
+			handler := NewOpenAIOAuthHandler(oauth, nil, nil, nil)
+			router := gin.New()
+			router.POST("/admin/openai/generate-auth-url", handler.GenerateAuthURL)
+			request := httptest.NewRequest(http.MethodPost, "/admin/openai/generate-auth-url", bytes.NewBufferString(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			require.Equal(t, tc.status, response.Code)
+			require.Nil(t, store.session, "invalid reauthorization must not create an unbound session")
+		})
 	}
 }
 

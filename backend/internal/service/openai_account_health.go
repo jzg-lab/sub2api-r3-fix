@@ -607,10 +607,7 @@ func (r *OpenAIDowngradeProbeRunner) ConfirmOpenAIRescueAccount(ctx context.Cont
 	if _, err := r.reenableOpenAIAccount(ctx, accountID, false, true); err != nil {
 		return err
 	}
-	select {
-	case r.wakeCh <- struct{}{}:
-	default:
-	}
+	r.Wake()
 	return nil
 }
 

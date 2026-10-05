@@ -42,7 +42,7 @@ var (
 	)
 	ErrOpenAIOAuthProxyBindingProtected = infraerrors.Conflict(
 		"OPENAI_OAUTH_PROXY_BINDING_PROTECTED",
-		"the OpenAI OAuth authorization proxy is protected and cannot be changed or removed",
+		"the proxy is referenced by current or historical OpenAI authorization records; deactivate or renew it instead of deleting it or changing its connection",
 	)
 	ErrOpenAIOAuthIdentityChanged = infraerrors.Conflict(
 		"OPENAI_OAUTH_IDENTITY_CHANGED",

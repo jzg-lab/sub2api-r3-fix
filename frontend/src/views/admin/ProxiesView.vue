@@ -1081,7 +1081,6 @@ const {
   isSelected,
   select,
   deselect,
-  clear: clearSelectedProxies,
   removeMany: removeSelectedProxies,
   toggleVisible,
   batchUpdate
@@ -1163,6 +1162,14 @@ const isAbortError = (error: unknown) => {
   if (!error || typeof error !== 'object') return false
   const maybeError = error as { name?: string; code?: string }
   return maybeError.name === 'AbortError' || maybeError.code === 'ERR_CANCELED'
+}
+
+const proxyMutationError = (error: any, fallback: string) => {
+  const reason = error?.reason || error?.response?.data?.reason
+  if (reason === 'OPENAI_OAUTH_PROXY_BINDING_PROTECTED') {
+    return t('admin.proxies.historyBindingProtected')
+  }
+  return error?.response?.data?.message || error?.response?.data?.detail || error?.message || fallback
 }
 
 const toggleSelectRow = (id: number, event: Event) => {
@@ -1458,7 +1465,14 @@ const handleUpdateProxy = async () => {
       port: editForm.port,
       username: editForm.username.trim() || null,
       status: editForm.status,
-      expires_at: editForm.expires_at ? Math.floor(new Date(editForm.expires_at).getTime() / 1000) : null,
+      // A status-only edit must not truncate an existing expiration to midnight.
+      expires_at: editForm.expires_at
+        ? Math.floor(new Date(
+          editForm.expires_at === editingProxy.value.expires_at?.slice(0, 10)
+            ? editingProxy.value.expires_at
+            : editForm.expires_at
+        ).getTime() / 1000)
+        : null,
       fallback_mode: editForm.fallback_mode,
       backup_proxy_id: editForm.fallback_mode === 'proxy' ? editForm.backup_proxy_id : null,
       expiry_warn_days: editForm.expiry_warn_days,
@@ -1474,7 +1488,7 @@ const handleUpdateProxy = async () => {
     closeEditModal()
     loadProxies()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.proxies.failedToUpdate'))
+    appStore.showError(proxyMutationError(error, t('admin.proxies.failedToUpdate')))
     console.error('Error updating proxy:', error)
   } finally {
     submitting.value = false
@@ -1962,7 +1976,7 @@ const confirmDelete = async () => {
     deletingProxy.value = null
     loadProxies()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.proxies.failedToDelete'))
+    appStore.showError(proxyMutationError(error, t('admin.proxies.failedToDelete')))
     console.error('Error deleting proxy:', error)
   }
 }
@@ -1984,12 +1998,15 @@ const confirmBatchDelete = async () => {
     } else if (skipped > 0) {
       appStore.showInfo(t('admin.proxies.batchDeleteSkipped', { skipped }))
     }
+    if (skipped > 0) {
+      appStore.showError(result.skipped.slice(0, 5).map(item => `#${item.id}: ${item.reason}`).join('\n'))
+    }
 
-    clearSelectedProxies()
+    removeSelectedProxies(result.deleted_ids || [])
     showBatchDeleteDialog.value = false
     loadProxies()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.proxies.batchDeleteFailed'))
+    appStore.showError(proxyMutationError(error, t('admin.proxies.batchDeleteFailed')))
     console.error('Error batch deleting proxies:', error)
   }
 }

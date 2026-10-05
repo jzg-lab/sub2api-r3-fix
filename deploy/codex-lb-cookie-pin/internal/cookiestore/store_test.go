@@ -2,6 +2,7 @@ package cookiestore
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -224,8 +225,8 @@ func TestSignInfoNewestAndPercentiles(t *testing.T) {
 	start := now.Add(time.Minute)
 	for i := 1; i <= 33; i++ {
 		life := time.Duration(100 * i * int(time.Second))
-		store.Capture(1211, []string{"__cflb=seq; Max-Age=3600"}, start)
-		store.Capture(1211, []string{"__cflb=seq; Max-Age=3600"}, start.Add(life))
+		store.Capture(1211, []string{"__cflb=seq-" + strconv.Itoa(i-1) + "; Max-Age=3600"}, start)
+		store.Capture(1211, []string{"__cflb=seq-" + strconv.Itoa(i) + "; Max-Age=3600"}, start.Add(life))
 		start = start.Add(life)
 	}
 	stats := store.SignInfo(1211, start).Stats
@@ -249,7 +250,7 @@ func TestStatusExposesSignFields(t *testing.T) {
 	store := New()
 	now := time.Now()
 	store.Capture(1210, []string{"__cflb=abc; Max-Age=3600"}, now)
-	store.Capture(1210, []string{"__cflb=abc; Max-Age=3600"}, now.Add(90*time.Second)) // 覆写归档 90s
+	store.Capture(1210, []string{"__cflb=abc-next; Max-Age=3600"}, now.Add(90*time.Second)) // 覆写归档 90s
 	status := store.Status(now.Add(95 * time.Second))
 	if len(status.Accounts) != 1 {
 		t.Fatalf("应有一个账号: %+v", status.Accounts)
