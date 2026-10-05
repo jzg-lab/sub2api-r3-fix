@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.NoError(t, err)
 	defer packageFile.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	hostVersion := os.Getenv("SUB2API_TEST_RESCUE_HOST_VERSION")
 	require.NotEmpty(t, hostVersion, "use the exact candidate host version")
@@ -62,7 +63,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.Equal(t, PluginSignatureTrusted, installation.SignatureStatus)
 	require.True(t, installation.Compatibility.Compatible)
 	require.Equal(t, "lyunlong.codex.lb-cookie-pin", installation.PluginKey)
-	require.Equal(t, "0.3.9", installation.Version)
+	require.Equal(t, "0.3.10", installation.Version)
 	installation.ID = 7
 
 	// macOS Unix socket paths have a short limit; keep RPC outside the long
@@ -107,6 +108,30 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 			}
 		}
 		switch step {
+		case "native-low-rt", "native-ambiguous", "native-wrong":
+			answer := "FINAL_ANSWER: 21"
+			if step == "native-ambiguous" {
+				answer = "not 21, no reliable final answer"
+			} else if step == "native-wrong" {
+				answer = "reasoning mentions 21\nFINAL_ANSWER: 0"
+			}
+			w.Header().Set("Set-Cookie", "__cflb=native-probe; Path=/")
+			w.Header().Set("Content-Type", "text/event-stream")
+			body, marshalErr := json.Marshal(map[string]any{
+				"type": "response.completed",
+				"response": map[string]any{"status": "completed",
+					"output": []any{map[string]any{"type": "message",
+						"content": []any{map[string]any{"type": "output_text", "text": answer}}}},
+					"usage": map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": 300}}},
+			})
+			if marshalErr != nil {
+				t.Error(marshalErr)
+				return
+			}
+			_, _ = io.WriteString(w, "data: "+string(body)+"\n\n")
+			return
+		case "paused-seed":
+			w.Header().Set("Set-Cookie", "__cflb=must-not-capture; Path=/")
 		case "seed-a":
 			w.Header().Set("Set-Cookie", "__cflb=old-a; Path=/")
 		case "seed-b":
@@ -231,6 +256,60 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	assert.False(t, reachedProxy)
 	assert.Equal(t, 0, legacy.doCalls, "no fallback for an inactive assigned proxy")
 
+	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
+		"enabled":true,"quality_probe_enabled":false,"persist_kv":false,"paused_account_ids":[41]
+	}`)))
+	send(41, "new", "paused-seed", http.StatusOK)
+	send(41, "new", "while-paused", http.StatusOK)
+	cookie("paused-seed", "")
+	cookie("while-paused", "")
+	send(42, "other", "other-while-paused", http.StatusOK)
+	cookie("other-while-paused", "__cflb=other-b")
+
+	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
+		"enabled":true,"quality_probe_enabled":true,"persist_kv":false,"paused_account_ids":[41]
+	}`)))
+	send(55, "low", "native-low-rt", http.StatusOK)
+	send(56, "ambiguous", "native-ambiguous", http.StatusOK)
+	send(57, "wrong", "native-wrong", http.StatusOK)
+	type probeView struct {
+		AccountID int64  `json:"account_id"`
+		Probes    int64  `json:"probes"`
+		Fails     int64  `json:"fails"`
+		Rerolls   int64  `json:"quality_rerolls"`
+		Passes    int    `json:"consecutive_passes"`
+		Verdict   string `json:"last_verdict"`
+	}
+	var views map[int64]probeView
+	require.Eventually(t, func() bool {
+		health, healthErr := runtime.api.Health(ctx, &pluginv1.HealthRequest{})
+		if healthErr != nil {
+			return false
+		}
+		var status struct {
+			Prober struct {
+				Accounts []probeView `json:"accounts"`
+			} `json:"prober"`
+		}
+		if json.Unmarshal([]byte(health.StatusJson), &status) != nil {
+			return false
+		}
+		views = make(map[int64]probeView)
+		for _, view := range status.Prober.Accounts {
+			views[view.AccountID] = view
+		}
+		return views[55].Probes > 0 && views[56].Probes > 0 && views[57].Fails > 0
+	}, 25*time.Second, 100*time.Millisecond)
+	for _, id := range []int64{55, 56} {
+		require.Equal(t, "error", views[id].Verdict)
+		require.Zero(t, views[id].Fails)
+		require.Zero(t, views[id].Rerolls)
+		require.Zero(t, views[id].Passes)
+	}
+	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
+		"enabled":true,"quality_probe_enabled":false,"persist_kv":false,"paused_account_ids":[41]
+	}`)))
+
 	require.Eventually(t, func() bool { return runtime.inFlight.Load() == 0 },
 		time.Second, 10*time.Millisecond)
 	runtime.draining.Store(true)
@@ -275,7 +354,8 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 			"trust_config_sha256":       sum(trustSource),
 			"test_source_sha256":        sum(source),
 			"checks": []string{"native_installer", "rpc", "gateway", "credential_rotation",
-				"stale_response", "account_isolation", "401", "reroll", "proxy_fail_closed", "drain"},
+				"stale_response", "account_isolation", "401", "reroll", "proxy_fail_closed", "drain",
+				"paused_account", "low_rt_observation", "ambiguous_answer", "explicit_wrong_answer"},
 			"production_adoption": false,
 		}, "", "  ")
 		require.NoError(t, marshalErr)

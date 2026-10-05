@@ -74,9 +74,8 @@ type Config struct {
 	// 未配置时缺省 medium（对齐宿主资格针）。
 	ProbeReasoningEffort string `json:"probe_reasoning_effort"`
 	// ProbeMinReasoningTokens 判过钉推理门槛（v0.3.4）：答对且 completed 带
-	// usage.reasoning_tokens 低于该值的针判 Fail（触发重摇，把搜索方向对准
-	// 「宿主资格针真能考过」的节点），对齐宿主「答对 + rt≥800」毕业判据。
-	// SSE 无 usage 的针不受影响（保持答对主义）；配 1 = 事实关闭。
+	// usage.reasoning_tokens 低于该值的针只作中性观察，不重摇、不计连过。
+	// 开启门槛时缺失 usage 也为中性；配 1 允许任何已知正 token 用量。
 	// 未配置时缺省 800。
 	ProbeMinReasoningTokens int `json:"probe_min_reasoning_tokens"`
 	// MaxConsecutiveProbeFailures 连续答错阈值：达到即判疑似账号级（重摇

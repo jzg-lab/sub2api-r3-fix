@@ -23,7 +23,7 @@ const (
 	VerdictPass Verdict = "pass"
 	// VerdictFail 答错：疑似路由级/账号级降智，触发重摇判定。
 	VerdictFail Verdict = "fail"
-	// VerdictError 传输/HTTP/解析失败：不是质量信号，不计入失败
+	// VerdictError 传输/HTTP/解析失败或中性观察：不计入质量失败或连续通过
 	//（冷会话首发 503 发生率 ~70%，重试即愈）。
 	VerdictError Verdict = "error"
 )

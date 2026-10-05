@@ -19,6 +19,37 @@ func downgradeDueColumns() []string {
 		astra_consecutive_successes astra_next_probe_at updated_at consecutive_429s`)
 }
 
+func TestProbeAnswerVerdictPersistence(t *testing.T) {
+	for _, tc := range []struct {
+		name                             string
+		transport, inconclusive, correct bool
+		want                             any
+	}{
+		{"ambiguous", true, true, false, nil},
+		{"transport", false, false, false, nil},
+		{"wrong", true, false, false, false},
+		{"correct", true, false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			tokens := 300
+			mock.ExpectBegin()
+			mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+				WithArgs(int64(7), nil, "normal", tc.transport, tc.want, tokens, nil, int64(0), 200, "", 0).
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			mock.ExpectCommit()
+			repo := &openAIDowngradeProbeRepository{db: db}
+			require.NoError(t, repo.RecordOpenAIDowngradeProbe(context.Background(), &service.OpenAIDowngradeProbeResult{
+				AccountID: 7, Mode: "normal", TransportOK: tc.transport,
+				AnswerCorrect: tc.correct, AnswerInconclusive: tc.inconclusive, ReasoningTokens: &tokens, HTTPStatus: 200,
+			}))
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 	now := time.Date(2026, 9, 15, 8, 0, 0, 0, time.UTC)
 	matcher := sqlmock.QueryMatcherFunc(func(_, actual string) error {

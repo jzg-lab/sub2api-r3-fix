@@ -29,17 +29,17 @@ const (
 var openAIDowngradeArchiveMu sync.Mutex
 
 type openAIDowngradeProbeArchiveEntry struct {
-	At              string `json:"at"`
-	AccountID       int64  `json:"account_id"`
-	Mode            string `json:"mode"`
-	Domain          string `json:"domain"`
-	QuestionText    string `json:"question_text"`
-	AnswerDisplay   string `json:"answer_display"`
+	At            string `json:"at"`
+	AccountID     int64  `json:"account_id"`
+	Mode          string `json:"mode"`
+	Domain        string `json:"domain"`
+	QuestionText  string `json:"question_text"`
+	AnswerDisplay string `json:"answer_display"`
 	// AnswerText 模型答案全文（判分内核提取，r17am）：答错定性第一证据——
 	// 「数字看错」还是「完全胡说」一眼可判，不再依赖被 usage 记录截断的
 	// 响应尾。
 	AnswerText      string `json:"answer_text,omitempty"`
-	AnswerCorrect   bool   `json:"answer_correct"`
+	AnswerCorrect   *bool  `json:"answer_correct"`
 	TransportOK     bool   `json:"transport_ok"`
 	HTTPStatus      int    `json:"http_status"`
 	ReasoningTokens *int   `json:"reasoning_tokens"`
@@ -82,7 +82,7 @@ func archiveOpenAIDowngradeProbe(accountID int64, mode string,
 		QuestionText:    question.Text,
 		AnswerDisplay:   question.AnswerDisplay,
 		AnswerText:      answerText,
-		AnswerCorrect:   result.AnswerCorrect,
+		AnswerCorrect:   result.AnswerVerdict(),
 		TransportOK:     result.TransportOK,
 		HTTPStatus:      result.HTTPStatus,
 		ReasoningTokens: result.ReasoningTokens,

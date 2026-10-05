@@ -216,10 +216,16 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 					name, existing, checksum, name, name,
 				)
 			}
-			continue // 迁移已应用且校验和匹配，跳过
 		}
-		if !errors.Is(rowErr, sql.ErrNoRows) {
+		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 			return fmt.Errorf("check migration %s: %w", name, rowErr)
+		}
+		aliasApplied, err := migrationAppliedUnderAlias(ctx, lockConn, name, checksum)
+		if err != nil {
+			return err
+		}
+		if rowErr == nil || aliasApplied {
+			continue
 		}
 
 		nonTx, err := validateMigrationExecutionMode(name, content)

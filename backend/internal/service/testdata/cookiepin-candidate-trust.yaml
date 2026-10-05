@@ -1,0 +1,8 @@
+# Isolated candidate acceptance only. Append this public key to the deployment's
+# existing policy after approval; never replace its other trusted publishers.
+plugins:
+  allow_unsigned: false
+  max_upload_bytes: 134217728
+  max_uncompressed_bytes: 268435456
+  trusted_publishers:
+    78907dd602a252f6: "eJB91gKiUvZWIIElohX3hXCgCpRX3hVv5pfXrCeTe+g="

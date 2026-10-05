@@ -82,7 +82,7 @@ func TestOpenAIDowngradeProbeArchivesExactlyOneFinalOutcome(t *testing.T) {
 			require.Equal(t, result.HTTPStatus, archived.HTTPStatus)
 			require.Equal(t, result.ErrorMessage, archived.ErrorMessage)
 			require.Equal(t, result.TransportOK, archived.TransportOK)
-			require.Equal(t, result.AnswerCorrect, archived.AnswerCorrect)
+			require.Equal(t, result.AnswerVerdict(), archived.AnswerCorrect)
 			require.Equal(t, result.ReasoningTokens, archived.ReasoningTokens)
 			require.Equal(t, result.Latency.Milliseconds(), archived.LatencyMS)
 			switch name {

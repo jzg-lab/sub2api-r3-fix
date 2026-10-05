@@ -44,6 +44,7 @@ func newProbePostgresWithOwnership(t *testing.T, ownership bool) *sql.DB {
 		"227_proxy_outcome_stats.sql",
 		"247_probe_auth_strikes.sql",
 		"248_drop_harvest_lane_and_codex_tickets.sql",
+		"249_openai_probe_inconclusive_answer.sql",
 	)
 	return newProbePostgresWithMigrations(t, migrations)
 }

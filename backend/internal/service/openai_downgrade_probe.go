@@ -172,16 +172,17 @@ func isOpenAIDowngradeTurnStateLenDegraded(length int) bool {
 // OpenAIDowngradeProbeResult is the redacted, bill-free result of one probe.
 // It intentionally contains no response text or credential material.
 type OpenAIDowngradeProbeResult struct {
-	AccountID       int64
-	ProxyID         *int64
-	Mode            string
-	TransportOK     bool
-	AnswerCorrect   bool
-	ReasoningTokens *int
-	Juice           *int
-	Latency         time.Duration
-	HTTPStatus      int
-	ErrorMessage    string
+	AccountID          int64
+	ProxyID            *int64
+	Mode               string
+	TransportOK        bool
+	AnswerCorrect      bool
+	AnswerInconclusive bool
+	ReasoningTokens    *int
+	Juice              *int
+	Latency            time.Duration
+	HTTPStatus         int
+	ErrorMessage       string
 	// RateLimitResetAt 非 nil 表示 429 带显式重置时间（x-codex-* 窗口头或
 	// usage_limit_reached 体），调度层据此长退避，不再短周期空打。
 	RateLimitResetAt *time.Time
@@ -198,11 +199,11 @@ type OpenAIDowngradeProbeResult struct {
 	gradedText string
 }
 
-func (r OpenAIDowngradeProbeResult) answerVerdict() any {
-	if !r.TransportOK {
+func (r OpenAIDowngradeProbeResult) AnswerVerdict() *bool {
+	if !r.TransportOK || r.AnswerInconclusive {
 		return nil
 	}
-	return r.AnswerCorrect
+	return &r.AnswerCorrect
 }
 
 func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
@@ -216,6 +217,9 @@ func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
 	if isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) {
 		return true
 	}
+	if r.AnswerInconclusive {
+		return false
+	}
 	if !r.AnswerCorrect {
 		return true
 	}
@@ -224,8 +228,8 @@ func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
 	// 没伤到结论；指纹只有在叠加答错(上方 !AnswerCorrect)时才构成降智证据。
 	// 真截断伤害(1029 校准针03: 1552+答错)照走降智路径。IsRecovered 仍排除
 	// 指纹——恢复连胜必须来自干净 ≥1400 针，1552+答对只保底不惩罚。
-	return r.ReasoningTokens != nil &&
-		*r.ReasoningTokens < OpenAIDowngradeFailureReasoningThreshold
+	// Correct low-token answers are observations, not failure evidence.
+	return false
 }
 
 // IsQualificationPass 认证档的答对主义判定（2026-09-15 用户裁定「他只要答对
@@ -234,6 +238,7 @@ func (r OpenAIDowngradeProbeResult) IsDegraded() bool {
 // 凑不齐连胜，账号被钉死在资格节奏上。仅认证档使用；正常档判定不变。
 func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
 	return r.TransportOK &&
+		!r.AnswerInconclusive &&
 		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
 		r.AnswerCorrect &&
 		r.ReasoningTokens != nil &&
@@ -248,6 +253,7 @@ func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
 // （356 票/低 rt/截断指纹答对）的单针杀纪律不变（见 Apply 分层）。
 func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
 	return r.TransportOK &&
+		!r.AnswerInconclusive &&
 		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
 		!r.AnswerCorrect &&
 		!isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) &&
@@ -257,6 +263,7 @@ func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
 
 func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
 	return r.TransportOK &&
+		!r.AnswerInconclusive &&
 		(r.HTTPStatus == 0 || r.HTTPStatus == http.StatusOK) &&
 		r.AnswerCorrect &&
 		r.ReasoningTokens != nil &&
@@ -377,7 +384,8 @@ func ApplyOpenAIDowngradeProbeResult(
 			// 指纹+答对=中性且保留连胜(2026-09-15 用户裁定):若像普通中带
 			// (800≤rt<1400)那样清零,穿插的 1552 会让认证的 2 连胜永远凑不齐,
 			// 账号被钉死在 qualification 5min 节奏上,反而制造规律性探针流量。
-			if !(result.AnswerCorrect && result.ReasoningTokens != nil &&
+			if !(!result.AnswerInconclusive && result.AnswerCorrect && result.ReasoningTokens != nil &&
+				*result.ReasoningTokens >= OpenAIDowngradeFailureReasoningThreshold &&
 				isOpenAIDowngradeTruncationFingerprint(*result.ReasoningTokens)) {
 				state.ConsecutiveSuccesses = 0
 			}
@@ -1129,7 +1137,7 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 				"turn_state_len":   result.TurnStateLen,
 				"http_status":      result.HTTPStatus,
 				"transport_ok":     result.TransportOK,
-				"answer_correct":   result.answerVerdict(),
+				"answer_correct":   result.AnswerVerdict(),
 				"reasoning_tokens": result.ReasoningTokens,
 			}); err != nil {
 			return err
@@ -2309,7 +2317,9 @@ func (r *OpenAIDowngradeProbeResult) applyResponse(body []byte, answerPattern *r
 		text, reasoningTokens, juice = "", nil, nil
 	}
 	r.gradedText = text
-	r.AnswerCorrect = text != "" && answerPattern.MatchString(text)
+	final, known := extractOpenAIProbeFinalAnswer(text)
+	r.AnswerInconclusive = !known
+	r.AnswerCorrect = known && answerPattern != nil && answerPattern.MatchString(final)
 	r.ReasoningTokens = reasoningTokens
 	r.Juice = juice
 	// An incomplete body is not a wrong answer. Keep it out of all votes.
@@ -2317,6 +2327,8 @@ func (r *OpenAIDowngradeProbeResult) applyResponse(body []byte, answerPattern *r
 	r.ErrorMessage = ""
 	if !r.TransportOK {
 		r.ErrorMessage = "probe response missing valid completion or reasoning usage"
+	} else if r.AnswerInconclusive {
+		r.ErrorMessage = "probe response ambiguous final answer"
 	}
 }
 
@@ -2633,7 +2645,8 @@ func parseOpenAIDowngradeProbeResponse(body []byte, answerPattern *regexp.Regexp
 	if answerPattern == nil || text == "" {
 		return false, nil, nil
 	}
-	return answerPattern.MatchString(text), reasoningTokens, juice
+	final, known := extractOpenAIProbeFinalAnswer(text)
+	return known && answerPattern.MatchString(final), reasoningTokens, juice
 }
 
 // parseOpenAIDowngradeProbeCompletion 是 parseOpenAIDowngradeProbeResponse 的

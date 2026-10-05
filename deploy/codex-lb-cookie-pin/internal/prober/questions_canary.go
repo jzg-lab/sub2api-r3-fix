@@ -7,8 +7,7 @@ package prober
 // 40 连败，根因 = 考卷难度错位。唯一落在健康带的题域是「可感知维度 ×
 // 不可见维度 + 跨维配对目标」的双维两阶段最坏情形分析（糖果结构）；
 // 社区侧（linux.do、sub2api issue #3644）糖果题也正是降智检测的公认
-// canary。判分沿用 ContainsNumberToken 的数字边界匹配（与宿主正则
-// (^|[^0-9])N([^0-9]|$) 语义一致）。
+// canary。判分只接受明确最终答案，不以推导中出现的数字作为通过证据。
 //
 // 题域按针数确定性轮换（candy/two_dim 交替），每针的语义表面（口味/
 // 形状/容器/数表数字）现场随机重生成——题面每针不同、结构与锚点不变，
@@ -101,8 +100,11 @@ func candyQuestion() Question {
 		shapeB, rowB[0], rowB[1], rowB[2])
 	return Question{
 		ID:     "candy",
-		Prompt: text,
-		Grade:  func(text string) bool { return ContainsNumberToken(text, "21") },
+		Prompt: text + finalAnswerInstruction,
+		Grade: func(text string) bool {
+			answer, known := ExtractFinalAnswer(text)
+			return known && answer == "21"
+		},
 	}
 }
 
@@ -261,8 +263,11 @@ func twoDimQuestion() Question {
 			sb, spec.counts[1][0], spec.counts[1][1], spec.counts[1][2])
 		return Question{
 			ID:     "two_dim",
-			Prompt: text,
-			Grade:  func(text string) bool { return ContainsNumberToken(text, strconv.Itoa(answer)) },
+			Prompt: text + finalAnswerInstruction,
+			Grade: func(text string) bool {
+				final, known := ExtractFinalAnswer(text)
+				return known && final == strconv.Itoa(answer)
+			},
 		}
 	}
 	return candyQuestion() // 300 次仍未命中干净实例（概率上不可达）：回糖果

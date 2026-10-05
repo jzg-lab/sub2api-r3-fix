@@ -538,7 +538,7 @@ func (r *OpenAIDowngradeProbeRunner) GetOpenAIAccountHealth(ctx context.Context,
 }
 
 // OpenAIProbeEvidenceDegraded 最近一针的降智布尔（IsDegraded 的证据行版）：
-// HTTP 200 且答错，或答对但 rt<800 → 降智证据。r15e 中性语义：截断指纹叠加
+// HTTP 200 且明确答错 → 降智证据。正确低 rt 仅中性观察。r15e 中性语义：截断指纹叠加
 // 答对不判降智——指纹判定需要完整 result，状态机侧 ConsecutiveFailures 已
 // 承接；证据行只做展示层复核。非 200（401/429/异常）不构成降智证据。
 func OpenAIProbeEvidenceDegraded(ev *OpenAIProbeLastEvidence) bool {
@@ -548,7 +548,7 @@ func OpenAIProbeEvidenceDegraded(ev *OpenAIProbeLastEvidence) bool {
 	if !*ev.AnswerCorrect {
 		return true
 	}
-	return ev.ReasoningTokens != nil && *ev.ReasoningTokens < OpenAIDowngradeFailureReasoningThreshold
+	return false
 }
 
 // =============================================================================

@@ -812,9 +812,8 @@ func TestProbeBareShapeOnNoneEffort(t *testing.T) {
 
 // ---------- v0.3.4 判过钉门槛 + 401 丢模板 ----------
 
-// TestProbeLowRTGateFails：答对但 usage 推理 token 低于门槛（缺省 800）→ 判
-// Fail 触发重摇（连错达阈值进退避），连过计数不吃低 rt 针。
-func TestProbeLowRTGateFails(t *testing.T) {
+// Correct low-token responses cannot reroll, escalate or certify recovery.
+func TestProbeLowRTGateIsNeutral(t *testing.T) {
 	up := newFakeUpstream(t, "pass") // 答案全对
 	up.rt = 300                      // 但推理预算低（< 800）
 	store := cookiestore.New()
@@ -828,10 +827,12 @@ func TestProbeLowRTGateFails(t *testing.T) {
 
 	tmpl := *srv.templates[52]
 	state := prober.NewState(52)
+	state.ConsecFails = 1
+	state.ConsecPasses = 2
 	srv.runProbeCycle(context.Background(), 52, &tmpl, state, cfg)
 
-	if state.LastVerdict != prober.VerdictFail {
-		t.Fatalf("低 rt 答对应判 Fail，得 %s（答案 %q）", state.LastVerdict, state.LastAnswer)
+	if state.LastVerdict != prober.VerdictError {
+		t.Fatalf("低 rt 答对应判中性，得 %s（答案 %q）", state.LastVerdict, state.LastAnswer)
 	}
 	if state.ConsecPasses != 0 {
 		t.Errorf("低 rt 针不得计入连过: %d", state.ConsecPasses)
@@ -842,8 +843,15 @@ func TestProbeLowRTGateFails(t *testing.T) {
 	if state.LastReasoningTokens != 300 {
 		t.Errorf("LastReasoningTokens 应为 300，得 %d", state.LastReasoningTokens)
 	}
-	if !state.SuspectAccountLevel || state.QualityRerolls != 2 {
-		t.Errorf("低 rt 连错应与普通连错同路（3 发退避/2 次重摇）: %+v", state)
+	for i := 0; i < 3; i++ {
+		srv.runProbeCycle(context.Background(), 52, &tmpl, state, cfg)
+	}
+	if state.SuspectAccountLevel || state.QualityRerolls != 0 || state.Fails != 0 ||
+		state.ConsecFails != 1 || state.ConsecPasses != 0 {
+		t.Errorf("中性观察不得增加失败或抹掉已有失败证据: %+v", state)
+	}
+	if got := store.MergeHeader(52, "", time.Now()); got == "" {
+		t.Fatal("中性观察不得丢弃 Cookie")
 	}
 }
 

@@ -154,6 +154,10 @@ docs/*
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/ANTI_BYPASS_PROMPT_BOUNDARIES.md
 !docs/PRODUCTION_RELIABILITY.md
+!docs/r17bg-plugin-improvement-plan.md
+!docs/r17bg-plugin-capability-comparison.md
+!docs/r17bg-plugin-improvement-results.md
+!docs/r17bg-deployment-20261006.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

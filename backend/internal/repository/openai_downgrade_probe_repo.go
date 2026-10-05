@@ -320,7 +320,7 @@ func (r *openAIDowngradeProbeRepository) recordOpenAIDowngradeProbe(
 			CASE WHEN $4::boolean THEN $5::boolean ELSE NULL::boolean END,
 			$6, $7, $8, NULLIF($9, 0), NULLIF($10, ''), $11)
 	`, result.AccountID, result.ProxyID, result.Mode, result.TransportOK,
-		result.AnswerCorrect, result.ReasoningTokens, result.Juice,
+		result.AnswerVerdict(), result.ReasoningTokens, result.Juice,
 		result.Latency.Milliseconds(), result.HTTPStatus, result.ErrorMessage,
 		result.TurnStateLen)
 	if err != nil {

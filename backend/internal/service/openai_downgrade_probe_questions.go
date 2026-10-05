@@ -10,7 +10,7 @@ import (
 
 // 探针多题域题库（P2-11 二期）：糖果组合题在社区已知是中转侧常用 canary 题，
 // 单一语义类别长期高频出现本身就是可聚类特征。题库扩为多个语义互不相交的
-// 题域，每针均匀抽取，共用同一组判分阈值（答错或 rt<800 = degraded，
+// 题域，每针均匀抽取，共用同一组判分阈值（明确答错 = degraded，正确低 rt 中性，
 // rt≥1400 = recovered）。
 //
 // 题域准入硬标准（2026-09-15 五轮网关校准，1029 健康号 / gpt-6-astra / xhigh）：
@@ -30,8 +30,7 @@ import (
 type openAIDowngradeProbeQuestion struct {
 	Domain string
 	Text   string
-	// AnswerPattern 在模型输出文本里匹配期望答案。数值答案带边界
-	// (^|[^0-9])N([^0-9]|$)，语义与旧版固定答案 21 的正则完全一致。
+	// AnswerPattern 仅在提取出的单一最终数字答案中匹配，不扫描推导全文。
 	AnswerPattern *regexp.Regexp
 	// AnswerDisplay 期望答案的可读形态，仅供日志与校准记录。
 	AnswerDisplay string
@@ -122,7 +121,7 @@ func openAIDowngradeCandyQuestion(_ time.Time) openAIDowngradeProbeQuestion {
 		shapeB, rowB[0], rowB[1], rowB[2])
 	return openAIDowngradeProbeQuestion{
 		Domain:        "candy",
-		Text:          text,
+		Text:          text + openAIProbeFinalAnswerInstruction,
 		AnswerPattern: openAIDowngradeNumericAnswerPattern(21),
 		AnswerDisplay: "21",
 	}
@@ -292,7 +291,7 @@ func openAIDowngradeTwoDimQuestion(_ time.Time) openAIDowngradeProbeQuestion {
 			sb, spec.counts[1][0], spec.counts[1][1], spec.counts[1][2])
 		return openAIDowngradeProbeQuestion{
 			Domain:        "two_dim",
-			Text:          text,
+			Text:          text + openAIProbeFinalAnswerInstruction,
 			AnswerPattern: openAIDowngradeNumericAnswerPattern(answer),
 			AnswerDisplay: strconv.Itoa(answer),
 		}

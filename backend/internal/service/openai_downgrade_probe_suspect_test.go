@@ -116,11 +116,11 @@ func TestApplyHardEvidenceSingleShotRegression(t *testing.T) {
 	}
 	require.True(t, ApplyOpenAIDowngradeProbeResult(onDuty, lowRTWrong, time.Now()).Circuit)
 
-	// 截断指纹答对（1552 带内指纹叠加答对仍算降智证据的镜像：低 rt 答对）。
+	// 正确低 rt 仅中性观察，不单独熔断。
 	lowRTCorrect := lowRTWrong
 	lowRTCorrect.AnswerCorrect = true
 	lowRTCorrect.ReasoningTokens = downgradeProbeIntPtr(516)
-	require.True(t, ApplyOpenAIDowngradeProbeResult(onDuty, lowRTCorrect, time.Now()).Circuit)
+	require.False(t, ApplyOpenAIDowngradeProbeResult(onDuty, lowRTCorrect, time.Now()).Circuit)
 
 	// 356 票答对 + 满血 rt：Apply 层铁证（processState 侧另有 singleShot 复推）。
 	ts356Correct := OpenAIDowngradeProbeResult{
