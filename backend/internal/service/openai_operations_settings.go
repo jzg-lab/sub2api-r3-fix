@@ -36,6 +36,8 @@ type OpenAIOperationsSettings struct {
 	Recovery           OpenAIRecoverySettings    `json:"recovery"`
 	Reasoning          OpenAIReasoningSettings   `json:"reasoning"`
 	NewAccountDefaults *OpenAINewAccountDefaults `json:"new_account_defaults"`
+	// nil preserves the existing global restriction; an empty list restricts no groups.
+	QualityProtectedGroupIDs []int64 `json:"quality_protected_group_ids"`
 }
 
 func DefaultOpenAIOperationsSettings() OpenAIOperationsSettings {
@@ -46,6 +48,11 @@ func DefaultOpenAIOperationsSettings() OpenAIOperationsSettings {
 }
 
 func (v OpenAIOperationsSettings) Validate() error {
+	for _, id := range v.QualityProtectedGroupIDs {
+		if id <= 0 {
+			return fmt.Errorf("quality_protected_group_ids must contain positive group IDs")
+		}
+	}
 	r := v.Recovery
 	if r.IntervalMinutes < 5 || r.IntervalMinutes > 1440 || r.FailureThreshold < 1 || r.FailureThreshold > 100 ||
 		r.BackoffMinutes < r.IntervalMinutes || r.BackoffMinutes > 10080 || r.CooldownMinutes < 1 || r.CooldownMinutes > 1440 {
@@ -112,8 +119,7 @@ func (s *SettingService) SetOpenAIOperationsSettings(ctx context.Context, value 
 	return s.settingRepo.Set(ctx, SettingKeyOpenAIOperations, string(raw))
 }
 
-// A configured template is authoritative for its selected fields at creation
-// only. Unconfigured fields retain each import entry's existing behavior.
+// Templates apply at creation only. Explicit concurrency takes precedence.
 func applyOpenAINewAccountDefaults(input *CreateAccountInput, defaults *OpenAINewAccountDefaults) *CreateAccountInput {
 	if input == nil || input.Platform != PlatformOpenAI || defaults == nil {
 		return input
@@ -133,7 +139,7 @@ func applyOpenAINewAccountDefaults(input *CreateAccountInput, defaults *OpenAINe
 			out.ProxyID = &id
 		}
 	}
-	if defaults.Concurrency != nil {
+	if defaults.Concurrency != nil && input.Concurrency == 0 {
 		out.Concurrency = *defaults.Concurrency
 	}
 	if defaults.EnableTLSFingerprint != nil {

@@ -715,7 +715,9 @@
             v-model.number="concurrency"
             id="bulk-edit-concurrency"
             type="number"
-            readonly
+            min="1"
+            step="1"
+            required
             :disabled="!enableConcurrency"
             class="input"
             :class="!enableConcurrency && 'cursor-not-allowed opacity-50'"
@@ -773,7 +775,9 @@
             v-model.number="priority"
             id="bulk-edit-priority"
             type="number"
-            min="1"
+            min="0"
+            step="1"
+            required
             :disabled="!enablePriority"
             class="input"
             :class="!enablePriority && 'cursor-not-allowed opacity-50'"
@@ -1472,7 +1476,7 @@
 </template>
 
 <script setup lang="ts">
-import { LOCAL_ACCOUNT_CONCURRENCY } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, LOCAL_ACCOUNT_PRIORITY } from '@/constants/account'
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -1688,7 +1692,7 @@ const headerOverrideRows = ref<HeaderOverrideRow[]>([])
 const proxyId = ref<number | null>(null)
 const concurrency = ref<number>(LOCAL_ACCOUNT_CONCURRENCY)
 const loadFactor = ref<number | null>(null)
-const priority = ref(1)
+const priority = ref(LOCAL_ACCOUNT_PRIORITY)
 const rateMultiplier = ref(1)
 const status = ref<'active' | 'inactive'>('active')
 const groupIds = ref<number[]>([])
@@ -1922,6 +1926,11 @@ const buildOpenAICompactModelMapping = (): Record<string, string> | null => {
 }
 
 const buildUpdatePayload = (): Record<string, unknown> | null => {
+  if ((enableConcurrency.value && (!Number.isInteger(concurrency.value) || concurrency.value < 1)) ||
+      (enablePriority.value && (!Number.isInteger(priority.value) || priority.value < 0))) {
+    appStore.showError(t('admin.accounts.schedulingInvalid'))
+    return null
+  }
   const updates: Record<string, unknown> = {}
   const credentials: Record<string, unknown> = {}
   let credentialsChanged = false
@@ -2382,7 +2391,7 @@ watch(
       proxyId.value = null
       concurrency.value = LOCAL_ACCOUNT_CONCURRENCY
       loadFactor.value = null
-      priority.value = 1
+      priority.value = LOCAL_ACCOUNT_PRIORITY
       rateMultiplier.value = 1
       status.value = 'active'
       groupIds.value = []

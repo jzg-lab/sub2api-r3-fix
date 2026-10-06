@@ -121,6 +121,18 @@ func (r *openAIDowngradeProbeRepository) CommitOpenAIDowngradeMutation(ctx conte
 		return err
 	}
 
+	if mutation.Schedulable != nil && !*mutation.Schedulable &&
+		mutation.ErrorMessage == nil && mutation.State.AuthConsecutiveFailures == 0 {
+		protected, err := openAIQualityProtectionApplies(ctx, tx, mutation.AccountID)
+		if err != nil {
+			return err
+		}
+		if !protected {
+			// Keep evidence and normal recovery, but do not stop scheduling for
+			// quality alone. Authentication strikes retain their existing pause.
+			mutation.Schedulable = nil
+		}
+	}
 	changed := mutation.ChangesAccount()
 	if changed {
 		extra := map[string]any{}

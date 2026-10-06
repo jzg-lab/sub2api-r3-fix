@@ -893,6 +893,14 @@ sub2api/
     └── install.sh            # One-click installation script
 ```
 
+## Local Modification Record
+
+The [local modification record](docs/local-customizations.md) documents user-requested
+changes made in this project, not a list of features merged from upstream or other projects.
+Before merging upstream, review this record and the
+[integration policy](docs/upstream-integration-policy.md). Preserve the confirmed local
+behaviors and run their regression tests; a conflict-free merge is not sufficient validation.
+
 ## Star History
 
 <a href="https://star-history.dera.page/#Wei-Shaw/sub2api&Date">

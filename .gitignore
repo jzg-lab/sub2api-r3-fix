@@ -158,6 +158,12 @@ docs/*
 !docs/r17bg-plugin-capability-comparison.md
 !docs/r17bg-plugin-improvement-results.md
 !docs/r17bg-deployment-20261006.md
+!docs/local-customizations.md
+!docs/account-scheduling-settings-20261006.md
+!docs/cookie-pin-passive-activation-20261006.md
+!docs/cookie-pin-ui-save-fix-20261006.md
+!docs/group-scoped-quality-protection-plan-20261007.md
+!docs/group-scoped-quality-protection-progress-20261007.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

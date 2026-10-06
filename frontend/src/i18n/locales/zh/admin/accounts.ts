@@ -1080,6 +1080,7 @@ export default {
       proxy: '代理',
       noProxy: '无代理',
       concurrency: '并发数',
+      schedulingInvalid: '并发数必须为正整数，优先级必须为非负整数',
       loadFactor: '负载因子',
       loadFactorHint: '提高负载因子可以提高对账号的调度频率',
       priority: '优先级',

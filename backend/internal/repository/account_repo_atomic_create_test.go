@@ -102,7 +102,7 @@ func TestCreateWithAccountGroupsPublishesOnlyCommittedState(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, int64(71), account.ID)
-			require.Equal(t, 50, account.Concurrency)
+			require.Equal(t, before.Concurrency, account.Concurrency)
 			require.False(t, account.CreatedAt.IsZero())
 			require.NotEmpty(t, account.Extra["codex_fingerprint_seed"])
 			require.Equal(t, len(groups), len(account.GroupIDs))

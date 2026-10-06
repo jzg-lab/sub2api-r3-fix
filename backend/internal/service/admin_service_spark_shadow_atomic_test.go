@@ -75,7 +75,7 @@ func TestCreateShadowAtomicBoundary(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, repo.atomicCalls)
 			require.Zero(t, repo.legacyCalls)
-			require.Equal(t, LocalAccountConcurrency, shadow.Concurrency)
+			require.Equal(t, parent.Concurrency, shadow.Concurrency)
 			require.Equal(t, parent.ID, *shadow.ParentAccountID)
 			require.Equal(t, QuotaDimensionSpark, shadow.QuotaDimension)
 			require.Len(t, shadow.GroupIDs, len(tc.want))

@@ -1,11 +1,18 @@
 # Codex LB Cookie Pin（sub2api 插件）
 
-`lyunlong.codex.lb-cookie-pin` v0.3.10 是本地维护的 sub2api 配套救号插件，
+`lyunlong.codex.lb-cookie-pin` v0.3.11 是本地维护的 sub2api 配套救号插件，
 实现 OpenAI 负载均衡粘性 Cookie 的**被动捕获 → 按账号注入 → 信号自动重摇**闭环；
 v0.2 增加可选的**质量探针自愈**：定期判别题检测静默降智，答错自动重摇。
 
 本插件使用 Sub2API 插件协议，但不是 Sub2API 官方发布的账号重授权插件。
 它不登录账号、不更新 OAuth 凭据，也不代替重授权流程。
+
+## 0.3.11 配置页保存修复
+
+- 保存配置和调整页面高度采用宿主 UI Bridge v1 的顶层参数格式。
+- 保存失败显示宿主具体错误，不再丢失为通用“请求失败”。
+- 保存保留页面未展示的高级配置，未加载配置时不允许覆盖保存。
+- 探针仍默认关闭，不自动改变服务器已保存的开关。
 
 ## 0.3.10 判分修复
 
@@ -79,7 +86,7 @@ v0.2 增加可选的**质量探针自愈**：定期判别题检测静默降智�
 |---|---|---|
 | 协议兼容版本 | 候选 | manifest 的最低版本是协议声明，不是本代联合验收记录 |
 | 本代宿主救治与重授权候选 | 待联合验收 | 以当前源码、签名安装包、真实宿主集成测试和部署回执为准；旧宿主缺少本代恢复判据，不可只升级插件便声称闭环 |
-| 清单声明的版本 | 候选 | 见 manifest.source.json；历史版本记录不等于 0.3.10 已逐一回归 |
+| 清单声明的版本 | 候选 | 见 manifest.source.json；历史版本记录不等于当前包已逐一回归 |
 | 本地 r17bd 联合修复候选 | 待联合验收 | 使用合法 semver；以当前源码、安装包、真实宿主集成测试和部署回执为准 |
 | KV 持久化 | 取决于宿主能力 | 宿主不调用 InitHostServices 时不持久化；探针启动不依赖该回调 |
 
@@ -111,7 +118,7 @@ S2PLUGIN_KEY=/existing/publisher.key ./build.sh --release # 默认要求现有�
 省略时沿用公钥前 16 位十六进制 ID。不要为发布生成新信任根或开启生产
 `allow_unsigned`。部署前必须用目标宿主的原有信任配置验证签名、文件哈希和版本兼容性。
 
-产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.10.s2plugin`。旧 0.3.9 包保留用于历史核对。
+产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.11.s2plugin`。旧包保留用于历史核对和回退。
 包含 macOS amd64/arm64、Linux amd64/arm64、Windows amd64 的 runtimes 和 UI。
 不要通过删除平台绕过交付矩阵；宿主上传限制须在安装前核验。
 
@@ -139,6 +146,9 @@ generation/holder，不得返回缓存或固定值。每个原生读写步骤前
 ## 测试（不装任何 sub2api）
 
 ```sh
+# 配置页与宿主 UI Bridge v1 协议回归（无真实请求）
+node --test tools/ui/bridge.test.mjs
+
 # 本地假上游全链路：捕获→注入→Faster-Model 信号重摇→重摇后空罐
 go run ./tools/testhost -plugin dist/runtimes/darwin-arm64/cookiepin -mock
 

@@ -243,10 +243,10 @@ func TestCreateShadow_BindGroups(t *testing.T) {
 	require.Equal(t, shadow.ID, accounts[0].ID)
 }
 
-func TestCreateShadow_UsesLocalConcurrency(t *testing.T) {
+func TestCreateShadow_PreservesConcurrencySettings(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("unspecified_uses_local_policy", func(t *testing.T) {
+	t.Run("unspecified_inherits_parent", func(t *testing.T) {
 		repo := newSparkShadowRepoStub()
 		svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 		parent := &Account{
@@ -258,11 +258,11 @@ func TestCreateShadow_UsesLocalConcurrency(t *testing.T) {
 
 		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "conc-shadow"})
 		require.NoError(t, err)
-		require.Equal(t, 50, shadow.Concurrency)
-		require.Equal(t, 50, repo.accounts[shadow.ID].Concurrency)
+		require.Equal(t, 3, shadow.Concurrency)
+		require.Equal(t, 3, repo.accounts[shadow.ID].Concurrency)
 	})
 
-	t.Run("explicit_value_cannot_override_policy", func(t *testing.T) {
+	t.Run("explicit_value_is_preserved", func(t *testing.T) {
 		repo := newSparkShadowRepoStub()
 		svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 		parent := &Account{
@@ -274,7 +274,7 @@ func TestCreateShadow_UsesLocalConcurrency(t *testing.T) {
 
 		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "conc-shadow2", Concurrency: 2})
 		require.NoError(t, err)
-		require.Equal(t, 50, shadow.Concurrency)
+		require.Equal(t, 2, shadow.Concurrency)
 	})
 }
 

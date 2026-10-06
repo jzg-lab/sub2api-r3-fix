@@ -58,11 +58,11 @@ const (
 
 var (
 	// ErrRescueLaneDisabled 救治区未启用（rescue_lane.enabled=false 是上线默认）。
-	ErrRescueLaneDisabled = errors.New("rescue lane is not enabled")
+	ErrRescueLaneDisabled = infraerrors.Conflict("OPENAI_RESCUE_LANE_DISABLED", "rescue lane is not enabled; enable rescue lane settings before sending accounts")
 	// ErrRescueLaneNotConfigured 救治组未配置（group id 缺失）。
-	ErrRescueLaneNotConfigured = errors.New("rescue lane group is not configured")
+	ErrRescueLaneNotConfigured = infraerrors.Conflict("OPENAI_RESCUE_LANE_NOT_CONFIGURED", "rescue lane group is not configured; select a rescue group before sending accounts")
 	// ErrRescueLaneIneligible 账号不满足入区资格（非 OpenAI OAuth / 影子号 / 已在区）。
-	ErrRescueLaneIneligible = errors.New("account is not eligible for rescue lane")
+	ErrRescueLaneIneligible = infraerrors.BadRequest("OPENAI_RESCUE_LANE_INELIGIBLE", "account is not eligible for rescue lane")
 )
 
 const (

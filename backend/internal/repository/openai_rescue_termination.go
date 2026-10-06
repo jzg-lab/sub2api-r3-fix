@@ -71,6 +71,12 @@ func (r *accountRepository) EnterOpenAIRescue(ctx context.Context, account *serv
 	if !revision.Equal(account.UpdatedAt) {
 		return false, service.ErrOpenAIProbeStale
 	}
+	if !manual {
+		protected, err := openAIQualityProtectionApplies(txCtx, client, account.ID)
+		if err != nil || !protected {
+			return false, err
+		}
+	}
 	groups, err := client.AccountGroup.Query().Where(dbaccountgroup.AccountIDEQ(account.ID)).All(txCtx)
 	if err != nil {
 		return false, err
@@ -125,37 +131,7 @@ func (r *accountRepository) TerminateOpenAIRescue(ctx context.Context, accountID
 	if extra["openai_rescue_lane"] == nil {
 		return false, nil
 	}
-	groupIDs, err := service.OpenAIRescueOriginalGroups(extra["openai_rescue_lane"])
-	if err != nil {
-		return false, err
-	}
-	if err := replaceAccountGroupsInTx(txCtx, client, accountID, groupIDs); err != nil {
-		return false, err
-	}
-	if _, err := client.ExecContext(txCtx, `UPDATE accounts SET schedulable = false,
-		updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond') WHERE id = $1`, accountID); err != nil {
-		return false, err
-	}
-	if _, err := client.ExecContext(txCtx, `INSERT INTO openai_downgrade_probe_states(account_id,state,probe_mode)
-		VALUES($1,'pending_replace','normal') ON CONFLICT(account_id) DO UPDATE
-		SET state = 'pending_replace', probe_mode = 'normal', consecutive_successes = 0,
-			consecutive_failures = 0,
-			updated_at = GREATEST(clock_timestamp(), openai_downgrade_probe_states.updated_at + INTERVAL '1 microsecond')`, accountID); err != nil {
-		return false, err
-	}
-	if err := updateOpenAIRescueExtraInTx(txCtx, client, accountID, map[string]any{
-		"openai_rescue_lane": nil, "openai_rescue_suspected": false,
-		service.OpenAIRescueTerminatedAtExtraKey: stoppedAt.Format(time.RFC3339Nano),
-	}); err != nil {
-		return false, err
-	}
-	groupJSON, err := json.Marshal(groupIDs)
-	if err != nil {
-		return false, err
-	}
-	if _, err := client.ExecContext(txCtx, `INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details)
-		SELECT id, proxy_id, 'rescue_terminated', jsonb_build_object('reason', 'manual', 'orig_group_ids', $2::jsonb)
-		FROM accounts WHERE id = $1`, accountID, string(groupJSON)); err != nil {
+	if err := terminateOpenAIRescueInTx(txCtx, client, accountID, extra, stoppedAt, "manual"); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -163,6 +139,46 @@ func (r *accountRepository) TerminateOpenAIRescue(ctx context.Context, accountID
 	}
 	r.syncSchedulerAccountSnapshotDetached(ctx, accountID)
 	return true, nil
+}
+
+func terminateOpenAIRescueInTx(txCtx context.Context, client *dbent.Client, accountID int64, extra map[string]any, stoppedAt time.Time, reason string) error {
+	groupIDs, err := service.OpenAIRescueOriginalGroups(extra["openai_rescue_lane"])
+	if err != nil {
+		return err
+	}
+	if err := replaceAccountGroupsInTx(txCtx, client, accountID, groupIDs); err != nil {
+		return err
+	}
+	if _, err := client.ExecContext(txCtx, `UPDATE accounts SET schedulable = false,
+		updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond') WHERE id = $1`, accountID); err != nil {
+		return err
+	}
+	if _, err := client.ExecContext(txCtx, `INSERT INTO openai_downgrade_probe_states(account_id,state,probe_mode)
+		VALUES($1,'pending_replace','normal') ON CONFLICT(account_id) DO UPDATE
+		SET state = 'pending_replace', probe_mode = 'normal', consecutive_successes = 0,
+			consecutive_failures = 0,
+			updated_at = GREATEST(clock_timestamp(), openai_downgrade_probe_states.updated_at + INTERVAL '1 microsecond')`, accountID); err != nil {
+		return err
+	}
+	if err := updateOpenAIRescueExtraInTx(txCtx, client, accountID, map[string]any{
+		"openai_rescue_lane": nil, "openai_rescue_suspected": false,
+		service.OpenAIRescueTerminatedAtExtraKey: stoppedAt.Format(time.RFC3339Nano),
+	}); err != nil {
+		return err
+	}
+	groupJSON, err := json.Marshal(groupIDs)
+	if err != nil {
+		return err
+	}
+	if _, err := client.ExecContext(txCtx, `INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details)
+		SELECT id, proxy_id, 'rescue_terminated', jsonb_build_object('reason', $3::text, 'orig_group_ids', $2::jsonb)
+		FROM accounts WHERE id = $1`, accountID, string(groupJSON), reason); err != nil {
+		return err
+	}
+	extra["openai_rescue_lane"] = nil
+	extra["openai_rescue_suspected"] = false
+	extra[service.OpenAIRescueTerminatedAtExtraKey] = stoppedAt.Format(time.RFC3339Nano)
+	return nil
 }
 
 func (r *accountRepository) MutateOpenAIRescue(ctx context.Context, accountID int64, expected any, groupIDs *[]int64, updates map[string]any, disable bool) (bool, error) {

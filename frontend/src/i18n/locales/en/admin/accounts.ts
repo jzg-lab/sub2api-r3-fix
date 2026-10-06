@@ -1009,6 +1009,7 @@ export default {
       proxy: 'Proxy',
       noProxy: 'No Proxy',
       concurrency: 'Concurrency',
+      schedulingInvalid: 'Concurrency must be a positive integer and priority a non-negative integer',
       loadFactor: 'Load Factor',
       loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',

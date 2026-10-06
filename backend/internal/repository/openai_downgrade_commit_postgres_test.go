@@ -84,6 +84,7 @@ func newProbePostgresWithMigrations(t *testing.T, migrations []string) *sql.DB {
 	// Base columns mirror the production types; the probe/outbox schemas below
 	// are executed from the actual migrations, not reimplemented test schemas.
 	_, err = db.Exec(`
+		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL);
 			CREATE TABLE proxies (
 				id BIGINT PRIMARY KEY, status VARCHAR(20) NOT NULL DEFAULT 'active',
 				deleted_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, exit_ip TEXT,

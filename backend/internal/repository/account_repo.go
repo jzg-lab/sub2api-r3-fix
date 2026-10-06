@@ -161,6 +161,10 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	}
 	service.NormalizeOpenAICodexFingerprintExtraForCreate(account)
 	service.NormalizeTLSFingerprintExtraForCreate(account)
+	concurrency := account.Concurrency
+	if concurrency == 0 {
+		concurrency = service.LocalAccountConcurrency
+	}
 
 	builder := client.Account.Create().
 		SetName(account.Name).
@@ -169,7 +173,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(normalizeJSONMap(account.Extra)).
-		SetConcurrency(service.LocalAccountConcurrency).
+		SetConcurrency(concurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
@@ -610,7 +614,7 @@ func (r *accountRepository) updateLockedAccount(
 	}
 	account.Extra = extra
 	if !preserveScheduling && account.IsOpenAIOAuth() && account.Schedulable {
-		if err := validateOpenAIRescueScheduling(account); err != nil {
+		if err := validateOpenAIRescueScheduling(ctx, client, account); err != nil {
 			return nil, err
 		}
 	}
@@ -622,7 +626,7 @@ func (r *accountRepository) updateLockedAccount(
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(extra).
-		SetConcurrency(service.LocalAccountConcurrency).
+		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
@@ -3196,7 +3200,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	if updates.Concurrency != nil {
 		setClauses = append(setClauses, "concurrency = $"+itoa(idx))
-		args = append(args, service.LocalAccountConcurrency)
+		args = append(args, *updates.Concurrency)
 		idx++
 	}
 	if updates.Priority != nil {

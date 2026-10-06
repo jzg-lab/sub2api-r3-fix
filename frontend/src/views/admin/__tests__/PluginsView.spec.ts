@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PluginsView from '../PluginsView.vue'
+import OpenAIQualityScope from '@/components/plugins/OpenAIQualityScope.vue'
 
 const {
   listPlugins,
@@ -117,6 +118,7 @@ function mountView() {
         BaseDialog: { template: '<div><slot /></div>' },
         Icon: true,
         TotpStepUpDialog: true,
+        OpenAIQualityScope: true,
       },
     },
   })
@@ -165,5 +167,17 @@ describe('管理员插件页二次验证', () => {
 
     expect(stepUpRun).toHaveBeenCalledTimes(1)
     expect(uploadPlugin).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['local.test.transport', 'lyunlong.codex.lb-cookie-pin'])('分组选择仅在 Cookie Pin 配置弹窗内展示：%s', async (pluginKey) => {
+    listPlugins.mockResolvedValue([{ ...plugin, plugin_key: pluginKey }])
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.findComponent(OpenAIQualityScope).exists()).toBe(false)
+    const configure = wrapper.findAll('button').find(item => item.text().includes('admin.plugins.configure'))
+    await configure!.trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent(OpenAIQualityScope).exists()).toBe(pluginKey === 'lyunlong.codex.lb-cookie-pin')
+    wrapper.unmount()
   })
 })

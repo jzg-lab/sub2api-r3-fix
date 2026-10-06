@@ -109,6 +109,11 @@ func expectProbeCommitLocks(mock sqlmock.Sqlmock, mutation *service.OpenAIDowngr
 		WithArgs(mutation.AccountID, mutation.ExpectedStateUpdatedAt).
 		WillReturnRows(sqlmock.NewRows([]string{"updated_at"}).AddRow(mutation.ExpectedStateUpdatedAt)).
 		RowsWillBeClosed()
+	if mutation.Schedulable != nil && !*mutation.Schedulable &&
+		mutation.ErrorMessage == nil && mutation.State.AuthConsecutiveFailures == 0 {
+		mock.ExpectQuery("SELECT COALESCE").WithArgs(service.SettingKeyOpenAIOperations).
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(`{}`))
+	}
 }
 
 func TestOpenAIProbeCommitRejectsStaleAccountAndState(t *testing.T) {

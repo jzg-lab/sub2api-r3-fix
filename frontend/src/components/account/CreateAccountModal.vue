@@ -2974,7 +2974,7 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" readonly class="input" />
+          <input v-model.number="form.concurrency" type="number" min="1" step="1" required class="input" data-testid="account-concurrency" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -2988,7 +2988,9 @@
           <input
             v-model.number="form.priority"
             type="number"
-            min="1"
+            min="0"
+            step="1"
+            required
             class="input"
             data-tour="account-form-priority"
           />
@@ -3882,7 +3884,7 @@ import {
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
-import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, LOCAL_ACCOUNT_PRIORITY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -4587,7 +4589,7 @@ const form = reactive({
   proxy_id: null as number | null,
   concurrency: LOCAL_ACCOUNT_CONCURRENCY,
   load_factor: null as number | null,
-  priority: 1,
+  priority: LOCAL_ACCOUNT_PRIORITY,
   rate_multiplier: 1,
   group_ids: [] as number[],
   expires_at: null as number | null
@@ -4702,7 +4704,6 @@ watch(
       accountCategory.value = 'oauth-based'
       addMethod.value = 'oauth'
       modelRestrictionMode.value = 'mapping'
-      form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
       form.load_factor = null
     }
     if (newPlatform !== 'gemini' && newPlatform !== 'anthropic' && accountCategory.value === 'service_account') {
@@ -5130,7 +5131,7 @@ const resetForm = () => {
   form.proxy_id = null
   form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
   form.load_factor = null
-  form.priority = 1
+  form.priority = LOCAL_ACCOUNT_PRIORITY
   form.rate_multiplier = 1
   form.group_ids = []
   form.expires_at = null
@@ -5476,6 +5477,11 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (!Number.isInteger(form.concurrency) || form.concurrency < 1 ||
+      !Number.isInteger(form.priority) || form.priority < 0) {
+    appStore.showError(t('admin.accounts.schedulingInvalid'))
+    return
+  }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
     if (!isGrokSSOInputMethod.value && !form.name.trim()) {

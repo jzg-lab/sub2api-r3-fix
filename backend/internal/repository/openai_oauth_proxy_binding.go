@@ -9,6 +9,7 @@ import (
 	"maps"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
@@ -210,7 +211,7 @@ func validateOpenAIOAuthBulkUpdate(
 		}
 		if updates.Schedulable != nil && *updates.Schedulable &&
 			service.IsOpenAIBrowserOAuthAccount(current) {
-			if err := validateOpenAIRescueScheduling(current); err != nil {
+			if err := validateOpenAIRescueScheduling(ctx, exec, current); err != nil {
 				return err
 			}
 			if err := validateOpenAIOAuthQualification(ctx, exec, &next); err != nil {
@@ -250,13 +251,29 @@ func validateOpenAIOAuthSchedulable(
 	if !service.IsOpenAIBrowserOAuthAccount(account) {
 		return nil
 	}
-	if err := validateOpenAIRescueScheduling(account); err != nil {
+	if err := validateOpenAIRescueScheduling(ctx, exec, account); err != nil {
 		return err
 	}
 	return validateOpenAIOAuthQualification(ctx, exec, account)
 }
 
-func validateOpenAIRescueScheduling(account *service.Account) error {
+func validateOpenAIRescueScheduling(ctx context.Context, exec sqlExecutor, account *service.Account) error {
+	if service.OpenAIRescueManuallyTerminated(account) || account.Extra["openai_rescue_lane"] != nil {
+		protected, err := openAIQualityProtectionApplies(ctx, exec, account.ID)
+		if err != nil {
+			return err
+		}
+		if !protected {
+			if account.Extra["openai_rescue_lane"] != nil {
+				client, ok := exec.(*dbent.Client)
+				if !ok {
+					return service.ErrOpenAIProbeAtomicStore
+				}
+				return terminateOpenAIRescueInTx(ctx, client, account.ID, account.Extra, time.Now().UTC(), "manual_scheduling_outside_quality_scope")
+			}
+			return nil
+		}
+	}
 	if service.OpenAIRescueManuallyTerminated(account) {
 		return service.ErrOpenAIRescueTerminated
 	}
@@ -310,7 +327,7 @@ func validateOpenAIOAuthSchedulableInRescueLane(
 	if !service.IsOpenAIBrowserOAuthAccount(account) {
 		return nil
 	}
-	if err := validateOpenAIRescueScheduling(account); err != nil {
+	if err := validateOpenAIRescueScheduling(ctx, exec, account); err != nil {
 		return err
 	}
 	if rescueGroupID <= 0 {

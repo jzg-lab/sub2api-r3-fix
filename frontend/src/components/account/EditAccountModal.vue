@@ -1546,7 +1546,7 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" readonly class="input" />
+          <input v-model.number="form.concurrency" type="number" min="1" step="1" required class="input" data-testid="account-concurrency" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -1560,7 +1560,9 @@
           <input
             v-model.number="form.priority"
             type="number"
-            min="1"
+            min="0"
+            step="1"
+            required
             class="input"
             data-tour="account-form-priority"
           />
@@ -3009,7 +3011,7 @@ import {
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
-import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, LOCAL_ACCOUNT_PRIORITY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3683,7 +3685,7 @@ const form = reactive({
   proxy_id: null as number | null,
   concurrency: LOCAL_ACCOUNT_CONCURRENCY,
   load_factor: null as number | null,
-  priority: 1,
+  priority: LOCAL_ACCOUNT_PRIORITY,
   rate_multiplier: 1,
   status: 'active' as 'active' | 'inactive' | 'error',
   group_ids: [] as number[],
@@ -3789,7 +3791,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
-  form.concurrency = LOCAL_ACCOUNT_CONCURRENCY
+  form.concurrency = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
   form.rate_multiplier = newAccount.rate_multiplier ?? 1
@@ -4729,6 +4731,11 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
 
 const handleSubmit = async () => {
   if (!props.account) return
+  if (!Number.isInteger(form.concurrency) || form.concurrency < 1 ||
+      !Number.isInteger(form.priority) || form.priority < 0) {
+    appStore.showError(t('admin.accounts.schedulingInvalid'))
+    return
+  }
   const accountID = props.account.id
 
   if (form.status !== 'active' && form.status !== 'inactive' && form.status !== 'error') {

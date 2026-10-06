@@ -292,6 +292,11 @@
         width="full"
         @close="closeConfiguration"
       >
+        <OpenAIQualityScope
+          v-if="configPlugin?.plugin_key === 'lyunlong.codex.lb-cookie-pin'"
+          :key="configPlugin.id"
+          class="mb-5"
+        />
         <div
           class="relative min-h-[520px] overflow-hidden bg-gray-50 dark:bg-dark-900"
           :style="{ height: `${iframeHeight}px` }"
@@ -344,6 +349,7 @@ import { useAppStore } from "@/stores";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import BaseDialog from "@/components/common/BaseDialog.vue";
 import Icon from "@/components/icons/Icon.vue";
+import OpenAIQualityScope from "@/components/plugins/OpenAIQualityScope.vue";
 import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
 import {
   isStepUpBlocked,

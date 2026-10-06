@@ -40,6 +40,35 @@ type reenableHandlerAccountRepo struct {
 	account *service.Account
 }
 
+func TestOpenAIRescueHandlerPreconditionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config service.OpenAIRescueLaneConfig
+		status int
+		reason string
+	}{
+		{"disabled", service.OpenAIRescueLaneConfig{}, http.StatusConflict, "OPENAI_RESCUE_LANE_DISABLED"},
+		{"no_group", service.OpenAIRescueLaneConfig{Enabled: true}, http.StatusConflict, "OPENAI_RESCUE_LANE_NOT_CONFIGURED"},
+		{"ineligible", service.OpenAIRescueLaneConfig{Enabled: true, GroupID: 9}, http.StatusBadRequest, "OPENAI_RESCUE_LANE_INELIGIBLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &reenableHandlerAccountRepo{account: &service.Account{ID: 7}}
+			runner := service.NewOpenAIDowngradeProbeRunner(nil, repo, nil, nil, nil, nil)
+			runner.SetRescueLane(service.NewOpenAIRescueLane(repo, nil, func() service.OpenAIRescueLaneConfig {
+				return tc.config
+			}, nil))
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.POST("/accounts/:id/rescue", NewOpenAIProbeHealthHandler(runner).RescueAccount)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/accounts/7/rescue", nil))
+			require.Equal(t, tc.status, recorder.Code)
+			require.Contains(t, recorder.Body.String(), tc.reason)
+			require.NotContains(t, recorder.Body.String(), "internal error")
+		})
+	}
+}
+
 func (r *reenableHandlerAccountRepo) GetByID(context.Context, int64) (*service.Account, error) {
 	return r.account, nil
 }

@@ -1,6 +1,9 @@
 export default {
   plugins: {
     title: '插件管理',
+    qualityScope: '质量调度限制',
+    qualityScopeAll: '全部分组（原有规则）',
+    qualityScopeSelected: '仅选中分组',
     description: '安装和管理独立运行的 OAuth 出站传输插件。API Key 流程不受影响。',
     upload: '安装插件',
     uploadHint: '仅接受 .s2plugin 包；默认要求可信发布者签名。',

@@ -1,6 +1,7 @@
 import { apiClient } from '../client'
 
 export interface OpenAIOperationsSettings {
+  quality_protected_group_ids?: number[] | null
   recovery: { enabled: boolean; interval_minutes: number; failure_threshold: number; backoff_minutes: number; cooldown_minutes: number }
   reasoning: { window_hours: number; sample_limit: number; threshold: number }
   new_account_defaults: {

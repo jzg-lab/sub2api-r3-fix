@@ -488,11 +488,11 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 		"access_token_sha256": codexTokenFingerprint(req.AccessToken),
 	})
 
-	concurrency := 3
+	concurrency := service.LocalAccountConcurrency
 	if req.Concurrency != nil {
 		concurrency = *req.Concurrency
 	}
-	priority := 50
+	priority := service.LocalAccountPriority
 	if req.Priority != nil {
 		priority = *req.Priority
 	}

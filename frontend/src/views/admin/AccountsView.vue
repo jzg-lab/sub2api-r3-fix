@@ -297,7 +297,15 @@
             <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-capacity="{ row }">
-            <AccountCapacityCell :account="row" />
+            <AccountCapacityCell :account="row">
+              <template #concurrency="{ colorClass, current }">
+                <AccountSchedulingField :account="row" field="concurrency" @updated="handleSchedulingUpdated($event, 'concurrency')" @editing="setSchedulingEditing(row.id, 'concurrency', $event)">
+                  <CapacityBadge :color-class="colorClass" :current="current" :max="row.concurrency">
+                    <Icon name="grid" size="xs" />
+                  </CapacityBadge>
+                </AccountSchedulingField>
+              </template>
+            </AccountCapacityCell>
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
@@ -476,8 +484,8 @@
               @probe="handleProbeUpstreamBilling(row)"
             />
           </template>
-          <template #cell-priority="{ value }">
-            <span class="text-sm text-gray-700 dark:text-gray-300">{{ value }}</span>
+          <template #cell-priority="{ row }">
+            <AccountSchedulingField :account="row" field="priority" @updated="handleSchedulingUpdated($event, 'priority')" @editing="setSchedulingEditing(row.id, 'priority', $event)" />
           </template>
           <template #header-scheduler_score="{ column }">
             <div class="flex items-center">
@@ -621,6 +629,8 @@ import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import CapacityBadge from '@/components/account/CapacityBadge.vue'
+import AccountSchedulingField from '@/components/account/AccountSchedulingField.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -1988,8 +1998,15 @@ watch(accounts, (rows) => {
   )
 })
 
+const editingSchedulingFields = reactive(new Set<string>())
+const setSchedulingEditing = (id: number, field: string, editing: boolean) => {
+  const key = `${id}:${field}`
+  if (editing) editingSchedulingFields.add(key)
+  else editingSchedulingFields.delete(key)
+}
 const isAnyModalOpen = computed(() => {
   return (
+    editingSchedulingFields.size > 0 ||
     showCreate.value ||
     showEdit.value ||
     showSync.value ||
@@ -2962,6 +2979,13 @@ const handleAccountUpdated = (updatedAccount: Account) => {
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
 }
+const handleSchedulingUpdated = (updatedAccount: Account, field: 'concurrency' | 'priority') => {
+  const current = accounts.value.find(account => account.id === updatedAccount.id)
+  if (!current) return
+  // Parallel field saves must not replace unrelated settings with an older response.
+  patchAccountInList({ ...current, [field]: updatedAccount[field] })
+  enterAutoRefreshSilentWindow()
+}
 const formatExportTimestamp = () => {
   const now = new Date()
   const pad2 = (value: number) => String(value).padStart(2, '0')
@@ -3154,10 +3178,11 @@ const handleToggleSchedulable = async (a: Account) => {
   try {
     const updated = await adminAPI.accounts.setSchedulable(a.id, nextSchedulable)
     updateSchedulableInList([a.id], updated?.schedulable ?? nextSchedulable)
+    if (updated) accounts.value = accounts.value.map(account => account.id === a.id ? updated : account)
     enterAutoRefreshSilentWindow()
   } catch (error) {
     console.error('Failed to toggle schedulable:', error)
-    appStore.showError(t('admin.accounts.failedToToggleSchedulable'))
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.failedToToggleSchedulable')))
   } finally {
     togglingSchedulable.value = null
   }

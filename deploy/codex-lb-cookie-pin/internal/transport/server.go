@@ -31,7 +31,7 @@ const (
 	// PluginID 与 manifest.json 的 id 必须一致。
 	PluginID = "lyunlong.codex.lb-cookie-pin"
 	// PluginVersion 与 manifest.json 的 version 必须一致。
-	PluginVersion = "0.3.10"
+	PluginVersion = "0.3.11"
 	// A 518n-2 usage pattern is an observation, not proof of model quality.
 	// Correct answers with this pattern neither reroll nor certify recovery.
 	truncationFingerprintModulus = 518

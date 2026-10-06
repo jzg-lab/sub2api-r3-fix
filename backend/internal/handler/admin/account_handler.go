@@ -120,7 +120,7 @@ type CreateAccountRequest struct {
 	Extra                   map[string]any `json:"extra"`
 	ProxyID                 *int64         `json:"proxy_id"`
 	Concurrency             int            `json:"concurrency"`
-	Priority                int            `json:"priority"`
+	Priority                *int           `json:"priority"`
 	RateMultiplier          *float64       `json:"rate_multiplier"`
 	LoadFactor              *int           `json:"load_factor"`
 	GroupIDs                []int64        `json:"group_ids"`
@@ -128,6 +128,13 @@ type CreateAccountRequest struct {
 	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
 	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
 	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+}
+
+func (r CreateAccountRequest) priorityValue() int {
+	if r.Priority != nil {
+		return *r.Priority
+	}
+	return service.LocalAccountPriority
 }
 
 // UpdateAccountRequest represents update account request
@@ -855,7 +862,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Extra:                 req.Extra,
 			ProxyID:               req.ProxyID,
 			Concurrency:           req.Concurrency,
-			Priority:              req.Priority,
+			Priority:              req.priorityValue(),
 			RateMultiplier:        req.RateMultiplier,
 			LoadFactor:            req.LoadFactor,
 			GroupIDs:              req.GroupIDs,
@@ -1884,7 +1891,7 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				Extra:                 item.Extra,
 				ProxyID:               item.ProxyID,
 				Concurrency:           item.Concurrency,
-				Priority:              item.Priority,
+				Priority:              item.priorityValue(),
 				RateMultiplier:        item.RateMultiplier,
 				GroupIDs:              item.GroupIDs,
 				ExpiresAt:             item.ExpiresAt,

@@ -81,17 +81,36 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('BulkEditAccountModal', () => {
-  it('keeps the concurrency control at 50 when enabled and reopened', async () => {
+  it('saves custom concurrency and priority, then resets defaults on reopening', async () => {
     const wrapper = mountModal()
     const limit = wrapper.get<HTMLInputElement>('#bulk-edit-concurrency')
-    expect(limit.element.value).toBe('50')
-    expect(limit.element.readOnly).toBe(true)
+    expect(limit.element.value).toBe('5')
+    expect(wrapper.get<HTMLInputElement>('#bulk-edit-priority').element.value).toBe('2')
+    expect(limit.element.readOnly).toBe(false)
     await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
     expect(limit.element.disabled).toBe(false)
-    expect(limit.element.value).toBe('50')
+    expect(limit.element.value).toBe('5')
+    await limit.setValue(75)
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-priority').setValue(0)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { concurrency: 75, priority: 0 })
     await wrapper.setProps({ show: false })
     await wrapper.setProps({ show: true })
-    expect(limit.element.value).toBe('50')
+    expect(limit.element.value).toBe('5')
+    expect(wrapper.get<HTMLInputElement>('#bulk-edit-priority').element.value).toBe('2')
+    wrapper.unmount()
+  })
+
+  it('rejects invalid scheduling values without making a request', async () => {
+    const wrapper = mountModal()
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-concurrency').setValue(0)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.schedulingInvalid')
     wrapper.unmount()
   })
 

@@ -344,11 +344,19 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
-  it('shows the fixed concurrency instead of a stale account limit', async () => {
-    const wrapper = mountModal(buildGrokAPIKeyAccount())
+  it('loads and saves the account concurrency and priority without forcing defaults', async () => {
+    const account = buildGrokAPIKeyAccount()
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
     await flushPromises()
-    const limit = wrapper.get('input[type="number"][readonly]')
-    expect((limit.element as HTMLInputElement).value).toBe('50')
+    const limit = wrapper.get('[data-testid="account-concurrency"]')
+    expect((limit.element as HTMLInputElement).value).toBe(String(account.concurrency))
+    expect((limit.element as HTMLInputElement).readOnly).toBe(false)
+    await limit.setValue(75)
+    await wrapper.get('[data-tour="account-form-priority"]').setValue(0)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledWith(account.id, expect.objectContaining({ concurrency: 75, priority: 0 }))
     wrapper.unmount()
   })
 

@@ -173,11 +173,11 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 	if req.UpdateExisting != nil {
 		updateExisting = *req.UpdateExisting
 	}
-	concurrency := 3
+	concurrency := service.LocalAccountConcurrency
 	if req.Concurrency != nil {
 		concurrency = *req.Concurrency
 	}
-	priority := 50
+	priority := service.LocalAccountPriority
 	if req.Priority != nil {
 		priority = *req.Priority
 	}

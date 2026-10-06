@@ -197,7 +197,18 @@ func TestOpenAIOperationsSettingsAndTemplate(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.Recovery.Enabled)
 	require.Nil(t, cfg.NewAccountDefaults)
+	require.Nil(t, cfg.QualityProtectedGroupIDs)
 	require.Empty(t, store.values, "no startup settings writes")
+	for _, ids := range [][]int64{{7, 8}, {}, nil} {
+		cfg.QualityProtectedGroupIDs = ids
+		require.NoError(t, svc.SetOpenAIOperationsSettings(t.Context(), cfg))
+		loaded, err := svc.GetOpenAIOperationsSettings(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, ids, loaded.QualityProtectedGroupIDs)
+	}
+	cfg.QualityProtectedGroupIDs = []int64{0}
+	require.Error(t, svc.SetOpenAIOperationsSettings(t.Context(), cfg))
+	cfg.QualityProtectedGroupIDs = nil
 	proxy, profile, concurrency, enabled, mode := int64(0), int64(-1), 8, false, "machine"
 	cfg.NewAccountDefaults = &OpenAINewAccountDefaults{ProxyID: &proxy, TLSFingerprintProfileID: &profile,
 		Concurrency: &concurrency, EnableTLSFingerprint: &enabled, CodexFingerprintMode: &mode}
@@ -210,11 +221,13 @@ func TestOpenAIOperationsSettingsAndTemplate(t *testing.T) {
 		Extra: map[string]any{"enable_tls_fingerprint": true, "unrelated": "kept"}}
 	out := applyOpenAINewAccountDefaults(input, cfg.NewAccountDefaults)
 	require.Nil(t, out.ProxyID)
-	require.Equal(t, 8, out.Concurrency)
+	require.Equal(t, 3, out.Concurrency, "explicit concurrency takes precedence over the template")
 	require.Equal(t, false, out.Extra["enable_tls_fingerprint"])
 	require.Equal(t, "kept", out.Extra["unrelated"])
 	require.Equal(t, true, input.Extra["enable_tls_fingerprint"], "no mutation of original import or old account")
 	require.Equal(t, 3, input.Concurrency)
+	input.Concurrency = 0
+	require.Equal(t, 8, applyOpenAINewAccountDefaults(input, cfg.NewAccountDefaults).Concurrency)
 	input.Platform = PlatformAnthropic
 	require.Same(t, input, applyOpenAINewAccountDefaults(input, cfg.NewAccountDefaults))
 	require.Same(t, input, applyOpenAINewAccountDefaults(input, nil))

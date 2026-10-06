@@ -117,6 +117,7 @@
   })();
   var pending = {};   // request_id -> {resolve, reject, timer}
   var seq = 0;
+  var savedConfig = null;
 
   function post(type, params, timeoutMs) {
     var id = "ui-" + (++seq);
@@ -128,13 +129,12 @@
           reject(new Error("请求超时: " + type));
         }, timeoutMs || 8000)
       };
-      parent.postMessage({
+      parent.postMessage(Object.assign({
         source: "sub2api-plugin-ui",
         bridge_token: BRIDGE,
         type: type,
-        request_id: id,
-        params: params || {}
-      }, "*");
+        request_id: id
+      }, params || {}), "*");
     });
   }
 
@@ -148,7 +148,12 @@
     if (!entry) return;
     clearTimeout(entry.timer);
     delete pending[data.request_id];
-    if (data.ok) entry.resolve(data); else entry.reject(new Error(data.error && data.error.message || "请求失败"));
+    if (data.ok) {
+      entry.resolve(data);
+    } else {
+      var message = typeof data.error === "string" ? data.error : data.error && data.error.message;
+      entry.reject(new Error(message || data.result && data.result.message || "请求失败"));
+    }
   });
 
   var $ = function (id) { return document.getElementById(id); };
@@ -166,7 +171,8 @@
       .filter(function (s) { return s.length > 0; });
     var drops = $("drop_account_ids").value.split(",").map(function (s) { return parseInt(s.trim(), 10); })
       .filter(function (n) { return !isNaN(n) && n > 0; });
-    return {
+    // Preserve saved settings that this form does not expose.
+    return Object.assign({}, savedConfig, {
       enabled: $("enabled").checked,
       cookie_names: names,
       default_ttl_seconds: parseInt($("default_ttl_seconds").value, 10) || 240,
@@ -177,13 +183,15 @@
       drop_account_ids: drops.length ? drops : undefined,
       quality_probe_enabled: $("quality_probe_enabled").checked,
       probe_interval_seconds: parseInt($("probe_interval_seconds").value, 10) || 900,
-      probe_model: $("probe_model").value.trim() || undefined,
+      probe_model: $("probe_model").value.trim(),
       max_consecutive_probe_failures: parseInt($("max_consecutive_probe_failures").value, 10) || 3,
       probe_backoff_seconds: parseInt($("probe_backoff_seconds").value, 10) || 3600
-    };
+    });
   }
   function configToForm(cfg) {
     if (!cfg) return;
+    savedConfig = Object.assign({}, cfg);
+    delete savedConfig.drop_account_ids;
     if (typeof cfg.enabled === "boolean") $("enabled").checked = cfg.enabled;
     if (cfg.cookie_names) $("cookie_names").value = cfg.cookie_names.join(",");
     if (cfg.default_ttl_seconds) $("default_ttl_seconds").value = cfg.default_ttl_seconds;
@@ -264,6 +272,10 @@
   }
 
   $("save").addEventListener("click", function () {
+    if (!savedConfig) {
+      say("保存失败: 配置尚未加载，请重新打开配置页", true);
+      return;
+    }
     post("config.save", { config: formToConfig() }).then(function (resp) {
       configToForm(resp.config);      // 用宿主规范化后的配置回填
       say("已保存（手动重摇已执行）");

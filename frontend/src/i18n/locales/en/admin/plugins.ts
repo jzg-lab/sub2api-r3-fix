@@ -1,6 +1,9 @@
 export default {
   plugins: {
     title: 'Plugin Management',
+    qualityScope: 'Quality scheduling restrictions',
+    qualityScopeAll: 'All groups (existing rules)',
+    qualityScopeSelected: 'Selected groups only',
     description: 'Install and manage isolated OAuth outbound transport plugins. API Key flows are unchanged.',
     upload: 'Install plugin',
     uploadHint: 'Only .s2plugin packages are accepted; trusted publisher signatures are required by default.',
