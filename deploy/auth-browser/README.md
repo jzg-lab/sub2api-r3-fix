@@ -76,10 +76,54 @@ A fully automated adapter must drive the same reviewed browser/route through
 the callback; a detached credential upload cannot establish that continuity.
 
 This is a native workflow adaptation, not execution or recompilation of
-codex-helper 0.2.32. It does not implement password/2FA automation. IP probes
+codex-helper 0.2.32. The optional automatic mode is described below. IP probes
 detect drift at checked boundaries, not every browser packet: real adoption
 also requires a fixed-egress route with no identity-changing fallback.
 The rescue transport plugin is not replaced or given a second outbound owner.
+
+### Automatic Reauthorization Candidate
+
+Both OpenAI OAuth reauthorization dialogs include a form for the account
+email, password and optional authenticator-app TOTP secret. Submission creates
+an account-bound session, drives an isolated Chrome window through the same
+reviewed fixed exit, exchanges the callback once, and applies the host's
+one-use replacement proof to the original account. Account identity, route,
+original IP and authorization revision must still match. A successful browser
+launch alone is not a successful account update.
+
+Automatic mode requires Node.js 22 or newer on the macOS Sub host, in addition
+to the existing Chrome, curl and Python requirements. Set
+`SUB2API_AUTH_BROWSER_NODE` to an absolute Node executable path when the service
+environment has no Node on PATH. The browser opens on the Sub host, not on a
+remote user's computer. Linux and Windows archives contain the source and
+adapter but do not provide a native browser launcher.
+
+The form is enabled only for OpenAI OAuth accounts. Input is submitted only
+from HTTPS or numeric/local loopback UI origins, kept out of browser storage,
+and cleared on submission, cancellation, account changes and unmount. The
+server marks the response `no-store`, limits the body to 16 KiB and passes
+the transient input through subprocess stdin, not command arguments,
+environment or diagnostic output. Interactive requests are never replayed
+by the admin-session refresh interceptor. This minimizes retention; it is not
+a claim of guaranteed erasure from garbage-collected memory.
+
+Only forms on `auth.openai.com` are eligible for automatic entry. Authenticator
+codes are generated locally. Third-party sign-in, email/SMS challenges,
+CAPTCHAs and security challenges remain manual; nothing bypasses them.
+Uncertain submissions are not repeated. The operation has a five-minute
+server bound and closes its disposable browser profile on termination.
+Same-account launches in different sessions are serialized while the launcher
+is in flight; unrelated accounts and initial-login sessions remain independent.
+This is a per-host launcher guard, not a distributed OAuth lease.
+
+No automatic flow can recreate a missing historical login IP, repair an
+upstream revocation or guarantee that an account will remain authorized.
+Missing history, changed identity or an unreviewed route fails closed without
+overwriting the account. Real upstream OAuth is not covered by local fixtures.
+
+```bash
+node --test tests/automate.test.mjs
+```
 
 ### Fixed Route Admission
 

@@ -67,7 +67,8 @@ export function useReauthBrowserLaunch(
             refreshed = true
             const generated = await oauth.generateAuthUrl(operation.account.proxy_id, undefined, {
               accountId: operation.account.id,
-              expectedUpdatedAt: operation.expectedUpdatedAt
+              expectedUpdatedAt: operation.expectedUpdatedAt,
+              expectedAuthorizationRevision: operation.account.reauthorization_revision
             })
             if (!generated || !session.isCurrent(operation)) return
             sessionId = oauth.sessionId.value

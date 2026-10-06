@@ -173,11 +173,14 @@ func (c *refreshAPICacheStub) DeleteAccessToken(ctx context.Context, key string)
 	return nil
 }
 
-func (c *refreshAPICacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
-	return c.lockResult, c.lockErr
+func (c *refreshAPICacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
+	if !c.lockResult {
+		return "", c.lockErr
+	}
+	return "test-lease", c.lockErr
 }
 
-func (c *refreshAPICacheStub) ReleaseRefreshLock(ctx context.Context, _ string) error {
+func (c *refreshAPICacheStub) ReleaseRefreshLock(ctx context.Context, _ string, _ string) error {
 	c.releaseCalls++
 	c.releaseCtxErr = ctx.Err()
 	return nil
@@ -250,7 +253,7 @@ func TestRefreshIfNeeded_LockHeld(t *testing.T) {
 	require.Equal(t, 0, executor.refreshCalls)
 }
 
-func TestRefreshIfNeeded_LockErrorDegrades(t *testing.T) {
+func TestRefreshIfNeeded_LockErrorFailsClosed(t *testing.T) {
 	account := &Account{ID: 3, Platform: PlatformGemini, Type: AccountTypeOAuth, Status: StatusActive}
 	repo := &refreshAPIAccountRepo{account: account}
 	cache := &refreshAPICacheStub{lockErr: errors.New("redis down")} // lock error
@@ -262,11 +265,24 @@ func TestRefreshIfNeeded_LockErrorDegrades(t *testing.T) {
 	api := NewOAuthRefreshAPI(repo, cache)
 	result, err := api.RefreshIfNeeded(context.Background(), account, executor, 3*time.Minute)
 
-	require.NoError(t, err)
-	require.True(t, result.Refreshed)       // still refreshed (degraded mode)
-	require.Equal(t, 1, repo.updateCalls)   // DB updated
+	require.ErrorIs(t, err, errOAuthRefreshLockUnavailable)
+	require.Nil(t, result)
+	require.Equal(t, 0, repo.getByIDCalls)
+	require.Equal(t, 0, repo.updateCalls)
 	require.Equal(t, 0, cache.releaseCalls) // no lock to release
-	require.Equal(t, 1, executor.refreshCalls)
+	require.Equal(t, 0, executor.refreshCalls)
+}
+
+func TestRefreshIfNeeded_RequestCannotOutliveDistributedLease(t *testing.T) {
+	repo := &refreshAPIAccountRepo{account: &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{needsRefresh: true, delay: 40 * time.Millisecond,
+		credentials: map[string]any{"fixture": "late-result"}}
+	api := NewOAuthRefreshAPI(repo, cache, 20*time.Millisecond)
+	_, err := api.RefreshIfNeeded(context.Background(), repo.account, executor, time.Minute)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, 0, repo.updateCalls)
+	require.Equal(t, 1, cache.releaseCalls)
 }
 
 func TestRefreshIfNeeded_NoCacheNoLock(t *testing.T) {

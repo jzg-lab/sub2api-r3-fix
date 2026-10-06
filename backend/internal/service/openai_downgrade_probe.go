@@ -173,6 +173,8 @@ func isOpenAIDowngradeTurnStateLenDegraded(length int) bool {
 // OpenAIDowngradeProbeResult is the redacted, bill-free result of one probe.
 // It intentionally contains no response text or credential material.
 type OpenAIDowngradeProbeResult struct {
+	// Request-local evidence for rebinding an atomic commit after token refresh.
+	authAttempt     *Account
 	AccountID       int64
 	ProxyID         *int64
 	Mode            string
@@ -2143,23 +2145,31 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		result.Latency = time.Since(started)
 		return result
 	}
-	token, err := r.tokenProvider.GetAccessToken(ctx, account)
-	if err != nil {
-		result.ErrorMessage = "access token unavailable"
-		result.Latency = time.Since(started)
-		return result
+	// Keep the validated proxy row with this attempt. A URL alone leaves
+	// ID-only account snapshots unable to pass the final transport guard.
+	attempt := snapshotOAuthRefreshAccount(account)
+	if r.proxyRepo != nil && attempt.ProxyID != nil {
+		proxy, lookupErr := r.proxyRepo.GetByID(ctx, *attempt.ProxyID)
+		if lookupErr != nil {
+			result.ErrorMessage = "probe requires account proxy bucket"
+			result.Latency = time.Since(started)
+			return result
+		}
+		attempt.Proxy = proxy
 	}
-	var proxyURL string
-	if r.proxyRepo != nil {
-		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
-	} else {
-		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
-	}
+	proxyURL, err := openAIOAuthProxySnapshotURL(attempt.Proxy, attempt.ProxyID)
 	if err != nil {
 		// 出口硬闸：解析不出桶代理就不发探针。直连会把家用 IP 暴露给
 		// chatgpt.com，且裸 Go TLS 指纹与账号流量冲突；无结论（不奖不罚）
 		// 等下一轮资格流程绑桶后再探。
 		result.ErrorMessage = "probe requires account proxy bucket"
+		result.Latency = time.Since(started)
+		return result
+	}
+	account = attempt
+	token, err := r.tokenProvider.GetAccessToken(ctx, account)
+	if err != nil {
+		result.ErrorMessage = "access token unavailable"
 		result.Latency = time.Since(started)
 		return result
 	}
@@ -2212,16 +2222,19 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		// Cookie 钉扎救回的号在裸 LB 路上 4 针全 200+错答——资格针不与
 		// 真实流量同路就结构性测不出救治效果。插件未启用/未处理时回退
 		// 原一次性专用传输，非救治账号路径不变。
-		var resp *http.Response
-		if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(account) != nil {
-			var handled bool
-			resp, handled, requestErr = r.pluginRoundTrip(ctx, req, proxyURL, account)
-			if !handled {
-				resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
-			}
-		} else {
-			resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
-		}
+		resp, requestErr := doOpenAIUpstreamWithRecovery(ctx, req, proxyURL, account, r.tokenProvider, true,
+			func(request *http.Request, route string, current *Account) (*http.Response, error) {
+				if routeErr := validateOpenAIAccountProxyRoute(current, route); routeErr != nil {
+					return nil, routeErr
+				}
+				if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(current) != nil {
+					response, handled, err := r.pluginRoundTrip(request.Context(), request, route, current)
+					if handled {
+						return response, err
+					}
+				}
+				return r.httpUpstream.DoProbeWithTLS(request, route, current.Concurrency, probeProfile)
+			})
 		if requestErr != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -2231,6 +2244,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		if resp == nil {
 			return 0, nil, nil, errors.New("probe upstream returned no response")
 		}
+		result.authAttempt = openAIResponseAccount(resp, account)
 		responseBody, readErr := readOpenAIDowngradeProbeBody(resp.Body)
 		respHeader := resp.Header
 		statusCode := resp.StatusCode

@@ -60,12 +60,14 @@ archives:
       - deploy/auth-browser/README.md
       - deploy/auth-browser/ONBOARDING-LICENSE
       - deploy/auth-browser/launch.sh
+      - deploy/auth-browser/automate.mjs
       - deploy/auth-browser/proxy_address.py
       - deploy/auth-browser/reauthorize.mjs
       - deploy/auth-browser/reauthorization.mjs
       - deploy/auth-browser/tests/test_launcher.py
       - deploy/auth-browser/tests/reauthorization.test.mjs
-      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-0.3.9.s2plugin
+      - deploy/auth-browser/tests/automate.test.mjs
+      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-0.3.10.s2plugin
         dst: plugins
         strip_parent: true
       - src: deploy/codex-lb-cookie-pin/README.md

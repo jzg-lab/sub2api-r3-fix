@@ -109,6 +109,7 @@ async function scenario(mode, width, behavior = 'success') {
   const errors = []
   const requests = []
   const gate = deferred()
+  const launchStarted = deferred()
   const exchangeStarted = deferred()
   const persistenceStarted = deferred()
   let launchCount = 0
@@ -138,14 +139,20 @@ async function scenario(mode, width, behavior = 'success') {
     }
     if (url.pathname.endsWith('/launch-auth-browser')) {
       launchCount += 1
-      if (behavior === 'launcher-failure') {
+      launchStarted.resolve()
+      if (['automatic-cancel', 'automatic-switch', 'automatic-duplicate'].includes(behavior)) await gate.promise
+      if (behavior === 'launcher-failure' || behavior === 'automatic-failure') {
         return reply({ code: 'OPENAI_AUTH_BROWSER_UNAVAILABLE', message: 'Fixture launcher unavailable' }, 503)
       }
-      if (behavior === 'launcher-running' || behavior === 'launcher-not-launched') {
-        return reply({ launched: false, already_running: behavior === 'launcher-running' })
+      if (behavior === 'launcher-running' || behavior === 'launcher-not-launched' || behavior === 'automatic-running') {
+        return reply({ launched: false, already_running: behavior !== 'launcher-not-launched' })
+      }
+      if (behavior.startsWith('automatic-')) {
+        return reply({ launched: true, code: 'fixture-code', state: `fixture-state-${sessionCount}` })
       }
       return reply({ launched: true, already_running: false })
     }
+    if (url.pathname === `/api/v1/admin/accounts/${account.id}` && request.method() === 'GET') return reply(account)
     if (url.pathname.endsWith('/exchange-code')) {
       exchangeStarted.resolve()
       if (behavior === 'switch-during-exchange' || behavior === 'duplicate-exchange') await gate.promise
@@ -179,6 +186,51 @@ async function scenario(mode, width, behavior = 'success') {
   const submitted = page.getByRole('button', { name: 'Complete Authorization', exact: true })
   try {
     await page.goto(`${server.resolvedUrls.local[0]}?mode=${mode}`)
+    if (behavior.startsWith('automatic-')) {
+      await page.getByLabel('账号邮箱', { exact: true }).fill('fixture@example.invalid')
+      await page.getByLabel('账号密码', { exact: true }).fill(['fixture', 'only'].join('-'))
+      const start = page.getByRole('button', { name: '自动重新授权并覆盖', exact: true })
+      await start.click()
+      await launchStarted.promise
+      assert.equal(await page.getByLabel('账号邮箱', { exact: true }).inputValue(), '')
+      assert.equal(await page.getByLabel('账号密码', { exact: true }).inputValue(), '')
+      if (behavior === 'automatic-duplicate') {
+        assert.equal(await start.isDisabled(), true)
+        await start.evaluate(element => { element.click(); element.click() })
+        gate.resolve()
+      } else if (behavior === 'automatic-cancel') {
+        await page.getByRole('button', { name: '取消自动授权', exact: true }).click()
+        gate.resolve()
+      } else if (behavior === 'automatic-switch') {
+        await page.evaluate(() => window.fixture.switchAccount())
+        gate.resolve()
+      }
+      const succeeded = ['automatic-success', 'automatic-duplicate'].includes(behavior)
+      if (succeeded) {
+        await page.waitForFunction(() => window.fixture.events.length >= 2)
+        assert.deepEqual((await page.evaluate(() => window.fixture.events)).sort(),
+          [`reauthorized:${account.id}`, 'close'].sort())
+      } else {
+        await page.waitForFunction(() => window.fixture.pending === 0)
+        await page.getByRole('button', { name: '自动重新授权并覆盖', exact: true }).waitFor()
+        assert.deepEqual(await page.evaluate(() => window.fixture.events), [])
+        assert.equal(requests.filter(item => item.path.endsWith('/exchange-code')).length, 0)
+        assert.equal(requests.filter(item => item.method === 'POST' && item.path.includes('/accounts/')).length, 0)
+        if (behavior === 'automatic-failure' || behavior === 'automatic-running') {
+          assert.equal(await page.getByRole('alert').count() > 0, true)
+        }
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+        await page.screenshot({ path: resolve(output, `${mode}-${width}-${behavior}.png`), fullPage: true })
+      }
+      assert.equal(launchCount, 1)
+      const generated = requests.find(item => item.path.endsWith('/generate-auth-url'))
+      assert.equal(generated.body.account_id, account.id)
+      assert.equal(generated.body.proxy_id, proxy.id)
+      assert.deepEqual(errors, [])
+      results.push({ mode, width, behavior, status: 'passed' })
+      console.log(`PASS ${mode} ${width} ${behavior}`)
+      return
+    }
     if (mode === 'create') {
       await page.getByRole('button', { name: 'OpenAI', exact: true }).click()
       await page.locator('form#create-account-form input[type=text]').first().fill('Browser fixture create')
@@ -311,6 +363,12 @@ try {
       await scenario(mode, 1440, behavior)
     }
     if (mode !== 'create') await scenario(mode, 1440, 'switch-during-exchange')
+    if (mode !== 'create') {
+      for (const width of [1440, 390]) await scenario(mode, width, 'automatic-success')
+      for (const behavior of ['automatic-duplicate', 'automatic-cancel', 'automatic-switch', 'automatic-failure', 'automatic-running']) {
+        await scenario(mode, behavior === 'automatic-failure' ? 390 : 1440, behavior)
+      }
+    }
   }
   await scenario('create', 1440, 'write-failure')
   await writeFile(resolve(output, 'results.json'), JSON.stringify({

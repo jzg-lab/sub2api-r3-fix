@@ -31,7 +31,7 @@ const (
 	// PluginID 与 manifest.json 的 id 必须一致。
 	PluginID = "lyunlong.codex.lb-cookie-pin"
 	// PluginVersion 与 manifest.json 的 version 必须一致。
-	PluginVersion = "0.3.9"
+	PluginVersion = "0.3.10"
 	// A 518n-2 usage pattern is an observation, not proof of model quality.
 	// Correct answers with this pattern neither reroll nor certify recovery.
 	truncationFingerprintModulus = 518
@@ -375,7 +375,7 @@ func (s *Server) stashTemplateLocked(start *pluginv1.ForwardRequestStart, body [
 		s.nextTemplateGeneration++
 		next.Generation = s.nextTemplateGeneration
 		// A new credential or route must not inherit the old probe's graduation.
-		delete(s.states, accountID)
+		s.resetProbeStateLocked(accountID, now)
 		if previous != nil {
 			s.Store.Drop(accountID)
 			if cancel, ok := s.probeRunning.Load(accountID); ok {
@@ -398,6 +398,19 @@ func sameProbeIdentity(a, b *probeTemplate) bool {
 func (s *Server) probeTemplateCurrent(accountID int64, tmpl *probeTemplate) bool {
 	live := s.templates[accountID]
 	return live != nil && live.Generation == tmpl.Generation
+}
+
+// Credential rotation invalidates quality evidence, not an upstream cooldown.
+// Retain only the deadline so a new template cannot resume probes prematurely.
+func (s *Server) resetProbeStateLocked(accountID int64, now time.Time) {
+	if previous := s.states[accountID]; previous != nil && previous.RetryNotBefore.After(now) {
+		state := prober.NewState(accountID)
+		state.RetryNotBefore = previous.RetryNotBefore
+		state.NextProbeAt = previous.RetryNotBefore
+		s.states[accountID] = state
+		return
+	}
+	delete(s.states, accountID)
 }
 
 // extractModel 从业务请求体提取 model 字段（Responses API JSON）。探针开启
@@ -502,12 +515,17 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 	}
 	cfg := s.Store.Config()
 	horizon := 2 * time.Duration(cfg.ProbeIntervalSeconds) * time.Second
+	for accountID, state := range s.states {
+		if s.templates[accountID] == nil && !state.RetryNotBefore.After(now) {
+			delete(s.states, accountID)
+		}
+	}
 	for accountID, tmpl := range s.templates {
 		state := s.states[accountID]
 		if templateRetired(tmpl, state, now, horizon) {
 			s.invalidateProbeLocked(accountID)
 			delete(s.templates, accountID)
-			delete(s.states, accountID)
+			s.resetProbeStateLocked(accountID, now)
 			continue
 		}
 		if !cfg.Enabled || !cfg.QualityProbeEnabled || !scopeMatch(cfg.InjectScope, tmpl.URL) || tmpl.Model == "" {
@@ -528,6 +546,7 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 		if state.BackoffUntil.After(dueAt) {
 			dueAt = state.BackoffUntil
 		}
+		dueAt = maxTime(dueAt, state.RetryNotBefore)
 		if dueAt.After(now) {
 			nextScan = min(nextScan, dueAt.Sub(now))
 			continue
@@ -626,7 +645,9 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 					time.Duration(info.Stats.P80*float64(time.Second)), cfg, rand.Float64)
 			}
 		}
+		observation := newProbeObservation(tmpl, state, decision, now)
 		s.probeMu.Unlock()
+		observation.log(slog.Default())
 		if !decision.ProbeAgainNow {
 			return
 		}
@@ -643,7 +664,7 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 // 报文逐条反推）：input 必须是消息数组、store 必须 false、stream 必须
 // true（后端强制 SSE）——恰好也是 codex CLI 的原生形态，指纹同形。响应的
 // Set-Cookie 走同一被动捕获路径——探针本身就能把重摇后的新签重新钉住。
-// 5xx/429/传输错误重试（最多 3 次尝试），全败记 VerdictError（冷会话首发 503
+// 5xx/传输错误重试（最多 3 次尝试），429/Retry-After 延后调度；全败记 VerdictError（冷会话首发 503
 // 是常态，不是质量信号）。任何路径都不记 Authorization/Cookie 到日志或答案摘要。
 // v0.3.4：①401/403 当场丢模板（模板 Authorization 已死，留着只会无限空转——
 // 1227 实证；下一笔真实 Forward 自动用新鲜 token 重stash）；②判过钉推理门槛
@@ -770,7 +791,19 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				"body_fingerprint", failure.Fingerprint, "body_truncated", len(raw) > maxProbeErrorBody,
 				"body_read_failed", readErr != nil)
 			lastFailure = failure.Summary()
-			if code >= 500 || code == http.StatusTooManyRequests {
+			if deadline := probeRetryDeadline(code, response.Header, time.Now()); !deadline.IsZero() {
+				s.probeMu.Lock()
+				if !s.probeTemplateCurrent(accountID, tmpl) {
+					s.probeMu.Unlock()
+					return prober.VerdictError, "stale:template", 0
+				}
+				if state := s.states[accountID]; state != nil {
+					state.RetryNotBefore = maxTime(state.RetryNotBefore, deadline)
+				}
+				s.probeMu.Unlock()
+				return prober.VerdictError, lastFailure, 0
+			}
+			if code >= 500 {
 				if attempt == 2 {
 					break
 				}
@@ -1033,10 +1066,11 @@ func (s *Server) snapshotProber(now time.Time, cfg pluginconfig.Config) probeSta
 	for _, state := range s.states {
 		view := accountProbeView{
 			State:                  *state,
-			InBackoff:              now.Before(state.BackoffUntil),
+			InBackoff:              now.Before(maxTime(state.BackoffUntil, state.RetryNotBefore)),
 			EstimatedRemainingSecs: -1,
 			EstimateBasis:          "none",
 		}
+		view.NextProbeAt = maxTime(view.NextProbeAt, maxTime(state.BackoffUntil, state.RetryNotBefore))
 		info := s.Store.SignInfo(state.AccountID, now)
 		if info.HasSign {
 			view.SignCapturedAt = info.CapturedAt

@@ -1,11 +1,23 @@
 # Codex LB Cookie Pin（sub2api 插件）
 
-`lyunlong.codex.lb-cookie-pin` v0.3.9 是本地维护的 sub2api 配套救号插件，
+`lyunlong.codex.lb-cookie-pin` v0.3.10 是本地维护的 sub2api 配套救号插件，
 实现 OpenAI 负载均衡粘性 Cookie 的**被动捕获 → 按账号注入 → 信号自动重摇**闭环；
 v0.2 增加可选的**质量探针自愈**：定期判别题检测静默降智，答错自动重摇。
 
 本插件使用 Sub2API 插件协议，但不是 Sub2API 官方发布的账号重授权插件。
 它不登录账号、不更新 OAuth 凭据，也不代替重授权流程。
+
+## 0.3.10 冷却与诊断
+
+- 429 不再就地连发重试；429/503 的有效 `Retry-After` 进入调度截止时间，
+  凭据更新、模板退休、新 Cookie 和自适应调度都不能提前绕过冷却。
+- `quality_probe_observation` 将已接受的探针结果绑定账号、模板与 Cookie
+  代次、探针序号和重摇次数，供后续只读关联分析使用。日志不含请求头、
+  URL、认证材料、题目或答案；推理 token 数不构成真实模型身份证明。
+- HTTP 400 中明确的客户端升级要求单独显示为 `client-upgrade-required`；
+  不自动改版本、模型、TLS、出口或业务会话，不把该错误算成质量失败或毕业。
+- 未取得逐次证据前，不据历史汇总推断 IP fallback 或调整毕业门槛。
+  客户业务流量的会话标识、原始出口和授权身份保持不变。
 
 ## 0.3.9 调度优化
 
@@ -110,7 +122,7 @@ S2PLUGIN_KEY=/existing/publisher.key ./build.sh --release # 默认要求现有�
 省略时沿用公钥前 16 位十六进制 ID。不要为发布生成新信任根或开启生产
 `allow_unsigned`。部署前必须用目标宿主的原有信任配置验证签名、文件哈希和版本兼容性。
 
-产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.9.s2plugin`。
+产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.10.s2plugin`。
 包含 macOS amd64/arm64、Linux amd64/arm64、Windows amd64 的 runtimes 和 UI。
 不要通过删除平台绕过交付矩阵；宿主上传限制须在安装前核验。
 
@@ -172,7 +184,8 @@ go run ./tools/testhost -plugin dist/runtimes/darwin-arm64/cookiepin -forward \
 
 1. 开启后，每笔业务出站请求顺带刷新该账号的**探针模板**（URL/headers/代理/模型，
    含 Authorization——只存内存，绝不进日志与状态面板）。
-2. 探针回路每 10s 扫描台账，到期账号使用宿主同源 canary 题库生成一道判别题。
+2. 探针回路按最近到期时间唤醒；新模板、配置和新签触发事件唤醒，无需等固定轮询周期。
+   到期账号使用宿主同源 canary 题库生成一道判别题。
 3. **双档排程（v0.3.2）**：连过未达退出线（当前默认 6，显式旧值保留）= 未验证态，走密集档
   （默认 120s）快速攒证据；达标回稳态档（`probe_interval_seconds`）。救治号
    停调度后可由种子提供模板。插件连过只是必要证据，还需同窗宿主资格针，
@@ -187,7 +200,9 @@ go run ./tools/testhost -plugin dist/runtimes/darwin-arm64/cookiepin -forward \
    Set-Cookie 走同一被动捕获路径——探针自己就能把新签钉回罐。
 7. 连续答错达阈值 → 判疑似账号级（重摇无解，继续摇纯属烧额度）→ 退避停探，
    期满复探给新机会。插件一次答对可以清其本地疑似标志，但不能清宿主疑似状态或毕业。
-8. 传输错误 / 5xx / 429 重试至多 3 次后记 error，**不计质量失败**（冷会话首发
+8. 429 不在同轮重试，按 `Retry-After` 冷却；缺失或无效时至少等待一分钟。
+   503 带有效 `Retry-After` 时也推迟下一针。新签、凭据轮换和模板更换均不能绕过冷却。
+   其余可重试的传输错误 / 5xx 有界重试，**不计质量失败**（冷会话首发
    503 不能单独作为降智信号）。答对但命中截断指纹也记中性观察，并清连续通过证据。
 
 ## 重启后的救治恢复

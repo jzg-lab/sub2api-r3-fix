@@ -96,6 +96,7 @@ type State struct {
 	PreviousPassAt          time.Time `json:"previous_pass_at"`
 	NextProbeAt             time.Time `json:"next_probe_at"`
 	BackoffUntil            time.Time `json:"backoff_until"`
+	RetryNotBefore          time.Time `json:"retry_not_before"`
 	TruncationObservations  int64     `json:"truncation_observations"`
 	TruncationWindowSamples int       `json:"truncation_window_samples"`
 	TruncationWindowHits    int       `json:"truncation_window_hits"`
@@ -111,7 +112,7 @@ func NewState(accountID int64) *State {
 // Due 报告现在是否应探该账号（退避期内或未到期都不探；ProbeAgainNow 的
 // 立即复探由执行器绕过本判断）。
 func (st *State) Due(now time.Time) bool {
-	if now.Before(st.BackoffUntil) {
+	if now.Before(st.BackoffUntil) || now.Before(st.RetryNotBefore) {
 		return false
 	}
 	return !now.Before(st.NextProbeAt)

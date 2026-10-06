@@ -13,6 +13,8 @@ type GeminiTokenCache interface {
 	SetAccessToken(ctx context.Context, cacheKey string, token string, ttl time.Duration) error
 	DeleteAccessToken(ctx context.Context, cacheKey string) error
 
-	AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error)
-	ReleaseRefreshLock(ctx context.Context, cacheKey string) error
+	// An empty lease means another worker holds the lock. Release must compare
+	// the lease atomically so an expired holder cannot unlock its successor.
+	AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (string, error)
+	ReleaseRefreshLock(ctx context.Context, cacheKey, lease string) error
 }

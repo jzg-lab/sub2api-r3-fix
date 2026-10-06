@@ -3099,10 +3099,24 @@ func TestFetchCodexModelsManifestAPIKeyRejectsBaseURLFragment(t *testing.T) {
 type codexModelsAccountStateRepo struct {
 	AccountRepository
 	mu                  sync.Mutex
+	current             *Account
 	setErrorCalls       int
 	lastErrorMsg        string
 	setTempUnschedCalls int
 	lastTempReason      string
+}
+
+func (r *codexModelsAccountStateRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	if !matchesAuthFailureTestAccount(r.current, before) {
+		return false, nil
+	}
+	var err error
+	if change.ErrorMessage != nil {
+		err = r.SetError(ctx, before.ID, *change.ErrorMessage)
+	} else if change.CooldownUntil != nil {
+		err = r.SetTempUnschedulable(ctx, before.ID, *change.CooldownUntil, change.CooldownReason)
+	}
+	return err == nil, err
 }
 
 func (r *codexModelsAccountStateRepo) SetError(_ context.Context, _ int64, errorMsg string) error {
@@ -3143,6 +3157,7 @@ func TestFetchCodexModelsManifestOAuth401MarksAccountUnschedulable(t *testing.T)
 	s := newCodexModels401TestService(repo)
 	account := newCodexModelsTestAccount()
 	account.Credentials["refresh_token"] = "test-refresh-token"
+	repo.current = snapshotOAuthRefreshAccount(account)
 
 	_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
 	require.Error(t, err)
@@ -3167,6 +3182,7 @@ func TestFetchCodexModelsManifestOAuth401TokenRevokedDisablesAccount(t *testing.
 	s := newCodexModels401TestService(repo)
 	account := newCodexModelsTestAccount()
 	account.Credentials["refresh_token"] = "test-refresh-token"
+	repo.current = snapshotOAuthRefreshAccount(account)
 
 	_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
 	require.Error(t, err)
@@ -3174,6 +3190,39 @@ func TestFetchCodexModelsManifestOAuth401TokenRevokedDisablesAccount(t *testing.
 	require.Equal(t, 1, repo.setErrorCalls, "revoked token should permanently disable the account")
 	require.Contains(t, repo.lastErrorMsg, "Token revoked")
 	require.Equal(t, 0, repo.setTempUnschedCalls)
+}
+
+func TestFetchCodexModelsManifestOAuth401IgnoresReauthorizedAccount(t *testing.T) {
+	for _, body := range []string{
+		`{"detail":{"message":"invalid token"}}`,
+		`{"error":{"code":"token_revoked","message":"token has been revoked"}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			original := chatgptCodexModelsURL
+			chatgptCodexModelsURL = server.URL
+			defer func() { chatgptCodexModelsURL = original }()
+
+			account := newCodexModelsTestAccount()
+			account.Credentials["refresh_token"] = "test-refresh-token"
+			current := snapshotOAuthRefreshAccount(account)
+			current.Credentials["access_token"] = "fixture-reauthorized-access"
+			current.Credentials["refresh_token"] = "fixture-reauthorized-refresh"
+			repo := &codexModelsAccountStateRepo{current: current}
+			s := newCodexModels401TestService(repo)
+
+			_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
+			require.Error(t, err)
+			require.True(t, IsRetryableCodexModelsManifestError(err))
+			require.Zero(t, repo.setErrorCalls)
+			require.Zero(t, repo.setTempUnschedCalls)
+			require.False(t, s.isOpenAIAccountRuntimeBlocked(current))
+		})
+	}
 }
 
 func TestFetchCodexModelsManifestAgentIdentity401DoesNotDisableAccount(t *testing.T) {

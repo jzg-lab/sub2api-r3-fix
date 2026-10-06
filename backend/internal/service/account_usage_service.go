@@ -358,37 +358,23 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		return s.getPassiveUsageForAccount(ctx, account)
 	}
 
+	// Usage can come from cached, local or degraded snapshots. It must not
+	// clear authentication failures; credential recovery owns that transition.
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
-		usage, err := s.getOpenAIUsage(ctx, account, forceProbe)
-		if err == nil {
-			s.tryClearRecoverableAccountError(ctx, account)
-		}
-		return usage, err
+		return s.getOpenAIUsage(ctx, account, forceProbe)
 	}
 
 	if account.Platform == PlatformGemini {
-		usage, err := s.getGeminiUsage(ctx, account)
-		if err == nil {
-			s.tryClearRecoverableAccountError(ctx, account)
-		}
-		return usage, err
+		return s.getGeminiUsage(ctx, account)
 	}
 
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
-		usage, err := s.getAntigravityUsage(ctx, account)
-		if err == nil {
-			s.tryClearRecoverableAccountError(ctx, account)
-		}
-		return usage, err
+		return s.getAntigravityUsage(ctx, account)
 	}
 
 	if account.Platform == PlatformGrok {
-		usage, err := s.getGrokUsage(ctx, account, forceProbe)
-		if err == nil && usage != nil && usage.Error == "" {
-			s.tryClearRecoverableAccountError(ctx, account)
-		}
-		return usage, err
+		return s.getGrokUsage(ctx, account, forceProbe)
 	}
 
 	// 只有oauth类型账号可以通过API获取usage（有profile scope）
@@ -472,7 +458,6 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 			usage.SevenDayFable = buildPassiveUsageWindow(account.Extra, "passive_usage_7d_oi_utilization", "passive_usage_7d_oi_reset")
 		}
 
-		s.tryClearRecoverableAccountError(ctx, account)
 		return usage, nil
 	}
 
@@ -1614,32 +1599,6 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unable to parse time: %s", s)
-}
-
-func (s *AccountUsageService) tryClearRecoverableAccountError(ctx context.Context, account *Account) {
-	if account == nil || account.Status != StatusError {
-		return
-	}
-
-	msg := strings.ToLower(strings.TrimSpace(account.ErrorMessage))
-	if msg == "" {
-		return
-	}
-
-	if !strings.Contains(msg, "token refresh failed") &&
-		!strings.Contains(msg, "invalid_client") &&
-		!strings.Contains(msg, "missing_project_id") &&
-		!strings.Contains(msg, "unauthenticated") {
-		return
-	}
-
-	if err := s.accountRepo.ClearError(ctx, account.ID); err != nil {
-		log.Printf("[usage] failed to clear recoverable account error for account %d: %v", account.ID, err)
-		return
-	}
-
-	account.Status = StatusActive
-	account.ErrorMessage = ""
 }
 
 // buildUsageInfo 构建UsageInfo

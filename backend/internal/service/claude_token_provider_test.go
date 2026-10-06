@@ -68,18 +68,21 @@ func (s *claudeTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 	return nil
 }
 
-func (s *claudeTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error) {
+func (s *claudeTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (string, error) {
 	atomic.AddInt32(&s.lockCalled, 1)
 	if s.lockErr != nil {
-		return false, s.lockErr
+		return "", s.lockErr
 	}
 	if s.simulateLockRace {
-		return false, nil
+		return "", nil
 	}
-	return s.lockAcquired, nil
+	if !s.lockAcquired {
+		return "", nil
+	}
+	return "test-lease", nil
 }
 
-func (s *claudeTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string) error {
+func (s *claudeTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, _ string) error {
 	atomic.AddInt32(&s.unlockCalled, 1)
 	return s.releaseLockErr
 }
@@ -154,9 +157,9 @@ func (p *testClaudeTokenProvider) GetAccessToken(ctx context.Context, account *A
 	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= claudeTokenRefreshSkew
 	refreshFailed := false
 	if needsRefresh && p.tokenCache != nil {
-		locked, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
-		if err == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+		lease, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		if err == nil && lease != "" {
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease) }()
 
 			// Check cache again after acquiring lock
 			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && token != "" {

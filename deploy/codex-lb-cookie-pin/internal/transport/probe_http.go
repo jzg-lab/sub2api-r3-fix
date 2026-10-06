@@ -8,10 +8,42 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
 const maxProbeErrorBody = 16 << 10
+
+// Rate limits are scheduling signals, not reasons to reroll or retry the
+// same request immediately. Even Retry-After: 0 retains a one-minute floor.
+func probeRetryDeadline(status int, header http.Header, now time.Time) time.Time {
+	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
+		return time.Time{}
+	}
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	var deadline time.Time
+	if seconds, err := strconv.ParseUint(raw, 10, 64); err == nil {
+		// Saturate before converting to Duration to prevent integer overflow.
+		const maxSeconds = uint64((1<<63 - 1) / int64(time.Second))
+		if seconds > maxSeconds {
+			seconds = maxSeconds
+		}
+		deadline = now.Add(time.Duration(seconds) * time.Second)
+	} else if date, err := http.ParseTime(raw); err == nil {
+		deadline = date
+	}
+	if status == http.StatusTooManyRequests || !deadline.IsZero() {
+		return maxTime(deadline, now.Add(time.Minute))
+	}
+	return time.Time{}
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
 
 // Compaction is forwarded unchanged, but its JSON-only endpoint cannot execute
 // a streaming quality probe. Both requests belong to the same account route.
@@ -122,6 +154,12 @@ func classifyProbeHTTPError(status int, raw []byte, readErr error) probeHTTPFail
 		}
 	}
 	switch {
+	case status == http.StatusBadRequest && (code == "client_version_unsupported" ||
+		code == "client_version_outdated" || code == "client_upgrade_required" ||
+		strings.Contains(message, "please upgrade your codex client") ||
+		strings.Contains(message, "please update your codex client") ||
+		strings.Contains(message, "codex client version is no longer supported")):
+		result.Kind, result.Parameter = "client-upgrade-required", ""
 	case code == "model_not_found" || code == "model_not_supported":
 		result.Kind, result.Parameter = "model-unavailable", "model"
 	case code == "unsupported_parameter" || code == "unsupported_value" ||

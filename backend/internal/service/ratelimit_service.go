@@ -420,6 +420,15 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		// 问题变成影子永久死亡。母账号被标记 temp-unschedulable 后由 parentHealthyForShadow 级联排除影子。
 		// 非影子时 resolveCredentialAccount 返回自身;母账号缺失/损坏(orphan 影子,罕见)时回退到原 account。
 		authAccount := account
+		if isOpenAIAuthAttemptAccount(account) {
+			authAccount = openAIAuthAttemptAccount(account)
+			// Without an attempted parent snapshot a shadow's late 401 cannot
+			// safely mutate the current parent credentials.
+			if authAccount == nil {
+				return false
+			}
+			return s.handleOpenAIOAuthUnauthorized(ctx, authAccount, responseBody, upstreamMsg)
+		}
 		if resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account); rerr == nil && resolved != nil {
 			authAccount = resolved
 		}

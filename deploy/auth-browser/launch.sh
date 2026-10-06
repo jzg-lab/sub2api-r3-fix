@@ -107,6 +107,15 @@ if ! EXIT_IP="$("$PYTHON" "$BASE_DIR/proxy_address.py" "${EXIT_CHECK_ARGS[@]}" 2
   exit 2
 fi
 
+if [ "${SUB2API_AUTH_BROWSER_MODE:-}" = "automated" ]; then
+  if [ -z "$PINNED_EXIT_IP" ]; then
+    echo "自动重新授权需要原登录 IP 绑定。" >&2
+    exit 2
+  fi
+  NODE="${SUB2API_AUTH_BROWSER_NODE:-node}"
+  exec "$NODE" "$BASE_DIR/automate.mjs" "$CHROME" "$PROFILE_ROOT" "$NAME" "$AUTH_URL" "$PROXY"
+fi
+
 mkdir -p "$PROFILE_DIR/Default" "$(dirname "$LOG_FILE")"
 if [ ! -f "$PROFILE_DIR/Default/Preferences" ]; then
   cat >"$PROFILE_DIR/Default/Preferences" <<'EOF'

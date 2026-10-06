@@ -3,23 +3,38 @@
 package service
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"regexp"
 	"testing"
 	"time"
 
-	appTimezone "github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/stretchr/testify/require"
 )
 
-func useGroupUsageTestTimezone(t *testing.T, name string) {
+func useGroupUsageTestTimezone(t *testing.T, name string) bool {
 	t.Helper()
-
-	previousName := appTimezone.Name()
-	require.NoError(t, appTimezone.Init(name))
-	t.Cleanup(func() { require.NoError(t, appTimezone.Init(previousName)) })
+	if os.Getenv("SUB2API_TEST_TIMEZONE") == name {
+		return true
+	}
+	// Initialize once in a child process; changing time.Local races with
+	// background workers left alive by otherwise unrelated service tests.
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.timeout=20s")
+	cmd.Env = append(os.Environ(), "SUB2API_TEST_TIMEZONE="+name)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	return false
 }
 
 func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	beforeMidnight := time.Date(2026, 3, 9, 3, 59, 59, 0, time.UTC)
 	atMidnight := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
@@ -30,7 +45,9 @@ func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
 }
 
 func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	parsed, err := ParseGroupUsageDate("2026-03-08")
 	require.NoError(t, err)
@@ -39,7 +56,9 @@ func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
 }
 
 func TestGroupUsageYesterdayStartHandlesDST(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	todayStart := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
 	yesterdayStart := GroupUsageYesterdayStart(todayStart)

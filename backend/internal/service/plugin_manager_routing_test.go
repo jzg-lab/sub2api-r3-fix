@@ -86,7 +86,7 @@ func TestOpenAIGatewayPluginRoutingPreservesAPIKeyAndFailsClosedForOAuth(t *test
 
 	apiKeyRequest, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/v1/responses", nil)
 	require.NoError(t, err)
-	apiKeyResponse, err := service.doOpenAIUpstream(apiKeyRequest, "", &Account{
+	apiKeyResponse, err := service.doOpenAIUpstream(apiKeyRequest.Context(), apiKeyRequest, "", &Account{
 		ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
 	})
 	require.NoError(t, err)
@@ -96,7 +96,7 @@ func TestOpenAIGatewayPluginRoutingPreservesAPIKeyAndFailsClosedForOAuth(t *test
 
 	oauthRequest, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/v1/responses", nil)
 	require.NoError(t, err)
-	oauthResponse, err := service.doOpenAIUpstream(oauthRequest, openAITransportTestProxy().URL(), &Account{
+	oauthResponse, err := service.doOpenAIUpstream(oauthRequest.Context(), oauthRequest, openAITransportTestProxy().URL(), &Account{
 		ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 	})

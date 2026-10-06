@@ -137,6 +137,12 @@ func TestProbeHTTPDiagnosticsAreBoundedAndSecretSafe(t *testing.T) {
 		{"unsupported tokens", `{"error":"Unsupported parameter: max_output_tokens"}`, "unsupported", "max_output_tokens", nil},
 		{"stream constraint", `{"error":{"message":"stream must be true"}}`, "invalid", "stream", nil},
 		{"model unavailable", `{"error":{"code":"model_not_found","message":"private-fixture"}}`, "model-unavailable", "model", nil},
+		{"client version code", `{"error":{"code":"client_version_unsupported","message":"private-fixture"}}`, "client-upgrade-required", "", nil},
+		{"client upgrade message", `{"error":{"message":"Please upgrade your Codex client. private-fixture"}}`, "client-upgrade-required", "", nil},
+		{"client update message", `{"detail":"Please update your Codex client; private-fixture"}`, "client-upgrade-required", "", nil},
+		{"retired client", `{"error":"Codex client version is no longer supported. private-fixture"}`, "client-upgrade-required", "", nil},
+		{"unrelated upgrade", `{"error":{"message":"Upgrade your plan; private-fixture"}}`, "rejected", "", nil},
+		{"ambiguous version", `{"error":{"message":"Unsupported model version; private-fixture"}}`, "unsupported", "model", nil},
 		{"invalid compression", `{"error":{"code":"invalid_header","message":"Invalid Content-Encoding"}}`, "invalid", "content-encoding", nil},
 		{"unknown data", `{"error":{"code":"private-fixture","param":"private-fixture","message":"private-fixture"}}`, "rejected", "", nil},
 		{"word boundaries", `{"error":{"message":"private-streamkey private-modelname private-instructionskey"}}`, "rejected", "", nil},
@@ -161,6 +167,37 @@ func TestProbeHTTPDiagnosticsAreBoundedAndSecretSafe(t *testing.T) {
 	long := classifyProbeHTTPError(400, raw, nil)
 	if short != long {
 		t.Fatal("response diagnostics must use at most the bounded prefix")
+	}
+	for _, status := range []int{401, 403, 429, 503} {
+		failure := classifyProbeHTTPError(status, []byte(`{"error":{"code":"client_upgrade_required"}}`), nil)
+		if failure.Kind == "client-upgrade-required" {
+			t.Fatalf("unrelated HTTP %d must not become a client-version diagnosis", status)
+		}
+	}
+}
+
+func TestProbeClientUpgradeDoesNotRetryRerollOrGraduate(t *testing.T) {
+	requests := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":"client_upgrade_required","message":"private-fixture"}}`)
+	}))
+	defer up.Close()
+	store := cookiestore.New()
+	cfg := probeTestConfig()
+	store.SetConfig(cfg)
+	srv := stoppedProbeServer(t, store)
+	stashFrom(srv, 42, up.URL, time.Now())
+	tmpl := *srv.templates[42]
+	state := prober.NewState(42)
+	state.ConsecPasses = cfg.ProbeBurstUntilPasses - 1
+	srv.runProbeCycle(t.Context(), 42, &tmpl, state, cfg)
+	if state.LastVerdict != prober.VerdictError ||
+		!strings.HasPrefix(state.LastAnswer, "http:400 client-upgrade-required e=") ||
+		requests != 1 || state.Fails != 0 || state.QualityRerolls != 0 ||
+		state.ConsecPasses != 0 {
+		t.Fatalf("client upgrade request changed recovery policy: requests=%d verdict=%s", requests, state.LastVerdict)
 	}
 }
 

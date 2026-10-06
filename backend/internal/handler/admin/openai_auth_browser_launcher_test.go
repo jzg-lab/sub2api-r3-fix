@@ -80,6 +80,51 @@ func TestLaunchAuthBrowserReturnsProcessOutcome(t *testing.T) {
 	}
 }
 
+func TestLaunchAuthBrowserTransientHTTPBoundary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	marker := strings.Repeat("fixture-input-", 3)
+	for _, tc := range []struct {
+		name    string
+		payload any
+		raw     string
+	}{
+		{name: "malformed JSON", raw: `{"session_id":`},
+		{name: "missing session", payload: map[string]any{"login": map[string]string{"password": marker}}},
+		{name: "wrong field type", payload: map[string]any{"session_id": "one", "login": marker}},
+		{name: "oversized body", payload: map[string]any{"session_id": "one", "login": map[string]string{"password": strings.Repeat(marker, 800)}}},
+		{name: "invalid email", payload: map[string]any{"session_id": "one", "login": map[string]string{"email": "not-an-email", "password": marker}}},
+		{name: "unbound initial login", payload: map[string]any{"session_id": "one", "login": map[string]string{"email": "fixture@example.invalid", "password": marker}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.AuthBrowserLauncher = "/usr/bin/false"
+			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
+				ID: "one", State: strings.Repeat("a", 64),
+				CodeVerifier: strings.Repeat("b", 128), CreatedAt: time.Now(),
+			}}
+			handler := &OpenAIOAuthHandler{}
+			handler.SetAuthBrowserLauncher(service.NewOpenAIAuthBrowserLauncher(cfg, store, &oauthRouteProxyRepo{}))
+			router := gin.New()
+			router.POST("/admin/openai/launch-auth-browser", handler.LaunchAuthBrowser)
+			payload := []byte(tc.raw)
+			if tc.payload != nil {
+				var err error
+				payload, err = json.Marshal(tc.payload)
+				require.NoError(t, err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/admin/openai/launch-auth-browser", bytes.NewReader(payload))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			require.NotContains(t, response.Body.String(), marker)
+			require.NotContains(t, response.Body.String(), "fixture@example.invalid")
+			require.Contains(t, response.Body.String(), "AUTH_BROWSER_LAUNCH_INVALID_REQUEST")
+		})
+	}
+}
+
 func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	validProxy := &service.Proxy{
@@ -228,9 +273,34 @@ func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
 	}
 }
 
+type authBrowserEvidenceFixtureStore struct {
+	*oauthRouteSessionStore
+	evidence map[string]*service.OpenAIOAuthSession
+	conflict bool
+}
+
+func (s *authBrowserEvidenceFixtureStore) Get(ctx context.Context, id string) (*service.OpenAIOAuthSession, error) {
+	if id == s.session.ID || s.conflict {
+		return s.oauthRouteSessionStore.Get(ctx, id)
+	}
+	if evidence := s.evidence[id]; evidence != nil {
+		return evidence, nil
+	}
+	return nil, service.ErrPendingAuthSessionNotFound
+}
+
+func (s *authBrowserEvidenceFixtureStore) Create(_ context.Context, session *service.OpenAIOAuthSession) error {
+	if s.evidence == nil {
+		s.evidence = make(map[string]*service.OpenAIOAuthSession)
+	}
+	copy := *session
+	s.evidence[session.ID] = &copy
+	return nil
+}
+
 func TestLaunchAuthBrowserFixedEgressStartupBinding(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, variant := range []string{"valid", "missing", "invalid", "duplicate", "changed ingress", "changed route", "changed IP"} {
+	for _, variant := range []string{"valid", "missing", "invalid", "duplicate", "changed ingress", "changed route", "changed IP", "conflicting browser evidence"} {
 		t.Run(variant, func(t *testing.T) {
 			proxy := &service.Proxy{
 				ID: 901, Status: service.StatusActive, Protocol: "socks5h",
@@ -242,14 +312,14 @@ func TestLaunchAuthBrowserFixedEgressStartupBinding(t *testing.T) {
 				Extra: map[string]any{service.OpenAIOAuthLoginExitIPExtraKey: "198.51.100.25"},
 			}
 			routeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(proxy.URL())))
-			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
+			store := &authBrowserEvidenceFixtureStore{oauthRouteSessionStore: &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
 				ID: "session-1", State: strings.Repeat("a", 64), CodeVerifier: strings.Repeat("b", 128),
 				ProxyID: proxy.ID, ProxyRouteHash: routeHash,
 				Platform: service.PlatformOpenAI, CreatedAt: time.Now(),
 				ReauthorizationAccountID: account.ID,
 				ReauthorizationRevision:  account.UpdatedAt.Format(time.RFC3339Nano),
 				ReauthorizationExitIP:    "198.51.100.25",
-			}}
+			}}, conflict: variant == "conflicting browser evidence"}
 			repo := &oauthRouteProxyRepo{proxy: proxy}
 			oauth := service.NewOpenAIOAuthService(repo, nil)
 			oauth.SetSessionStore(store)
@@ -290,6 +360,11 @@ func TestLaunchAuthBrowserFixedEgressStartupBinding(t *testing.T) {
 			if variant == "valid" {
 				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 				require.Contains(t, response.Body.String(), `"launched":true`)
+				require.Len(t, store.evidence, 1)
+			} else if variant == "conflicting browser evidence" {
+				require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+				require.Contains(t, response.Body.String(), `"reason":"OPENAI_OAUTH_REAUTH_PROOF_REQUIRED"`)
+				require.NotContains(t, response.Body.String(), `"launched":true`)
 			} else {
 				require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
 				require.Contains(t, response.Body.String(), `"reason":"OPENAI_OAUTH_FIXED_EGRESS_REQUIRED"`)

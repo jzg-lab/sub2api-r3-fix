@@ -392,6 +392,9 @@ func ProvideAccountTestService(
 	service.agentIdentityWS = openAIGatewayService
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
+	if openAIGatewayService != nil {
+		service.openAITokenProvider = openAIGatewayService.openAITokenProvider
+	}
 	return service
 }
 

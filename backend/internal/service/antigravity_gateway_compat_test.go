@@ -63,11 +63,11 @@ func (c *antigravityCompatTokenCache) DeleteAccessToken(context.Context, string)
 	return nil
 }
 
-func (c *antigravityCompatTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
+func (c *antigravityCompatTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
+	return "test-lease", nil
 }
 
-func (c *antigravityCompatTokenCache) ReleaseRefreshLock(context.Context, string) error {
+func (c *antigravityCompatTokenCache) ReleaseRefreshLock(context.Context, string, string) error {
 	return nil
 }
 

@@ -45,6 +45,11 @@
       </div>
 
       <!-- Add Method Selection (Claude only) -->
+      <AutomaticReauthForm v-if="isOpenAI && account?.type === 'oauth'"
+        :busy="currentLoading" :running="automaticReauth.running.value"
+        :error="automaticReauth.error.value" :generation="reauthSession.generation.value"
+        @submit="automaticReauth.start" @cancel="automaticReauth.cancel" />
+
       <fieldset v-if="isAnthropic" :disabled="currentLoading" class="border-0 p-0">
         <legend class="input-label">{{ t('admin.accounts.oauth.authMethod') }}</legend>
         <div class="mt-2 flex gap-4">
@@ -199,6 +204,8 @@ import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useReauthSession, type ReauthOperation } from '@/composables/useReauthSession'
 import { useReauthBrowserLaunch } from '@/composables/useReauthBrowserLaunch'
+import { useAutomaticReauth } from '@/composables/useAutomaticReauth'
+import AutomaticReauthForm from '@/components/account/AutomaticReauthForm.vue'
 import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -376,6 +383,12 @@ const applyReauthCredentials = async (
     expected_updated_at: expectedUpdatedAt
   })
 }
+
+const automaticReauth = useAutomaticReauth(reauthSession, openaiOAuth, async (operation, info) => {
+  const account = await applyReauthCredentials(operation, 'oauth', openaiOAuth.buildCredentials(info),
+    openaiOAuth.buildExtraInfo(info), info.reauthorization_proof)
+  completeReauth(operation, account)
+})
 
 const handleGenerateUrl = () => reauthSession.run(async (operation) => {
   if (!props.account) return

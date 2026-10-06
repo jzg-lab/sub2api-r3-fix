@@ -473,6 +473,33 @@ export async function launchAuthBrowser(
   return data
 }
 
+export interface AuthBrowserLogin {
+  email: string
+  password: string
+  totp_secret: string
+}
+
+export async function automateAuthBrowser(sessionId: string, login: AuthBrowserLogin, signal: AbortSignal) {
+  try {
+    const { data } = await apiClient.post<{
+      launched: boolean; code?: string; state?: string
+    }>('/admin/openai/launch-auth-browser', { session_id: sessionId, login }, {
+      signal, timeout: 330000, sensitiveNoReplay: true
+    })
+    return data
+  } catch (error: unknown) {
+    // Axios errors retain the serialized request body. Strip it before the
+    // exception can reach component diagnostics or a global error reporter.
+    if (error && typeof error === 'object' && 'config' in error) {
+      const config = error.config as { data?: unknown } | undefined
+      if (config) config.data = undefined
+    }
+    throw error
+  } finally {
+    login.password = login.totp_secret = ''
+  }
+}
+
 /**
  * Exchange authorization code for tokens
  * @param endpoint - API endpoint path
@@ -1266,6 +1293,7 @@ export const accountsAPI = {
   syncUpstreamModelsPreview,
   generateAuthUrl,
   launchAuthBrowser,
+  automateAuthBrowser,
   exchangeCode,
   refreshOpenAIToken,
   batchCreate,

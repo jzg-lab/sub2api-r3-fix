@@ -1031,7 +1031,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Codex 客户端遥测：身份取自终态出站头，异步补发分析事件与 OTLP 指标，
 		// 失败仅记日志，绝不影响主链路（openai_codex_telemetry.go）。
 		telemetryAttempt := beginOpenAICodexTelemetry(s, account, body, upstreamReq.Header, proxyURL, false, isOpenAIResponsesCompactPath(c))
-		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
+		account = openAIResponseAccount(resp, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if headerGuard != nil && headerGuard.stopHeaderWait() {
 			telemetryAttempt.finishFailed()

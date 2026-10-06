@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -69,9 +72,11 @@ type OpenAIAuthBrowserLauncher struct {
 	now                        func() time.Time
 	newCommand                 func(context.Context, string, ...string) *exec.Cmd
 	timeout                    time.Duration
+	automationTimeout          time.Duration
 
-	mu       sync.Mutex
-	inFlight map[string]struct{}
+	mu               sync.Mutex
+	inFlight         map[string]struct{}
+	inFlightAccounts map[int64]string
 }
 
 func NewOpenAIAuthBrowserLauncher(
@@ -212,9 +217,26 @@ type OpenAIAuthBrowserLaunchResult struct {
 	ProxyName      string `json:"proxy_name"`
 	ExitIngress    string `json:"exit_ingress"`
 	Output         string `json:"output"`
+	Code           string `json:"code,omitempty"`
+	State          string `json:"state,omitempty"`
 }
 
-func (l *OpenAIAuthBrowserLauncher) claimLaunch(sessionID string) bool {
+// Transient input travels only over the child process's stdin, never argv,
+// environment, disk or diagnostic output.
+type OpenAIAuthBrowserLogin struct {
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	TOTPSecret string `json:"totp_secret"`
+}
+
+func validAuthBrowserLogin(login *OpenAIAuthBrowserLogin) bool {
+	return login != nil && len(login.Email) <= 254 && strings.Contains(login.Email, "@") &&
+		!strings.ContainsAny(login.Email, "\x00\r\n\t ") &&
+		len(login.Password) > 0 && len(login.Password) <= 4096 &&
+		!strings.ContainsRune(login.Password, '\x00') && len(login.TOTPSecret) <= 256
+}
+
+func (l *OpenAIAuthBrowserLauncher) claimLaunch(sessionID string, accountID int64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.inFlight == nil {
@@ -223,13 +245,25 @@ func (l *OpenAIAuthBrowserLauncher) claimLaunch(sessionID string) bool {
 	if _, exists := l.inFlight[sessionID]; exists {
 		return false
 	}
+	if accountID != 0 {
+		if _, exists := l.inFlightAccounts[accountID]; exists {
+			return false
+		}
+		if l.inFlightAccounts == nil {
+			l.inFlightAccounts = make(map[int64]string)
+		}
+		l.inFlightAccounts[accountID] = sessionID
+	}
 	l.inFlight[sessionID] = struct{}{}
 	return true
 }
 
-func (l *OpenAIAuthBrowserLauncher) releaseLaunch(sessionID string) {
+func (l *OpenAIAuthBrowserLauncher) releaseLaunch(sessionID string, accountID int64) {
 	l.mu.Lock()
 	delete(l.inFlight, sessionID)
+	if owner, exists := l.inFlightAccounts[accountID]; exists && owner == sessionID {
+		delete(l.inFlightAccounts, accountID)
+	}
 	l.mu.Unlock()
 }
 
@@ -261,6 +295,17 @@ func openAIAuthBrowserProfileTag(state string) string {
 // Launch 按授权会话直拉激活浏览器。sessionID 即生成链接时返回的
 // session_id（前端手里有，不用重新解析 URL）。
 func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string) (*OpenAIAuthBrowserLaunchResult, error) {
+	return l.launch(ctx, sessionID, nil)
+}
+
+func (l *OpenAIAuthBrowserLauncher) LaunchWithLogin(ctx context.Context, sessionID string, login *OpenAIAuthBrowserLogin) (*OpenAIAuthBrowserLaunchResult, error) {
+	if !validAuthBrowserLogin(login) {
+		return nil, ErrOpenAIAuthBrowserInvalidRequest
+	}
+	return l.launch(ctx, sessionID, login)
+}
+
+func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string, login *OpenAIAuthBrowserLogin) (*OpenAIAuthBrowserLaunchResult, error) {
 	if l == nil {
 		return nil, fmt.Errorf("auth browser launcher is not configured")
 	}
@@ -297,6 +342,9 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	}
 	if err := validateOpenAIOAuthReauthorizationBinding(session); err != nil {
 		return nil, ErrOpenAIAuthBrowserSessionInvalid
+	}
+	if login != nil && session.ReauthorizationAccountID == 0 {
+		return nil, ErrOpenAIAuthBrowserInvalidRequest
 	}
 
 	proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
@@ -349,15 +397,14 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		ExitIngress: ingress,
 	}
 
-	// 同一授权会话只允许一个启动脚本在途。前端重复点击或网络重试直接复用
-	// 在途状态，不再重复打开 Chrome 配置目录。脚本尚未成功退出前不能声称
-	// Launched=true，否则代理预检或 Chrome 启动失败会被重复请求误报为成功。
-	if !l.claimLaunch(sessionID) {
+	// Serialize account-bound launches across sessions as well as duplicate clicks.
+	// A busy launch is not evidence that this session's browser completed.
+	if !l.claimLaunch(sessionID, session.ReauthorizationAccountID) {
 		result.AlreadyRunning = true
-		result.Output = "launcher is already running for this authorization session"
+		result.Output = "launcher is already running for this account or authorization session"
 		return result, nil
 	}
-	defer l.releaseLaunch(sessionID)
+	defer l.releaseLaunch(sessionID, session.ReauthorizationAccountID)
 
 	// 启动脚本需要做代理预检，生命周期不能继承 HTTP 请求的取消信号：
 	// 页面切换后，浏览器启动仍应继续。准备阶段使用请求 ctx 读取会话和代理；
@@ -366,7 +413,15 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	if timeout <= 0 {
 		timeout = defaultAuthBrowserLauncherTimeout
 	}
-	launchCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := context.Background()
+	if login != nil {
+		parent = ctx
+		timeout = l.automationTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+	}
+	launchCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	commandContext := l.newCommand
 	if commandContext == nil {
@@ -381,11 +436,31 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 	cmd := commandContext(launchCtx, l.launcherPath, args...)
 	output := newBoundedAuthBrowserOutput()
 	cmd.Stdout = output
-	cmd.Stderr = output
+	if login == nil {
+		cmd.Stderr = output
+	} else {
+		input, err := json.Marshal(login)
+		if err != nil {
+			return nil, ErrOpenAIAuthBrowserInvalidRequest
+		}
+		defer clear(input)
+		cmd.Stdin = bytes.NewReader(input)
+		cmd.Env = append(cmd.Environ(), "SUB2API_AUTH_BROWSER_MODE=automated")
+		// Give the helper a short opportunity to terminate its isolated browser.
+		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+		cmd.WaitDelay = 3 * time.Second
+		// Browser/helper stderr is not a public error channel.
+	}
 	if err := cmd.Start(); err != nil {
 		return result, fmt.Errorf("start auth browser launcher: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
+		if login != nil {
+			if launchCtx.Err() != nil {
+				return result, ErrOpenAIAuthBrowserLauncherTimeout
+			}
+			return result, errors.New("automatic authorization did not complete; check the authorization window or use manual authorization")
+		}
 		detail := output.text()
 		logger.LegacyPrintf(
 			"service.openai_auth_browser",
@@ -405,6 +480,25 @@ func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string
 		return result, fmt.Errorf("auth browser launcher exited unsuccessfully: %w", err)
 	}
 
+	if login != nil {
+		var callback struct {
+			Code  string `json:"code"`
+			State string `json:"state"`
+		}
+		if output.truncated || json.Unmarshal(output.buffer.Bytes(), &callback) != nil ||
+			callback.State != session.State || len(callback.Code) == 0 || len(callback.Code) > 4096 ||
+			strings.ContainsAny(callback.Code, " \t\r\n\x00") {
+			return result, errors.New("automatic authorization callback is invalid")
+		}
+		// Recheck the original account and fixed exit after the interactive wait.
+		if err := l.validateReauthorization(launchCtx, session, false); err != nil {
+			return result, err
+		}
+		if redirect, err := url.Parse(session.RedirectURI); err != nil || redirect.Scheme != "http" {
+			return result, ErrOpenAIAuthBrowserSessionInvalid
+		}
+		result.Code, result.State = callback.Code, callback.State
+	}
 	if session.ReauthorizationAccountID != 0 || session.LoginExitIP != "" {
 		if l.recordAuthorizationBrowser == nil {
 			return result, authorizationBrowserProofError(session)

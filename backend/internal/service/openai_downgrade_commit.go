@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -102,8 +103,9 @@ func (m *OpenAIDowngradeMutation) ChangesAccount() bool {
 type openAIProbeStaging struct {
 	OpenAIDowngradeProbeStore
 	AccountRepository
-	account  *Account
-	mutation OpenAIDowngradeMutation
+	account      *Account
+	inputAccount *Account
+	mutation     OpenAIDowngradeMutation
 }
 
 func newOpenAIProbeStaging(r *OpenAIDowngradeProbeRunner, account *Account, state *OpenAIDowngradeProbeState) *openAIProbeStaging {
@@ -115,6 +117,7 @@ func newOpenAIProbeStaging(r *OpenAIDowngradeProbeRunner, account *Account, stat
 		OpenAIDowngradeProbeStore: r.store,
 		AccountRepository:         r.accountRepo,
 		account:                   &snapshot,
+		inputAccount:              snapshotOAuthRefreshAccount(account),
 		mutation: OpenAIDowngradeMutation{
 			AccountID:                account.ID,
 			ExpectedAccountUpdatedAt: account.UpdatedAt,
@@ -321,7 +324,47 @@ func (s *openAIProbeStaging) RecordOpenAIDowngradeProbe(_ context.Context, resul
 	if err := s.checkAccount(result.AccountID); err != nil {
 		return err
 	}
-	s.mutation.Results = append(s.mutation.Results, *result)
+	if err := s.bindProbeAuthAttempt(result.authAttempt); err != nil {
+		return err
+	}
+	record := *result
+	record.authAttempt = nil
+	s.mutation.Results = append(s.mutation.Results, record)
+	return nil
+}
+
+func (s *openAIProbeStaging) bindProbeAuthAttempt(attempt *Account) error {
+	if attempt == nil || reflect.DeepEqual(attempt.Credentials, s.account.Credentials) {
+		return nil
+	}
+	if attempt.ID != s.account.ID || len(s.mutation.Results) != 0 ||
+		!openAIProbeAccountUnchanged(s.account, attempt) || s.inputAccount == nil {
+		return ErrOpenAIProbeStale
+	}
+	// Only a rotation actually used by this probe may advance its input.
+	// Policy, identity, authorization-IP and rescue-episode changes still fail.
+	rebound := snapshotOAuthRefreshAccount(s.account)
+	rebound.Credentials = maps.Clone(rebound.Credentials)
+	if rebound.Credentials == nil {
+		rebound.Credentials = make(map[string]any)
+	}
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "expires_at", "_token_version"} {
+		if value, exists := attempt.Credentials[key]; exists {
+			rebound.Credentials[key] = value
+		} else {
+			delete(rebound.Credentials, key)
+		}
+	}
+	if openAIProbeInputHash(rebound) == ([sha256.Size]byte{}) ||
+		openAIProbeInputHash(rebound) != openAIProbeInputHash(attempt) {
+		return ErrOpenAIProbeStale
+	}
+	baseline := snapshotOAuthRefreshAccount(s.inputAccount)
+	baseline.Credentials = maps.Clone(rebound.Credentials)
+	s.mutation.expectedInputHash = openAIProbeInputHash(baseline)
+	s.mutation.ExpectedAccountUpdatedAt = attempt.UpdatedAt
+	s.account.Credentials = maps.Clone(rebound.Credentials)
+	s.account.UpdatedAt = attempt.UpdatedAt
 	return nil
 }
 

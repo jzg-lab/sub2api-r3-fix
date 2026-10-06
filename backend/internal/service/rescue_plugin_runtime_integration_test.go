@@ -62,7 +62,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.Equal(t, PluginSignatureTrusted, installation.SignatureStatus)
 	require.True(t, installation.Compatibility.Compatible)
 	require.Equal(t, "lyunlong.codex.lb-cookie-pin", installation.PluginKey)
-	require.Equal(t, "0.3.9", installation.Version)
+	require.Equal(t, "0.3.10", installation.Version)
 	installation.ID = 7
 
 	// macOS Unix socket paths have a short limit; keep RPC outside the long
@@ -145,7 +145,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer fixture-"+credential)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Test-Step", step)
-		response, requestErr := gateway.doOpenAIUpstream(req, route, acc)
+		response, requestErr := gateway.doOpenAIUpstream(req.Context(), req, route, acc)
 		if requestErr != nil {
 			return 0, requestErr
 		}

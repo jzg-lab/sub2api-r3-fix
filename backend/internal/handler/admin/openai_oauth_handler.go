@@ -162,7 +162,8 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 // OpenAILaunchAuthBrowserRequest 授权浏览器直拉（方案A，2026-09-22）：
 // session_id 用生成链接时前端已拿到的那份。
 type OpenAILaunchAuthBrowserRequest struct {
-	SessionID string `json:"session_id" binding:"required"`
+	SessionID string                          `json:"session_id" binding:"required"`
+	Login     *service.OpenAIAuthBrowserLogin `json:"login,omitempty"`
 }
 
 // LaunchAuthBrowser 按授权会话弹出本机激活浏览器（带授权桶代理+授权链接）。
@@ -170,6 +171,7 @@ type OpenAILaunchAuthBrowserRequest struct {
 // 功能由 SUB2API_AUTH_BROWSER_LAUNCHER 环境变量开门；未配置时返回明确
 // 错误（前端可提示改走手动 applet 路径）。
 func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	if h.authBrowserLauncher == nil {
 		response.ErrorFrom(c, infraerrors.New(http.StatusServiceUnavailable,
 			"AUTH_BROWSER_LAUNCHER_DISABLED",
@@ -177,22 +179,35 @@ func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
 		return
 	}
 	var req OpenAILaunchAuthBrowserRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ErrorFrom(c, infraerrors.New(http.StatusBadRequest,
-			"AUTH_BROWSER_LAUNCH_INVALID_REQUEST", err.Error()))
+			"AUTH_BROWSER_LAUNCH_INVALID_REQUEST", "invalid authorization browser request"))
 		return
 	}
 	// 5 秒只约束会话/代理准备阶段；启动脚本使用独立的有界 context，
 	// 但必须同步等到脚本退出后才能回报启动结果。
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	timeout := 5 * time.Second
+	if req.Login != nil {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
-	result, err := h.authBrowserLauncher.Launch(ctx, req.SessionID)
+	var result *service.OpenAIAuthBrowserLaunchResult
+	var err error
+	if req.Login != nil {
+		result, err = h.authBrowserLauncher.LaunchWithLogin(ctx, req.SessionID, req.Login)
+		req.Login.Email, req.Login.Password, req.Login.TOTPSecret = "", "", ""
+	} else {
+		result, err = h.authBrowserLauncher.Launch(ctx, req.SessionID)
+	}
 	if err != nil {
 		if errors.Is(err, service.ErrOAuthReauthorizationStale) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnknown) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPChanged) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnavailable) ||
 			errors.Is(err, service.ErrOpenAIOAuthFixedEgressRequired) ||
+			errors.Is(err, service.ErrOpenAIOAuthReauthorizationProofRequired) ||
 			errors.Is(err, service.ErrOpenAIOAuthInitialLoginProofRequired) ||
 			errors.Is(err, service.ErrOpenAIOAuthProxyBindingCorrupt) ||
 			errors.Is(err, service.ErrOpenAIOAuthProxyMismatch) {

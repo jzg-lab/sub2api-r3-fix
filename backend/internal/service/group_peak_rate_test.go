@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -11,7 +12,11 @@ import (
 
 func init() {
 	// 测试固定全局时区为 UTC，确保判定可复现。
-	_ = timezone.Init("UTC")
+	name := os.Getenv("SUB2API_TEST_TIMEZONE")
+	if name == "" {
+		name = "UTC"
+	}
+	_ = timezone.Init(name)
 }
 
 func newPeakGroup(enabled bool, start, end string, mult float64) *Group {
