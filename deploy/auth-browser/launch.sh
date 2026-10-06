@@ -116,7 +116,10 @@ if [ "${SUB2API_AUTH_BROWSER_MODE:-}" = "automated" ]; then
   exec "$NODE" "$BASE_DIR/automate.mjs" "$CHROME" "$PROFILE_ROOT" "$NAME" "$AUTH_URL" "$PROXY"
 fi
 
-mkdir -p "$PROFILE_DIR/Default" "$(dirname "$LOG_FILE")"
+for PRIVATE_DIR in "$PROFILE_ROOT" "$PROFILE_DIR" "$PROFILE_DIR/Default"; do
+  "$PYTHON" "$BASE_DIR/proxy_address.py" --private-directory "$PRIVATE_DIR"
+done
+mkdir -p "$(dirname "$LOG_FILE")"
 if [ ! -f "$PROFILE_DIR/Default/Preferences" ]; then
   cat >"$PROFILE_DIR/Default/Preferences" <<'EOF'
 {"intl":{"accept_languages":"en-US,en"},"dns_over_https":{"mode":"secure","templates":"https://cloudflare-dns.com/dns-query"}}

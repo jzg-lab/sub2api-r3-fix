@@ -105,7 +105,7 @@ func NewOpenAIAuthBrowserLauncher(
 		proxyRepo:         proxyRepo,
 		fixedEgressRoutes: routes,
 		now:               time.Now,
-		newCommand:        exec.CommandContext,
+		newCommand:        newOpenAIAuthBrowserCommand,
 		timeout:           defaultAuthBrowserLauncherTimeout,
 		inFlight:          make(map[string]struct{}),
 	}
@@ -292,6 +292,47 @@ func openAIAuthBrowserProfileTag(state string) string {
 	return fmt.Sprintf("auth-%x", sum)
 }
 
+func openAIAuthBrowserEnvironment(environment []string) []string {
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
+			"LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
+			"SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "ComSpec", "COMSPEC",
+			"PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+			"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+			"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS",
+			"SUB2API_AUTH_BROWSER_PYTHON", "SUB2API_AUTH_BROWSER_CURL",
+			"SUB2API_AUTH_BROWSER_CHROME", "SUB2API_AUTH_BROWSER_NODE",
+			"SUB2API_AUTH_BROWSER_PROFILE_ROOT", "SUB2API_AUTH_BROWSER_LOG_FILE",
+			"SUB2API_AUTH_BROWSER_PROFILE_MAX_AGE_HOURS",
+			"SUB2API_AUTH_BROWSER_REQUIRE_STATIC_EXIT_CHECKS":
+			result = append(result, entry)
+		default:
+			// Retain per-ingress IP pins, not arbitrary host or interpreter settings.
+			if suffix, ok := strings.CutPrefix(name, "SUB2API_AUTH_BROWSER_EXPECTED_EXIT_"); ok {
+				port, err := strconv.ParseUint(suffix, 10, 16)
+				if err == nil && port > 0 && strconv.FormatUint(port, 10) == suffix {
+					result = append(result, entry)
+				}
+			}
+		}
+	}
+	return result
+}
+
+func newOpenAIAuthBrowserCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	// Browser processes must not inherit database credentials, host proxy
+	// fallbacks, or interpreter injection settings from the service.
+	cmd.Env = openAIAuthBrowserEnvironment(os.Environ())
+	return cmd
+}
+
 // Launch 按授权会话直拉激活浏览器。sessionID 即生成链接时返回的
 // session_id（前端手里有，不用重新解析 URL）。
 func (l *OpenAIAuthBrowserLauncher) Launch(ctx context.Context, sessionID string) (*OpenAIAuthBrowserLaunchResult, error) {
@@ -425,7 +466,7 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 	defer cancel()
 	commandContext := l.newCommand
 	if commandContext == nil {
-		commandContext = exec.CommandContext
+		commandContext = newOpenAIAuthBrowserCommand
 	}
 	args := []string{profileTag, authURL, ingress}
 	if session.ReauthorizationAccountID != 0 {
@@ -445,7 +486,7 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 		}
 		defer clear(input)
 		cmd.Stdin = bytes.NewReader(input)
-		cmd.Env = append(cmd.Environ(), "SUB2API_AUTH_BROWSER_MODE=automated")
+		cmd.Env = append(cmd.Env, "SUB2API_AUTH_BROWSER_MODE=automated")
 		// Give the helper a short opportunity to terminate its isolated browser.
 		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 		cmd.WaitDelay = 3 * time.Second

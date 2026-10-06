@@ -107,6 +107,22 @@ environment or diagnostic output. Interactive requests are never replayed
 by the admin-session refresh interceptor. This minimizes retention; it is not
 a claim of guaranteed erasure from garbage-collected memory.
 
+The host supplies an explicit child-environment allowlist. Service settings,
+inherited proxy overrides, interpreter injection settings and an inherited
+automatic-mode flag are excluded. Executable paths, desktop/runtime settings
+and canonical per-port exit-IP pins are retained. Profile directories must
+belong to the current user; existing directories are tightened to mode 0700
+through no-follow directory handles. Symlinks and non-directories are rejected.
+
+The authorization URL still appears in launcher/helper process arguments and,
+in manual mode, Chrome arguments. It contains OAuth state and the public PKCE
+challenge, not the PKCE verifier, login input or issued tokens. The state hash
+in profile names reduces persistent disclosure; it does not conceal local
+process arguments. Run the host under a trusted OS account and do not export
+process command lines into diagnostics. Account-bound session validation, the
+private server-side verifier, one-use browser proof and conditional replacement
+remain required; observing a launch is not permission to replace an account.
+
 Only forms on `auth.openai.com` are eligible for automatic entry. Authenticator
 codes are generated locally. Third-party sign-in, email/SMS challenges,
 CAPTCHAs and security challenges remain manual; nothing bypasses them.

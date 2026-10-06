@@ -1,12 +1,27 @@
 import { createHmac } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { mkdir, mkdtemp, open, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const fail = (code) => { throw new Error(code) }
 const authOrigin = 'https://auth.openai.com'
+
+export async function preparePrivateProfileRoot(profileRoot) {
+  await mkdir(profileRoot, { recursive: true, mode: 0o700 })
+  const directory = await open(profileRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    const info = await directory.stat()
+    if (!info.isDirectory() || (process.getuid && info.uid !== process.getuid())) fail('AUTH_PROFILE_UNSAFE')
+    // mkdir does not tighten an existing directory. Use the opened directory
+    // rather than following a replacement symlink during chmod.
+    await directory.chmod(0o700)
+  } finally {
+    await directory.close()
+  }
+}
 
 export function totp(secret, milliseconds = Date.now(), digits = 6) {
   const normalized = String(secret).toUpperCase().replace(/[\s-]/g, '').replace(/=+$/, '')
@@ -226,7 +241,7 @@ export async function automate({ chrome, profileRoot, profileTag, authURL, proxy
       (login.totp_secret != null && typeof login.totp_secret !== 'string')) fail('AUTH_INPUT_INVALID')
   if (login.totp_secret) totp(login.totp_secret)
   signal?.throwIfAborted()
-  await mkdir(profileRoot, { recursive: true, mode: 0o700 })
+  await preparePrivateProfileRoot(profileRoot)
   const profile = await mkdtemp(join(profileRoot, `${profileTag}-auto-`))
   let child
   let pipe

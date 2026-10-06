@@ -193,6 +193,29 @@ class LauncherTests(unittest.TestCase):
         state = character * 64
         return "auth-" + hashlib.sha256(state.encode("ascii")).hexdigest()
 
+    def test_existing_profile_permissions_are_tightened(self):
+        profile = self.profile_root / self.profile_tag("a")
+        default = profile / "Default"
+        default.mkdir(parents=True)
+        for directory in (self.profile_root, profile, default):
+            directory.chmod(0o777)
+        result = self.launch(self.profile_tag("a"), AUTH_URL, "127.0.0.1:17933")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for directory in (self.profile_root, profile, default):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_symlinked_default_directory_never_launches_browser(self):
+        profile = self.profile_root / self.profile_tag("a")
+        profile.mkdir(parents=True)
+        outside = self.root / "outside"
+        outside.mkdir()
+        outside.chmod(0o755)
+        (profile / "Default").symlink_to(outside, target_is_directory=True)
+        result = self.launch(self.profile_tag("a"), AUTH_URL, "127.0.0.1:17933")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.chrome_record.exists())
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+
     def test_proxy_reaches_preflight_and_chrome(self):
         result = self.launch(self.profile_tag("a"), AUTH_URL, "127.0.0.1:17933")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
