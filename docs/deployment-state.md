@@ -17,7 +17,7 @@
 | 数据库迁移 | 追加 251：`accounts.totp_secret_encrypted` 可空列；历史迁移/checksum 不变 |
 | TOTP | 沿用固定加密密钥；管理员状态接口可用，未授权请求返回 401；未导入真实账号密钥 |
 | 自动授权运行时 | Alpine 3.23、Node 24.18.1、Python 3.12.15、Chromium 149.0.7827.53；启动器已配置 |
-| 质量限制范围 | `openai_operations.quality_protected_group_ids=null`，即全部分组 |
+| 质量限制范围 | `openai_operations.quality_protected_group_ids=[37,26]`，沿用本次切换前配置 |
 | 独立救治区 | 已启用，组 #74 `rescue-lab` 专属且停用；3 次连续通过阈值、5 分钟巡检 |
 
 宿主和前端包含质量调度范围选择、默认并发 5/优先级 2、自由编辑及救治错误回显。
@@ -27,6 +27,8 @@
 管理员设置、原 `config.yaml` 及插件配置的 SHA-256 在切换前后核对一致，数据库和 Redis
 容器身份不变。唯一设置差异为后台任务独占更新的 `openai_codex_client_version_synced`
 自动同步值（验收时为 `0.161.0`），不是管理员覆写或 Sub2API 版本号。
+更正：此前文档沿用了 10 月 7 日“全部分组”的旧快照；本次实查为分组 37、26，
+部署前后设置哈希一致，本次没有修改该范围。
 
 GitHub `main` 后续已包含 `e3db10524` 的用量表缓存命中率/TPS 界面修改；本次生产固定于上表
 提交，**未部署该后续界面提交**。仅文档提交同样不改变运行镜像身份。
