@@ -63,6 +63,7 @@ var (
 
 // openAIAuthBrowserLauncher 授权浏览器直拉服务。
 type OpenAIAuthBrowserLauncher struct {
+	accountTOTP             *AccountTOTPService
 	launcherPath            string
 	sessionStore            OpenAIOAuthSessionStore
 	proxyRepo               ProxyRepository
@@ -216,9 +217,10 @@ type OpenAIAuthBrowserLaunchResult struct {
 // Transient input travels only over the child process's stdin, never argv,
 // environment, disk or diagnostic output.
 type OpenAIAuthBrowserLogin struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	TOTPSecret string `json:"totp_secret"`
+	Email         string `json:"email"`
+	Password      string `json:"password"`
+	TOTPSecret    string `json:"totp_secret"`
+	UseStoredTOTP bool   `json:"use_stored_totp,omitempty"`
 }
 
 func validAuthBrowserLogin(login *OpenAIAuthBrowserLogin) bool {
@@ -380,23 +382,24 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 		return nil, ErrOpenAIAuthBrowserInvalidRequest
 	}
 
-	proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
-	if err != nil {
-		return nil, fmt.Errorf("load authorization proxy: %w", err)
-	}
-	if proxy == nil || !proxy.IsActive() {
-		return nil, ErrOpenAIAuthBrowserProxyUnavailable
-	}
-	proxyURL, err := openAIOAuthProxySnapshotURL(proxy, &session.ProxyID)
-	if err != nil {
-		return nil, ErrOpenAIAuthBrowserProxyUnavailable
+	ingress, proxyName, proxyURL := "direct", "Direct", ""
+	if session.ProxyID != 0 {
+		proxy, err := l.proxyRepo.GetByID(ctx, session.ProxyID)
+		if err != nil || proxy == nil || !proxy.IsActive() {
+			return nil, ErrOpenAIAuthBrowserProxyUnavailable
+		}
+		proxyURL, err = openAIOAuthProxySnapshotURL(proxy, &session.ProxyID)
+		if err != nil {
+			return nil, ErrOpenAIAuthBrowserProxyUnavailable
+		}
+		ingress = openAIAuthBrowserLocalIngress(proxy)
+		if ingress == "" {
+			return nil, ErrOpenAIAuthBrowserIngressUnavailable
+		}
+		proxyName = proxy.Name
 	}
 	if session.ProxyRouteHash == "" || session.ProxyRouteHash != openAIOAuthProxyRouteHash(proxyURL) {
-		return nil, fmt.Errorf("%w; start a new authorization", ErrOpenAIAuthBrowserRouteChanged)
-	}
-	ingress := openAIAuthBrowserLocalIngress(proxy)
-	if ingress == "" {
-		return nil, fmt.Errorf("%w: proxy bucket %s", ErrOpenAIAuthBrowserIngressUnavailable, proxy.Name)
+		return nil, ErrOpenAIAuthBrowserRouteChanged
 	}
 
 	if session.ReauthorizationAccountID != 0 {
@@ -405,6 +408,26 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 		}
 		if err := l.validateReauthorization(ctx, session, false); err != nil {
 			return nil, err
+		}
+	}
+
+	if login != nil {
+		copy := *login
+		login = &copy
+		defer func() { login.Password, login.TOTPSecret = "", "" }()
+		if login.UseStoredTOTP {
+			if login.TOTPSecret != "" || l.accountTOTP == nil {
+				return nil, ErrOpenAIAuthBrowserInvalidRequest
+			}
+			login.TOTPSecret, err = l.accountTOTP.Load(ctx, session, login.Email)
+			if err != nil {
+				return nil, err
+			}
+		} else if login.TOTPSecret != "" {
+			login.TOTPSecret, err = NormalizeAccountTOTP(login.TOTPSecret)
+			if err != nil {
+				return nil, ErrOpenAIAuthBrowserInvalidRequest
+			}
 		}
 	}
 
@@ -421,7 +444,7 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 
 	result := &OpenAIAuthBrowserLaunchResult{
 		ProfileTag:  profileTag,
-		ProxyName:   proxy.Name,
+		ProxyName:   proxyName,
 		ExitIngress: ingress,
 	}
 
@@ -512,7 +535,7 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 			strings.ContainsAny(callback.Code, " \t\r\n\x00") {
 			return result, errors.New("automatic authorization callback is invalid")
 		}
-		// Recheck the original account and fixed exit after the interactive wait.
+		// Recheck account identity and route after the interactive wait.
 		if err := l.validateReauthorization(launchCtx, session, false); err != nil {
 			return result, err
 		}
@@ -532,3 +555,5 @@ func (l *OpenAIAuthBrowserLauncher) SetOAuthService(s *OpenAIOAuthService) {
 		l.validateReauthorization = s.validateReauthorizationSession
 	}
 }
+
+func (l *OpenAIAuthBrowserLauncher) SetAccountTOTP(s *AccountTOTPService) { l.accountTOTP = s }

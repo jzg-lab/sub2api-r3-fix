@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# macOS OpenAI authorization browser launcher for Sub2API.
-# The service must pass a no-auth proxy ingress as argv[3]. There is no direct
-# or default-route fallback: an unavailable or malformed proxy aborts launch.
+# macOS/Linux OpenAI authorization browser launcher.
+# argv[3] is either an explicit no-auth proxy or the explicit sentinel direct.
 
 set -eu
 umask 077
@@ -10,7 +9,13 @@ umask 077
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PYTHON="${SUB2API_AUTH_BROWSER_PYTHON:-/usr/bin/python3}"
 CURL="${SUB2API_AUTH_BROWSER_CURL:-/usr/bin/curl}"
-CHROME="${SUB2API_AUTH_BROWSER_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
+CHROME="${SUB2API_AUTH_BROWSER_CHROME:-}"
+if [ -z "$CHROME" ]; then
+  case "$(uname -s)" in
+    Darwin) CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ;;
+    Linux) CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)" ;;
+  esac
+fi
 PROFILE_ROOT="${SUB2API_AUTH_BROWSER_PROFILE_ROOT:-$BASE_DIR/profiles}"
 LOG_FILE="${SUB2API_AUTH_BROWSER_LOG_FILE:-$BASE_DIR/launcher.log}"
 PROFILE_MAX_AGE_HOURS="${SUB2API_AUTH_BROWSER_PROFILE_MAX_AGE_HOURS:-72}"
@@ -47,7 +52,10 @@ if [ "$NAME" != "$EXPECTED_NAME" ]; then
   echo "授权环境标识与 OpenAI state 指纹不匹配，拒绝复用错误的浏览器配置。" >&2
   exit 1
 fi
-PROXY="$("$PYTHON" "$BASE_DIR/proxy_address.py" --proxy "$RAW_PROXY")" || exit 1
+PROXY="$RAW_PROXY"
+if [ "$RAW_PROXY" != "direct" ]; then
+  PROXY="$("$PYTHON" "$BASE_DIR/proxy_address.py" --proxy "$RAW_PROXY")" || exit 1
+fi
 
 if [ ! -x "$CHROME" ]; then
   echo "未找到可执行的 Google Chrome。" >&2
@@ -84,6 +92,15 @@ if [ -e "$PROFILE_DIR/SingletonLock" ] || [ -L "$PROFILE_DIR/SingletonLock" ]; t
   fi
 fi
 
+if [ "${SUB2API_AUTH_BROWSER_MODE:-}" = "automated" ]; then
+  NODE="${SUB2API_AUTH_BROWSER_NODE:-node}"
+  exec "$NODE" "$BASE_DIR/automate.mjs" "$CHROME" "$PROFILE_ROOT" "$NAME" "$AUTH_URL" "$PROXY"
+fi
+
+EXIT_IP="direct"
+ROUTE_ARGS=(--no-proxy-server)
+if [ "$PROXY" != "direct" ]; then
+ROUTE_ARGS=(--proxy-server="$PROXY")
 CURL_PROXY="$PROXY"
 case "$PROXY" in
 socks5://*) CURL_PROXY="socks5h://${PROXY#socks5://}" ;;
@@ -98,9 +115,6 @@ if ! EXIT_IP="$("$PYTHON" "$BASE_DIR/proxy_address.py" --exit-ip "$EXIT_IP" "$PR
   exit 2
 fi
 
-if [ "${SUB2API_AUTH_BROWSER_MODE:-}" = "automated" ]; then
-  NODE="${SUB2API_AUTH_BROWSER_NODE:-node}"
-  exec "$NODE" "$BASE_DIR/automate.mjs" "$CHROME" "$PROFILE_ROOT" "$NAME" "$AUTH_URL" "$PROXY"
 fi
 
 for PRIVATE_DIR in "$PROFILE_ROOT" "$PROFILE_DIR" "$PROFILE_DIR/Default"; do
@@ -116,7 +130,7 @@ fi
 printf '%s LAUNCH name=%s exit=%s\n' "$(date '+%F %T')" "$NAME" "$EXIT_IP" >>"$LOG_FILE"
 TZ="America/New_York" nohup "$CHROME" \
   --user-data-dir="$PROFILE_DIR" \
-  --proxy-server="$PROXY" \
+  "${ROUTE_ARGS[@]}" \
   --lang=en-US \
   --accept-lang=en-US \
   --force-webrtc-ip-handling-policy=disable_non_proxied_udp \

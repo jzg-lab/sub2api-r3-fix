@@ -21,6 +21,7 @@ import (
 
 // OpenAIOAuthHandler handles OpenAI OAuth-related operations
 type OpenAIOAuthHandler struct {
+	accountTOTP        *service.AccountTOTPService
 	openaiOAuthService *service.OpenAIOAuthService
 	adminService       service.AdminService
 	quotaService       openAIQuotaService
@@ -203,7 +204,10 @@ func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
 		result, err = h.authBrowserLauncher.Launch(ctx, req.SessionID)
 	}
 	if err != nil {
-		if errors.Is(err, service.ErrOAuthReauthorizationStale) ||
+		if errors.Is(err, service.ErrAccountTOTPInvalid) ||
+			errors.Is(err, service.ErrAccountTOTPKey) ||
+			errors.Is(err, service.ErrAccountTOTPUnavailable) ||
+			errors.Is(err, service.ErrOAuthReauthorizationStale) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnknown) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPChanged) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnavailable) ||

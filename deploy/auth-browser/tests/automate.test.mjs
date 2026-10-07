@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { advanceLogin, automate, authorizationBinding, BrowserPipe, parseCallback, totp } from '../automate.mjs'
@@ -102,7 +102,7 @@ test('missing browser fails without hanging and removes only the temporary profi
   }
 })
 
-test('pre-canceled work and non-loopback ingress never start a browser', async () => {
+test('pre-canceled work and credential-bearing ingress never start a browser', async () => {
   const controller = new AbortController()
   controller.abort()
   const options = {
@@ -111,5 +111,46 @@ test('pre-canceled work and non-loopback ingress never start a browser', async (
     login: { email: 'fixture@example.invalid', password: 'fixture-only' },
   }
   await assert.rejects(automate({ ...options, signal: controller.signal }), { name: 'AbortError' })
-  await assert.rejects(automate({ ...options, proxy: 'http://example.invalid:8080' }), /AUTH_INPUT_INVALID/)
+  await assert.rejects(automate({ ...options, proxy: 'http://user:password@example.invalid:8080' }), /AUTH_INPUT_INVALID/)
+})
+
+
+test('Linux direct automation uses headless sandboxed Chrome and removes its profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'linux-reauth-'))
+  const chrome = join(root, 'chrome')
+  const argsFile = join(root, 'args.json')
+  const profiles = join(root, 'profiles')
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')
+  try {
+    await writeFile(chrome, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+let pending = '';
+const send = msg => fs.writeSync(4, JSON.stringify(msg) + '\\0');
+fs.createReadStream(null, {fd:3}).on('data', data => {
+ pending += data.toString();
+ let split;
+ while ((split = pending.indexOf('\\0')) >= 0) {
+  const msg = JSON.parse(pending.slice(0, split)); pending = pending.slice(split + 1);
+  const result = msg.method === 'Target.createTarget' ? {targetId:'target'} : msg.method === 'Target.attachToTarget' ? {sessionId:'session'} : {};
+  send({id:msg.id,result});
+  if (msg.method === 'Page.navigate') send({sessionId:'session',method:'Fetch.requestPaused',params:{requestId:'callback',request:{method:'GET',url:${JSON.stringify(callback({state,code:'fixture-code'}))}}}});
+ }
+});
+`, {mode:0o700})
+    Object.defineProperty(process, 'platform', {value:'linux'})
+    const login = {email:'fixture@example.invalid',password:'fixture-only'}
+    const result = await automate({chrome,profileRoot:profiles,profileTag:'fixture',authURL,proxy:'direct',login})
+    assert.deepEqual(result, {code:'fixture-code',state})
+    const args = JSON.parse(await readFile(argsFile,'utf8'))
+    assert(args.includes('--headless=new'))
+    assert(args.includes('--no-proxy-server'))
+    assert(!args.includes('--no-sandbox'))
+    assert(!args.some(v => v.startsWith('--proxy-server=')))
+    assert.deepEqual(await readdir(profiles), [])
+    assert.equal(login.password, '')
+  } finally {
+    Object.defineProperty(process, 'platform', original)
+    await rm(root,{recursive:true,force:true})
+  }
 })

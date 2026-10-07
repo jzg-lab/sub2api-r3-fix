@@ -15,7 +15,8 @@ export function useAutomaticReauth(
   let activeLogin: AuthBrowserLogin | undefined
   const clearLogin = (login?: AuthBrowserLogin) => {
     if (!login) return
-    for (const key of Object.keys(login) as (keyof AuthBrowserLogin)[]) login[key] = ''
+    login.email = login.password = login.totp_secret = ''
+    delete login.use_stored_totp
   }
   const cancel = () => {
     if (controller) oauth.resetState()

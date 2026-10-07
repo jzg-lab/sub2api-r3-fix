@@ -295,8 +295,12 @@ var ProviderSet = wire.NewSet(
 	ProvideHandlers,
 )
 
-func ProvideOpenAIOAuthHandler(oauth *service.OpenAIOAuthService, adminService service.AdminService, quota *service.OpenAIQuotaService, rateLimit *service.RateLimitService, launcher *service.OpenAIAuthBrowserLauncher) *admin.OpenAIOAuthHandler {
+func ProvideOpenAIOAuthHandler(oauth *service.OpenAIOAuthService, adminService service.AdminService, quota *service.OpenAIQuotaService, rateLimit *service.RateLimitService, launcher *service.OpenAIAuthBrowserLauncher, totp *service.AccountTOTPService) *admin.OpenAIOAuthHandler {
 	h := admin.NewOpenAIOAuthHandler(oauth, adminService, quota, rateLimit)
 	h.SetAuthBrowserLauncher(launcher)
+	h.SetAccountTOTP(totp)
+	if launcher != nil {
+		launcher.SetAccountTOTP(totp)
+	}
 	return h
 }

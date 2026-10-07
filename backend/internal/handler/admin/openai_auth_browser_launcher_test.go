@@ -234,7 +234,7 @@ func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
 		{
 			name: "proxy store failure", sessionID: "session-1", session: validSession,
 			proxyErr:   errors.New("injected proxy store failure"),
-			wantStatus: http.StatusInternalServerError, wantReason: "AUTH_BROWSER_LAUNCH_FAILED",
+			wantStatus: http.StatusServiceUnavailable, wantReason: "AUTH_BROWSER_PROXY_UNAVAILABLE",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

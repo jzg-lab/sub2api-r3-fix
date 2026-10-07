@@ -456,6 +456,8 @@ func registerOpenAIOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// 授权浏览器直拉（方案A，2026-09-22）：session_id → 本机激活浏览器
 		// 弹窗（授权桶代理+授权链接）。SUB2API_AUTH_BROWSER_LAUNCHER 开门。
 		openai.POST("/launch-auth-browser", h.Admin.OpenAIOAuth.LaunchAuthBrowser)
+		openai.GET("/accounts/:id/totp", h.Admin.OpenAIOAuth.AccountTOTP)
+		openai.PUT("/accounts/:id/totp", h.Admin.OpenAIOAuth.AccountTOTP)
 		openai.POST("/exchange-code", h.Admin.OpenAIOAuth.ExchangeCode)
 		openai.POST("/refresh-token", h.Admin.OpenAIOAuth.RefreshToken)
 		openai.POST("/accounts/:id/refresh", h.Admin.OpenAIOAuth.RefreshAccountToken)

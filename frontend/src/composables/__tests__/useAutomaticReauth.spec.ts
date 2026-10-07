@@ -63,6 +63,21 @@ describe('automatic reauthorization', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
+  it('passes an explicit stored TOTP choice and clears transient input', async () => {
+    const test = setup()
+    const login = { ...loginFixture(), use_stored_totp: true }
+    api.automateAuthBrowser.mockImplementation(async (_id, input) => {
+      expect(input.use_stored_totp).toBe(true)
+      expect(input.totp_secret).toBe('')
+      return { launched: true, code: 'local-code', state: 'bound-state' }
+    })
+    await test.start(login)
+    expect(test.apply).toHaveBeenCalledOnce()
+    expect(login.password).toBe('')
+    expect(login.use_stored_totp).toBeUndefined()
+    test.scope.stop()
+  })
+
   it('uses the original account/proxy, fresh identity revision and one-use proof', async () => {
     const test = setup()
     const login = loginFixture()

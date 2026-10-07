@@ -229,12 +229,12 @@ export async function advanceLogin(pipe, sessionId, login, submitted) {
 
 export async function automate({ chrome, profileRoot, profileTag, authURL, proxy, login, signal }) {
   const binding = authorizationBinding(authURL)
-  const ingress = new URL(proxy)
+  const ingress = proxy === 'direct' ? null : new URL(proxy)
   if (!login || !/^[a-zA-Z0-9._-]{1,100}$/.test(profileTag) ||
-      !['http:', 'https:', 'socks5:'].includes(ingress.protocol) ||
-      !['127.0.0.1', 'localhost', '[::1]'].includes(ingress.hostname) ||
+      (ingress && (!['http:', 'https:', 'socks5:'].includes(ingress.protocol) ||
+      !ingress.hostname ||
       !ingress.port || ingress.username || ingress.password || ingress.search || ingress.hash ||
-      !['', '/'].includes(ingress.pathname) || typeof login.email !== 'string' ||
+      !['', '/'].includes(ingress.pathname))) || typeof login.email !== 'string' ||
       !/^[^\s@]+@[^\s@]+$/.test(login.email) || login.email.length > 254 ||
       typeof login.password !== 'string' || !login.password || login.password.length > 4096 ||
       login.password.includes('\0') ||
@@ -249,7 +249,9 @@ export async function automate({ chrome, profileRoot, profileTag, authURL, proxy
   const stop = () => child?.kill('SIGTERM')
   try {
     child = spawn(chrome, [
-      `--user-data-dir=${profile}`, `--proxy-server=${proxy}`,
+      `--user-data-dir=${profile}`,
+      ...(proxy === 'direct' ? ['--no-proxy-server'] : [`--proxy-server=${proxy}`]),
+      ...(process.platform === 'linux' ? ['--headless=new'] : []),
       '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
       '--incognito', '--disable-sync', '--disable-extensions', '--disable-quic',
       '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection',

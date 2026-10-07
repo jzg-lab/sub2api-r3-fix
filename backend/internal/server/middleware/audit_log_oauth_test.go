@@ -50,3 +50,20 @@ func TestOpenAIOAuthAuditOmitsLiveSessionHandles(t *testing.T) {
 		require.NotEmpty(t, entry.Action)
 	}
 }
+
+func TestAccountTOTPAuditOmitsSecretOnRejectedRequest(t *testing.T) {
+	repository := &auditCaptureRepository{}
+	audit := service.NewAuditLogService(repository, nil)
+	audit.Start()
+	router := gin.New()
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(audit)))
+	router.PUT("/api/v1/admin/openai/accounts/:id/totp", func(c *gin.Context) { c.Status(http.StatusBadRequest) })
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/openai/accounts/1/totp", bytes.NewBufferString(`{"mfa_secret":"secret-canary","unexpected":"secret-canary"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(httptest.NewRecorder(), req)
+	audit.Stop()
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	require.Len(t, repository.logs, 1)
+	require.Equal(t, "<credential-bearing body omitted>", repository.logs[0].RequestBody)
+}

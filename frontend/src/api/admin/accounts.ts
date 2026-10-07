@@ -474,6 +474,7 @@ export async function launchAuthBrowser(
 }
 
 export interface AuthBrowserLogin {
+  use_stored_totp?: boolean
   email: string
   password: string
   totp_secret: string

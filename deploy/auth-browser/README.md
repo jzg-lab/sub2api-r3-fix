@@ -1,175 +1,95 @@
-# Sub2API macOS authorization browser launcher
+# OpenAI 单次自动授权（macOS / Linux）
 
-This optional helper is used by `SUB2API_AUTH_BROWSER_LAUNCHER` to open an
-isolated Google Chrome profile for an OpenAI OAuth session.
+管理端的自动重新授权使用 Node 标准库通过 Chrome DevTools pipe 驱动独立浏览器。
+Linux 自动使用 `--headless=new`，保留 Chrome sandbox；macOS 使用可见窗口。
+不依赖 oh-my-sub2api 的外部协议 worker，不提供独立桌面重授权管理工具。
 
-The launcher is deliberately fail-closed:
+## 运行依赖
 
-- the caller must provide an explicit no-auth proxy ingress;
-- the proxy is tested before a profile is created;
-- no direct or default proxy fallback exists;
-- only `https://auth.openai.com/oauth/authorize` URLs are accepted;
-- the isolated profile tag must match the OAuth `state` carried by that URL;
-- a running profile cannot be silently reused with another proxy.
-
-Install the directory on the macOS host, keep `launch.sh` executable, and set:
+Sub2API 进程所在的运行环境需要 Bash、Python 3、Node.js 20+、Chrome/Chromium、curl。
+启动器和这些程序必须在同一环境：服务在容器内运行时，不能直接执行宿主机浏览器。
+现有基础镜像没有因此自动安装浏览器；部署者需要准备依赖、可写私有配置目录及可用的浏览器 sandbox。
+用非 root 用户运行 Chrome，不以 `--no-sandbox` 绕过部署问题。
 
 ```bash
 export SUB2API_AUTH_BROWSER_LAUNCHER="/opt/sub2api/auth-browser/launch.sh"
+export SUB2API_AUTH_BROWSER_PROFILE_ROOT="/var/lib/sub2api/auth-browser"
+# 可选：Linux 自动寻找 google-chrome / chromium / chromium-browser
+export SUB2API_AUTH_BROWSER_CHROME="/usr/bin/chromium"
 ```
 
-Optional paths can be overridden with `SUB2API_AUTH_BROWSER_CHROME`,
-`SUB2API_AUTH_BROWSER_CURL`, `SUB2API_AUTH_BROWSER_PYTHON`,
-`SUB2API_AUTH_BROWSER_PROFILE_ROOT`, and
-`SUB2API_AUTH_BROWSER_LOG_FILE`. Disposable `auth-<state fingerprint>`
-profiles older than 72 hours are removed before launch when they have no live
-or ambiguous Chrome lock. Override the retention with
-`SUB2API_AUTH_BROWSER_PROFILE_MAX_AGE_HOURS` (1-8760).
+安装整个 `deploy/auth-browser` 目录，保留 `launch.sh` 可执行权限。
+`SUB2API_AUTH_BROWSER_NODE`、`SUB2API_AUTH_BROWSER_PYTHON`、`SUB2API_AUTH_BROWSER_CURL`
+可指定程序路径。未设置启动器时自动授权关闭，普通 OAuth/令牌导入继续可用。
 
-For fixed local proxy buckets, bind each ingress port to its expected public
-exit and require the check before Chrome starts:
+账号无代理时明确使用 `--no-proxy-server`，不会继承环境代理；显式代理无效时失败，
+不回退直连。Chrome 代理入口须免认证；已有老板本机桶映射继续可用。自动授权不要求
+历史登录 IP 或固定出口证明。会话仍绑定当前账号、代理配置和凭据版本。
+密码和 TOTP 通过子进程 stdin 传递，不放命令行、环境或文件；成功、失败、取消后清理临时浏览器配置。
+短信、邮箱验证码、CAPTCHA 等人工挑战不保证完成，可用普通手动授权。
+
+## 管理后台导入 TOTP
+
+仅操作已有的主 OpenAI 浏览器 OAuth 账号。管理员 JWT（`Authorization: Bearer …`）
+或管理端 API Key（`x-api-key`）均使用已有管理员鉴权；远程对接使用 HTTPS。
+先调用 `GET /api/v1/admin/accounts/:id` 获取当前 `reauthorization_revision`。
+
+```http
+PUT /api/v1/admin/openai/accounts/123/totp
+Content-Type: application/json
+
+{
+  "expected_authorization_revision": "<账号当前 reauthorization_revision>",
+  "totp_secret": "<Base32 密钥>"
+}
+```
+
+兼容别名 `mfa_secret`；两个字段同时提供时，规范化后必须相同。支持 Base32 大小写、空白、
+短横线和末尾 padding；不接收六位验证码或 `otpauth://` URI。字段省略保持原值，
+空字符串、null、非法格式、未知字段均拒绝。替换用相同 PUT；明确清除：
+
+```json
+{"expected_authorization_revision":"<当前版本>","clear":true}
+```
+
+`clear` 不能与密钥同时提供。过期版本返回 409，应重新读取账号并核对后提交。
+状态读取 `GET /api/v1/admin/openai/accounts/:id/totp`，写入也只返回相同状态：
+
+```json
+{"code":0,"data":{"has_totp_secret":true,"encryption_key_configured":true}}
+```
+
+实际外层响应格式遵循宿主统一响应约定。普通账号 DTO、列表及导出不包含密钥或密文；
+配置状态使用上述独立接口读取。导入不创建账号、不修改令牌/代理/分组/调度、不启动登录。
+
+密钥存放在追加迁移 `251_account_totp_secret.sql` 创建的 `accounts.totp_secret_encrypted`，
+由 AccountTOTPService 独立读写，普通 Ent 更新和令牌刷新不碰此列。复用现有 AES-256-GCM，
+密文内部绑定账号 ID、邮箱和用户身份。不得绕过 API 直接写入明文。
+必须固定配置并备份 `TOTP_ENCRYPTION_KEY`（64 个十六进制字符），或 `totp.encryption_key`。
+自动生成的临时密钥不允许保存/使用持久 TOTP；备份数据库时也应单独安全备份该配置。
+更换密钥会使已有密文不可读，需要恢复原密钥或重新导入；本次不提供在线密钥轮换。
+源码回退可保留此可空列及其密文，不修改或回写历史迁移。
+
+## 使用已保存密钥
+
+重新授权表单明确勾选“使用管理后台已导入的 2FA 密钥”，仍需填写邮箱和本次密码。
+服务端解密使用，密钥不回填前端；单次输入的密码/TOTP 不持久化。
+底层 `POST /api/v1/admin/openai/launch-auth-browser` 使用已有账号绑定的 `session_id`：
+
+```json
+{"session_id":"<绑定会话>","login":{"email":"<账号邮箱>","password":"<本次密码>","use_stored_totp":true}}
+```
+
+`use_stored_totp` 与非空 `totp_secret` 互斥。身份/邮箱变化、缺失或不可解密的密钥均失败，
+不尝试其他账号的密钥。完成后沿用一次性 code 兑换及绑定凭据的 proof 原子应用流程。
+长期保存密码、定时无人值守重登和批量导入 UI 不在本次范围。
+
+## 验证
 
 ```bash
-export SUB2API_AUTH_BROWSER_REQUIRE_STATIC_EXIT_CHECKS=true
-export SUB2API_AUTH_BROWSER_EXPECTED_EXIT_17931="192.0.2.10"
+node --test deploy/auth-browser/tests/*.test.mjs
+python3 -m unittest discover -s deploy/auth-browser/tests -p 'test_*.py'
 ```
 
-When the requirement flag is enabled, ports `17931` through `17934` fail
-closed if their expected exit is missing or differs from the observed IP.
-
-## Native Reauthorization Candidate
-
-For account-bound reauthorization, the host passes a fourth positional
-argument containing the original login IP. This pin is mandatory for that
-flow, including non-static ingress ports. It is checked in addition to the
-ingress expectation; neither can override the other. An empty or changed
-original IP aborts before Chrome is started.
-
-Reauthorization also requires one-use evidence of a successful host launch
-for that exact account, revision, OAuth session and route. Missing, failed,
-expired or other-session launches cannot exchange a code or issue a replacement
-proof. The account and route are checked again when the launcher completes.
-Old replacement proofs without this evidence require a new authorization.
-After an exchange attempt the UI discards the session, including on a network
-error; it never silently replays the code or starts another login.
-
-The candidate host uses the system-managed account extra field
-`openai_oauth_login_exit_ip`, not the latest `proxies.exit_ip` observation.
-Accounts without verified historical evidence fail closed. Do not populate
-this field from today's live probe or from an arbitrary account import.
-Historical evidence recovery is not implemented in this candidate. New
-identities can establish the login IP only through the reviewed fixed-route
-path below; this cannot backfill missing history for a deleted identity.
-
-For a new identity on a reviewed fixed route, a successful host browser launch
-records one-use launch evidence. Token exchange consumes that evidence and
-issues a five-minute, one-use creation proof bound to the returned identity,
-credentials and proxy route. The create transaction rechecks the route and
-history before persisting the login IP. Copying the authorization URL, sending
-an IP field, or importing credentials cannot establish this history. Failed
-creation returns the UI to the preserved form; check for an already-created
-account before starting authorization again rather than replaying the code.
-
-Launch evidence attests to the host launch, not to every subsequent human
-action. Do not copy the link into another browser or network after launching.
-A fully automated adapter must drive the same reviewed browser/route through
-the callback; a detached credential upload cannot establish that continuity.
-
-This is a native workflow adaptation, not execution or recompilation of
-codex-helper 0.2.32. The optional automatic mode is described below. IP probes
-detect drift at checked boundaries, not every browser packet: real adoption
-also requires a fixed-egress route with no identity-changing fallback.
-The rescue transport plugin is not replaced or given a second outbound owner.
-
-### Automatic Reauthorization Candidate
-
-Both OpenAI OAuth reauthorization dialogs include a form for the account
-email, password and optional authenticator-app TOTP secret. Submission creates
-an account-bound session, drives an isolated Chrome window through the same
-reviewed fixed exit, exchanges the callback once, and applies the host's
-one-use replacement proof to the original account. Account identity, route,
-original IP and authorization revision must still match. A successful browser
-launch alone is not a successful account update.
-
-Automatic mode requires Node.js 22 or newer on the macOS Sub host, in addition
-to the existing Chrome, curl and Python requirements. Set
-`SUB2API_AUTH_BROWSER_NODE` to an absolute Node executable path when the service
-environment has no Node on PATH. The browser opens on the Sub host, not on a
-remote user's computer. Linux and Windows archives contain the source and
-adapter but do not provide a native browser launcher.
-
-The form is enabled only for OpenAI OAuth accounts. Input is submitted only
-from HTTPS or numeric/local loopback UI origins, kept out of browser storage,
-and cleared on submission, cancellation, account changes and unmount. The
-server marks the response `no-store`, limits the body to 16 KiB and passes
-the transient input through subprocess stdin, not command arguments,
-environment or diagnostic output. Interactive requests are never replayed
-by the admin-session refresh interceptor. This minimizes retention; it is not
-a claim of guaranteed erasure from garbage-collected memory.
-
-The host supplies an explicit child-environment allowlist. Service settings,
-inherited proxy overrides, interpreter injection settings and an inherited
-automatic-mode flag are excluded. Executable paths, desktop/runtime settings
-and canonical per-port exit-IP pins are retained. Profile directories must
-belong to the current user; existing directories are tightened to mode 0700
-through no-follow directory handles. Symlinks and non-directories are rejected.
-
-The authorization URL still appears in launcher/helper process arguments and,
-in manual mode, Chrome arguments. It contains OAuth state and the public PKCE
-challenge, not the PKCE verifier, login input or issued tokens. The state hash
-in profile names reduces persistent disclosure; it does not conceal local
-process arguments. Run the host under a trusted OS account and do not export
-process command lines into diagnostics. Account-bound session validation, the
-private server-side verifier, one-use browser proof and conditional replacement
-remain required; observing a launch is not permission to replace an account.
-
-Only forms on `auth.openai.com` are eligible for automatic entry. Authenticator
-codes are generated locally. Third-party sign-in, email/SMS challenges,
-CAPTCHAs and security challenges remain manual; nothing bypasses them.
-Uncertain submissions are not repeated. The operation has a five-minute
-server bound and closes its disposable browser profile on termination.
-Same-account launches in different sessions are serialized while the launcher
-is in flight; unrelated accounts and initial-login sessions remain independent.
-This is a per-host launcher guard, not a distributed OAuth lease.
-
-No automatic flow can recreate a missing historical login IP, repair an
-upstream revocation or guarantee that an account will remain authorized.
-Missing history, changed identity or an unreviewed route fails closed without
-overwriting the account. Real upstream OAuth is not covered by local fixtures.
-
-```bash
-node --test tests/automate.test.mjs
-```
-
-### Fixed Route Admission
-
-Account-bound reauthorization also requires startup configuration under
-`gateway.auth_browser_fixed_egress_routes`. Each entry contains `proxy_id`,
-`proxy_route_sha256`, `browser_ingress`, and `exit_ip`. The route hash is the
-lowercase SHA-256 hex digest of the exact proxy URL produced by the host
-(including authentication and URL escaping); never log that URL or its
-credentials. `browser_ingress` must be the exact no-auth URL selected by the
-launcher, and `exit_ip` must equal the account's historical login IP.
-
-The operator must first verify the actual proxy configuration and both routes:
-they must use the same fixed public exit for the entire OAuth flow, with no
-direct fallback, rotating exit, or failover to a different public IP. Failover
-of the transport under a fixed ISP endpoint is allowed only if the public
-exit remains unchanged. Two matching live probes are not this verification.
-After a routing change, re-review the route before updating its startup pin.
-An unchanged proxy URL cannot detect changes hidden inside a proxy service.
-
-Missing, malformed, or duplicate route entries disable reauthorization rather
-than trusting current IP observations. Normal account editing and token refresh
-do not use this route list. Initial authorization without a reviewed route
-retains the existing flow but does not establish a trusted login IP; with a
-reviewed route it requires the host-launched browser and creation proof.
-The list cannot establish missing historical login evidence. Activation
-requires a verified route and historical evidence for each target account;
-this candidate does not ship fabricated production pins.
-
-Run the focused regression tests with:
-
-```bash
-/usr/bin/python3 tests/test_launcher.py
-```
+测试使用合成 RFC TOTP、模拟 Chrome 子进程和隔离数据库；真实 Linux 浏览器登录、
+目标服务器依赖及真实账号挑战仍需部署验收。模拟测试不代表真实 OAuth 已成功。

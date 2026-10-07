@@ -82,3 +82,14 @@ func countExtraTextPatternCacheEntries() int {
 	})
 	return count
 }
+
+func TestAccountTOTPSecretsRedacted(t *testing.T) {
+	for _, key := range []string{"totp_secret", "mfa_secret", "totp_secret_encrypted"} {
+		if strings.Contains(RedactText(key+"=secret-canary"), "secret-canary") {
+			t.Fatal("secret leaked")
+		}
+		if strings.Contains(RedactJSON([]byte(`{"`+key+`":"secret-canary"}`)), "secret-canary") {
+			t.Fatal("secret leaked")
+		}
+	}
+}

@@ -52,3 +52,25 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 
 对应回归位于 `backend/internal/repository/openai_quality_scope_test.go`；
 运行方法及通用检查见 [开发指南](../DEV_GUIDE.md)。
+
+
+## r17bj 适配与 Linux TOTP
+
+本轮使用老板 `a84149c1fcb22b9ce120c84240164185a455fbd3` 的严格冷却/到期恢复，
+取消旧每日提前复查和 8 天排期上限；人工暂停、救治终止、质量范围及联合毕业证据继续保留。
+账号并发仍默认 5、优先级默认 2，优先级 0 有效；省略并发的后台写入不覆盖显式更新。
+插件采用老板 Cookie 续期、过期模板处理和配置加载保护，并保留本地最终答案及中性判分。
+
+账号绑定的重新授权使用凭据身份版本；普通健康状态变化不使其失效，身份/代理变化会拒绝旧结果。
+手动 OAuth 和令牌导入继续支持无代理；不要求历史 IP、固定出口或浏览器启动证明。
+自动授权复用 Chrome/Node，Linux 使用无头模式；真实账号和目标 Linux 环境未在本次验证。
+
+TOTP 密钥通过管理员 `GET/PUT /api/v1/admin/openai/accounts/:id/totp` 管理，独立加密列
+不会随令牌刷新或普通账号编辑丢失，不进入账号 DTO/通用导出；配置状态通过专用 GET 读取。
+后台导入后登录可明确选用，单次输入不默认保存，密码不持久化。接口字段、依赖、密钥配置和
+回退约束见 [授权辅助程序说明](../deploy/auth-browser/README.md)。
+
+回归入口：`account_totp_service_test.go`、`account_totp_integration_test.go`、
+`openai_reauthorization_local_test.go`、`openai_auth_browser_automation_test.go`、
+`audit_log_oauth_test.go`、`useAutomaticReauth.spec.ts` 和 `deploy/auth-browser/tests`。
+Wire 的探针/救治/浏览器依赖已回归正式 provider，重新生成不会丢失启动/停止连接。

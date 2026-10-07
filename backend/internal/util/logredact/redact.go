@@ -12,6 +12,7 @@ import (
 const maxRedactDepth = 32
 
 var defaultSensitiveKeys = map[string]struct{}{
+	"totp_secret": {}, "mfa_secret": {}, "totp_secret_encrypted": {},
 	"authorization_code": {},
 	"code":               {},
 	"code_verifier":      {},
@@ -23,6 +24,7 @@ var defaultSensitiveKeys = map[string]struct{}{
 }
 
 var defaultSensitiveKeyList = []string{
+	"totp_secret", "mfa_secret", "totp_secret_encrypted",
 	"authorization_code",
 	"code",
 	"code_verifier",
