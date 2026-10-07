@@ -57,6 +57,23 @@ V2 渠道状态默认展示平台/分组卡片、所选区间指标及状态时�
 `monitorTimeline.spec.ts`、`OpsOpenAIDowngradeCard.spec.ts`、`feature-access.spec.ts`；
 内嵌资源与直达路由使用 `backend/internal/web/embed_test.go`（`embed` 标签）。
 
+### 用户页面第二轮对齐（本地，尚未部署）
+
+用户仪表盘改为余额/累计 Token/快捷操作、今日指标/模型摘要、全宽趋势的排布；趋势可切换
+总用量和原 Token 明细，原模型图表及完整表格在“模型分布 · 明细”展开查看。累计、今日、
+所选日期区间仍分别按原接口计算，平台拆分、其他差额、配额和最近使用保留。
+API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；筛选、列设置、导出及密钥操作不变。
+页面专用样式位于 `frontend/src/styles/user-console.css`，不改变管理端表格。
+
+渠道卡片增加标题分隔、记录槽数量和 PAST/NOW 轴，日期仍可通过提示查看。时间线颜色保留
+原健康分数分类，高度使用原总体状态；未知槽与失败槽区分，保持缺口和键盘详情。
+修复 Vue scoped CSS 中 `:global(.dark)` 后的卡片选择器被丢弃导致的白底白字，改用
+`.dark .channel-status-card` 祖先选择器；深色卡片使用炭灰渐变。
+
+回归入口增加 `UserDashboard.spec.ts`、`TokenUsageTrend.spec.ts`，并继续运行
+`monitorTimeline.spec.ts`、`KeysView.spec.ts`、`UsageView.spec.ts` 和共享 `UsageTable.spec.ts`。
+本轮来源、验证及未部署状态见[第二轮对齐记录](upstream-sync-state.md#用户页面第二轮视觉对齐)。
+
 ## 质量调度限制分组
 
 入口：后台 → 插件管理 → Codex LB Cookie Pin → 配置 → 质量调度限制。

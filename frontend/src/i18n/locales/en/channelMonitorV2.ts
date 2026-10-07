@@ -2,6 +2,7 @@
 export default {
   channelMonitorV2: {
     cards: {
+      historyCount: 'Last {count} intervals',
       title: 'Channel status', overview: 'Channel overview', details: 'Detailed analysis',
       description: 'Service status by platform and group',
       rangeSummary: 'Summary for {range}',

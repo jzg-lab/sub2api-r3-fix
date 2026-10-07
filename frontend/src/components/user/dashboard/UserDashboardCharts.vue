@@ -1,28 +1,24 @@
 <template>
-  <div class="space-y-6">
-    <!-- Date Range Filter -->
-    <div class="card p-4">
-      <div class="flex flex-wrap items-center gap-4">
-        <div class="flex items-center gap-2">
-          <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('dashboard.timeRange') }}:</span>
-          <DateRangePicker :start-date="startDate" :end-date="endDate" @update:startDate="$emit('update:startDate', $event)" @update:endDate="$emit('update:endDate', $event)" @change="$emit('dateRangeChange', $event)" />
+  <section class="signal-charts" data-signal-charts :aria-busy="loading">
+    <div class="signal-chart-toolbar">
+      <div class="signal-date-control">
+        <DateRangePicker :start-date="startDate" :end-date="endDate" @update:startDate="$emit('update:startDate', $event)" @update:endDate="$emit('update:endDate', $event)" @change="$emit('dateRangeChange', $event)" />
+      </div>
+      <div class="signal-chart-actions">
+        <div class="signal-chart-mode" role="group" :aria-label="t('dashboard.tokenUsageTrend')">
+          <button :aria-pressed="mode === 'total'" @click="mode = 'total'">{{ t('dashboard.totalUsage') }}</button>
+          <button :aria-pressed="mode === 'breakdown'" @click="mode = 'breakdown'">{{ t('dashboard.tokenDetails') }}</button>
         </div>
-        <button @click="$emit('refresh')" :disabled="loading" class="btn btn-secondary">
-          {{ t('common.refresh') }}
-        </button>
-        <div class="ml-auto flex items-center gap-2">
-          <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('dashboard.granularity') }}:</span>
-          <div class="w-28">
-            <Select :model-value="granularity" :options="[{value:'day', label:t('dashboard.day')}, {value:'hour', label:t('dashboard.hour')}]" @update:model-value="$emit('update:granularity', $event)" @change="$emit('granularityChange')" />
-          </div>
-        </div>
+        <Select class="signal-granularity" :aria-label="t('dashboard.granularity')" :model-value="granularity" :options="[{value:'day', label:t('dashboard.day')}, {value:'hour', label:t('dashboard.hour')}]" @update:model-value="$emit('update:granularity', $event)" @change="$emit('granularityChange')" />
       </div>
     </div>
-
-    <!-- Charts Grid -->
-    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div class="signal-trend">
+      <TokenUsageTrend :trend-data="trend" :loading="loading" :mode="mode" />
+    </div>
+    <details class="signal-model-details">
+      <summary>{{ t('dashboard.modelDistribution') }} · {{ t('dashboard.details') }}</summary>
       <!-- Model Distribution Chart -->
-      <div class="card relative overflow-hidden p-4">
+      <div class="relative min-w-0 overflow-hidden py-4">
         <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-white/50 backdrop-blur-sm dark:bg-dark-800/50">
           <LoadingSpinner size="md" />
         </div>
@@ -57,14 +53,12 @@
         </div>
       </div>
 
-      <!-- Token Usage Trend Chart -->
-      <TokenUsageTrend :trend-data="trend" :loading="loading" />
-    </div>
-  </div>
+    </details>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
@@ -79,6 +73,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, ArcEleme
 const props = defineProps<{ loading: boolean, startDate: string, endDate: string, granularity: string, trend: TrendDataPoint[], models: ModelStat[] }>()
 defineEmits(['update:startDate', 'update:endDate', 'update:granularity', 'dateRangeChange', 'granularityChange', 'refresh'])
 const { t } = useI18n()
+const mode = ref<'total' | 'breakdown'>('total')
 
 const modelData = computed(() => !props.models?.length ? null : {
   labels: props.models.map((m: ModelStat) => m.model),
@@ -101,3 +96,21 @@ const doughnutOptions = {
   }
 }
 </script>
+<style scoped>
+.signal-charts { margin-top: 20px; min-width: 0; }
+.signal-chart-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 14px; }
+.signal-chart-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.signal-chart-mode { display: flex; padding: 3px; border: 1px solid var(--signal-line); border-radius: 6px; background: var(--signal-inset); }
+.signal-chart-mode button { min-height: 30px; padding: 4px 12px; border-radius: 4px; font-size: 12px; color: var(--signal-muted); }
+.signal-chart-mode [aria-pressed='true'] { background: var(--signal-raised); color: var(--signal-text); box-shadow: 0 1px 3px #00000010; }
+.signal-granularity { width: 98px; }
+.signal-trend { min-width: 0; max-width: 100%; overflow: hidden; }
+.signal-trend :deep(canvas) { max-width: 100%; }
+.signal-trend :deep(.card) { background: transparent; border: 0; border-radius: 0; padding: 16px 0 0; box-shadow: none; border-top: 1px solid var(--signal-line); }
+.signal-trend :deep(.h-48) { height: 260px; }
+@media (max-width: 639px) {
+  .signal-chart-actions { flex-wrap: wrap; }
+  .signal-chart-mode button { min-height: 38px; }
+  .signal-trend :deep(.h-48) { height: 220px; }
+}
+</style>

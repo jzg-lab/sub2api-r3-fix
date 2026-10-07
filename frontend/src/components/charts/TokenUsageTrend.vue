@@ -19,7 +19,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { usePreferredReducedMotion, useMutationObserver } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import {
   Chart as ChartJS,
@@ -52,11 +53,14 @@ const { t } = useI18n()
 const props = defineProps<{
   trendData: TrendDataPoint[]
   loading?: boolean
+  mode?: 'total' | 'breakdown'
 }>()
 
-const isDarkMode = computed(() => {
-  return document.documentElement.classList.contains('dark')
-})
+const isDarkMode = ref(document.documentElement.classList.contains('dark'))
+useMutationObserver(document.documentElement, () => {
+  isDarkMode.value = document.documentElement.classList.contains('dark')
+}, { attributes: true, attributeFilter: ['class'] })
+const motion = usePreferredReducedMotion()
 
 const chartColors = computed(() => ({
   text: isDarkMode.value ? '#e5e7eb' : '#374151',
@@ -70,6 +74,22 @@ const chartColors = computed(() => ({
 
 const chartData = computed(() => {
   if (!props.trendData?.length) return null
+
+  if (props.mode === 'total') {
+    return {
+      labels: props.trendData.map(d => d.date),
+      datasets: [{
+        label: t('dashboard.totalUsage'),
+        data: props.trendData.map(d => d.input_tokens + d.output_tokens + d.cache_creation_tokens + d.cache_read_tokens),
+        borderColor: chartColors.value.text,
+        backgroundColor: `${chartColors.value.text}20`,
+        borderWidth: 2,
+        pointRadius: 2,
+        fill: true,
+        tension: 0.3,
+      }],
+    }
+  }
 
   return {
     labels: props.trendData.map((d) => d.date),
@@ -125,6 +145,7 @@ const chartData = computed(() => {
 
 const lineOptions = computed(() => ({
   responsive: true,
+  animation: { duration: motion.value === 'reduce' ? 0 : 160 },
   maintainAspectRatio: false,
   interaction: {
     intersect: false,
@@ -132,6 +153,7 @@ const lineOptions = computed(() => ({
   },
   plugins: {
     legend: {
+      display: props.mode !== 'total',
       position: 'top' as const,
       labels: {
         color: chartColors.value.text,
@@ -165,6 +187,7 @@ const lineOptions = computed(() => ({
   scales: {
     x: {
       grid: {
+        display: props.mode !== 'total',
         color: chartColors.value.grid
       },
       ticks: {
@@ -187,6 +210,7 @@ const lineOptions = computed(() => ({
       }
     },
     yPercent: {
+      display: props.mode !== 'total',
       position: 'right' as const,
       min: 0,
       max: 100,

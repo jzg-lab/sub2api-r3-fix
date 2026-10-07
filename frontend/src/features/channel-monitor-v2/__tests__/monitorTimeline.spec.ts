@@ -51,6 +51,8 @@ describe('channel cards with public, redacted metrics', () => {
     const bars = wrapper.findAll('.status-slot')
     expect(bars).toHaveLength(3)
     expect(bars[0].find('span').classes()).toContain('health-unknown')
+    expect(bars[0].find('span').attributes('data-state')).toBe('unknown')
+    expect(bars[1].find('span').attributes('data-state')).toBe('healthy')
     expect(bars[1].find('span').classes()).toContain('health-score10')
     expect(bars[2].find('span').classes()).toContain('health-unknown')
     expect(wrapper.text()).toContain('Rate 0x')

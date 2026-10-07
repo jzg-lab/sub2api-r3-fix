@@ -2,6 +2,7 @@
 export default {
   channelMonitorV2: {
     cards: {
+      historyCount: '近 {count} 次记录',
       title: '渠道状态', overview: '渠道概览', details: '详细分析',
       description: '查看各平台与分组的运行状态',
       rangeSummary: '所选区间 {range} 汇总',

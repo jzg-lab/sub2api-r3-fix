@@ -1,20 +1,36 @@
 <template>
-  <AppLayout>
-    <div class="space-y-6">
+  <AppLayout class="user-console-page">
+    <div class="user-console signal-dashboard">
+      <header class="signal-workspace-heading signal-overview-heading">
+        <div class="signal-workspace-title">
+          <p class="signal-workspace-index" aria-hidden="true">01 / OVERVIEW</p>
+          <h1>{{ t('dashboard.overview') }}</h1>
+        </div>
+        <button class="btn btn-secondary btn-icon" :title="t('common.refresh')" :aria-label="t('common.refresh')" :disabled="loading || loadingCharts" @click="refreshAll">
+          <Icon name="refresh" size="sm" :class="{ 'animate-spin': loading || loadingCharts }" />
+        </button>
+      </header>
       <div v-if="loading" class="flex items-center justify-center py-12"><LoadingSpinner /></div>
       <template v-else-if="stats">
-        <UserDashboardStats :stats="stats" :balance="user?.balance || 0" :is-simple="authStore.isSimpleMode" :platform-quotas="platformQuotas" />
-        <UserDashboardCharts v-model:startDate="startDate" v-model:endDate="endDate" v-model:granularity="granularity" :loading="loadingCharts" :trend="trendData" :models="modelStats" @dateRangeChange="loadCharts" @granularityChange="loadCharts" @refresh="refreshAll" />
-        <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div class="lg:col-span-2"><UserDashboardRecentUsage :data="recentUsage" :loading="loadingUsage" /></div>
-          <div class="lg:col-span-1"><UserDashboardQuickActions /></div>
-        </div>
+        <UserDashboardStats :stats="stats" :balance="user?.balance || 0" :is-simple="authStore.isSimpleMode" :platform-quotas="platformQuotas">
+          <template #actions><UserDashboardQuickActions /></template>
+          <template #models><UserDashboardModels :models="modelStats" :start-date="startDate" :end-date="endDate" :loading="loadingCharts" /></template>
+          <template #charts>
+            <UserDashboardCharts v-model:startDate="startDate" v-model:endDate="endDate" v-model:granularity="granularity" :loading="loadingCharts" :trend="trendData" :models="modelStats" @dateRangeChange="loadCharts" @granularityChange="loadCharts" @refresh="refreshAll" />
+          </template>
+        </UserDashboardStats>
+        <div class="mt-6"><UserDashboardRecentUsage :data="recentUsage" :loading="loadingUsage" /></div>
       </template>
     </div>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
+import '@/styles/user-console.css'
+import { useI18n } from 'vue-i18n'
+import Icon from '@/components/icons/Icon.vue'
+import UserDashboardModels from '@/components/user/dashboard/UserDashboardModels.vue'
+const { t } = useI18n()
 import { ref, computed, onMounted } from 'vue'; import { useAuthStore } from '@/stores/auth'; import { usageAPI, type UserDashboardStats as UserStatsType } from '@/api/usage'
 import AppLayout from '@/components/layout/AppLayout.vue'; import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import UserDashboardStats from '@/components/user/dashboard/UserDashboardStats.vue'; import UserDashboardCharts from '@/components/user/dashboard/UserDashboardCharts.vue'

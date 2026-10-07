@@ -117,4 +117,21 @@ describe('TokenUsageTrend', () => {
     // Hit rate = 500 / (200 + 500 + 300) * 100 = 50%
     expect(hitRateDataset.data[0]).toBe(50)
   })
+  it('switches total usage back to the existing token and cache-rate breakdown', async () => {
+    const wrapper = mount(TokenUsageTrend, {
+      props: { mode: 'total', trendData: [{ date: '2026-10-08', requests: 1,
+        input_tokens: 200, output_tokens: 50, cache_creation_tokens: 300,
+        cache_read_tokens: 500, cost: 0.02, actual_cost: 0.01 }] },
+    })
+    // The chart stub deliberately exposes its actual props, not a duplicate formula.
+    let data = JSON.parse(wrapper.get('.chart-data').text())
+    expect(data.datasets).toHaveLength(1)
+    expect(data.datasets[0].data).toEqual([1050])
+    await wrapper.setProps({ mode: 'breakdown' })
+    data = JSON.parse(wrapper.get('.chart-data').text())
+    expect(data.datasets).toHaveLength(5)
+    expect(data.datasets.find((d: any) => d.label === 'Cache Hit Rate').data).toEqual([50])
+    wrapper.unmount()
+  })
+
 })
