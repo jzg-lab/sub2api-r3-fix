@@ -7,8 +7,13 @@ import AccountModal from '@/components/account/ReAuthAccountModal.vue'
 
 const api = vi.hoisted(() => ({
   exchangeCode: vi.fn(),
+  exchangeAuthCode: vi.fn(),
   launchAuthBrowser: vi.fn(),
   applyOAuthCredentials: vi.fn(),
+  generateAuthUrl: vi.fn(),
+  getById: vi.fn(),
+  resetState: vi.fn(),
+  sessionId: 'bound-session',
   showSuccess: vi.fn(),
   showError: vi.fn()
 }))
@@ -23,12 +28,15 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 function oauthClient() {
   return {
     authUrl: ref(''),
-    sessionId: ref(''),
+    sessionId: ref(api.sessionId),
     state: ref(''),
-    oauthState: ref(''),
+    oauthState: ref('fixture-state'),
     loading: ref(false),
     error: ref(''),
-    resetState: vi.fn(),
+    resetState: api.resetState,
+    generateAuthUrl: api.generateAuthUrl,
+    exchangeAuthCode: api.exchangeAuthCode,
+    buildCredentials: () => ({ access_token: 'fixture' }),
     buildExtraInfo: () => undefined
   }
 }
@@ -46,10 +54,10 @@ const Dialog = defineComponent({
 })
 
 const Flow = defineComponent({
-  props: ['showAuthBrowserLaunch', 'authBrowserLaunching'],
+  props: ['showAuthBrowserLaunch', 'authBrowserLaunching', 'authBrowserReady', 'showRefreshTokenOption', 'error'],
   emits: ['launch-auth-browser'],
   setup(_, { expose }) {
-    expose({ reset: vi.fn() })
+    expose({ reset: vi.fn(), authCode: 'fixture-code', oauthState: 'fixture-state' })
     return () => h('div')
   }
 })
@@ -79,7 +87,11 @@ describe.each([
   ['admin', AdminModal],
   ['account', AccountModal]
 ] as const)('%s reauthorization lifecycle', (_, component) => {
-  beforeEach(() => vi.resetAllMocks())
+  beforeEach(() => {
+    vi.resetAllMocks()
+    api.sessionId = 'bound-session'
+    api.getById.mockResolvedValue({ ...account(), platform: 'openai', proxy_id: 7 })
+  })
 
   function setup() {
     const wrapper = mount(component, {
@@ -95,6 +107,102 @@ describe.each([
     return { wrapper, actions }
   }
 
+  it('passes the one-shot server proof with the same account revision', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    api.exchangeAuthCode.mockResolvedValue({ reauthorization_proof: 'bound-proof' })
+    api.applyOAuthCredentials.mockResolvedValue(original)
+    api.launchAuthBrowser.mockResolvedValue({ launched: true })
+    await actions.handleLaunchAuthBrowser()
+    await actions.handleExchangeCode()
+    expect(api.applyOAuthCredentials).toHaveBeenCalledWith(original.id, expect.objectContaining({
+      reauthorization_proof: 'bound-proof',
+      expected_updated_at: original.updated_at
+    }))
+    expect(wrapper.emitted('reauthorized')).toEqual([[original]])
+    wrapper.unmount()
+  })
+
+  it('allows a fresh attempt after lookup failure without using the old session', async () => {
+    const { wrapper, actions } = setup()
+    await wrapper.setProps({ account: { ...account(), platform: 'openai', proxy_id: 7 } })
+    api.launchAuthBrowser.mockResolvedValue({ launched: true })
+    await actions.handleLaunchAuthBrowser()
+    api.resetState.mockClear()
+    api.getById.mockRejectedValueOnce({ reason: 'OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE' })
+    await actions.handleGenerateUrl()
+    expect(api.resetState).toHaveBeenCalledTimes(1)
+    expect(api.generateAuthUrl).not.toHaveBeenCalled()
+    await actions.handleGenerateUrl()
+    expect(api.getById).toHaveBeenCalledTimes(2)
+    expect(api.generateAuthUrl).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('generates authorization without historical login IP', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    api.getById.mockResolvedValue({
+      ...original, extra: { openai_oauth_login_exit_ip: '198.51.100.25' }
+    })
+    await actions.handleGenerateUrl()
+    expect(wrapper.findComponent(Flow).props('error')).toBe('')
+    wrapper.unmount()
+  })
+
+  it.each(['close', 'replace', 'proxy', 'type', 'reopen'] as const)(
+    'discards a pending snapshot after %s',
+    async (change) => {
+      const { wrapper, actions } = setup()
+      const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+      await wrapper.setProps({ account: original })
+      const pending = deferred<Account>()
+      api.getById.mockReturnValue(pending.promise)
+      const first = actions.handleGenerateUrl()
+      await actions.handleGenerateUrl()
+      expect(api.getById).toHaveBeenCalledTimes(1)
+      if (change === 'close') actions.handleClose()
+      if (change === 'replace') await wrapper.setProps({ account: { ...original, id: 2 } })
+      if (change === 'proxy') await wrapper.setProps({ account: { ...original, proxy_id: 8 } })
+      if (change === 'type') await wrapper.setProps({ account: { ...original, type: 'apikey' } })
+      if (change === 'reopen') {
+        await wrapper.setProps({ show: false })
+        await wrapper.setProps({ show: true })
+      }
+      pending.resolve(original)
+      await first
+      expect(api.generateAuthUrl).not.toHaveBeenCalled()
+      expect(api.showError).not.toHaveBeenCalled()
+      wrapper.unmount()
+    }
+  )
+
+  it.each([
+    { id: 2 }, { platform: 'anthropic' }, { type: 'apikey' }, { proxy_id: 8 }, { updated_at: '' }
+  ])('rejects changed snapshot identity or missing revision: %j', async (change) => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    api.getById.mockResolvedValue({ ...original, ...change })
+    await actions.handleGenerateUrl()
+    expect(api.generateAuthUrl).not.toHaveBeenCalled()
+    expect(api.showError).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('binds authorization generation to the original account, revision and proxy', async () => {
+    const { wrapper, actions } = setup()
+    const original = { ...account(), platform: 'openai' as const, proxy_id: 7 }
+    await wrapper.setProps({ account: original })
+    await actions.handleGenerateUrl()
+    expect(api.generateAuthUrl).toHaveBeenCalledWith(7, undefined, {
+      accountId: original.id, expectedUpdatedAt: original.updated_at
+    })
+    wrapper.unmount()
+  })
+
   it('exposes the bound browser launcher only for OpenAI reauthorization', async () => {
     const { wrapper } = setup()
     expect(wrapper.findComponent(Flow).props('showAuthBrowserLaunch')).toBe(false)
@@ -103,8 +211,7 @@ describe.each([
     expect(flow.props('showAuthBrowserLaunch')).toBe(true)
     flow.vm.$emit('launch-auth-browser')
     await flushPromises()
-    expect(api.showError).toHaveBeenCalledWith('授权会话缺失，请先重新生成授权链接')
-    expect(api.launchAuthBrowser).not.toHaveBeenCalled()
+    expect(api.launchAuthBrowser).toHaveBeenCalledWith('bound-session')
     wrapper.unmount()
   })
 

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -92,15 +93,12 @@ const (
 	// 短重试——耗尽号（1029 实测 3 小时 20 针）全程空打，每针都是从账号出口 IP
 	// 发出的可聚类请求。两级退避：①429 体带显式重置时间（usage_limit_reached
 	// 的 resets_at/resets_in_seconds，复用 parseOpenAIRateLimitResetTime）→ 按
-	// 重置点+错峰或稀疏复查回来；②不带时间的 429 连打达阈值 → 退到小时级。
-	openAIDowngradeRateLimitResetFloor   = 30 * time.Minute   // 重置点已过/过近时的排期下限
-	openAIDowngradeRateLimitResetCap     = 8 * 24 * time.Hour // 重置点离谱远时的排期上钳
-	openAIDowngradeRateLimitResetStagger = 30 * time.Minute   // 重置点后的错峰窗（jitter 15-45min）
-	// Preserve r17i's account hold for unknown windows with distant reset evidence.
+	// 重置点+错峰回来；②不带时间的 429 连打达阈值 → 退到小时级。
+	openAIDowngradeRateLimitResetFloor   = 30 * time.Minute // 重置点已过/过近时的排期下限
+	openAIDowngradeRateLimitResetStagger = 30 * time.Minute // 重置点后的错峰窗（jitter 15-45min）
+	// Window classification is diagnostic, never permission to ignore a cooldown.
 	openAIDowngradeRateLimitQuotaLikeDistance = 5*time.Hour + 30*time.Minute
-	// 稀疏复查（2026-09-16 用户裁定「重置不是固定的，有时候可以手动重置」）：
-	// 长持有不能死等重置点。每天最多一针的随机复查（spread 后 22-27.5h），
-	// 每次重新抽签无可聚类周期；重置点更近时仍取重置点一侧（min 规则）。
+	// Reconcile legacy schedules only when no active upstream hold is bypassed.
 	openAIDowngradeRateLimitRecheckInterval = 22 * time.Hour
 	openAIDowngrade429StreakThreshold       = 6 // 无时间信息的连续 429 达此数即风暴退避
 	openAIDowngrade429StreakBackoff         = time.Hour
@@ -172,6 +170,8 @@ func isOpenAIDowngradeTurnStateLenDegraded(length int) bool {
 // OpenAIDowngradeProbeResult is the redacted, bill-free result of one probe.
 // It intentionally contains no response text or credential material.
 type OpenAIDowngradeProbeResult struct {
+	// Request-local evidence after token refresh.
+	authAttempt        *Account
 	AccountID          int64
 	ProxyID            *int64
 	Mode               string
@@ -603,11 +603,12 @@ type OpenAIDowngradeProbeRunner struct {
 	// The staged runner retains this observation until its database commit.
 	abuseSignal *openAIAbuseRouteSignal
 
-	startOnce sync.Once
-	stopOnce  sync.Once
-	stopCh    chan struct{}
-	doneCh    chan struct{}
-	wakeCh    chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	stopCh      chan struct{}
+	doneCh      chan struct{}
+	wakeCh      chan struct{}
+	wakeVersion atomic.Uint64
 }
 
 func NewOpenAIDowngradeProbeRunner(
@@ -670,6 +671,19 @@ func (r *OpenAIDowngradeProbeRunner) Start() {
 	r.startOnce.Do(func() {
 		go r.loop()
 	})
+}
+
+// Wake coalesces committed imports and recovery requests without starting a
+// second scan or waiting on network work in the caller.
+func (r *OpenAIDowngradeProbeRunner) Wake() {
+	if r == nil || r.IsStopped() {
+		return
+	}
+	r.wakeVersion.Add(1)
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 func (r *OpenAIDowngradeProbeRunner) Stop() {
@@ -802,6 +816,7 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		return nil
 	}
 	defer r.runMu.Unlock()
+	wakeVersion := r.wakeVersion.Load()
 	r.lifecycleMu.Lock()
 	if r.stopped {
 		r.lifecycleMu.Unlock()
@@ -922,6 +937,11 @@ func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Finish an in-flight probe, then rescan committed imports before
+		// starting more work from an older queue. Never cancel its result.
+		if r.wakeVersion.Load() != wakeVersion {
+			break
+		}
 		err := r.processStateAtomic(ctx, &due[i], now)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -1010,6 +1030,15 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 	}
 	if err != nil {
 		return err
+	}
+	if account.RateLimitResetAt != nil && now.Before(*account.RateLimitResetAt) {
+		// Re-read account state even for a previously dequeued probe. Cooling
+		// must precede qualification, route changes and quality state changes.
+		if state.NextProbeAt.Before(*account.RateLimitResetAt) {
+			state.NextProbeAt = account.RateLimitResetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger))
+		}
+		state.UpdatedAt = now
+		return r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	if !isOpenAIDowngradeProbeAccountEligible(account, now) {
 		// 活账号但当前不可探测（改平台/改类型/影子/过期）：不探，但排期
@@ -1550,20 +1579,9 @@ func sameOpenAIProbeProxy(a, b *int64) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
-// probeOpenAI429ResetTime 提取探针 429 的显式重置时间：优先 x-codex-* 响应头
-// （primary=周限/secondary=5h 窗口类限流，calculateOpenAI429ResetTime 自带
-// 「已打满的窗口优先」判定），其次响应体的 usage_limit_reached/resets_at
-// （用量耗尽类）。与真实流量路径同款解析器；nil 表示该 429 不带时间信息
-// （走短周期重探或风暴退避）。
+// Use the same not-before boundary as business traffic, including Retry-After.
 func probeOpenAI429ResetTime(headers http.Header, body []byte) *time.Time {
-	if resetAt := calculateOpenAI429ResetTime(headers); resetAt != nil {
-		return resetAt
-	}
-	if ts := parseOpenAIRateLimitResetTime(body); ts != nil {
-		resetAt := time.Unix(*ts, 0)
-		return &resetAt
-	}
-	return nil
+	return openAI429ResetTimeAt(headers, body, time.Now())
 }
 
 func probeOpenAI429Window(headers http.Header) string {
@@ -1639,28 +1657,10 @@ func (r *OpenAIDowngradeProbeRunner) SetPluginRoundTrip(
 	r.pluginRoundTrip = fn
 }
 
-// applyRateLimitDeferral 是全部探测路径共用的 429 长退避闸（2026-09-15 用户
-// 裁定：机制必须能检测到额度耗尽，耗尽号不能一直探）。两级：
-//  1. 429 带显式重置时间（x-codex-* 窗口头或 usage_limit_reached 体，真实
-//     流量路径同款解析）→ 下一针取 min(重置点+错峰, 现在+稀疏复查)（r17
-//     稀疏复查：重置不是固定的，供应商可能提前手动重置——长持有每天最多
-//     一针随机复查，重置点更近时自然收敛回重置点一侧）；重置点过近/过远
-//     分别落 floor/cap。分窗差异化：5h 短窗只顺探针不动账号；7d 显式周限
-//     额外单调延长真实流量冷却（到点自动放行）；未知窗口仍保留分类，
-//     但服务端重置点超过 5.5h 时按额度级冷却持有账号。
-//  2. 不带时间信息的 429 连续达阈值 → 风暴退避 1 小时（spread 错开）；
-//     账号已处于限流持有中（rate_limit_reset_at 未到）的无信息 429 不进
-//     风暴闸——账号已被长退避摘出真实流量，1 小时连打正是 1029 事故形态，
-//     锚定已持久化的持有继续稀疏复查节奏。
-//
-// 非 429 且为上游真实接受（传输 OK 且 2xx）时，按 CAS 清除观察到的持有
-// （rate_limit_recheck_recovered）——这是官方重置/提前手动重置的检测回路
-// 终点，检测而非猜测，auto-reset 纪律不破。
-// 命中任一级时计数器一律不动（限流不是降智证据），落事件后返回 handled=true，
-// 所有 429 均返回 handled=true，包括普通短周期重探，不能落入失败/换号路径。
-// 官方重置的检测回路：错峰首针在重置点后落下一探，200 即回正常轨道；仍未
-// 重置则吃新 429 带新重置点继续顺延（自纠错）。
-// The streak is persisted with the probe mutation, including its commit fence.
+// applyRateLimitDeferral keeps all 429s out of quality and route decisions.
+// Explicit deadlines are not-before bounds shared with business scheduling;
+// neither a daily recheck nor a local cap may shorten them. Unknown deadlines
+// retain bounded backoff and escalation. All writes use the probe commit fence.
 func (r *OpenAIDowngradeProbeRunner) applyRateLimitDeferral(
 	ctx context.Context,
 	account *Account,
@@ -1688,34 +1688,20 @@ func (r *OpenAIDowngradeProbeRunner) applyRateLimitDeferral(
 			resetAt = floor
 			details["floored"] = true
 		}
-		if capLimit := now.Add(openAIDowngradeRateLimitResetCap); resetAt.After(capLimit) {
-			resetAt = capLimit
-			details["capped"] = true
-		}
-		capped := details["capped"] == true
 		quotaLike := window == "7d_window" || (window == "unknown_window" &&
-			(capped || resetAt.Sub(now) > openAIDowngradeRateLimitQuotaLikeDistance))
-		if quotaLike {
-			store, ok := r.accountRepo.(OpenAIDowngradeRateLimitStore)
-			if !ok {
-				return true, errors.New("openai downgrade monotonic rate limit store unavailable")
-			}
-			if err := store.SetRateLimitedIfLater(ctx, state.AccountID, resetAt); err != nil {
-				return true, err
-			}
+			resetAt.Sub(now) > openAIDowngradeRateLimitQuotaLikeDistance)
+		if account != nil && account.RateLimitResetAt != nil && account.RateLimitResetAt.After(resetAt) {
+			resetAt = *account.RateLimitResetAt
+		}
+		store, ok := r.accountRepo.(OpenAIDowngradeRateLimitStore)
+		if !ok {
+			return true, errors.New("openai downgrade monotonic rate limit store unavailable")
+		}
+		if err := store.SetRateLimitedIfLater(ctx, state.AccountID, resetAt); err != nil {
+			return true, err
 		}
 		details["quota_like"] = quotaLike
-		// 重置点后错峰首探：同窗口打满的多个账号不会在同一秒集体醒来（jitter
-		// 后 15-45min），「重置时刻整点回访」本身也是可聚类特征。r17 稀疏
-		// 复查：长持有不死等重置点——min(重置点+错峰, 现在+spread复查)，
-		// 复查每次重新抽签，无可聚类周期；5h 短窗的重置点恒早于复查侧，
-		// 行为不变；接近重置点时收敛回官方重置检测回路。
-		nextProbeAt := resetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger))
-		if recheck := now.Add(r.spread(openAIDowngradeRateLimitRecheckInterval)); recheck.Before(nextProbeAt) {
-			nextProbeAt = recheck
-			details["recheck"] = true
-		}
-		state.NextProbeAt = nextProbeAt
+		state.NextProbeAt = resetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger))
 		state.LastProbeAt = &now
 		state.UpdatedAt = now
 		details["reset_at"] = resetAt.Format(time.RFC3339)
@@ -1725,16 +1711,9 @@ func (r *OpenAIDowngradeProbeRunner) applyRateLimitDeferral(
 		}
 		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
-	// 持有中的无时间信息 429：不进风暴闸、不计数（限流非降智证据），锚定
-	// 已持久化的持有走稀疏复查节奏。新证据（带重置点的 429 / 2xx 接受）由
-	// 对应分支自纠。未持有的账号保持原风暴退避语义。
+	// Missing metadata on an in-flight response cannot discard an existing hold.
 	if account != nil && account.RateLimitResetAt != nil && now.Before(*account.RateLimitResetAt) {
-		nextProbeAt := now.Add(r.spread(openAIDowngradeRateLimitRecheckInterval))
-		// A missing response header must not discard an already observed nearer reset.
-		if resetProbeAt := account.RateLimitResetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger)); resetProbeAt.Before(nextProbeAt) {
-			nextProbeAt = resetProbeAt
-		}
-		state.NextProbeAt = nextProbeAt
+		state.NextProbeAt = account.RateLimitResetAt.Add(r.jitter(openAIDowngradeRateLimitResetStagger))
 		state.LastProbeAt = &now
 		state.UpdatedAt = now
 		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
@@ -1750,13 +1729,23 @@ func (r *OpenAIDowngradeProbeRunner) applyRateLimitDeferral(
 	} else {
 		state.Consecutive429s = openAIDowngrade429StreakThreshold
 	}
+	store, ok := r.accountRepo.(OpenAIDowngradeRateLimitStore)
+	if !ok {
+		return true, errors.New("openai downgrade monotonic rate limit store unavailable")
+	}
 	if state.Consecutive429s < openAIDowngrade429StreakThreshold {
 		state.NextProbeAt = now.Add(r.jitter(openAIDowngradeRateLimitedRetryInterval))
+		if err := store.SetRateLimitedIfLater(ctx, state.AccountID, state.NextProbeAt); err != nil {
+			return true, err
+		}
 		state.LastProbeAt = &now
 		state.UpdatedAt = now
 		return true, r.store.SaveOpenAIDowngradeState(ctx, state)
 	}
 	state.NextProbeAt = now.Add(r.spread(openAIDowngrade429StreakBackoff))
+	if err := store.SetRateLimitedIfLater(ctx, state.AccountID, state.NextProbeAt); err != nil {
+		return true, err
+	}
 	state.LastProbeAt = &now
 	state.UpdatedAt = now
 	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
@@ -2082,20 +2071,28 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		result.Latency = time.Since(started)
 		return result
 	}
-	token, err := r.tokenProvider.GetAccessToken(ctx, account)
+	// Keep the validated proxy row with this attempt. A URL alone leaves
+	// ID-only account snapshots unable to pass the final transport guard.
+	attempt := snapshotOAuthRefreshAccount(account)
+	if r.proxyRepo != nil && attempt.ProxyID != nil {
+		proxy, lookupErr := r.proxyRepo.GetByID(ctx, *attempt.ProxyID)
+		if lookupErr != nil {
+			result.ErrorMessage = "probe requires account proxy bucket"
+			result.Latency = time.Since(started)
+			return result
+		}
+		attempt.Proxy = proxy
+	}
+	proxyURL, err := openAIOAuthProxySnapshotURL(attempt.Proxy, attempt.ProxyID)
 	if err != nil {
-		result.ErrorMessage = "access token unavailable"
+		result.ErrorMessage = "account proxy unavailable"
 		result.Latency = time.Since(started)
 		return result
 	}
-	var proxyURL string
-	if r.proxyRepo != nil {
-		proxyURL, err = resolveOpenAIOAuthProxyURL(ctx, r.proxyRepo, account.ProxyID)
-	} else {
-		proxyURL, err = openAIOAuthProxySnapshotURL(account.Proxy, account.ProxyID)
-	}
+	account = attempt
+	token, err := r.tokenProvider.GetAccessToken(ctx, account)
 	if err != nil {
-		result.ErrorMessage = "account proxy unavailable"
+		result.ErrorMessage = "access token unavailable"
 		result.Latency = time.Since(started)
 		return result
 	}
@@ -2148,16 +2145,19 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		// Cookie 钉扎救回的号在裸 LB 路上 4 针全 200+错答——资格针不与
 		// 真实流量同路就结构性测不出救治效果。插件未启用/未处理时回退
 		// 原一次性专用传输，非救治账号路径不变。
-		var resp *http.Response
-		if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(account) != nil {
-			var handled bool
-			resp, handled, requestErr = r.pluginRoundTrip(ctx, req, proxyURL, account)
-			if !handled {
-				resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
-			}
-		} else {
-			resp, requestErr = r.httpUpstream.DoProbeWithTLS(req, proxyURL, account.Concurrency, probeProfile)
-		}
+		resp, requestErr := doOpenAIUpstreamWithRecovery(ctx, req, proxyURL, account, r.tokenProvider, true,
+			func(request *http.Request, route string, current *Account) (*http.Response, error) {
+				if routeErr := validateOpenAIAccountProxyRoute(current, route); routeErr != nil {
+					return nil, routeErr
+				}
+				if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(current) != nil {
+					response, handled, err := r.pluginRoundTrip(request.Context(), request, route, current)
+					if handled {
+						return response, err
+					}
+				}
+				return r.httpUpstream.DoProbeWithTLS(request, route, current.Concurrency, probeProfile)
+			})
 		if requestErr != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -2167,6 +2167,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 		if resp == nil {
 			return 0, nil, nil, errors.New("probe upstream returned no response")
 		}
+		result.authAttempt = openAIResponseAccount(resp, account)
 		responseBody, readErr := readOpenAIDowngradeProbeBody(resp.Body)
 		respHeader := resp.Header
 		statusCode := resp.StatusCode

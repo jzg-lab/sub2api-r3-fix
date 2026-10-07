@@ -47,6 +47,7 @@ type PluginManager struct {
 	hostInfo               PluginHostInfo
 	installer              *PluginPackageInstaller
 	pausedAccountIDsSource func(context.Context) ([]int64, error)
+	rateLimitService       *RateLimitService
 
 	operationMu        sync.Mutex
 	mu                 sync.Mutex
@@ -1162,7 +1163,14 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 	if !route.runtime.beginRequest() {
 		return nil, true, errors.New("OpenAI OAuth 插件正在停止")
 	}
-	response, err := route.runtime.roundTrip(ctx, request, proxyURL, account)
+	policy := pluginv1.ProbeRateLimitPolicy{}
+	if m.rateLimitService != nil {
+		policy.Fallback, _ = m.rateLimitService.get429FallbackCooldown(ctx, account)
+	}
+	if account.RateLimitResetAt != nil {
+		policy.NotBefore = *account.RateLimitResetAt
+	}
+	response, err := route.runtime.roundTrip(pluginv1.WithProbeRateLimitPolicy(ctx, policy), request, proxyURL, account)
 	if err != nil {
 		route.runtime.finishRequest()
 		if route.runtime.client.Exited() {

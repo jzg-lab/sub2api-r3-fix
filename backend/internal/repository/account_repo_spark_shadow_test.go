@@ -15,10 +15,11 @@ func TestAccountRepoSparkShadowRoundTrip(t *testing.T) {
 	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
 
 	parent := &service.Account{
-		Name:     "parent",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-		Status:   service.StatusActive,
+		Name:        "parent",
+		Credentials: map[string]any{"email": "parent@example.com"},
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
 	}
 	if err := repo.Create(ctx, parent); err != nil {
 		t.Fatalf("create parent: %v", err)
@@ -58,10 +59,11 @@ func TestListShadowsByParent(t *testing.T) {
 
 	// Create parent1 and its spark shadow
 	parent1 := &service.Account{
-		Name:     "list-parent1",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-		Status:   service.StatusActive,
+		Name:        "list-parent1",
+		Credentials: map[string]any{"email": "list-parent1@example.com"},
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
 	}
 	if err := repo.Create(ctx, parent1); err != nil {
 		t.Fatalf("create parent1: %v", err)
@@ -82,10 +84,11 @@ func TestListShadowsByParent(t *testing.T) {
 
 	// Create parent2 and its spark shadow (must NOT appear in parent1's list)
 	parent2 := &service.Account{
-		Name:     "list-parent2",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-		Status:   service.StatusActive,
+		Name:        "list-parent2",
+		Credentials: map[string]any{"email": "list-parent2@example.com"},
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
 	}
 	if err := repo.Create(ctx, parent2); err != nil {
 		t.Fatalf("create parent2: %v", err)
@@ -106,10 +109,11 @@ func TestListShadowsByParent(t *testing.T) {
 
 	// Create 1 unrelated normal account (no parent, global dimension)
 	unrelated := &service.Account{
-		Name:     "unrelated",
-		Platform: service.PlatformOpenAI,
-		Type:     service.AccountTypeOAuth,
-		Status:   service.StatusActive,
+		Name:        "unrelated",
+		Credentials: map[string]any{"email": "unrelated@example.com"},
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
 	}
 	if err := repo.Create(ctx, unrelated); err != nil {
 		t.Fatalf("create unrelated: %v", err)

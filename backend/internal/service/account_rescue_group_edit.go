@@ -11,7 +11,7 @@ var ErrOpenAIRescueGroupLocked = infraerrors.Conflict("OPENAI_RESCUE_GROUP_LOCKE
 // AccountGroupEditRepository checks rescue ownership and commits the whole edit
 // with its group bindings, so a concurrent rescue cannot cause a partial save.
 type AccountGroupEditRepository interface {
-	UpdateWithAccountGroups(context.Context, *Account, []int64, *bool, *bool, *float64) error
+	UpdateWithAccountGroups(context.Context, *Account, []int64, *bool, *bool, *float64, *int) error
 	BulkUpdateWithAccountGroups(context.Context, []int64, AccountBulkUpdate, []int64) (int64, error)
 }
 

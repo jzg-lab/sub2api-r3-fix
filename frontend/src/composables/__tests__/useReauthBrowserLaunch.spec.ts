@@ -28,7 +28,8 @@ function setup() {
     show: true,
     account: {
       id: 41, platform: 'openai', proxy_id: 21,
-      updated_at: '2026-10-02T15:35:17.123456Z'
+      updated_at: '2026-10-02T15:35:17.123456Z',
+      reauthorization_revision: 'fixture-identity-revision'
     } as Account
   })
   const oauth = { sessionId: ref('session-old'), generateAuthUrl: vi.fn() }
@@ -83,7 +84,11 @@ describe('reauthorization browser launch', () => {
     await test.launch()
     expect(test.clear).toHaveBeenCalledOnce()
     expect(test.oauth.generateAuthUrl).toHaveBeenCalledOnce()
-    expect(test.oauth.generateAuthUrl).toHaveBeenCalledWith(21)
+    expect(test.oauth.generateAuthUrl).toHaveBeenCalledWith(21, undefined, {
+      accountId: 41,
+      expectedUpdatedAt: '2026-10-02T15:35:17.123456Z',
+      expectedAuthorizationRevision: 'fixture-identity-revision'
+    })
     expect(api.launchAuthBrowser.mock.calls).toEqual([['session-old'], ['session-new']])
     expect(api.showError).not.toHaveBeenCalled()
     expect(test.launching.value).toBe(false)

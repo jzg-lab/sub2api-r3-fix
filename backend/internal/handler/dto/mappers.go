@@ -264,6 +264,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		AutoPauseOnExpired:      a.AutoPauseOnExpired,
 		CreatedAt:               a.CreatedAt,
 		UpdatedAt:               a.UpdatedAt,
+		ReauthorizationRevision: service.OpenAIOAuthAccountRevision(a),
 		Schedulable:             a.Schedulable,
 		RateLimitedAt:           a.RateLimitedAt,
 		RateLimitResetAt:        a.RateLimitResetAt,

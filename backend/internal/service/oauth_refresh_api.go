@@ -44,6 +44,7 @@ var (
 	errOAuthRefreshAccountRereadFailed = errors.New("oauth refresh account reread failed")
 	errOAuthRefreshAccountStateChanged = errors.New("oauth refresh account state changed")
 	errOAuthRefreshCredentialPersist   = errors.New("oauth refresh credential persistence failed")
+	errOAuthRefreshLockUnavailable     = errors.New("oauth refresh distributed lock unavailable")
 )
 
 type oauthRefreshRequestPathKey struct{}
@@ -203,22 +204,21 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 
 	// 1. 获取分布式锁
 	if api.tokenCache != nil {
-		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
+		// Include acquisition latency in the lease budget, on every consumer
+		// path, not just the background refresher.
+		leaseCtx, cancelLease := context.WithTimeout(ctx, clampRefreshAttemptToLockLease(api.lockTTL, api.lockTTL))
+		defer cancelLease()
+		ctx = leaseCtx
+		lease, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
 		if lockErr != nil {
-			if recovery {
-				return nil, fmt.Errorf("recovery distributed refresh lock unavailable")
-			}
-			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
-			slog.Warn("oauth_refresh_lock_failed_degraded",
-				"account_id", account.ID,
-				"cache_key", cacheKey,
-				"error", lockErr,
-			)
-		} else if !acquired {
+			// A process-local lock cannot protect a rotating credential from
+			// another host. Do not consume it without the configured lock.
+			return nil, errOAuthRefreshLockUnavailable
+		} else if lease == "" {
 			// 锁被其他 worker 持有
 			return &OAuthRefreshResult{LockHeld: true}, nil
 		} else {
-			defer api.releaseRefreshLock(ctx, cacheKey)
+			defer api.releaseRefreshLock(ctx, cacheKey, lease)
 		}
 	}
 
@@ -427,14 +427,14 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 	}, nil
 }
 
-func (api *OAuthRefreshAPI) releaseRefreshLock(parent context.Context, cacheKey string) {
+func (api *OAuthRefreshAPI) releaseRefreshLock(parent context.Context, cacheKey, lease string) {
 	cleanupParent := context.Background()
 	if parent != nil {
 		cleanupParent = context.WithoutCancel(parent)
 	}
 	ctx, cancel := context.WithTimeout(cleanupParent, defaultRefreshLockReleaseTimeout)
 	defer cancel()
-	if err := api.tokenCache.ReleaseRefreshLock(ctx, cacheKey); err != nil {
+	if err := api.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease); err != nil {
 		slog.Warn("oauth_refresh_lock_release_failed", "cache_key", cacheKey, "error", err)
 	}
 }

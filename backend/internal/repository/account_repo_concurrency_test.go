@@ -97,7 +97,7 @@ func TestAccountRepositoryUpdatePreservesConcurrency(t *testing.T) {
 				}
 			}
 
-			err := repo.Update(t.Context(), account)
+			err := repo.UpdateWithAccountBillingSettings(t.Context(), account, nil, nil, nil, &account.Concurrency)
 			require.True(t, *seen)
 			if failure == "none" {
 				require.NoError(t, err)

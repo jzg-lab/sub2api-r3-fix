@@ -150,6 +150,7 @@ export default {
       batchDeleteSkipped: '已跳过 {skipped} 个代理',
       batchDeleteFailed: '批量删除失败',
       deleteBlockedInUse: '该代理已有账号使用，无法删除',
+      historyBindingProtected: '此代理仍被当前或历史 OpenAI 授权记录引用，不能删除或直接修改连接参数。可在编辑中停用或续期；历史绑定和原登录 IP 将继续保留。',
       accountsTitle: '使用该IP的账号',
       accountsEmpty: '暂无账号使用此代理',
       accountsFailed: '获取账号列表失败',

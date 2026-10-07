@@ -265,15 +265,20 @@ func (s *Store) captureLocked(accountID int64, setCookies []string, now time.Tim
 			}
 			continue
 		}
+		capturedAt := now
 		if old, exists := accountJar.Entries[name]; exists {
-			// 覆写 = LB 换签（TTL 刷新信号）：旧签寿命归档。
-			s.meterDeath(accountID, old.CapturedAt, now)
+			if old.Value == value && now.Before(old.ExpiresAt) {
+				// Renewing the same live cookie is not a new routing signature.
+				capturedAt = old.CapturedAt
+			} else {
+				s.meterDeath(accountID, old.CapturedAt, now)
+			}
 		}
 		accountJar.Entries[name] = Entry{
 			Name:       name,
 			Value:      value,
 			Attributes: strings.Join(parts[1:], ";"),
-			CapturedAt: now,
+			CapturedAt: capturedAt,
 			ExpiresAt:  expires,
 		}
 		s.versions[accountID]++

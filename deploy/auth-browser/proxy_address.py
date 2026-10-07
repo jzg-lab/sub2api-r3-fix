@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -206,7 +207,25 @@ def auth_profile_tag(value):
     return "auth-" + hashlib.sha256(state.encode("ascii")).hexdigest()
 
 
+def prepare_private_directory(value):
+    try:
+        os.makedirs(value, mode=0o700, exist_ok=True)
+        fd = os.open(value, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError("Authorization profile directory is not privately owned.")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise ValueError("Cannot secure authorization profile directory.") from None
+
+
 def main(argv):
+    if len(argv) == 2 and argv[0] == "--private-directory":
+        prepare_private_directory(argv[1])
+        return
     if len(argv) == 4 and argv[0] == "--prune-profiles":
         print(prune_stale_profiles(argv[1], argv[2], argv[3]))
         return

@@ -530,6 +530,7 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 		clear   bool
 		resume  bool
 		dialErr bool
+		auth    bool
 	}{
 		{name: "clear", clear: true},
 		{name: "clear_failed_dial", clear: true, dialErr: true},
@@ -537,6 +538,8 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 		{name: "clear_then_reacquire_failed_dial", clear: true, resume: true, dialErr: true},
 		{name: "target_change", resume: true},
 		{name: "target_change_failed_dial", resume: true, dialErr: true},
+		{name: "oauth_rotation", resume: true, auth: true},
+		{name: "oauth_rotation_failed_dial", resume: true, auth: true, dialErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
@@ -568,6 +571,11 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 				return &openAIWSFakeConn{}, nil
 			}))
 			account := &Account{ID: 997, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			if tc.auth {
+				account.Type = AccountTypeOAuth
+				account.ProxyID = openAITransportTestProxyID()
+				account.Proxy = openAITransportTestProxy()
+			}
 			req := openAIWSAcquireRequest{
 				Account: account, ProxyURL: openAITransportTestRoute(account),
 				WSURL: "wss://example.com/v1/responses",
@@ -575,6 +583,10 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 					"X-Codex-Beta-Features": {"original"},
 				},
 			}
+			if tc.auth {
+				req.Headers.Set("Authorization", "Bearer "+t.Name()+"/before")
+			}
+			expectedCompatibility := normalizeOpenAIWSHandshakeCompatibility(account, req.Headers)
 			ap := pool.getOrCreateAccountPool(account.ID)
 			ap.mu.Lock()
 			ap.lastAcquire = cloneOpenAIWSAcquireRequestPtr(&req)
@@ -597,7 +609,12 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 			}
 			if tc.resume {
 				current := cloneOpenAIWSAcquireRequest(req)
-				current.Headers.Set("X-Codex-Beta-Features", "replacement")
+				if tc.auth {
+					current.Headers.Set("Authorization", "Bearer "+t.Name()+"/after")
+				} else {
+					current.Headers.Set("X-Codex-Beta-Features", "replacement")
+				}
+				expectedCompatibility = normalizeOpenAIWSHandshakeCompatibility(account, current.Headers)
 				ap.mu.Lock()
 				generation := ap.generation
 				ap.mu.Unlock()
@@ -619,17 +636,17 @@ func TestOpenAIWSConnPool_PrewarmStopsObsoleteInFlightBatch(t *testing.T) {
 			require.Equal(t, wantDials, dials.Load(), "remaining old reservations must not dial")
 			ap.mu.Lock()
 			failures, failAt := ap.prewarmFails, ap.prewarmFailAt
-			var betas []string
+			var compatibilities []openAIWSHandshakeCompatibilityKey
 			for _, conn := range ap.conns {
-				betas = append(betas, conn.handshakeCompatibility.betaFeatures)
+				compatibilities = append(compatibilities, conn.handshakeCompatibility)
 			}
 			targetMissing := ap.lastAcquire == nil
 			ap.mu.Unlock()
 			require.Zero(t, failures, "obsolete failures must not suppress the replacement target")
 			require.True(t, failAt.IsZero())
 			require.Equal(t, !tc.resume, targetMissing)
-			for _, beta := range betas {
-				require.Equal(t, "replacement", beta)
+			for _, compatibility := range compatibilities {
+				require.Equal(t, expectedCompatibility, compatibility)
 			}
 			if !tc.dialErr {
 				raw.mu.Lock()
@@ -936,7 +953,7 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	first.Release()
 
 	nextHeaders := stableOpenAIWSIdentityHeadersForTest()
-	nextHeaders.Set("Authorization", "Bearer token-b")
+	nextHeaders.Set("Authorization", headers.Get("Authorization"))
 	nextHeaders.Set("x-codex-turn-metadata", `{"turn_id":"turn-b"}`)
 	nextHeaders.Set(openAICodexRoutingHintHeader, "model=gpt-5.6-codex;tier=priority")
 	second, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
@@ -949,7 +966,121 @@ func TestOpenAIWSConnPool_AcquireReusesSameStableIdentityWithDifferentTurnMetada
 	require.True(t, second.Reused())
 	require.Equal(t, firstConnID, second.ConnID())
 	second.Release()
-	require.Equal(t, 1, dialer.DialCount(), "stable identity match should ignore auth, turn metadata, and soft routing hints")
+	require.Equal(t, 1, dialer.DialCount(), "same authentication and stable identity should ignore turn metadata and soft routing hints")
+}
+
+func TestOpenAIWSConnPool_OAuthRotationIsolatesConnections(t *testing.T) {
+	for _, mode := range []string{"off", "session", "shadow"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+			pool := newOpenAIWSConnPool(cfg)
+			defer pool.Close()
+			dialer := &openAIWSCountingDialer{}
+			pool.setClientDialerForTest(dialer)
+			account := activeCodexFingerprintPoolAccountForTest(132)
+			if mode == "off" {
+				account.Extra[codexFingerprintModeExtraKey] = "off"
+			}
+			if mode == "shadow" {
+				parentID := int64(131)
+				account.ParentAccountID = &parentID
+			}
+			headers := stableOpenAIWSIdentityHeadersForTest()
+			headers.Set("Authorization", "Bearer "+t.Name()+"/before")
+			request := openAIWSAcquireRequest{
+				Account: account, Headers: headers,
+				WSURL: "wss://example.com/v1/responses", ProxyURL: openAITransportTestRoute(account),
+			}
+			first, err := pool.Acquire(context.Background(), request)
+			require.NoError(t, err)
+			oldID := first.ConnID()
+			first.Release()
+
+			next := cloneOpenAIWSAcquireRequest(request)
+			next.Headers.Set("Authorization", "Bearer "+t.Name()+"/after")
+			require.False(t, sameOpenAIWSPrewarmTarget(request, next))
+			next.PreferredConnID = oldID
+			next.ForcePreferredConn = true
+			lease, err := pool.Acquire(context.Background(), next)
+			require.ErrorIs(t, err, errOpenAIWSPreferredConnUnavailable)
+			require.Nil(t, lease)
+
+			next.ForcePreferredConn = false
+			lease, err = pool.Acquire(context.Background(), next)
+			require.NoError(t, err)
+			require.False(t, lease.Reused())
+			require.NotEqual(t, oldID, lease.ConnID())
+			newID := lease.ConnID()
+			lease.Release()
+			next.PreferredConnID = newID
+			lease, err = pool.Acquire(context.Background(), next)
+			require.NoError(t, err)
+			require.True(t, lease.Reused())
+			require.Equal(t, newID, lease.ConnID())
+			lease.Release()
+			require.Equal(t, 2, dialer.DialCount())
+		})
+	}
+}
+
+func TestOpenAIWSConnPool_OAuthRotationWaitsForInFlightConnection(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+	pool := newOpenAIWSConnPool(cfg)
+	t.Cleanup(pool.Close)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{
+		ID: 133, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
+	}
+	request := openAIWSAcquireRequest{
+		Account: account, ProxyURL: openAITransportTestRoute(account),
+		WSURL:   "wss://example.com/v1/responses",
+		Headers: http.Header{"Authorization": {"Bearer " + t.Name() + "/before"}},
+	}
+	first, err := pool.Acquire(t.Context(), request)
+	require.NoError(t, err)
+	defer first.Release()
+	type result struct {
+		lease *openAIWSConnLease
+		err   error
+	}
+	results := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	next := cloneOpenAIWSAcquireRequest(request)
+	next.Headers.Set("Authorization", "Bearer "+t.Name()+"/after")
+	go func() {
+		lease, err := pool.Acquire(ctx, next)
+		results <- result{lease, err}
+	}()
+	select {
+	case outcome := <-results:
+		if outcome.lease != nil {
+			outcome.lease.Release()
+		}
+		t.Fatal("rotated authentication reused or interrupted an in-flight connection")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-first.conn.closedCh:
+		t.Fatal("authentication rotation closed the in-flight connection")
+	default:
+	}
+	first.Release()
+	outcome := <-results
+	require.NoError(t, outcome.err)
+	require.NotNil(t, outcome.lease)
+	defer outcome.lease.Release()
+	require.False(t, outcome.lease.Reused())
+	require.NotEqual(t, first.ConnID(), outcome.lease.ConnID())
+	require.Equal(t, 2, dialer.DialCount())
 }
 
 func TestOpenAIWSConnPool_AcquireDoesNotReuseDifferentStableIdentity(t *testing.T) {

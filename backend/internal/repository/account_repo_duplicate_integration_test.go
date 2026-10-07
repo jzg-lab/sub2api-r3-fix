@@ -48,7 +48,7 @@ func TestCreateWithAccountGroupsPersistsPausedCopyAtomically(t *testing.T) {
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT priority FROM account_groups WHERE account_id = $1 AND group_id = $2", success.ID, group.ID).Scan(&priority))
 	require.Equal(t, 37, priority)
 	var outboxCount int
-	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1", success.ID).Scan(&outboxCount))
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM scheduler_outbox WHERE account_id = $1 AND event_type = 'account_changed'", success.ID).Scan(&outboxCount))
 	require.Equal(t, 1, outboxCount)
 
 	failure := &service.Account{

@@ -170,7 +170,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer fixture-"+credential)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Test-Step", step)
-		response, requestErr := gateway.doOpenAIUpstream(req, route, acc)
+		response, requestErr := gateway.doOpenAIUpstream(req.Context(), req, route, acc)
 		if requestErr != nil {
 			return 0, requestErr
 		}

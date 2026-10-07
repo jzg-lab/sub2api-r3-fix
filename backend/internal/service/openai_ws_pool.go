@@ -84,6 +84,7 @@ type openAIWSAcquireRequest struct {
 
 type openAIWSHandshakeCompatibilityKey struct {
 	proxyRouteDigest    [32]byte
+	authorizationDigest [sha256.Size]byte
 	tlsTransportKey     string
 	betaFeatures        string
 	codexInstallationID string
@@ -2220,11 +2221,15 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 // normalizeOpenAIWSHandshakeCompatibility 计算 WS 连接复用的握手兼容分桶键。
 // machine/指纹收敛移植：Codex 会话身份头进入分桶维度——同一账号池里不同
 // 会话身份的握手不再复用同一条上游连接（upstream 按握手头绑定会话上下文）。
-// 按有效指纹模式分层：off 只比 betaFeatures（与存量行为完全一致）；device 追加
+// OAuth 认证代次独立于指纹模式，避免新凭据复用旧凭据认证的连接。
+// 按有效指纹模式分层：off 不增加会话身份；device 追加
 // installation 维度；session/full/machine 追加全部会话身份维度。
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header, profiles ...*tlsfingerprint.Profile) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+	}
+	if isOpenAIAuthAttemptAccount(account) {
+		key.authorizationDigest = sha256.Sum256([]byte(headers.Get("Authorization")))
 	}
 	if account != nil && account.Proxy != nil {
 		key.proxyRouteDigest = sha256.Sum256([]byte(account.Proxy.URL()))

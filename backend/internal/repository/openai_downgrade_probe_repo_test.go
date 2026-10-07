@@ -60,6 +60,7 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		for _, predicate := range []string{
 			"JOIN accounts a ON a.id = s.account_id",
 			"a.deleted_at IS NULL",
+			"a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $1",
 			"a.platform = 'openai' AND a.type = 'oauth'",
 			"a.parent_account_id IS NULL",
 			"AND s.state <> 'pending_replace'",
@@ -84,7 +85,8 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		require.Equal(t, 2, strings.Count(dueQuery, "'proxy:' || a.proxy_id::text"))
 		require.Contains(t, dueQuery, "recent.proxy_id = a.proxy_id")
 		require.NotContains(t, dueQuery, "p.id = s.current_proxy_id")
-		require.Contains(t, query, "ORDER BY next_probe_at, account_id LIMIT $2")
+		require.Contains(t, query, "ORDER BY first_qualification DESC, next_probe_at, account_id LIMIT $2")
+		require.Equal(t, 2, strings.Count(query, "AND recent.http_status <> 429 THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END"))
 		return nil
 	})
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))

@@ -183,13 +183,16 @@ func TestAdminServiceUpdateAccountAllowsExplicitCodexImportOptIn(t *testing.T) {
 	}}
 	svc := &adminServiceImpl{accountRepo: repo}
 
-	account, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{
+	input := &UpdateAccountInput{
 		Credentials: map[string]any{"access_token": "new-token"},
 		Extra: map[string]any{
 			openAILongContextBillingEnabledKey: true,
 			"import_source":                    "codex_session",
 		},
-	})
+	}
+	// Billing opt-in is a metadata edit, not an unproved credential rotation.
+	repo.account.Credentials = input.Credentials
+	account, err := svc.UpdateAccount(context.Background(), 1, input)
 
 	require.NoError(t, err)
 	require.Equal(t, true, account.Extra[openAILongContextBillingEnabledKey])

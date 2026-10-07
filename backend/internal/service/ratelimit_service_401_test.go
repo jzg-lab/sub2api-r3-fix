@@ -35,6 +35,19 @@ func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, error
 	return nil
 }
 
+func (r *rateLimitAccountRepoStub) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	if !matchesAuthFailureTestAccount(r.accountsByID[before.ID], before) {
+		return false, nil
+	}
+	var err error
+	if change.ErrorMessage != nil {
+		err = r.SetError(ctx, before.ID, *change.ErrorMessage)
+	} else if change.CooldownUntil != nil {
+		err = r.SetTempUnschedulable(ctx, before.ID, *change.CooldownUntil, change.CooldownReason)
+	}
+	return err == nil, err
+}
+
 func (r *rateLimitAccountRepoStub) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	r.tempCalls++
 	r.lastTempID = id
@@ -168,6 +181,7 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		Type:        AccountTypeOAuth,
 		Credentials: map[string]any{"refresh_token": "rt-mother"},
 	}
+	mother.Credentials["access_token"] = "fixture-parent"
 	repo.accountsByID[parentID] = mother
 
 	shadowParent := parentID
@@ -180,7 +194,8 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		// 影子不持凭据:GetCredential("refresh_token") == ""
 	}
 
-	shouldDisable := service.HandleUpstreamError(context.Background(), shadow, 401, http.Header{}, []byte("unauthorized"))
+	attempt := snapshotOpenAIRequestAccount(context.Background(), shadow, "Bearer "+mother.GetOpenAIAccessToken(), repo)
+	shouldDisable := service.HandleUpstreamError(context.Background(), attempt, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
 	require.Equal(t, 0, repo.setErrorCalls, "spark shadow must not be permanently disabled on a parent-token 401")
@@ -209,6 +224,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401InvalidatorError(t *testin
 		},
 	}
 
+	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
@@ -254,6 +270,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401DoesNotOverwriteCredential
 		},
 	}
 
+	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
@@ -281,6 +298,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 			},
 		}
 
+		repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
@@ -304,6 +322,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 			},
 		}
 
+		repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)

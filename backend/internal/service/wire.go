@@ -252,7 +252,6 @@ func ProvideOpenAIDowngradeProbeRunner(
 			return err == nil && len(logs) > 0
 		})
 	}
-	runner.Start()
 	return runner
 }
 
@@ -366,6 +365,17 @@ func ProvideAccountUsageService(
 	return service
 }
 
+func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config,
+	hostInfo PluginHostInfo, rateLimitService *RateLimitService, accountRepo AccountRepository,
+) *PluginManager {
+	manager := NewPluginManager(repo, encryptor, cfg, hostInfo)
+	manager.rateLimitService = rateLimitService
+	if source, ok := accountRepo.(OpenAIRescueTerminatedAccountLister); ok {
+		manager.SetRescueTerminatedAccountSource(source.ListOpenAIRescueTerminatedAccountIDs)
+	}
+	return manager
+}
+
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
@@ -392,6 +402,9 @@ func ProvideAccountTestService(
 	service.agentIdentityWS = openAIGatewayService
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
+	if openAIGatewayService != nil {
+		service.openAITokenProvider = openAIGatewayService.openAITokenProvider
+	}
 	return service
 }
 
@@ -959,6 +972,8 @@ func ProvideAPIKeyService(
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
+	ProvideOpenAIAuthBrowserLauncher,
+	NewAuthPendingIdentityService,
 	ProvideAuthService,
 	NewPasskeyService,
 	NewUserService,
@@ -1006,6 +1021,7 @@ var ProviderSet = wire.NewSet(
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,
 	ProvideOpenAIDowngradeProbeRunner,
+	ProvideOpenAIRescueLane,
 	ProvideOpenAIQuotaAutoResetService,
 	ProvideGrokQuotaService,
 	ProvideCNProviderQuotaService,
@@ -1063,7 +1079,7 @@ var ProviderSet = wire.NewSet(
 	NewTotpService,
 	NewErrorPassthroughService,
 	ProvideTLSFingerprintProfileService,
-	NewPluginManager,
+	ProvidePluginManager,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,
 	ProvideSystemOperationLockService,
@@ -1179,4 +1195,39 @@ func ProvideChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.
 	}
 	aggregator.Start()
 	return aggregator
+}
+
+// Configure all probe/rescue callbacks before either background loop starts.
+func ProvideOpenAIRescueLane(accounts AccountRepository, store OpenAIDowngradeProbeStore, settings *SettingService, tests *AccountTestService, plugin *PluginManager, runner *OpenAIDowngradeProbeRunner, rateLimit *RateLimitService) *OpenAIRescueLane {
+	lane := NewOpenAIRescueLane(accounts, store, func() OpenAIRescueLaneConfig {
+		return ResolveOpenAIRescueLaneConfig(settings.GetOpenAIRescueLaneSettings(context.Background()))
+	}, NewOpenAIRescueLaneSeedAdapter(tests))
+	runner.SetRescueLane(lane)
+	runner.SetPluginBridgeSource(plugin.BridgeStatus)
+	runner.SetPluginRoundTrip(plugin.RoundTripOpenAIOAuth)
+	lane.SetPluginProbePauseSync(plugin.SyncRescueProbePauses)
+	if controls, ok := store.(OpenAIDowngradeProbeControlStore); ok {
+		lane.SetSchedulingGate(controls.CanRunOpenAIDowngradeProbe)
+	}
+	if health, ok := store.(OpenAIProbeHealthLister); ok {
+		lane.SetProbeStateSource(func(ctx context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+			snapshots, err := health.ListOpenAIProbeHealthSnapshots(ctx, ids)
+			if err != nil {
+				return nil, err
+			}
+			states := make(map[int64]OpenAIProbeHealthSnapshot, len(snapshots))
+			for _, snapshot := range snapshots {
+				states[snapshot.AccountID] = snapshot
+			}
+			return states, nil
+		})
+	}
+	lane.SetBridgeSource(plugin.BridgeStatus)
+	lane.SetNeedleTrigger(runner.ConfirmOpenAIRescueAccount)
+	if writer, ok := store.(OpenAIQuotaCutEventWriter); ok {
+		rateLimit.SetOpenAIQuotaCutEventWriter(writer)
+	}
+	runner.Start()
+	lane.Start()
+	return lane
 }

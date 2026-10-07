@@ -509,14 +509,14 @@ func TestPullForFreshSign(t *testing.T) {
 	now := time.Now()
 	st := prober.NewState(2)
 	st.NextProbeAt = now.Add(4 * time.Minute)
-	pullForFreshSign(st, now.Add(-30*time.Second), now)
+	pullForFreshSign(st, now, now)
 	if !st.NextProbeAt.Equal(now.Add(postCaptureProbeDelay)) {
 		t.Fatalf("新签应拉近到 +5s: %v", st.NextProbeAt)
 	}
 	// 不推远：下一针本就更近，保持。
 	st2 := prober.NewState(3)
 	st2.NextProbeAt = now.Add(2 * time.Second)
-	pullForFreshSign(st2, now.Add(-30*time.Second), now)
+	pullForFreshSign(st2, now, now)
 	if !st2.NextProbeAt.Equal(now.Add(2 * time.Second)) {
 		t.Fatalf("只拉近不推远: %v", st2.NextProbeAt)
 	}
@@ -667,7 +667,7 @@ func TestPullForFreshSignRespectsBackoff(t *testing.T) {
 	st.NextProbeAt = after.Add(4 * time.Minute) // 期满后的远排期（如稀疏档）
 	fresh2 := after.Add(-10 * time.Second)      // 比 KnownSignAt 更新的新签
 	pullForFreshSign(st, fresh2, after)
-	if !st.NextProbeAt.Equal(after.Add(postCaptureProbeDelay)) {
+	if !st.NextProbeAt.Equal(fresh2.Add(postCaptureProbeDelay)) {
 		t.Fatalf("退避期满后的新签应恢复拉近: %v", st.NextProbeAt)
 	}
 }
@@ -736,7 +736,7 @@ func TestProbeCycleInFlightGuard(t *testing.T) {
 	release()                                    // 放行第一轮，随后守卫应解除
 	deadline := time.Now().Add(20 * time.Second) // 复探链含两次 2s 落定等待，放宽
 	for {
-		if _, busy := srv.probeRunning.Load(60); !busy {
+		if _, busy := srv.probeRunning.Load(int64(60)); !busy {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -782,7 +782,7 @@ func TestProbeOwnCaptureDoesNotFeedPull(t *testing.T) {
 // ---------- v0.3.3 考卷同形 ----------
 
 // TestProbeBareShapeOnNoneEffort：probe_reasoning_effort=none 时回退旧裸形态
-// （不带 reasoning/instructions/parallel_tool_calls/include）。
+// （不带 reasoning/parallel_tool_calls/include；instructions 始终必需）。
 func TestProbeBareShapeOnNoneEffort(t *testing.T) {
 	up := newFakeUpstream(t, "pass")
 	store := cookiestore.New()
@@ -803,7 +803,10 @@ func TestProbeBareShapeOnNoneEffort(t *testing.T) {
 		t.Fatalf("应判 pass，得 %s（答案 %q）", state.LastVerdict, state.LastAnswer)
 	}
 	body := fmt.Sprint(up.seenBody.Load())
-	for _, ban := range []string{`"reasoning"`, `"instructions"`, `"parallel_tool_calls"`, `"include"`} {
+	if !strings.Contains(body, `"instructions":""`) {
+		t.Error("Codex OAuth requires instructions even without reasoning")
+	}
+	for _, ban := range []string{`"reasoning"`, `"parallel_tool_calls"`, `"include"`} {
 		if strings.Contains(body, ban) {
 			t.Errorf("裸形态不应包含 %s: %s", ban, body)
 		}

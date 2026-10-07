@@ -260,7 +260,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewDataManagementHandler,
 	admin.NewBackupHandler,
 	admin.NewOAuthHandler,
-	admin.NewOpenAIOAuthHandler,
+	ProvideOpenAIOAuthHandler,
 	admin.NewGeminiOAuthHandler,
 	admin.NewAntigravityOAuthHandler,
 	admin.NewGrokOAuthHandler,
@@ -294,3 +294,9 @@ var ProviderSet = wire.NewSet(
 	ProvideAdminHandlers,
 	ProvideHandlers,
 )
+
+func ProvideOpenAIOAuthHandler(oauth *service.OpenAIOAuthService, adminService service.AdminService, quota *service.OpenAIQuotaService, rateLimit *service.RateLimitService, launcher *service.OpenAIAuthBrowserLauncher) *admin.OpenAIOAuthHandler {
+	h := admin.NewOpenAIOAuthHandler(oauth, adminService, quota, rateLimit)
+	h.SetAuthBrowserLauncher(launcher)
+	return h
+}

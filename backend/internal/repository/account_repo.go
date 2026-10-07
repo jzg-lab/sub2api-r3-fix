@@ -130,12 +130,19 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
-	tx, err := r.client.Tx(ctx)
-	if err != nil {
-		return err
+	txClient := clientFromContext(ctx, r.client)
+	var tx *dbent.Tx
+	if dbent.TxFromContext(ctx) == nil {
+		var err error
+		tx, err = txClient.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			txClient = tx.Client()
+		}
 	}
-	defer func() { _ = tx.Rollback() }()
-	txClient := tx.Client()
 
 	staged := *account
 	staged.Extra = maps.Clone(account.Extra)
@@ -148,8 +155,10 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	if err := enqueueSchedulerOutbox(ctx, txClient, service.SchedulerOutboxEventAccountChanged, &staged.ID, nil, buildSchedulerGroupPayload(staged.GroupIDs)); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	*account = staged
 	return nil
@@ -504,7 +513,7 @@ func (r *accountRepository) ListCRSAccountIDs(ctx context.Context) (map[string]i
 }
 
 func (r *accountRepository) Update(ctx context.Context, account *service.Account) error {
-	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier, nil, false)
+	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier, nil, false, nil)
 }
 
 // UpdateWithAccountBillingSettings applies an admin account edit while
@@ -516,8 +525,9 @@ func (r *accountRepository) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
+	concurrency *int,
 ) error {
-	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, nil, true)
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, nil, true, concurrency)
 }
 
 func (r *accountRepository) updateAccount(
@@ -528,6 +538,7 @@ func (r *accountRepository) updateAccount(
 	explicitRateMultiplier *float64,
 	groupIDs *[]int64,
 	preserveScheduling bool,
+	explicitConcurrency *int,
 ) error {
 	if account == nil {
 		return nil
@@ -568,6 +579,7 @@ func (r *accountRepository) updateAccount(
 		explicitRateSyncEnabled,
 		explicitRateMultiplier,
 		preserveScheduling,
+		explicitConcurrency,
 	)
 	if err != nil {
 		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
@@ -607,6 +619,7 @@ func (r *accountRepository) updateLockedAccount(
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
 	preserveScheduling bool,
+	explicitConcurrency *int,
 ) (*dbent.Account, error) {
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
@@ -626,7 +639,6 @@ func (r *accountRepository) updateLockedAccount(
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(extra).
-		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
@@ -638,6 +650,10 @@ func (r *accountRepository) updateLockedAccount(
 		builder.SetSchedulable(account.Schedulable)
 	}
 
+	// Background refreshes and stale account snapshots do not own this setting.
+	if explicitConcurrency != nil {
+		builder.SetConcurrency(*explicitConcurrency)
+	}
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
 	}
@@ -2454,6 +2470,7 @@ func (r *accountRepository) clearPlatformRateLimitIfObserved(ctx context.Context
 		Where(
 			dbaccount.IDEQ(id),
 			dbaccount.PlatformEQ(platform),
+			dbaccount.TypeEQ(service.AccountTypeOAuth),
 			dbaccount.RateLimitedAtEQ(observedLimitedAt),
 			dbaccount.RateLimitResetAtEQ(observedResetAt),
 		).
@@ -3422,7 +3439,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 	if rows > 0 && contextTx == nil {
-		shouldSync := false
+		// Limits affect slot admission immediately, including when a limit is
+		// lowered below the number of in-flight requests.
+		shouldSync := updates.Concurrency != nil
 		if updates.Status != nil && (*updates.Status == service.StatusError || *updates.Status == service.StatusDisabled) {
 			shouldSync = true
 		}

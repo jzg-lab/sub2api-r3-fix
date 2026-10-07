@@ -898,6 +898,9 @@ func TestAPIContracts(t *testing.T) {
 						"table_page_size_options": [10, 20, 50, 100],
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"min_codex_version": "",
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
@@ -1214,6 +1217,9 @@ func TestAPIContracts(t *testing.T) {
 					"ops_metrics_interval_seconds": 60,
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"allow_ungrouped_key_scheduling": false,
 					"backend_mode_enabled": false,
 					"enable_fingerprint_unification": true,
@@ -1479,7 +1485,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 	settingRepo := newStubSettingRepo()
 	settingService := service.NewSettingService(settingRepo, cfg)
 
-	adminService := service.NewAdminService(userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	adminService := service.NewAdminService(userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	authHandler := handler.NewAuthHandler(cfg, nil, userService, settingService, nil, redeemService, nil, nil)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, nil, nil)
@@ -1889,6 +1895,7 @@ func (s *stubAccountRepo) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
+	concurrency *int,
 ) error {
 	return errors.New("not implemented")
 }

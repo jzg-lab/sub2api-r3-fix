@@ -3,14 +3,13 @@ package service
 import (
 	"context"
 	"errors"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIProbeRecoveryUsesAtomicEntry(t *testing.T) {
+func TestOpenAIProbeCooldownUsesAtomicEntry(t *testing.T) {
 	for _, track := range []struct{ state, mode string }{
 		{OpenAIDowngradeStateOnDuty, "normal"},
 		{OpenAIDowngradeStateOnDuty, "qualification"},
@@ -34,18 +33,13 @@ func TestOpenAIProbeRecoveryUsesAtomicEntry(t *testing.T) {
 					downgradeProbeStoreStub: base, accountRepo: repo, commitErr: commitErr,
 				}
 				store.afterCommit = func() {
-					require.NotNil(t, store.observed.RateLimitClear)
+					require.Nil(t, store.observed.RateLimitClear)
 					require.Zero(t, repo.snapshotCalls)
-					account.RateLimitedAt, account.RateLimitResetAt = nil, nil
 				}
 				runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
 				runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
-					require.Equal(t, &resetAt, account.RateLimitResetAt)
-					require.Zero(t, store.commits)
-					return OpenAIDowngradeProbeResult{
-						AccountID: 7, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
-						TransportOK: true, AnswerCorrect: true, ReasoningTokens: downgradeProbeIntPtr(1500),
-					}
+					t.Fatal("a persisted cooldown cannot be cleared by an early probe")
+					return OpenAIDowngradeProbeResult{}
 				}
 				deadline := now.Add(time.Hour)
 				state := OpenAIDowngradeProbeState{
@@ -56,10 +50,8 @@ func TestOpenAIProbeRecoveryUsesAtomicEntry(t *testing.T) {
 				before := state
 				require.ErrorIs(t, runner.processStateAtomic(context.Background(), &state, now), commitErr)
 				require.Equal(t, 1, store.commits)
-				require.Equal(t, &OpenAIDowngradeRateLimitObservation{
-					LimitedAt: limitedAt, ResetAt: resetAt,
-				}, store.observed.RateLimitClear)
-				require.True(t, store.observed.ChangesAccount())
+				require.Nil(t, store.observed.RateLimitClear)
+				require.False(t, store.observed.ChangesAccount())
 				require.Nil(t, store.observed.RateLimitResetAt)
 				require.Empty(t, repo.openAIRateLimitClears, "never call the live nontransactional releaser")
 				require.Zero(t, base.eventCalls)
@@ -70,15 +62,15 @@ func TestOpenAIProbeRecoveryUsesAtomicEntry(t *testing.T) {
 						recovered++
 					}
 				}
-				require.Equal(t, 1, recovered)
+				require.Zero(t, recovered)
+				require.Equal(t, &limitedAt, account.RateLimitedAt)
+				require.Equal(t, &resetAt, account.RateLimitResetAt)
+				require.Zero(t, repo.snapshotCalls)
 				if commitErr != nil {
 					require.Equal(t, before, state)
-					require.Equal(t, &limitedAt, account.RateLimitedAt)
-					require.Equal(t, &resetAt, account.RateLimitResetAt)
-					require.Zero(t, repo.snapshotCalls)
 				} else {
-					require.Nil(t, account.RateLimitResetAt)
-					require.Equal(t, 1, repo.snapshotCalls)
+					require.False(t, state.NextProbeAt.Before(resetAt))
+					require.Nil(t, state.LastProbeAt)
 				}
 			})
 		}

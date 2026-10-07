@@ -5,6 +5,7 @@ import { adminAPI } from '@/api/admin'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 
 export interface OpenAITokenInfo {
+  reauthorization_proof?: string
   proxy_id?: number
   access_token?: string
   refresh_token?: string
@@ -62,7 +63,8 @@ export function useOpenAIOAuth() {
   // Generate auth URL for OpenAI OAuth
   const generateAuthUrl = async (
     proxyId?: number | null,
-    redirectUri?: string
+    redirectUri?: string,
+    reauthorization?: { accountId: number; expectedUpdatedAt: string; expectedAuthorizationRevision?: string }
   ): Promise<boolean> => {
     const version = ++requestVersion
     authUrl.value = ''
@@ -82,6 +84,13 @@ export function useOpenAIOAuth() {
       if (validProxyId(proxyId)) payload.proxy_id = proxyId
       if (redirectUri) {
         payload.redirect_uri = redirectUri
+      }
+      if (reauthorization) {
+        payload.account_id = reauthorization.accountId
+        payload.expected_updated_at = reauthorization.expectedUpdatedAt
+        if (reauthorization.expectedAuthorizationRevision) {
+          payload.expected_authorization_revision = reauthorization.expectedAuthorizationRevision
+        }
       }
 
       const response = await adminAPI.accounts.generateAuthUrl(

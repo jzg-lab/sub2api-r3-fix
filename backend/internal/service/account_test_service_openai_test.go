@@ -100,6 +100,14 @@ func (r *openAIAccountTestRepo) SetError(_ context.Context, id int64, errorMsg s
 	return nil
 }
 
+func (r *openAIAccountTestRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	if !matchesAuthFailureTestAccount(r.accountsByID[before.ID], before) || change.ErrorMessage == nil {
+		return false, nil
+	}
+	err := r.SetError(ctx, before.ID, *change.ErrorMessage)
+	return err == nil, err
+}
+
 func TestAccountTestService_OpenAISuccessPersistsSnapshotFromHeaders(t *testing.T) {
 	ctx, recorder := newTestContext()
 
@@ -519,6 +527,7 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 		Credentials: map[string]any{"access_token": "test-token"},
 	}
 
+	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
 	require.Error(t, err)
 	require.Equal(t, account.ID, repo.setErrorID)

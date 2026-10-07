@@ -52,7 +52,11 @@ export function useReauthBrowserLaunch(
           if (!refreshed && reason && recoverableReasons.has(reason)) {
             refreshed = true
             clearCallback()
-            const generated = await oauth.generateAuthUrl(operation.account.proxy_id)
+            const generated = await oauth.generateAuthUrl(operation.account.proxy_id, undefined, {
+              accountId: operation.account.id,
+              expectedUpdatedAt: operation.expectedUpdatedAt,
+              expectedAuthorizationRevision: operation.account.reauthorization_revision
+            })
             if (!generated || !session.isCurrent(operation)) return
             sessionId = oauth.sessionId.value
             if (sessionId) continue

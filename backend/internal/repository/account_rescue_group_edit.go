@@ -13,8 +13,8 @@ import (
 
 var _ service.AccountGroupEditRepository = (*accountRepository)(nil)
 
-func (r *accountRepository) UpdateWithAccountGroups(ctx context.Context, account *service.Account, groupIDs []int64, probeEnabled, rateSyncEnabled *bool, rateMultiplier *float64) error {
-	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, &groupIDs, true)
+func (r *accountRepository) UpdateWithAccountGroups(ctx context.Context, account *service.Account, groupIDs []int64, probeEnabled, rateSyncEnabled *bool, rateMultiplier *float64, concurrency *int) error {
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, &groupIDs, true, concurrency)
 }
 
 func (r *accountRepository) BulkUpdateWithAccountGroups(ctx context.Context, ids []int64, updates service.AccountBulkUpdate, groupIDs []int64) (int64, error) {

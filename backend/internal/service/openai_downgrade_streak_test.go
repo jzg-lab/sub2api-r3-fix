@@ -88,7 +88,7 @@ func TestProbe429StreakResetAndSaturation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
-			runner := NewOpenAIDowngradeProbeRunner(store, nil, nil, nil, nil, nil)
+			runner := NewOpenAIDowngradeProbeRunner(store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
 			state := &OpenAIDowngradeProbeState{AccountID: 7, Consecutive429s: tc.before}
 			handled, err := runner.applyRateLimitDeferral(context.Background(), nil, state, tc.result, now)
 			require.NoError(t, err)

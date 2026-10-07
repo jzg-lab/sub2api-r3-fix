@@ -75,13 +75,13 @@ func (u *openAIImagesFailoverHTTPUpstream) Do(_ *http.Request, _ string, account
 	u.accountIDs = append(u.accountIDs, accountID)
 	u.mu.Unlock()
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: http.StatusBadGateway,
 		Header: http.Header{
-			"Content-Type": []string{"text/event-stream"},
+			"Content-Type": []string{"application/json"},
 			"X-Request-Id": []string{"req_img_failover"},
 		},
 		Body: io.NopCloser(bytes.NewBufferString(
-			"data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"image backend unavailable\"}}\n\n",
+			`{"error":{"type":"server_error","code":"server_error","message":"image backend unavailable"}}`,
 		)),
 	}, nil
 }

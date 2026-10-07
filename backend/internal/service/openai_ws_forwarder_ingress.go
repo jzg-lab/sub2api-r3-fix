@@ -769,6 +769,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if buildHdrErr != nil {
 		return fmt.Errorf("build ws headers: %w", buildHdrErr)
 	}
+	account = snapshotOpenAIRequestAccount(ctx, account, wsHeaders.Get("Authorization"), s.accountRepo)
 	baseAcquireReq := openAIWSAcquireRequest{
 		Account: account,
 		WSURL:   wsURL,

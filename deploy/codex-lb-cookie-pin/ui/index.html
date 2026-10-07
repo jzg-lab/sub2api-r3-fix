@@ -97,8 +97,8 @@
 </fieldset>
 
 <div class="btns">
-  <button class="primary" id="save">保存</button>
-  <button id="test">测试已保存配置</button>
+  <button class="primary" id="save" disabled>保存</button>
+  <button id="test" disabled>测试已保存配置</button>
   <button id="refresh">刷新状态</button>
 </div>
 <div class="msg" id="msg"></div>
@@ -115,26 +115,32 @@
     var m = /(?:^|#)bridge_token=([^&]+)/.exec(location.hash);
     return m ? decodeURIComponent(m[1]) : "";
   })();
-  var pending = {};   // request_id -> {resolve, reject, timer}
+  var pending = Object.create(null); // request_id -> {resolve, reject, timer}
   var seq = 0;
-  var savedConfig = null;
+  var loadedConfig = null;
+  var actionPending = false;
+  var statusPending = false;
+  var statusTimer;
+  var refreshTimer;
 
-  function post(type, params, timeoutMs) {
+  function envelope(type, fields) {
+    return Object.assign({}, fields, {
+      source: "sub2api-plugin-ui",
+      bridge_token: BRIDGE,
+      type: type
+    });
+  }
+  function post(type, fields, timeoutMs) {
     var id = "ui-" + (++seq);
     return new Promise(function (resolve, reject) {
       pending[id] = {
         resolve: resolve, reject: reject,
         timer: setTimeout(function () {
           delete pending[id];
-          reject(new Error("请求超时: " + type));
+          reject(new Error("请求超时，结果尚未确认: " + type));
         }, timeoutMs || 8000)
       };
-      parent.postMessage(Object.assign({
-        source: "sub2api-plugin-ui",
-        bridge_token: BRIDGE,
-        type: type,
-        request_id: id
-      }, params || {}), "*");
+      parent.postMessage(Object.assign(envelope(type, fields), { request_id: id }), "*");
     });
   }
 
@@ -144,15 +150,15 @@
     var data = event.data;
     if (!data || data.source !== "sub2api-plugin-host") return;
     if (data.bridge_token !== BRIDGE) return;
+    if (typeof data.request_id !== "string") return;
     var entry = pending[data.request_id];
     if (!entry) return;
     clearTimeout(entry.timer);
     delete pending[data.request_id];
-    if (data.ok) {
-      entry.resolve(data);
-    } else {
-      var message = typeof data.error === "string" ? data.error : data.error && data.error.message;
-      entry.reject(new Error(message || data.result && data.result.message || "请求失败"));
+    if (data.ok === true) entry.resolve(data);
+    else {
+      var error = typeof data.error === "string" ? data.error : data.error && data.error.message;
+      entry.reject(new Error(error || data.result && data.result.message || "请求失败"));
     }
   });
 
@@ -163,16 +169,21 @@
     el.className = "msg " + (isErr ? "err" : "ok");
   }
   function resize() {
-    post("ui.resize", { height: document.documentElement.scrollHeight }, 3000).catch(function () {});
+    parent.postMessage(envelope("ui.resize", { height: document.documentElement.scrollHeight }), "*");
+  }
+  function updateButtons() {
+    $("save").disabled = !loadedConfig || actionPending;
+    $("test").disabled = !loadedConfig || actionPending;
   }
 
   function formToConfig() {
+    if (!loadedConfig) throw new Error("配置尚未加载，不能保存");
     var names = $("cookie_names").value.split(",").map(function (s) { return s.trim().toLowerCase(); })
       .filter(function (s) { return s.length > 0; });
     var drops = $("drop_account_ids").value.split(",").map(function (s) { return parseInt(s.trim(), 10); })
       .filter(function (n) { return !isNaN(n) && n > 0; });
-    // Preserve saved settings that this form does not expose.
-    return Object.assign({}, savedConfig, {
+    // Saving replaces the whole configuration; retain fields this UI does not edit.
+    return Object.assign({}, loadedConfig, {
       enabled: $("enabled").checked,
       cookie_names: names,
       default_ttl_seconds: parseInt($("default_ttl_seconds").value, 10) || 240,
@@ -189,9 +200,9 @@
     });
   }
   function configToForm(cfg) {
-    if (!cfg) return;
-    savedConfig = Object.assign({}, cfg);
-    delete savedConfig.drop_account_ids;
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("宿主返回的配置无效");
+    loadedConfig = Object.assign({}, cfg);
+    delete loadedConfig.drop_account_ids;
     if (typeof cfg.enabled === "boolean") $("enabled").checked = cfg.enabled;
     if (cfg.cookie_names) $("cookie_names").value = cfg.cookie_names.join(",");
     if (cfg.default_ttl_seconds) $("default_ttl_seconds").value = cfg.default_ttl_seconds;
@@ -206,6 +217,7 @@
     if (cfg.probe_backoff_seconds) $("probe_backoff_seconds").value = cfg.probe_backoff_seconds;
     // drop_account_ids 是一次性字段，规范化回包里不会有；表单保存成功后清空。
     $("drop_account_ids").value = "";
+    updateButtons();
   }
 
   function esc(s) {
@@ -264,30 +276,39 @@
   }
 
   function pullStatus() {
+    if (statusPending) return;
+    statusPending = true;
     post("plugin.status", {}, 6000).then(function (resp) {
       var r = resp.result || resp;
       var sj = r.status_json || (r.status && r.status.status_json);
       if (sj) renderStatus(sj);
-    }).catch(function () { $("status").textContent = "状态不可用（插件未启用或宿主不支持）"; });
+    }).catch(function () { $("status").textContent = "状态不可用（插件未启用或宿主不支持）"; })
+      .finally(function () { statusPending = false; });
   }
 
   $("save").addEventListener("click", function () {
-    if (!savedConfig) {
-      say("保存失败: 配置尚未加载，请重新打开配置页", true);
-      return;
-    }
-    post("config.save", { config: formToConfig() }).then(function (resp) {
+    if (!loadedConfig || actionPending) return;
+    var config = formToConfig();
+    actionPending = true;
+    updateButtons();
+    // Allow time for the host's administrator step-up challenge.
+    post("config.save", { config: config }, 120000).then(function (resp) {
       configToForm(resp.config);      // 用宿主规范化后的配置回填
-      say("已保存（手动重摇已执行）");
-      setTimeout(pullStatus, 400);
-    }).catch(function (e) { say("保存失败: " + e.message, true); });
+      say(config.drop_account_ids ? "已保存（手动重摇已执行）" : "已保存");
+      refreshTimer = setTimeout(pullStatus, 400);
+    }).catch(function (e) { say("保存失败: " + e.message, true); })
+      .finally(function () { actionPending = false; updateButtons(); });
   });
   $("test").addEventListener("click", function () {
-    post("config.test", {}).then(function (resp) {
+    if (!loadedConfig || actionPending) return;
+    actionPending = true;
+    updateButtons();
+    post("config.test", {}, 120000).then(function (resp) {
       var r = resp.result || {};
       say("测试通过: " + (r.message || "ok"));
       if (r.status_json) renderStatus(r.status_json);
-    }).catch(function (e) { say("测试失败: " + e.message, true); });
+    }).catch(function (e) { say("测试失败: " + e.message, true); })
+      .finally(function () { actionPending = false; updateButtons(); });
   });
   $("refresh").addEventListener("click", pullStatus);
 
@@ -298,8 +319,17 @@
     say("配置已加载");
   }).catch(function (e) { say("配置加载失败: " + e.message, true); });
   pullStatus();
-  setInterval(pullStatus, 5000);
+  statusTimer = setInterval(pullStatus, 5000);
   window.addEventListener("resize", resize);
+  window.addEventListener("pagehide", function () {
+    clearInterval(statusTimer);
+    clearTimeout(refreshTimer);
+    Object.keys(pending).forEach(function (id) {
+      clearTimeout(pending[id].timer);
+      pending[id].reject(new Error("配置页面已关闭"));
+      delete pending[id];
+    });
+  });
 })();
 </script>
 </body>

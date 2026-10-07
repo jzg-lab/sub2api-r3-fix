@@ -1105,7 +1105,7 @@ func TestOpenAIDowngradeProbeBodyFailurePreservesHTTPEvidence(t *testing.T) {
 					require.Equal(t, []time.Time{*result.RateLimitResetAt}, repo.rateLimitedResets)
 				} else {
 					require.Equal(t, openAIDowngrade429StreakThreshold, state.Consecutive429s)
-					require.Empty(t, repo.rateLimitedResets)
+					require.Equal(t, []time.Time{state.NextProbeAt}, repo.rateLimitedResets)
 				}
 			}
 		})
@@ -2120,8 +2120,8 @@ func TestOpenAIDowngradeSolFallbackAstraRecheckAdvancesSchedule(t *testing.T) {
 				HTTPStatus: http.StatusTooManyRequests, RateLimitResetAt: &resetAt,
 				RateLimitWindow: "7d_window",
 			},
-			minDelay: openAIDowngradeRateLimitRecheckInterval,
-			maxDelay: openAIDowngradeRateLimitRecheckInterval * 5 / 4},
+			minDelay: resetAt.Sub(now),
+			maxDelay: resetAt.Sub(now) + openAIDowngradeRateLimitResetStagger*3/2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			proxyID := int64(3)
@@ -2496,11 +2496,11 @@ func TestProbe429WithResetTimeDefersToResetPoint(t *testing.T) {
 	require.Equal(t, 2, state.ConsecutiveSuccesses, "deferral must not touch counters")
 	require.Equal(t, 0, state.ConsecutiveFailures)
 	require.Equal(t, 1, store.eventCalls)
-	require.Empty(t, repo.rateLimitedResets, "reset distance alone does not identify the window")
+	require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets, "an unknown window still imposes a deadline")
 	require.Equal(t, "unknown_window", store.eventDetails[0]["class"])
 }
 
-func TestProbe429ResetTimeFloorsAndCaps(t *testing.T) {
+func TestProbe429ResetTimeFloorWithoutEarlyCap(t *testing.T) {
 	newFixture := func(resetAt time.Time) (*OpenAIDowngradeProbeRunner, *OpenAIDowngradeProbeState, time.Time) {
 		now := time.Date(2026, 9, 15, 8, 0, 0, 0, time.UTC)
 		account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
@@ -2529,15 +2529,13 @@ func TestProbe429ResetTimeFloorsAndCaps(t *testing.T) {
 	require.True(t, !state.NextProbeAt.Before(lo) && !state.NextProbeAt.After(hi),
 		"floored backoff %v outside window [%v, %v]", state.NextProbeAt, lo, hi)
 
-	// 重置点离谱远（90 天）：cap 到 now+8d 防脏数据把账号钉死；r17 起排期
-	// 取 min(cap+错峰, 每日稀疏复查)——复查侧（22-27.5h）恒早于 8d，账号
-	// 每天仍有一针检测官方/手动提前重置，cap 只钳持有语义不再钉死探针节奏。
+	// A valid distant deadline must not be truncated into an early retry.
 	runner, state, now = newFixture(nowAdd(time.Date(2026, 9, 15, 8, 0, 0, 0, time.UTC), 90*24*time.Hour))
 	require.NoError(t, runner.processState(context.Background(), state, now))
-	lo = now.Add(openAIDowngradeRateLimitRecheckInterval)
-	hi = now.Add(time.Duration(float64(openAIDowngradeRateLimitRecheckInterval) * 1.25))
+	lo = now.Add(90*24*time.Hour + openAIDowngradeRateLimitResetStagger/2)
+	hi = now.Add(90*24*time.Hour + openAIDowngradeRateLimitResetStagger*3/2)
 	require.True(t, !state.NextProbeAt.Before(lo) && !state.NextProbeAt.After(hi),
-		"capped backoff %v outside daily recheck window [%v, %v]", state.NextProbeAt, lo, hi)
+		"backoff %v outside deadline window [%v, %v]", state.NextProbeAt, lo, hi)
 }
 
 func nowAdd(base time.Time, d time.Duration) time.Time { return base.Add(d) }
@@ -2588,12 +2586,7 @@ func TestProbe429StormEscalatesAndClearsOnSuccess(t *testing.T) {
 	require.Equal(t, 1, store.eventCalls, "no new storm event after reset")
 }
 
-// r17 稀疏复查五轨回归（2026-09-16 用户裁定「重置不是固定的，有时候可以
-// 手动重置」）：长持有每天最多一针随机复查、5h 短窗行为不变、近重置点收敛、
-// 持有中的无信息 429 不进风暴闸、复查 200 按 CAS 清除持有回岗。
-func TestProbe429SparseRecheckLongHoldGetsDailyCadence(t *testing.T) {
-	// 7d 周限、重置点 7 天后（cap 8d 内不截断）：min 规则取复查侧（22-27.5h），
-	// 不再死等重置点；周限持有照常单调延长（SetRateLimitedIfLater）。
+func TestProbe429LongHoldNeverGetsEarlyDailyRecheck(t *testing.T) {
 	now := time.Date(2026, 9, 16, 22, 0, 0, 0, time.UTC)
 	resetAt := now.Add(7 * 24 * time.Hour)
 	store := &downgradeProbeStoreStub{}
@@ -2605,17 +2598,16 @@ func TestProbe429SparseRecheckLongHoldGetsDailyCadence(t *testing.T) {
 			RateLimitResetAt: &resetAt, RateLimitWindow: "7d_window"}, now)
 	require.True(t, handled)
 	require.NoError(t, err)
-	recheckLo := now.Add(openAIDowngradeRateLimitRecheckInterval)
-	recheckHi := now.Add(time.Duration(float64(openAIDowngradeRateLimitRecheckInterval) * 1.25))
+	recheckLo := resetAt.Add(openAIDowngradeRateLimitResetStagger / 2)
+	recheckHi := resetAt.Add(openAIDowngradeRateLimitResetStagger * 3 / 2)
 	require.True(t, !state.NextProbeAt.Before(recheckLo) && !state.NextProbeAt.After(recheckHi),
-		"long-hold recheck %v outside daily window [%v, %v]", state.NextProbeAt, recheckLo, recheckHi)
-	require.Equal(t, true, store.eventDetails[0]["recheck"], "recheck-scheduled deferral must be labeled")
+		"long-hold recheck %v outside reset window [%v, %v]", state.NextProbeAt, recheckLo, recheckHi)
+	require.NotEqual(t, true, store.eventDetails[0]["recheck"])
 	require.Len(t, repo.rateLimitedResets, 1, "7d window must still extend the account hold")
 }
 
 func TestProbe429ShortWindowCadenceUnchangedByRecheck(t *testing.T) {
-	// 重置点 1 小时后（忙时窗口语义）：复查侧（≥22h）恒晚于重置点+错峰，
-	// min 规则取重置点一侧，r15g 行为不变——短窗本就该在重置后立刻回来。
+	// Short windows retain their existing post-deadline probe stagger.
 	now := time.Date(2026, 9, 16, 22, 0, 0, 0, time.UTC)
 	resetAt := now.Add(time.Hour)
 	store := &downgradeProbeStoreStub{}
@@ -2635,8 +2627,7 @@ func TestProbe429ShortWindowCadenceUnchangedByRecheck(t *testing.T) {
 }
 
 func TestProbe429RecheckConvergesTowardResetPoint(t *testing.T) {
-	// 重置点落在复查窗内（now+23h）：min 两侧都在 [22h, 27.5h] 包络内——
-	// 复查抽得早取复查、晚则取重置点+错峰，无空档也无双重等待。
+	// A reset near the old daily recheck boundary still forbids early probes.
 	now := time.Date(2026, 9, 16, 22, 0, 0, 0, time.UTC)
 	resetAt := now.Add(23 * time.Hour)
 	runner := NewOpenAIDowngradeProbeRunner(&downgradeProbeStoreStub{}, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
@@ -2646,8 +2637,8 @@ func TestProbe429RecheckConvergesTowardResetPoint(t *testing.T) {
 			RateLimitResetAt: &resetAt, RateLimitWindow: "unknown_window"}, now)
 	require.True(t, handled)
 	require.NoError(t, err)
-	lo := now.Add(openAIDowngradeRateLimitRecheckInterval)
-	hi := now.Add(time.Duration(float64(openAIDowngradeRateLimitRecheckInterval) * 1.25))
+	lo := resetAt.Add(openAIDowngradeRateLimitResetStagger / 2)
+	hi := resetAt.Add(openAIDowngradeRateLimitResetStagger * 3 / 2)
 	require.True(t, !state.NextProbeAt.Before(lo) && !state.NextProbeAt.After(hi),
 		"converged backoff %v outside envelope [%v, %v]", state.NextProbeAt, lo, hi)
 }
@@ -2659,16 +2650,15 @@ func TestProbe429UnknownWindowFarResetHoldsAccount(t *testing.T) {
 		window string
 		delay  time.Duration
 		hold   bool
-		capped bool
 	}{
-		{"unknown_capped", "unknown_window", 30 * 24 * time.Hour, true, true},
-		{"unknown_far", "unknown_window", 6 * 24 * time.Hour, true, false},
-		{"unknown_near", "unknown_window", 2 * time.Hour, false, false},
-		{"unknown_at_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance, false, false},
-		{"unknown_over_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance + time.Nanosecond, true, false},
-		{"short_window", "5h_window", 4 * time.Hour, false, false},
-		{"short_window_far", "5h_window", 6 * 24 * time.Hour, false, false},
-		{"weekly_near", "7d_window", time.Hour, true, false},
+		{"unknown_distant", "unknown_window", 30 * 24 * time.Hour, true},
+		{"unknown_far", "unknown_window", 6 * 24 * time.Hour, true},
+		{"unknown_near", "unknown_window", 2 * time.Hour, false},
+		{"unknown_at_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance, false},
+		{"unknown_over_boundary", "unknown_window", openAIDowngradeRateLimitQuotaLikeDistance + time.Nanosecond, true},
+		{"short_window", "5h_window", 4 * time.Hour, false},
+		{"short_window_far", "5h_window", 6 * 24 * time.Hour, false},
+		{"weekly_near", "7d_window", time.Hour, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &downgradeProbeStoreStub{}
@@ -2683,23 +2673,15 @@ func TestProbe429UnknownWindowFarResetHoldsAccount(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, store.eventDetails, 1)
 			require.Equal(t, tc.hold, store.eventDetails[0]["quota_like"])
-			if tc.hold {
-				expectedReset := resetAt
-				if tc.capped {
-					expectedReset = now.Add(openAIDowngradeRateLimitResetCap)
-				}
-				require.Equal(t, []time.Time{expectedReset}, repo.rateLimitedResets)
-			} else {
-				require.Empty(t, repo.rateLimitedResets)
-			}
-			require.Equal(t, tc.capped, store.eventDetails[0]["capped"] == true)
+			require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
+			require.NotEqual(t, true, store.eventDetails[0]["capped"])
 		})
 	}
 }
 
 func TestProbe429WhileHeldSkipsStormGate(t *testing.T) {
 	// 账号已在限流持有中（reset 未到）再吃无时间信息 429：不进 1 小时风暴闸、
-	// 不计数（限流非降智证据），锚定持有走稀疏复查。未持有账号保持原语义。
+	// 不计数（限流非降智证据），锚定持有截止时间。未持有账号保持原语义。
 	now := time.Date(2026, 9, 16, 22, 0, 0, 0, time.UTC)
 	limitedAt := now.Add(-time.Hour)
 	heldUntil := now.Add(14 * 24 * time.Hour)
@@ -2713,10 +2695,10 @@ func TestProbe429WhileHeldSkipsStormGate(t *testing.T) {
 	handled, err := runner.applyRateLimitDeferral(context.Background(), held, state, result, now)
 	require.True(t, handled)
 	require.NoError(t, err)
-	lo := now.Add(openAIDowngradeRateLimitRecheckInterval)
-	hi := now.Add(time.Duration(float64(openAIDowngradeRateLimitRecheckInterval) * 1.25))
+	lo := heldUntil.Add(openAIDowngradeRateLimitResetStagger / 2)
+	hi := heldUntil.Add(openAIDowngradeRateLimitResetStagger * 3 / 2)
 	require.True(t, !state.NextProbeAt.Before(lo) && !state.NextProbeAt.After(hi),
-		"held-account no-info 429 must use sparse recheck, got %v", state.NextProbeAt)
+		"held-account no-info 429 must wait until reset, got %v", state.NextProbeAt)
 	require.Zero(t, state.Consecutive429s, "held no-info 429 must not feed the storm counter")
 	require.Equal(t, "recheck_streak_suppressed", store.eventDetails[0]["class"])
 
@@ -2779,7 +2761,11 @@ func TestProbe429WhileHeldPreservesNearReset(t *testing.T) {
 			require.Equal(t, 2, state.ConsecutiveSuccesses)
 			require.Equal(t, 1, state.ConsecutiveFailures)
 			require.Equal(t, 1, store.saveCalls)
-			require.Empty(t, repo.rateLimitedResets)
+			if tc.held {
+				require.Empty(t, repo.rateLimitedResets)
+			} else {
+				require.Equal(t, []time.Time{state.NextProbeAt}, repo.rateLimitedResets)
+			}
 			require.Empty(t, repo.openAIRateLimitClears)
 			require.Equal(t, now.Add(tc.delay), *account.RateLimitResetAt)
 		})
@@ -2850,10 +2836,11 @@ func TestProbeOpenAI429ResetTimeParsesCodexHeaders(t *testing.T) {
 	require.NotNil(t, resetAt)
 	require.InDelta(t, time.Now().Add(72*time.Hour).Unix(), resetAt.Unix(), 5)
 
-	body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":1790000000}}`)
+	futureReset := time.Now().Add(48 * time.Hour).Unix()
+	body := []byte(fmt.Sprintf(`{"error":{"type":"usage_limit_reached","resets_at":%d}}`, futureReset))
 	resetAt = probeOpenAI429ResetTime(http.Header{}, body)
 	require.NotNil(t, resetAt)
-	require.Equal(t, int64(1790000000), resetAt.Unix())
+	require.Equal(t, futureReset, resetAt.Unix())
 
 	require.Nil(t, probeOpenAI429ResetTime(http.Header{}, []byte(`{"error":{"type":"rate_limited"}}`)))
 }
@@ -2892,21 +2879,9 @@ func TestProbe429WindowClassificationRequiresExplicitEvidence(t *testing.T) {
 				NextProbeAt: now,
 			}
 			require.NoError(t, runner.processState(context.Background(), state, now))
-			if tc.hold {
-				require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
-			} else {
-				require.Empty(t, repo.rateLimitedResets)
-			}
-			// r17 稀疏复查：远重置点（复查侧恒早于重置点+错峰）不死等重置点，
-			// 取每日随机复查；近重置点仍取重置点一侧（After(resetAt)）。
-			if tc.delay > 27*time.Hour {
-				recheckLo := now.Add(openAIDowngradeRateLimitRecheckInterval)
-				recheckHi := now.Add(time.Duration(float64(openAIDowngradeRateLimitRecheckInterval) * 1.25))
-				require.True(t, !state.NextProbeAt.Before(recheckLo) && !state.NextProbeAt.After(recheckHi),
-					"far reset must use sparse recheck, got %v", state.NextProbeAt)
-			} else {
-				require.True(t, state.NextProbeAt.After(resetAt))
-			}
+			require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
+			require.Equal(t, tc.hold, store.eventDetails[0]["quota_like"])
+			require.True(t, state.NextProbeAt.After(resetAt))
 			expected := tc.window
 			if expected != "5h_window" && expected != "7d_window" {
 				expected = "unknown_window"
@@ -3073,10 +3048,10 @@ func TestProbe429AllTracksUseSharedDeferral(t *testing.T) {
 				require.Empty(t, store.proxyChanges)
 				require.Empty(t, repo.schedulableCalls)
 				require.Empty(t, repo.fallbackModes)
-				if window == "7d_window" || window == "unknown_window" {
+				if window != "" {
 					require.Equal(t, []time.Time{resetAt}, repo.rateLimitedResets)
 				} else {
-					require.Empty(t, repo.rateLimitedResets)
+					require.Equal(t, []time.Time{state.NextProbeAt}, repo.rateLimitedResets)
 				}
 			})
 		}
@@ -3171,7 +3146,7 @@ func TestProbe429PersistenceErrorsPropagate(t *testing.T) {
 			} else {
 				store.saveErr = writeErr
 			}
-			runner := NewOpenAIDowngradeProbeRunner(store, nil, nil, nil, nil, nil)
+			runner := NewOpenAIDowngradeProbeRunner(store, &downgradeProbeAccountRepoStub{}, nil, nil, nil, nil)
 			handled, err := runner.applyRateLimitDeferral(context.Background(), nil,
 				&OpenAIDowngradeProbeState{AccountID: 1}, result, now)
 			require.True(t, handled)

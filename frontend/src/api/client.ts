@@ -4,6 +4,12 @@
  */
 
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig, AxiosResponse } from 'axios'
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    sensitiveNoReplay?: boolean
+  }
+}
 import type { ApiResponse } from '@/types'
 import { getLocale } from '@/i18n'
 import {
@@ -80,6 +86,7 @@ apiClient.interceptors.request.use(
 
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => {
+    if (response.config.sensitiveNoReplay) response.config.data = undefined
     // Unwrap standard API response format { code, message, data }
     const apiResponse = response.data as ApiResponse<unknown>
     if (apiResponse && typeof apiResponse === 'object' && 'code' in apiResponse) {
@@ -87,6 +94,9 @@ apiClient.interceptors.response.use(
         // Success - return the data portion
         response.data = apiResponse.data
       } else {
+        if (response.config.sensitiveNoReplay) {
+          return Promise.reject(new Error('Automatic authorization did not complete'))
+        }
         // API error
         const resp = apiResponse as unknown as Record<string, unknown>
         return Promise.reject({
@@ -101,6 +111,12 @@ apiClient.interceptors.response.use(
     return response
   },
   async (error: AxiosError<ApiResponse<unknown>>) => {
+    if (error.config?.sensitiveNoReplay) {
+      error.config.data = undefined
+      // Interactive login input must never be replayed by a session refresh
+      // or escape inside an Axios request/error object.
+      return Promise.reject(new Error('Automatic authorization did not complete'))
+    }
     // Request cancellation: keep the original axios cancellation error so callers can ignore it.
     // Otherwise we'd misclassify it as a generic "network error".
     if (error.code === 'ERR_CANCELED' || axios.isCancel(error)) {

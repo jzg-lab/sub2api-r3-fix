@@ -136,6 +136,64 @@ func TestOpenAIProbeAtomicCommitPublishesOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestOpenAIProbeCommitBindsObservedTokenRotation(t *testing.T) {
+	for _, mode := range []string{"rotation", "policy", "login_ip", "proxy", "disabled", "mixed_results", "unobserved"} {
+		t.Run(mode, func(t *testing.T) {
+			proxyID := int64(7)
+			before := &Account{
+				ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Status: StatusActive, Schedulable: true, ProxyID: &proxyID,
+				Credentials: map[string]any{"access_token": t.Name() + "/access", "refresh_token": t.Name() + "/refresh"},
+			}
+			before.UpdatedAt = time.Now().Add(-time.Minute)
+			stage := newOpenAIProbeStaging(&OpenAIDowngradeProbeRunner{}, before, &OpenAIDowngradeProbeState{})
+			attempt := snapshotOAuthRefreshAccount(before)
+			attempt.Credentials["access_token"] = "fixture-probe-rotated"
+			attempt.Credentials["refresh_token"] = "fixture-probe-refresh"
+			attempt.UpdatedAt = before.UpdatedAt.Add(time.Second)
+			switch mode {
+			case "policy":
+				attempt.Credentials["model_mapping"] = map[string]any{"fixture": "changed"}
+			case "login_ip":
+				attempt.Extra = shallowCopyMap(attempt.Extra)
+				if attempt.Extra == nil {
+					attempt.Extra = map[string]any{}
+				}
+				attempt.Extra[OpenAIOAuthLoginExitIPExtraKey] = "192.0.2.45"
+			case "proxy":
+				id := int64(999)
+				attempt.ProxyID = &id
+			case "disabled":
+				attempt.Status = StatusDisabled
+			case "mixed_results":
+				require.NoError(t, stage.RecordOpenAIDowngradeProbe(context.Background(), &OpenAIDowngradeProbeResult{
+					AccountID: before.ID, authAttempt: before,
+				}))
+			}
+			result := &OpenAIDowngradeProbeResult{AccountID: before.ID, authAttempt: attempt}
+			if mode == "unobserved" {
+				result.authAttempt = nil
+			}
+			err := stage.RecordOpenAIDowngradeProbe(context.Background(), result)
+			switch mode {
+			case "rotation":
+				require.NoError(t, err)
+				require.Equal(t, openAIProbeInputHash(attempt), stage.mutation.expectedInputHash)
+				require.Equal(t, attempt.UpdatedAt, stage.mutation.ExpectedAccountUpdatedAt)
+				require.Equal(t, attempt.Credentials, stage.account.Credentials)
+				require.Nil(t, stage.mutation.Results[0].authAttempt, "mutation must not retain credentials")
+			case "unobserved":
+				require.NoError(t, err)
+				require.Equal(t, openAIProbeInputHash(before), stage.mutation.expectedInputHash)
+			default:
+				require.ErrorIs(t, err, ErrOpenAIProbeStale)
+				require.Equal(t, openAIProbeInputHash(before), stage.mutation.expectedInputHash)
+			}
+			require.NotEqual(t, before.Credentials, attempt.Credentials)
+		})
+	}
+}
+
 func TestOpenAIProbeQualificationUsesDirectRoute(t *testing.T) {
 	now := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
 	oldProxyID, availableProxyID := int64(3), int64(5)

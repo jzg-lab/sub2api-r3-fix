@@ -165,19 +165,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	antigravityGatewayService := service.NewAntigravityGatewayService(accountRepository, gatewayCache, schedulerSnapshotService, antigravityTokenProvider, rateLimitService, httpUpstream, settingService, internal500CounterCache)
 	geminiMessagesCompatService := service.NewGeminiMessagesCompatService(accountRepository, groupRepository, gatewayCache, schedulerSnapshotService, geminiTokenProvider, rateLimitService, httpUpstream, antigravityGatewayService, configConfig)
 	opsSystemLogSink := service.ProvideOpsSystemLogSink(opsRepository)
+	openAIDowngradeProbeStore := repository.NewOpenAIDowngradeProbeRepository(db)
 	authCacheInvalidationOutboxRepository := repository.NewAuthCacheInvalidationOutboxRepository(db)
 	authCacheInvalidationWorker := service.ProvideAuthCacheInvalidationWorker(authCacheInvalidationOutboxRepository, apiKeyCache, apiKeyService)
-	openAIDowngradeProbeRepository := repository.NewOpenAIDowngradeProbeRepository(db)
-	// 降额基线告警事件写入探针事件流（quota_cut_detected），面板同流展示。
-	rateLimitService.SetOpenAIQuotaCutEventWriter(openAIDowngradeProbeRepository)
-	// 相位B（2026-09-21）：票表与探针同 repo——探针顺带采票（类型断言取得
-	// 票能力，常开=观察哨，能看到本站账号票长度走势）；gateway 侧活票注入
-	// 默认不接线：上游 2026-09-19 前后修复了 292 票跨账号重放，同账号换新
-	// 2026-10-02 打票线整体删除（r17ax）：turn-state 活票注入与采票观察哨
-	// 一并退役——注入 r17ai 起已停用，票表已 DROP（migration 248），
-	// turn-state 跨账号剥离守卫保留。
-	openAIDowngradeProbe := service.ProvideOpenAIDowngradeProbeRunner(openAIDowngradeProbeRepository, accountRepository, proxyRepository, openAITokenProvider, httpUpstream, tlsFingerprintProfileService, usageLogRepository)
-	opsService := service.ProvideOpsService(opsRepository, settingRepository, configConfig, accountRepository, userRepository, concurrencyService, gatewayService, openAIGatewayService, geminiMessagesCompatService, antigravityGatewayService, opsSystemLogSink, openAIDowngradeProbeRepository, settingService, authCacheInvalidationWorker, apiKeyService)
+	opsService := service.ProvideOpsService(opsRepository, settingRepository, configConfig, accountRepository, userRepository, concurrencyService, gatewayService, openAIGatewayService, geminiMessagesCompatService, antigravityGatewayService, opsSystemLogSink, openAIDowngradeProbeStore, settingService, authCacheInvalidationWorker, apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, opsService, settingService)
 	redeemHandler := handler.NewRedeemHandler(redeemService)
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionService)
@@ -201,7 +192,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	adminAccountRepository := repository.NewAdminAccountRepository(client, db, schedulerCache)
 	proxyExitInfoProber := repository.NewProxyExitInfoProber(configConfig)
 	proxyLatencyCache := repository.NewProxyLatencyCache(redisClient)
-	adminService := service.NewAdminService(userRepository, adminGroupRepository, adminAccountRepository, proxyRepository, apiKeyRepository, redeemCodeRepository, userGroupRateRepository, userRPMCache, billingCacheService, proxyExitInfoProber, proxyLatencyCache, apiKeyAuthCacheInvalidator, client, settingService, subscriptionService, userSubscriptionRepository, privacyClientFactory, openAIGatewayService, affiliateService, compositeModelRouteRepository, compositeRouteResolver, channelService)
+	openAIDowngradeProbeRunner := service.ProvideOpenAIDowngradeProbeRunner(openAIDowngradeProbeStore, accountRepository, proxyRepository, openAITokenProvider, httpUpstream, tlsFingerprintProfileService, usageLogRepository)
+	adminService := service.NewAdminService(userRepository, adminGroupRepository, adminAccountRepository, proxyRepository, apiKeyRepository, redeemCodeRepository, userGroupRateRepository, userRPMCache, billingCacheService, proxyExitInfoProber, proxyLatencyCache, apiKeyAuthCacheInvalidator, client, settingService, subscriptionService, userSubscriptionRepository, privacyClientFactory, openAIGatewayService, affiliateService, compositeModelRouteRepository, compositeRouteResolver, channelService, openAIDowngradeProbeRunner)
 	adminUserHandler := admin.NewUserHandler(adminService, concurrencyService, serviceUserPlatformQuotaRepository, billingCache, totpService, userService, settingService)
 	groupCapacityService := service.NewGroupCapacityService(accountRepository, groupRepository, concurrencyService, sessionLimitCache, rpmCache)
 	groupHandler := admin.NewGroupHandler(adminService, dashboardService, groupCapacityService)
@@ -214,64 +206,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	accountUsageService := service.ProvideAccountUsageService(accountRepository, usageLogRepository, claudeUsageFetcher, geminiQuotaService, antigravityQuotaFetcher, grokQuotaFetcher, grokQuotaService, openAIQuotaService, usageCache, identityCache, tlsFingerprintProfileService, openAIGatewayService)
 	pluginRepository := repository.NewPluginRepository(db)
 	pluginHostInfo := providePluginHostInfo(buildInfo)
-	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
-	if stoppedAccounts, ok := accountRepository.(service.OpenAIRescueTerminatedAccountLister); ok {
-		pluginManager.SetRescueTerminatedAccountSource(stoppedAccounts.ListOpenAIRescueTerminatedAccountIDs)
-	}
-	// 救治区插件桥：健康快照 API 附带 plugin_bridge 区块（PluginManager 30s
-	// 轮询缓存 + 2min 离线判定）。桥读失败在源侧吞掉，不影响账号健康列表。
-	openAIDowngradeProbe.SetPluginBridgeSource(pluginManager.BridgeStatus)
+	pluginManager := service.ProvidePluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo, rateLimitService, accountRepository)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
-	// 救治区编排器（r17ax Phase 3）：三入口（自动钩子/手动端点/对账清扫）
-	// 汇入 EnterRescue。config 走 settings 热更新（openai_rescue_lane 键，
-	// 每轮清扫/每次判死提交重读，改库即生效；键缺失 = 安全缺省关态）；
-	// 种子 = TestAccountConnection 内存直调（design 0.1，经插件 Forward 流
-	// 喂探针模板）。
-	openAIRescueLane := service.NewOpenAIRescueLane(
-		accountRepository,
-		openAIDowngradeProbeRepository,
-		func() service.OpenAIRescueLaneConfig {
-			return service.ResolveOpenAIRescueLaneConfig(
-				settingService.GetOpenAIRescueLaneSettings(context.Background()))
-		},
-		service.NewOpenAIRescueLaneSeedAdapter(accountTestService),
-	)
-	openAIDowngradeProbe.SetRescueLane(openAIRescueLane)
-	openAIRescueLane.SetPluginProbePauseSync(pluginManager.SyncRescueProbePauses)
-	// 调度闸预检（r17ba）：与 ListDue 同源的 controls 闸（manual_paused/
-	// owned_error fail-closed）。唯一用途=清扫补进候选过滤——手动暂停的
-	// 判死号不被强拉入区（r17an 静置语义）。在区号已无任何开调度路径
-	//（用户裁定：入区即关调度，唯一开调度点=考证通过后的资格完成），
-	// 面板暂停被完整尊重，不再撞 DB 触发器刷 WARN。
-	if controlStore, ok := openAIDowngradeProbeRepository.(service.OpenAIDowngradeProbeControlStore); ok {
-		openAIRescueLane.SetSchedulingGate(controlStore.CanRunOpenAIDowngradeProbe)
-	}
-	// 对账清扫：批量探针状态经健康快照查询取（与账号健康列表同源）。
-	// ListOpenAIProbeHealthSnapshots 是窄可选能力（OpenAIProbeHealthLister），
-	// 与健康列表同款启动期断言；断言失败时清扫退化为只做标记侧自愈。
-	if healthLister, ok := openAIDowngradeProbeRepository.(service.OpenAIProbeHealthLister); ok {
-		openAIRescueLane.SetProbeStateSource(func(ctx context.Context, accountIDs []int64) (map[int64]service.OpenAIProbeHealthSnapshot, error) {
-			snapshots, err := healthLister.ListOpenAIProbeHealthSnapshots(ctx, accountIDs)
-			if err != nil {
-				return nil, err
-			}
-			states := make(map[int64]service.OpenAIProbeHealthSnapshot, len(snapshots))
-			for _, snapshot := range snapshots {
-				states[snapshot.AccountID] = snapshot
-			}
-			return states, nil
-		})
-	}
-	// 撤调/恢复桥证据（task 3.5）：与插件桥缓存同源（30s 轮询 + 离线沿用
-	// 最近成功缓存）；清扫据此撤调度/回暖恢复。
-	openAIRescueLane.SetBridgeSource(pluginManager.BridgeStatus)
-	// 救治号资格针走插件钉扎传输（r17bb）：1217 实证被 Cookie 钉扎救回的号
-	// 在裸 LB 路上 4 针全 200+错答——针不与真实流量同路就结构性测不出救治
-	// 效果。仅带救治标记的账号改道；插件未启用/未处理回退原直连。
-	openAIDowngradeProbe.SetPluginRoundTrip(pluginManager.RoundTripOpenAIOAuth)
-	// Automatic confirmation preserves manual pause and customer isolation.
-	openAIRescueLane.SetNeedleTrigger(openAIDowngradeProbe.ConfirmOpenAIRescueAccount)
-	openAIRescueLane.Start()
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)
@@ -284,8 +220,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	imageStorageSettingService := service.ProvideImageStorageSettingService(settingRepository, secretEncryptor, backupService, imageStorageFactory, configConfig)
 	backupHandler := admin.NewBackupHandler(backupService, userService, imageStorageSettingService)
 	oAuthHandler := admin.NewOAuthHandler(oAuthService)
-	openAIOAuthHandler := admin.NewOpenAIOAuthHandler(openAIOAuthService, adminService, openAIQuotaService, rateLimitService)
-	openAIOAuthHandler.SetAuthBrowserLauncher(service.ProvideOpenAIAuthBrowserLauncher(configConfig, proxyRepository, authPendingIdentityService))
+	openAIAuthBrowserLauncher := service.ProvideOpenAIAuthBrowserLauncher(configConfig, proxyRepository, authPendingIdentityService)
+	openAIOAuthHandler := handler.ProvideOpenAIOAuthHandler(openAIOAuthService, adminService, openAIQuotaService, rateLimitService, openAIAuthBrowserLauncher)
 	geminiOAuthHandler := admin.NewGeminiOAuthHandler(geminiOAuthService)
 	antigravityOAuthHandler := admin.NewAntigravityOAuthHandler(antigravityOAuthService)
 	tokenRefreshService := service.ProvideTokenRefreshService(accountRepository, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, compositeTokenCacheInvalidator, schedulerCache, configConfig, tempUnschedCache, privacyClientFactory, proxyRepository, oAuthRefreshAPI, openAIGatewayService)
@@ -354,8 +290,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	auditLogRepository := repository.NewAuditLogRepository(db)
 	auditLogService := service.ProvideAuditLogService(auditLogRepository, settingService)
 	auditLogHandler := admin.NewAuditLogHandler(auditLogService, totpService)
-
-	openAIProbeHealthHandler := admin.NewOpenAIProbeHealthHandler(openAIDowngradeProbe)
+	openAIProbeHealthHandler := admin.NewOpenAIProbeHealthHandler(openAIDowngradeProbeRunner)
 	upstreamBillingProbeService := service.ProvideUpstreamBillingProbeService(accountRepository, accountTestService, settingService, leaderLockCache, db)
 	ollamaCloudUsageService := service.ProvideOllamaCloudUsageService(accountRepository, httpUpstream, settingService, secretEncryptor, configConfig, leaderLockCache, db)
 	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, openAIOperationsHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, openAIProbeHealthHandler, upstreamBillingProbeService, ollamaCloudUsageService)
@@ -419,13 +354,14 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	proxyExpiryService := service.ProvideProxyExpiryService(proxyRepository)
 	subscriptionExpiryService := service.ProvideSubscriptionExpiryService(userSubscriptionRepository, settingRepository, notificationEmailService, leaderLockCache, db)
 	batchImageWorkerRuntime := service.ProvideBatchImageWorkerRuntime(batchImageRepository, accountRepository, batchImageQueue, usageBillingRepository, usageLogRepository, batchImageModelPricingResolver, apiKeyAuthCacheInvalidator, configConfig)
+	openAIRescueLane := service.ProvideOpenAIRescueLane(accountRepository, openAIDowngradeProbeStore, settingService, accountTestService, pluginManager, openAIDowngradeProbeRunner, rateLimitService)
 	scheduledTestRunnerService := service.ProvideScheduledTestRunnerService(scheduledTestPlanRepository, scheduledTestService, accountTestService, rateLimitService, configConfig)
 	paymentOrderExpiryService := service.ProvidePaymentOrderExpiryService(paymentService, leaderLockCache, db)
 	channelMonitorQuotaFetcher := service.NewChannelMonitorQuotaFetcher(accountUsageService, cnProviderQuotaService, cnProviderBalanceService, accountRepository, configConfig)
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbe, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbeRunner, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -525,6 +461,18 @@ func provideCleanup(
 		}
 
 		parallelSteps := []cleanupStep{
+			{"OpenAIDowngradeProbe", func() error {
+				if openAIDowngradeProbe != nil {
+					openAIDowngradeProbe.Stop()
+				}
+				return nil
+			}},
+			{"OpenAIRescueLane", func() error {
+				if openAIRescueLane != nil {
+					openAIRescueLane.Stop()
+				}
+				return nil
+			}},
 			{"OpenAIOperationsService", func() error {
 				if openAIOperations != nil {
 					openAIOperations.Stop()
@@ -772,18 +720,6 @@ func provideCleanup(
 			{"UpstreamBillingProbeService", func() error {
 				if upstreamBillingProbe != nil {
 					upstreamBillingProbe.Stop()
-				}
-				return nil
-			}},
-			{"OpenAIDowngradeProbeRunner", func() error {
-				if openAIDowngradeProbe != nil {
-					openAIDowngradeProbe.Stop()
-				}
-				return nil
-			}},
-			{"OpenAIRescueLane", func() error {
-				if openAIRescueLane != nil {
-					openAIRescueLane.Stop()
 				}
 				return nil
 			}},

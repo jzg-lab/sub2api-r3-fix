@@ -1139,6 +1139,7 @@ export interface OllamaCloudUsageSettings {
 }
 
 export interface Account {
+  reauthorization_revision?: string
   id: number
   name: string
   notes?: string | null

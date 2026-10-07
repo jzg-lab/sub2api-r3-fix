@@ -26,8 +26,22 @@ func (r *openAIStream403AccountRepo) SetError(context.Context, int64, string) er
 
 type openAIAuthPolicyAccountRepo struct {
 	AccountRepository
+	current       *Account
 	tempCalls     int
 	setErrorCalls int
+}
+
+func (r *openAIAuthPolicyAccountRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	if !matchesAuthFailureTestAccount(r.current, before) {
+		return false, nil
+	}
+	var err error
+	if change.ErrorMessage != nil {
+		err = r.SetError(ctx, before.ID, *change.ErrorMessage)
+	} else if change.CooldownUntil != nil {
+		err = r.SetTempUnschedulable(ctx, before.ID, *change.CooldownUntil, change.CooldownReason)
+	}
+	return err == nil, err
 }
 
 func (r *openAIAuthPolicyAccountRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
@@ -163,6 +177,7 @@ func TestOpenAIHTTPAuthMessagesUseExistingStatusPolicies(t *testing.T) {
 			Credentials: map[string]any{"refresh_token": "refreshable"}}
 		body := []byte(`{"error":{"message":"account is disabled"}}`)
 
+		repo.current = snapshotOAuthRefreshAccount(account)
 		require.False(t, isOpenAIHTTPUpstreamAccessStateError(http.StatusUnauthorized, "", body))
 		require.True(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusUnauthorized, nil, body))
 		require.Zero(t, repo.setErrorCalls)

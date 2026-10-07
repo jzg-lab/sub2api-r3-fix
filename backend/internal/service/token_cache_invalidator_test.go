@@ -29,11 +29,11 @@ func (s *geminiTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 	return s.deleteErr
 }
 
-func (s *geminiTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error) {
-	return true, nil
+func (s *geminiTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (string, error) {
+	return "test-lease", nil
 }
 
-func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string) error {
+func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, _ string) error {
 	return nil
 }
 

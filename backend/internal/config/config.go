@@ -2370,6 +2370,7 @@ func setDefaults() {
 	viper.SetDefault("idempotency.cleanup_batch_size", 500)
 
 	// Gateway
+	viper.SetDefault("gateway.auth_browser_launcher", "")
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)

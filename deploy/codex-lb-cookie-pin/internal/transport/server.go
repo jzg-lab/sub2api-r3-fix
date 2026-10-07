@@ -44,17 +44,19 @@ const (
 // 指纹与业务流量一致（同 URL/头/代理）。含 Authorization，只存内存、绝不
 // 进日志或状态面板。
 type probeTemplate struct {
-	Method         string
-	URL            string
-	Host           string
-	Headers        http.Header // 深拷贝（含 Authorization）；Cookie 头剔除、探针时现合并
-	OriginalCookie string      // 业务请求原始 Cookie 头（罐内 Cookie 按需合并其上）
-	ProxyURL       string
-	Model          string
-	SeenAt         time.Time
-	CreatedAt      time.Time
-	Generation     uint64
-	CookieVersion  uint64 // Per-attempt snapshot; only written on the cycle's copy.
+	Method             string
+	URL                string
+	Host               string
+	Headers            http.Header // 深拷贝（含 Authorization）；Cookie 头剔除、探针时现合并
+	OriginalCookie     string      // 业务请求原始 Cookie 头（罐内 Cookie 按需合并其上）
+	ProxyURL           string
+	Model              string
+	SeenAt             time.Time
+	CreatedAt          time.Time
+	Generation         uint64
+	IdentityGeneration uint64 // Stable across business failures, not credential/route changes.
+	CookieVersion      uint64 // Per-attempt snapshot; only written on the cycle's copy.
+	RateLimitPolicy    pluginv1.ProbeRateLimitPolicy
 }
 
 // Server 实现 TransportPlugin 服务。
@@ -74,6 +76,7 @@ type Server struct {
 	states                 map[int64]*prober.State
 	probeStop              context.CancelFunc
 	probeWg                sync.WaitGroup
+	probeWake              chan struct{}
 	nextTemplateGeneration uint64
 	configGeneration       uint64
 	clientMu               sync.Mutex
@@ -107,6 +110,7 @@ func New(store *cookiestore.Store) *Server {
 		persistDone: make(chan struct{}),
 		templates:   map[int64]*probeTemplate{},
 		states:      map[int64]*prober.State{},
+		probeWake:   make(chan struct{}, 1),
 	}
 	// v0.3.1（2026-10-02 生产实证）：官方宿主的 TransportPlugin 方法集只有
 	// GetInfo/Health/ValidateConfig/ApplyConfig/TestConfig/Forward，没有
@@ -197,12 +201,22 @@ func (s *Server) ApplyConfig(_ context.Context, req *pluginv1.ApplyConfigRequest
 		s.Store.Drop(accountID)
 	}
 	s.Store.SetConfig(next)
+	s.wakeProbeLoop()
 	return &pluginv1.ApplyConfigResponse{Applied: true}, nil
 }
 
 // Invalidate evidence without forgiving failure budgets or account backoff.
 // Caller holds probeMu; replace templates so in-flight forwards keep their epoch.
 func (s *Server) invalidateProbeLocked(accountID int64) {
+	s.invalidateProbeResultsLocked(accountID)
+	if live := s.templates[accountID]; live != nil {
+		live.IdentityGeneration = live.Generation
+	}
+}
+
+// Business failures fence probe results, but concurrent responses from the same
+// identity may still extend its cooldown.
+func (s *Server) invalidateProbeResultsLocked(accountID int64) {
 	if live := s.templates[accountID]; live != nil {
 		next := *live
 		s.nextTemplateGeneration++
@@ -354,7 +368,7 @@ func (s *Server) stashTemplateLocked(start *pluginv1.ForwardRequestStart, body [
 	accountID := start.GetAccountId()
 	next := &probeTemplate{
 		Method:         http.MethodPost,
-		URL:            start.GetUrl(),
+		URL:            probeEndpoint(start.GetUrl()),
 		Host:           start.GetHost(),
 		Headers:        headers,
 		OriginalCookie: originalCookie,
@@ -372,16 +386,19 @@ func (s *Server) stashTemplateLocked(start *pluginv1.ForwardRequestStart, body [
 	previous := s.templates[accountID]
 	if previous != nil && sameProbeIdentity(previous, next) {
 		next.Generation = previous.Generation
+		next.IdentityGeneration = previous.IdentityGeneration
 		next.CreatedAt = previous.CreatedAt
 		if previous.Model != next.Model {
 			s.invalidateProbeLocked(accountID)
 			next.Generation = s.templates[accountID].Generation
+			next.IdentityGeneration = s.templates[accountID].IdentityGeneration
 		}
 	} else {
 		s.nextTemplateGeneration++
 		next.Generation = s.nextTemplateGeneration
+		next.IdentityGeneration = next.Generation
 		// A new credential or route must not inherit the old probe's graduation.
-		delete(s.states, accountID)
+		s.resetProbeStateLocked(accountID, now)
 		if previous != nil {
 			s.Store.Drop(accountID)
 			if cancel, ok := s.probeRunning.Load(accountID); ok {
@@ -413,6 +430,24 @@ func (s *Server) probePaused(accountID int64) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) forwardTemplateCurrent(accountID int64, tmpl *probeTemplate) bool {
+	live := s.templates[accountID]
+	return live != nil && live.IdentityGeneration == tmpl.IdentityGeneration
+}
+
+// Credential rotation invalidates quality evidence, not an upstream cooldown.
+// Retain only the deadline so a new template cannot resume probes prematurely.
+func (s *Server) resetProbeStateLocked(accountID int64, now time.Time) {
+	if previous := s.states[accountID]; previous != nil && previous.RetryNotBefore.After(now) {
+		state := prober.NewState(accountID)
+		state.RetryNotBefore = previous.RetryNotBefore
+		state.NextProbeAt = previous.RetryNotBefore
+		s.states[accountID] = state
+		return
+	}
+	delete(s.states, accountID)
 }
 
 // extractModel 从业务请求体提取 model 字段（Responses API JSON）。探针开启
@@ -478,34 +513,50 @@ func pullForFreshSign(state *prober.State, capturedAt, now time.Time) {
 	if now.Sub(capturedAt) > freshSignWindow {
 		return
 	}
-	if state.NextProbeAt.After(now.Add(postCaptureProbeDelay)) {
-		state.NextProbeAt = now.Add(postCaptureProbeDelay)
+	target := capturedAt.Add(postCaptureProbeDelay)
+	if state.NextProbeAt.After(target) {
+		state.NextProbeAt = target
 	}
 }
 
-// probeLoop 周期扫描模板台账，对到期账号发判别题探针、按判定驱动重摇/退避。
-// 10 秒粒度 tick（v0.3.2：密集档 120s 间隔 + 新签即探 +5s 落点，30s 粒度会把
-// 这两项的时效吃掉一半以上），每账号独立排期（NextProbeAt），配置即时生效
-// （每 tick 重读）。
+func (s *Server) wakeProbeLoop() {
+	select {
+	case s.probeWake <- struct{}{}:
+	default:
+	}
+}
+
+// Business responses and completed cycles wake the scheduler. The timer follows
+// the nearest deadline, with a bounded maintenance scan even when nothing is due.
 func (s *Server) probeLoop(ctx context.Context) {
 	defer s.probeWg.Done()
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.scanProbeTemplates(ctx, time.Now())
+		case <-s.probeWake:
+		case <-timer.C:
 		}
+		timer.Reset(s.scanProbeTemplates(ctx, time.Now()))
 	}
 }
 
-func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) {
+func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Duration {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
+	nextScan := 10 * time.Second
+	if ctx.Err() != nil {
+		return nextScan
+	}
 	cfg := s.Store.Config()
 	horizon := 2 * time.Duration(cfg.ProbeIntervalSeconds) * time.Second
+	for accountID, state := range s.states {
+		if s.templates[accountID] == nil && !state.RetryNotBefore.After(now) {
+			delete(s.states, accountID)
+		}
+	}
 	for accountID, tmpl := range s.templates {
 		if s.probePaused(accountID) {
 			continue
@@ -514,7 +565,7 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) {
 		if templateRetired(tmpl, state, now, horizon) {
 			s.invalidateProbeLocked(accountID)
 			delete(s.templates, accountID)
-			delete(s.states, accountID)
+			s.resetProbeStateLocked(accountID, now)
 			continue
 		}
 		if !cfg.Enabled || !cfg.QualityProbeEnabled || !scopeMatch(cfg.InjectScope, tmpl.URL) || tmpl.Model == "" {
@@ -522,17 +573,33 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) {
 		}
 		if state == nil {
 			state = prober.NewState(accountID)
+			state.NextProbeAt = now.Add(postCaptureProbeDelay)
 			s.states[accountID] = state
 		}
 		if info := s.Store.SignInfo(accountID, now); info.HasSign {
 			pullForFreshSign(state, info.CapturedAt, now)
 		}
-		if !state.Due(now) {
+		if _, busy := s.probeRunning.Load(accountID); busy {
+			continue
+		}
+		dueAt := state.NextProbeAt
+		if state.BackoffUntil.After(dueAt) {
+			dueAt = state.BackoffUntil
+		}
+		dueAt = maxTime(dueAt, state.RetryNotBefore)
+		if dueAt.After(now) {
+			nextScan = min(nextScan, dueAt.Sub(now))
+			continue
+		}
+		cycleCtx, cancel := context.WithCancel(ctx)
+		if _, busy := s.probeRunning.LoadOrStore(accountID, cancel); busy {
+			cancel()
 			continue
 		}
 		tmplCopy := *tmpl
-		go s.runProbeCycle(ctx, accountID, &tmplCopy, state, cfg)
+		go s.runReservedProbeCycle(cycleCtx, cancel, accountID, &tmplCopy, state, cfg)
 	}
+	return nextScan
 }
 
 // runProbeCycle 单账号一轮探针：判定 → （必要时）丢罐重摇 → 立即复探，直至
@@ -548,7 +615,17 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 	if _, busy := s.probeRunning.LoadOrStore(accountID, cancel); busy {
 		return
 	}
-	defer s.probeRunning.Delete(accountID)
+	s.runReservedProbeCycle(ctx, cancel, accountID, tmpl, state, cfg)
+}
+
+func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.CancelFunc, accountID int64,
+	tmpl *probeTemplate, state *prober.State, cfg pluginconfig.Config,
+) {
+	defer func() {
+		cancel()
+		s.probeRunning.Delete(accountID)
+		s.wakeProbeLoop()
+	}()
 	s.probeMu.Lock()
 	snapshot := *tmpl
 	s.probeMu.Unlock()
@@ -608,7 +685,9 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 					time.Duration(info.Stats.P80*float64(time.Second)), cfg, rand.Float64)
 			}
 		}
+		observation := newProbeObservation(tmpl, state, decision, now)
 		s.probeMu.Unlock()
+		observation.log(slog.Default())
 		if !decision.ProbeAgainNow {
 			return
 		}
@@ -625,7 +704,7 @@ func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probe
 // 报文逐条反推）：input 必须是消息数组、store 必须 false、stream 必须
 // true（后端强制 SSE）——恰好也是 codex CLI 的原生形态，指纹同形。响应的
 // Set-Cookie 走同一被动捕获路径——探针本身就能把重摇后的新签重新钉住。
-// 5xx/429/传输错误重试（最多 3 次尝试），全败记 VerdictError（冷会话首发 503
+// 5xx/传输错误重试（最多 3 次尝试），429/Retry-After 延后调度；全败记 VerdictError（冷会话首发 503
 // 是常态，不是质量信号）。任何路径都不记 Authorization/Cookie 到日志或答案摘要。
 // v0.3.4：①401/403 当场丢模板（模板 Authorization 已死，留着只会无限空转——
 // 1227 实证；下一笔真实 Forward 自动用新鲜 token 重stash）；②判过钉推理门槛
@@ -642,6 +721,8 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 	}
 	payload := map[string]any{
 		"model": model,
+		// Required by Codex OAuth independently of reasoning effort.
+		"instructions": "",
 		"input": []map[string]any{{
 			"type": "message",
 			"role": "user",
@@ -661,7 +742,6 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 	// 简单题在降智号上全对而资格针全错（2026-10-02 生产实证）——探针考卷
 	// 必须与裁判考卷同难度，连过才是真毕业证据，重摇才对着真考卷搜节点。
 	if effort := cfg.ProbeReasoningEffort; effort != "" {
-		payload["instructions"] = ""
 		payload["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
 		payload["parallel_tool_calls"] = true
 		payload["include"] = []string{"reasoning.encrypted_content"}
@@ -670,6 +750,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 	if err != nil {
 		return prober.VerdictError, "skip:build", 0
 	}
+	lastFailure := "transport"
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return prober.VerdictError, "cancel", 0
@@ -681,10 +762,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			return prober.VerdictError, "skip:build", 0
 		}
 		request.Host = tmpl.Host
-		request.Header = cloneHeader(tmpl.Headers)
-		if request.Header.Get("Content-Type") == "" {
-			request.Header.Set("Content-Type", "application/json")
-		}
+		request.Header = probeHeaders(tmpl.Headers)
 		now := time.Now()
 		s.probeMu.Lock()
 		if !s.probeTemplateCurrent(accountID, tmpl) {
@@ -705,6 +783,10 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		response, err := client.Do(request)
 		if err != nil {
 			cancel()
+			lastFailure = "transport"
+			if attempt == 2 {
+				break
+			}
 			select {
 			case <-ctx.Done():
 				return prober.VerdictError, "cancel", 0
@@ -712,6 +794,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			}
 			continue
 		}
+		observedAt := time.Now()
 		s.probeMu.Lock()
 		if !s.probeTemplateCurrent(accountID, tmpl) {
 			s.probeMu.Unlock()
@@ -720,7 +803,8 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			return prober.VerdictError, "stale:template", 0
 		}
 		// Authentication errors are not evidence of a healthy replacement cookie.
-		if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden {
+		if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden &&
+			response.StatusCode != http.StatusTooManyRequests && response.StatusCode != http.StatusServiceUnavailable {
 			var current bool
 			tmpl.CookieVersion, current = s.Store.CaptureIfCurrent(accountID,
 				response.Header.Values("Set-Cookie"), time.Now(), tmpl.CookieVersion)
@@ -732,20 +816,49 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			}
 		}
 		s.probeMu.Unlock()
-		if response.StatusCode >= 500 || response.StatusCode == 429 {
-			response.Body.Close()
-			cancel()
-			select {
-			case <-ctx.Done():
-				return prober.VerdictError, "cancel", 0
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
 		if response.StatusCode != 200 {
 			code := response.StatusCode
+			// Error bodies are untrusted and may echo credentials or prompts.
+			// Read a bounded prefix under a short deadline; publish only a
+			// finite diagnostic vocabulary and a correlation fingerprint.
+			stopRead := time.AfterFunc(3*time.Second, cancel)
+			raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxProbeErrorBody+1))
+			stopRead.Stop()
 			response.Body.Close()
 			cancel()
+			failure := classifyProbeHTTPError(code, raw, readErr)
+			slog.Warn("quality_probe_http_error", "account_id", accountID,
+				"http_status", code, "kind", failure.Kind, "parameter", failure.Parameter,
+				"body_fingerprint", failure.Fingerprint, "body_truncated", len(raw) > maxProbeErrorBody,
+				"body_read_failed", readErr != nil)
+			lastFailure = failure.Summary()
+			deadline := probeRetryDeadlineWithPolicy(code, response.Header, observedAt, tmpl.RateLimitPolicy)
+			if code == http.StatusTooManyRequests && readErr == nil {
+				deadline = maxTime(deadline, probeQuotaBodyDeadline(raw, observedAt))
+			}
+			if !deadline.IsZero() {
+				s.probeMu.Lock()
+				if !s.probeTemplateCurrent(accountID, tmpl) {
+					s.probeMu.Unlock()
+					return prober.VerdictError, "stale:template", 0
+				}
+				if state := s.states[accountID]; state != nil {
+					state.RetryNotBefore = maxTime(state.RetryNotBefore, deadline)
+				}
+				s.probeMu.Unlock()
+				return prober.VerdictError, lastFailure, 0
+			}
+			if code >= 500 {
+				if attempt == 2 {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return prober.VerdictError, "cancel", 0
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
 			if code == http.StatusUnauthorized || code == http.StatusForbidden {
 				// 模板凭据被拒（v0.3.4，1227 实证）：模板里的 Authorization
 				// 已死，重试只会再吃 401——当场丢模板。下一笔真实 Forward
@@ -757,11 +870,11 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 					return prober.VerdictError, "stale:template", 0
 				}
 				delete(s.templates, accountID)
-				delete(s.states, accountID)
+				s.resetProbeStateLocked(accountID, time.Now())
 				s.probeMu.Unlock()
 				return prober.VerdictError, "http:" + strconv.Itoa(code) + "+tmpl-dropped", 0
 			}
-			return prober.VerdictError, "http:" + strconv.Itoa(code), 0
+			return prober.VerdictError, lastFailure, 0
 		}
 		const maxProbeResponse = 2 << 20
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxProbeResponse+1))
@@ -801,7 +914,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		}
 		return prober.VerdictFail, answer, reasoningTokens
 	}
-	return prober.VerdictError, "retry-exhausted", 0
+	return prober.VerdictError, "retry-exhausted:" + lastFailure, 0
 }
 
 // Only a valid completed terminal can certify a probe; deltas and incomplete
@@ -997,10 +1110,11 @@ func (s *Server) snapshotProber(now time.Time, cfg pluginconfig.Config) probeSta
 	for _, state := range s.states {
 		view := accountProbeView{
 			State:                  *state,
-			InBackoff:              now.Before(state.BackoffUntil),
+			InBackoff:              now.Before(maxTime(state.BackoffUntil, state.RetryNotBefore)),
 			EstimatedRemainingSecs: -1,
 			EstimateBasis:          "none",
 		}
+		view.NextProbeAt = maxTime(view.NextProbeAt, maxTime(state.BackoffUntil, state.RetryNotBefore))
 		info := s.Store.SignInfo(state.AccountID, now)
 		if info.HasSign {
 			view.SignCapturedAt = info.CapturedAt
@@ -1078,6 +1192,16 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	var cookieVersion uint64
 	if inScope {
 		tmpl = s.stashTemplateLocked(start, body, now)
+		if tmpl != nil {
+			// Do not mutate snapshots retained by concurrent forwards/probes.
+			next := *tmpl
+			next.RateLimitPolicy = pluginv1.ReadProbeRateLimitPolicy(stream.Context())
+			s.templates[start.GetAccountId()] = &next
+			tmpl = &next
+			if next.RateLimitPolicy.NotBefore.After(now) {
+				s.extendProbeCooldownLocked(start.GetAccountId(), next.RateLimitPolicy.NotBefore)
+			}
+		}
 		merged, version := s.Store.HeaderSnapshot(start.GetAccountId(), request.Header.Get("Cookie"), now)
 		cookieVersion = version
 		if merged != request.Header.Get("Cookie") {
@@ -1097,14 +1221,22 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	defer response.Body.Close()
 
 	after := time.Now()
+	var cooldownTemplate *probeTemplate
 	s.Store.ObserveResponse()
-	if inScope && response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden {
+	if inScope {
 		s.probeMu.Lock()
-		if !s.probePaused(start.GetAccountId()) && configGeneration == s.configGeneration && (tmpl == nil || s.probeTemplateCurrent(start.GetAccountId(), tmpl)) {
-			s.Store.ObserveIfCurrent(start.GetAccountId(), response.Header.Values("Set-Cookie"), after,
-				cookieVersion, cfg.RerollOnFasterModel && response.Header.Get("Faster-Model") != "")
+		if !s.probePaused(start.GetAccountId()) && configGeneration == s.configGeneration && (tmpl == nil || s.forwardTemplateCurrent(start.GetAccountId(), tmpl)) {
+			if !s.observeForwardFailureLocked(start.GetAccountId(), tmpl, response.StatusCode, response.Header, after) {
+				if tmpl == nil || s.probeTemplateCurrent(start.GetAccountId(), tmpl) {
+					s.Store.ObserveIfCurrent(start.GetAccountId(), response.Header.Values("Set-Cookie"), after,
+						cookieVersion, cfg.RerollOnFasterModel && response.Header.Get("Faster-Model") != "")
+				}
+			} else if response.StatusCode == http.StatusTooManyRequests {
+				cooldownTemplate = s.templates[start.GetAccountId()]
+			}
 		}
 		s.probeMu.Unlock()
+		s.wakeProbeLoop()
 	}
 
 	if err := stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_Start{Start: &pluginv1.ForwardResponseStart{
@@ -1119,12 +1251,22 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		return err
 	}
 	buffer := make([]byte, 32*1024)
+	var quotaBody []byte
+	bodyTooLarge := false
 	var received int64
 	started := time.Now()
 	for {
 		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
 			received += int64(n)
+			if cooldownTemplate != nil && !bodyTooLarge {
+				if len(quotaBody)+n > maxProbeErrorBody {
+					quotaBody = nil
+					bodyTooLarge = true
+				} else {
+					quotaBody = append(quotaBody, buffer[:n]...)
+				}
+			}
 			chunk := append([]byte(nil), buffer[:n]...)
 			if err := stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_BodyChunk{BodyChunk: chunk}}); err != nil {
 				return err
@@ -1135,6 +1277,16 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		}
 		if readErr != nil {
 			return stream.Send(errorFrame("UPSTREAM_BODY", "读取上游响应失败", true))
+		}
+	}
+	if cooldownTemplate != nil {
+		deadline := probeQuotaBodyDeadline(quotaBody, after)
+		if deadline.After(after) {
+			s.probeMu.Lock()
+			if configGeneration == s.configGeneration && s.forwardTemplateCurrent(start.GetAccountId(), cooldownTemplate) {
+				s.extendProbeCooldownLocked(start.GetAccountId(), deadline)
+			}
+			s.probeMu.Unlock()
 		}
 	}
 	return stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_End{End: &pluginv1.ForwardResponseEnd{

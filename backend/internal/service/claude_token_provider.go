@@ -109,9 +109,9 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
-		locked, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
-		if lockErr == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+		lease, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		if lockErr == nil && lease != "" {
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease) }()
 		} else if lockErr != nil {
 			slog.Warn("claude_token_lock_failed", "account_id", account.ID, "error", lockErr)
 		} else {

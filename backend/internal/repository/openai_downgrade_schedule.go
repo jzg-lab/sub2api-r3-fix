@@ -50,6 +50,7 @@ func (r *openAIDowngradeProbeRepository) AccelerateOpenAIInterruptedProbeRecheck
 				AND a.platform = 'openai' AND a.type = 'oauth'
 				AND a.parent_account_id IS NULL
 				AND a.status = 'active' AND a.schedulable IS TRUE
+				AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $1)
 				AND (a.auto_pause_on_expired IS NOT TRUE
 					OR a.expires_at IS NULL OR a.expires_at > $1)
 				AND NOT EXISTS (
@@ -98,8 +99,8 @@ func (r *openAIDowngradeProbeRepository) AccelerateOpenAIInterruptedProbeRecheck
 	return result.RowsAffected()
 }
 
-// Reconcile only legacy long 429 schedules. The account's actual cooldown is
-// untouched; a later accepted probe still has to clear it through its CAS.
+// Repair schedules that predate an active hold, without shortening that hold.
+// Legacy long schedules without an active hold retain their sparse recheck.
 func (r *openAIDowngradeProbeRepository) ReconcileOpenAIRateLimitProbeSchedules(
 	ctx context.Context, now time.Time, interval time.Duration,
 ) (int64, error) {
@@ -110,10 +111,12 @@ func (r *openAIDowngradeProbeRepository) ReconcileOpenAIRateLimitProbeSchedules(
 		WITH candidates AS MATERIALIZED (
 			SELECT s.account_id, s.updated_at, s.next_probe_at, s.last_probe_at,
 				s.current_proxy_id, a.updated_at AS account_updated_at,
-				GREATEST(
+				CASE WHEN a.rate_limit_reset_at > $1 THEN
+					a.rate_limit_reset_at + (15 + RANDOM() * 30) * INTERVAL '1 minute'
+				ELSE GREATEST(
 					s.last_probe_at + ($2 * (1 + RANDOM() * 0.25)) * INTERVAL '1 second',
 					$1::timestamptz + (15 + RANDOM() * 30) * INTERVAL '1 minute'
-				) AS recheck_at
+				) END AS recheck_at
 			FROM openai_downgrade_probe_states s
 			JOIN accounts a ON a.id = s.account_id
 			JOIN LATERAL (
@@ -123,9 +126,13 @@ func (r *openAIDowngradeProbeRepository) ReconcileOpenAIRateLimitProbeSchedules(
 				ORDER BY p.created_at DESC, p.id DESC LIMIT 1
 			) latest ON TRUE
 			WHERE s.last_probe_at IS NOT NULL
-				AND s.next_probe_at > GREATEST(
-					s.last_probe_at + ($2 * 1.25) * INTERVAL '1 second',
-					$1::timestamptz + INTERVAL '45 minutes'
+				AND (
+					(a.rate_limit_reset_at > $1 AND s.next_probe_at < a.rate_limit_reset_at)
+					OR ((a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $1)
+						AND s.next_probe_at > GREATEST(
+							s.last_probe_at + ($2 * 1.25) * INTERVAL '1 second',
+							$1::timestamptz + INTERVAL '45 minutes'
+						))
 				)
 				AND latest.http_status = 429
 				AND latest.created_at >= s.last_probe_at
@@ -169,7 +176,7 @@ func (r *openAIDowngradeProbeRepository) ReconcileOpenAIRateLimitProbeSchedules(
 		INSERT INTO openai_downgrade_probe_events(account_id, proxy_id, event_type, details, created_at)
 		SELECT account_id, current_proxy_id, 'rate_limit_schedule_reconciled',
 			jsonb_build_object('previous_next_probe_at', previous_next_probe_at,
-				'next_probe_at', next_probe_at, 'reason', 'sparse_recheck_adoption'), $1
+				'next_probe_at', next_probe_at, 'reason', 'cooldown_aware_recheck_adoption'), $1
 		FROM changed
 	`, now, interval.Seconds())
 	if err != nil {

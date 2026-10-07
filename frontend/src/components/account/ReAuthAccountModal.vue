@@ -45,6 +45,11 @@
       </div>
 
       <!-- Add Method Selection (Claude only) -->
+      <AutomaticReauthForm v-if="isOpenAI && account?.type === 'oauth'"
+        :busy="currentLoading" :running="automaticReauth.running.value"
+        :error="automaticReauth.error.value" :generation="reauthSession.generation.value"
+        @submit="automaticReauth.start" @cancel="automaticReauth.cancel" />
+
       <fieldset v-if="isAnthropic" :disabled="currentLoading" class="border-0 p-0">
         <legend class="input-label">{{ t('admin.accounts.oauth.authMethod') }}</legend>
         <div class="mt-2 flex gap-4">
@@ -196,7 +201,10 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useReauthSession, type ReauthOperation } from '@/composables/useReauthSession'
+import { extractI18nErrorMessage } from '@/utils/apiError'
 import { useReauthBrowserLaunch } from '@/composables/useReauthBrowserLaunch'
+import { useAutomaticReauth } from '@/composables/useAutomaticReauth'
+import AutomaticReauthForm from '@/components/account/AutomaticReauthForm.vue'
 import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -271,7 +279,13 @@ const currentLoading = computed(() => {
   return claudeOAuth.loading.value
 })
 const currentError = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.error.value
+  if (isOpenAILike.value) {
+    const history = reauthSession.account.value?.extra?.openai_oauth_login_exit_ip
+    return openaiOAuth.error.value || (
+      typeof history !== 'string' || !history.trim()
+        ? t('admin.accounts.oauth.openai.errors.OPENAI_OAUTH_LOGIN_IP_UNKNOWN') : ''
+    )
+  }
   if (isGemini.value) return geminiOAuth.error.value
   if (isAntigravity.value) return antigravityOAuth.error.value
   return claudeOAuth.error.value
@@ -303,7 +317,7 @@ function resetState() {
 onBeforeUnmount(resetState)
 
 watch(
-  () => [props.show, props.account?.id, props.account?.platform, props.account?.proxy_id] as const,
+  [() => props.show, () => props.account?.id, () => props.account?.platform, () => props.account?.type, () => props.account?.proxy_id],
   ([newVal]) => {
     resetState()
     if (newVal && props.account) {
@@ -346,7 +360,8 @@ const applyReauthCredentials = async (
   operation: ReauthOperation,
   type: 'oauth' | 'setup-token',
   credentials: Record<string, unknown>,
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  proof?: string
 ): Promise<Account> => {
   if (!reauthSession.isCurrent(operation)) {
     throw new Error('Account is no longer available')
@@ -359,15 +374,37 @@ const applyReauthCredentials = async (
     type,
     credentials,
     extra,
-    expected_updated_at: expectedUpdatedAt
+    expected_updated_at: expectedUpdatedAt,
+    reauthorization_proof: proof
   })
 }
 
-const handleGenerateUrl = () => reauthSession.run(async () => {
+const automaticReauth = useAutomaticReauth(reauthSession, openaiOAuth, async (operation, info) => {
+  const account = await applyReauthCredentials(operation, 'oauth', openaiOAuth.buildCredentials(info),
+    openaiOAuth.buildExtraInfo(info), info.reauthorization_proof)
+  completeReauth(operation, account)
+})
+
+const handleGenerateUrl = () => reauthSession.run(async (operation) => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    oauthFlowRef.value?.reset()
+    openaiOAuth.resetState()
+    try {
+      if (!await reauthSession.refreshForNewAuthorization(operation, adminAPI.accounts.getById)) return
+      await openaiOAuth.generateAuthUrl(operation.account.proxy_id, undefined, {
+        accountId: operation.account.id,
+        expectedUpdatedAt: operation.expectedUpdatedAt,
+        expectedAuthorizationRevision: operation.account.reauthorization_revision
+      })
+    } catch (error: unknown) {
+      if (!reauthSession.isCurrent(operation)) return
+      openaiOAuth.error.value = extractI18nErrorMessage(
+        error, t, 'admin.accounts.oauth.openai.errors', t('admin.accounts.oauth.authFailed')
+      )
+      appStore.showError(openaiOAuth.error.value)
+    }
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined
@@ -412,7 +449,7 @@ const handleExchangeCode = () => reauthSession.run(async (operation) => {
     const extra = oauthClient.buildExtraInfo(tokenInfo)
 
     try {
-      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra)
+      const updatedAccount = await applyReauthCredentials(operation, 'oauth', credentials, extra, tokenInfo.reauthorization_proof)
       completeReauth(operation, updatedAccount)
     } catch (error: any) {
       if (!reauthSession.isCurrent(operation)) return

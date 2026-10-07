@@ -1384,10 +1384,11 @@ func (h *AccountHandler) Refresh(c *gin.Context) {
 
 // ApplyOAuthCredentialsRequest is the payload for persisting re-authorized OAuth credentials.
 type ApplyOAuthCredentialsRequest struct {
-	Type              string         `json:"type" binding:"required,oneof=oauth setup-token"`
-	Credentials       map[string]any `json:"credentials" binding:"required"`
-	Extra             map[string]any `json:"extra"`
-	ExpectedUpdatedAt string         `json:"expected_updated_at"`
+	ReauthorizationProof string         `json:"reauthorization_proof"`
+	Type                 string         `json:"type" binding:"required,oneof=oauth setup-token"`
+	Credentials          map[string]any `json:"credentials" binding:"required"`
+	Extra                map[string]any `json:"extra"`
+	ExpectedUpdatedAt    string         `json:"expected_updated_at"`
 }
 
 // ApplyOAuthCredentials 将"重新授权"得到的新凭据原子落库。
@@ -1440,6 +1441,18 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
+
+	if req.ReauthorizationProof != "" {
+		if h.openaiOAuthService == nil {
+			response.ErrorFrom(c, service.ErrOpenAIOAuthReauthorizationProofRequired)
+			return
+		}
+		ctx, err = h.openaiOAuthService.ConsumeReauthorizationProof(ctx, req.ReauthorizationProof, accountID, expectedUpdatedAt, req.Credentials)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
 
 	reauthService, ok := h.adminService.(service.OAuthReauthorizationService)
 	if !ok {

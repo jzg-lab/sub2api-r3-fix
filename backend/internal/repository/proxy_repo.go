@@ -143,8 +143,20 @@ func proxyProbeIdentityFromService(proxyIn *service.Proxy) proxyProbeIdentity {
 	}
 }
 
+type proxyMutationState struct {
+	identity  proxyProbeIdentity
+	expiresAt *time.Time
+}
+
+func sameProxyExpiry(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
 func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.Client, proxyIn *service.Proxy) (*dbent.Proxy, error) {
-	currentIdentity, err := lockProxyProbeIdentity(ctx, client, proxyIn.ID)
+	current, err := lockProxyMutationState(ctx, client, proxyIn.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -184,10 +196,12 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	if err != nil {
 		return nil, err
 	}
-	if currentIdentity == proxyProbeIdentityFromService(proxyIn) {
+	if current.identity == proxyProbeIdentityFromService(proxyIn) && sameProxyExpiry(current.expiresAt, proxyIn.ExpiresAt) {
 		return updated, nil
 	}
-	accountIDs, err := invalidateProxyProbeSnapshots(ctx, client, proxyIn.ID)
+	// OAuth scheduling also caches the proxy. Refresh every live consumer, not
+	// only API-key accounts that happen to have a billing probe snapshot.
+	accountIDs, err := touchProxyAccounts(ctx, client, proxyIn.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -197,28 +211,29 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	return updated, nil
 }
 
-func lockProxyProbeIdentity(ctx context.Context, client *dbent.Client, proxyID int64) (proxyProbeIdentity, error) {
+func lockProxyMutationState(ctx context.Context, client *dbent.Client, proxyID int64) (proxyMutationState, error) {
 	rows, err := client.QueryContext(ctx, `
-		SELECT protocol, host, port, COALESCE(username, ''), COALESCE(password, ''), status
+		SELECT protocol, host, port, COALESCE(username, ''), COALESCE(password, ''), status, expires_at
 		FROM proxies
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
 	`, proxyID)
 	if err != nil {
-		return proxyProbeIdentity{}, err
+		return proxyMutationState{}, err
 	}
 	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return proxyProbeIdentity{}, err
+			return proxyMutationState{}, err
 		}
-		return proxyProbeIdentity{}, service.ErrProxyNotFound
+		return proxyMutationState{}, service.ErrProxyNotFound
 	}
-	var identity proxyProbeIdentity
-	if err := rows.Scan(&identity.protocol, &identity.host, &identity.port, &identity.username, &identity.password, &identity.status); err != nil {
-		return proxyProbeIdentity{}, err
+	var state proxyMutationState
+	identity := &state.identity
+	if err := rows.Scan(&identity.protocol, &identity.host, &identity.port, &identity.username, &identity.password, &identity.status, &state.expiresAt); err != nil {
+		return proxyMutationState{}, err
 	}
-	return identity, rows.Err()
+	return state, rows.Err()
 }
 
 func invalidateProxyProbeSnapshots(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
@@ -291,7 +306,7 @@ func (r *proxyRepository) Delete(ctx context.Context, id int64) error {
 		}
 	}
 
-	if _, err := lockProxyProbeIdentity(ctx, client, id); err != nil {
+	if _, err := lockProxyMutationState(ctx, client, id); err != nil {
 		if errors.Is(err, service.ErrProxyNotFound) {
 			return nil
 		}
@@ -465,7 +480,8 @@ func proxyListOrder(params pagination.PaginationParams) []func(*entsql.Selector)
 
 func (r *proxyRepository) ListActive(ctx context.Context) ([]service.Proxy, error) {
 	proxies, err := r.client.Proxy.Query().
-		Where(proxy.StatusEQ(service.StatusActive)).
+		Where(proxy.StatusEQ(service.StatusActive),
+			proxy.Or(proxy.ExpiresAtIsNil(), proxy.ExpiresAtGT(time.Now()))).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -578,7 +594,8 @@ func (r *proxyRepository) GetAccountCountsForProxies(ctx context.Context) (count
 // ListActiveWithAccountCount returns all active proxies with account count, sorted by creation time descending
 func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]service.ProxyWithAccountCount, error) {
 	proxies, err := r.client.Proxy.Query().
-		Where(proxy.StatusEQ(service.StatusActive)).
+		Where(proxy.StatusEQ(service.StatusActive),
+			proxy.Or(proxy.ExpiresAtIsNil(), proxy.ExpiresAtGT(time.Now()))).
 		Order(dbent.Desc(proxy.FieldCreatedAt)).
 		All(ctx)
 	if err != nil {
@@ -752,7 +769,7 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 		return nil, err
 	}
 	// Include retained accounts: their proxy status changed even without reroute.
-	retainedIDs, err := touchExpiredProxyAccounts(ctx, exec, proxyID)
+	retainedIDs, err := touchProxyAccounts(ctx, exec, proxyID)
 	if err != nil {
 		return nil, err
 	}
@@ -860,7 +877,7 @@ const openAIBrowserOAuthAccountSQL = `platform='openai' AND type='oauth' AND par
 	AND lower(btrim(COALESCE(credentials->>'auth_mode', ''))) NOT IN ('personalaccesstoken', 'personal_access_token', 'agentidentity')
 	AND lower(btrim(COALESCE(credentials->>'openai_auth_mode', ''))) NOT IN ('personalaccesstoken', 'personal_access_token')`
 
-func touchExpiredProxyAccounts(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
+func touchProxyAccounts(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
 	if _, err := invalidateProxyProbeSnapshots(ctx, exec, proxyID); err != nil {
 		return nil, err
 	}

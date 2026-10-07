@@ -158,7 +158,7 @@ func TestQueryUsageResetCreditCountPrecedence(t *testing.T) {
 			tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 				OpenAITokenCacheKey(account): "fake-token",
 			}}
-			tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
+			tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
 
 			var detailCalls int
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -341,6 +341,13 @@ func normalizeAccountConcurrency(_, _ string, concurrency int) int {
 	return concurrency
 }
 
+func validateAccountConcurrency(concurrency int, allowDefault bool) error {
+	if allowDefault && concurrency == 0 {
+		return nil
+	}
+	return validateAccountSchedulingSettings(&concurrency, nil)
+}
+
 func validateAccountSchedulingSettings(concurrency, priority *int) error {
 	if concurrency != nil && *concurrency < 1 {
 		return infraerrors.BadRequest("INVALID_ACCOUNT_CONCURRENCY", "concurrency must be a positive integer")
@@ -628,6 +635,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	// Publish the account only after its groups and scheduler event commit together.
 	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, account, groups); err != nil {
 		return nil, err
+	}
+	if IsOpenAIBrowserOAuthAccount(account) && s.openAIProbeWakeup != nil {
+		// Admin uploads and OAuth creation converge here. Wake only after the
+		// account and groups commit; retain eligibility and cooldown checks.
+		s.openAIProbeWakeup()
 	}
 
 	// OAuth 账号：创建后异步设置隐私。
@@ -931,7 +943,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	groupsAppliedAtomically := false
 	if input.GroupIDs != nil {
 		if groupUpdater, ok := s.accountRepo.(AccountGroupEditRepository); ok {
-			if err := groupUpdater.UpdateWithAccountGroups(ctx, account, *input.GroupIDs, requestedProbeEnabledUpdate, requestedRateSyncEnabledUpdate, input.RateMultiplier); err != nil {
+			if err := groupUpdater.UpdateWithAccountGroups(ctx, account, *input.GroupIDs, requestedProbeEnabledUpdate, requestedRateSyncEnabledUpdate, input.RateMultiplier, input.Concurrency); err != nil {
 				return nil, err
 			}
 			billingSettingsAppliedAtomically, groupsAppliedAtomically = true, true
@@ -951,6 +963,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			requestedProbeEnabledUpdate,
 			requestedRateSyncEnabledUpdate,
 			input.RateMultiplier,
+			input.Concurrency,
 		); err != nil {
 			return nil, err
 		}

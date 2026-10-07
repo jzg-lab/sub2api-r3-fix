@@ -15,11 +15,12 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore         OpenAIOAuthSessionStore
-	proxyRepo            ProxyRepository
-	oauthClient          OpenAIOAuthClient
-	tlsProfiles          *TLSFingerprintProfileService
-	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	reauthorizationAccountLookup func(context.Context, int64) (*Account, error)
+	sessionStore                 OpenAIOAuthSessionStore
+	proxyRepo                    ProxyRepository
+	oauthClient                  OpenAIOAuthClient
+	tlsProfiles                  *TLSFingerprintProfileService
+	privacyClientFactory         PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
@@ -66,6 +67,10 @@ type OpenAIAuthURLResult struct {
 
 // GenerateAuthURL generates an OpenAI OAuth authorization URL
 func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string) (*OpenAIAuthURLResult, error) {
+	return s.generateAuthURL(ctx, proxyID, redirectURI, platform, nil)
+}
+
+func (s *OpenAIOAuthService) generateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string, binding *OpenAIOAuthSession) (*OpenAIAuthURLResult, error) {
 	if s.sessionStore == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_STORE_UNAVAILABLE", "openai oauth persistent session store is not configured")
 	}
@@ -114,6 +119,15 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		session.ProxyID = *proxyID
 	}
 	session.ID = sessionID
+	if binding != nil {
+		session.ReauthorizationAccountID = binding.ReauthorizationAccountID
+		session.ReauthorizationRevision = binding.ReauthorizationRevision
+		session.ReauthorizationAccountRevision = binding.ReauthorizationAccountRevision
+		session.ReauthorizationExitIP = binding.ReauthorizationExitIP
+		if err := s.validateReauthorizationSession(ctx, session, true); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.sessionStore.Create(ctx, session); err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_OAUTH_SESSION_PERSIST_FAILED", "failed to persist oauth session: %v", err)
 	}
@@ -139,6 +153,7 @@ type OpenAIExchangeCodeInput struct {
 
 // OpenAITokenInfo represents the token information for OpenAI
 type OpenAITokenInfo struct {
+	ReauthorizationProof  string `json:"reauthorization_proof,omitempty"`
 	AccessToken           string `json:"access_token"`
 	RefreshToken          string `json:"refresh_token"`
 	IDToken               string `json:"id_token,omitempty"`
@@ -197,6 +212,10 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	clientID := strings.TrimSpace(session.ClientID)
 	if clientID == "" {
 		clientID = openai.ClientID
+	}
+
+	if err := s.validateReauthorizationSession(ctx, session, false); err != nil {
+		return nil, err
 	}
 
 	// Consume before exchanging so the code verifier is one-shot even when two
@@ -263,7 +282,12 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	}
 
 	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
-
+	if err := s.validateReauthorizationSession(ctx, session, false); err != nil {
+		return nil, err
+	}
+	if err := s.issueReauthorizationProof(ctx, session, tokenInfo); err != nil {
+		return nil, err
+	}
 	return tokenInfo, nil
 }
 

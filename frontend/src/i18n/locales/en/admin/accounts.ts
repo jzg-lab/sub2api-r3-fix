@@ -398,6 +398,10 @@ export default {
       subscriptionExpires: 'Expires',
       // Capacity status tooltips
       capacity: {
+        editConcurrency: 'Edit concurrency limit',
+        invalidConcurrency: 'Concurrency must be an integer between 1 and 10000',
+        concurrencySaved: 'Concurrency limit saved',
+        concurrencyFailed: 'Failed to save concurrency limit',
         windowCost: {
           blocked: '5h window cost exceeded, account scheduling paused',
           stickyOnly: '5h window cost at threshold, only sticky sessions allowed',
@@ -1144,6 +1148,25 @@ export default {
           failedToValidateRT: 'Failed to validate refresh token',
           errors: {
             OPENAI_OAUTH_PROXY_MISMATCH: 'The network route differs from the authorization session. Generate a new authorization URL.',
+            ACCOUNT_NOT_FOUND: 'This account no longer exists. Refresh the account list.',
+            OAUTH_REAUTH_STALE_ACCOUNT:
+              'The account changed. Generate a new authorization link; old results will not be submitted and the original login IP will not change. If its type or proxy changed, close and reopen this dialog.',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE:
+              'Account state is temporarily unavailable. Try generating a new authorization link later. Existing credentials and the original login IP are unchanged.',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNSUPPORTED:
+              'This browser reauthorization flow only supports primary OpenAI OAuth accounts.',
+            OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
+              'Complete a new authorization in the verified fixed-egress browser. The initial-login proof is missing, expired, already used, or does not match this account.',
+            OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:
+              'Reauthorization requires a verified fixed-egress route matching the original login IP. Missing or changed route configuration cannot be replaced by a live IP check.',
+            OPENAI_OAUTH_LOGIN_IP_UNKNOWN:
+              'The original login IP has no verified record. Reauthorization stopped. Recover historical evidence; the current exit cannot replace the original IP.',
+            OPENAI_OAUTH_LOGIN_IP_CHANGED:
+              'The authorization exit differs from the original login IP. Reauthorization stopped without replacing the stored credentials.',
+            OPENAI_OAUTH_LOGIN_IP_UNAVAILABLE:
+              'The original authorization exit could not be verified. Reauthorization stopped without switching routes or connecting directly.',
+            OPENAI_OAUTH_REAUTH_PROOF_REQUIRED:
+              'Complete browser authorization on the original login IP again. A missing, expired or mismatched authorization result cannot replace the stored credentials.',
             OPENAI_OAUTH_PROXY_REQUIRED:
               'No proxy is configured and this server could not reach OpenAI directly, so the OpenAI OAuth request failed. Select a proxy that can access OpenAI and retry; if the authorization code has expired, regenerate the authorization URL.'
           },

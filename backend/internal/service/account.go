@@ -4,10 +4,9 @@ package service
 import (
 	"encoding/json"
 	"errors"
-	"hash/fnv"
 	"log/slog"
+	"maps"
 	"net/url"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +24,13 @@ const LocalAccountConcurrency = 5
 
 // LocalAccountPriority is the admin new-account default; explicit zero remains valid.
 const LocalAccountPriority = 2
+
+func NormalizeAccountConcurrency(concurrency int) int {
+	if concurrency <= 0 {
+		return LocalAccountConcurrency
+	}
+	return concurrency
+}
 
 type Account struct {
 	ID                      int64
@@ -67,27 +73,13 @@ type Account struct {
 	ParentAccountID *int64 // non-nil → 影子账号（不持凭据，透传母账号凭据）
 	QuotaDimension  string // 用量维度："" / "global" / "spark"
 
+	// Request-local credential owner for shadow authentication failures. Never persisted.
+	openAIAuthAttempt *Account
+
 	Proxy         *Proxy
 	AccountGroups []AccountGroup
 	GroupIDs      []int64
 	Groups        []*Group
-
-	// model_mapping 热路径缓存（非持久化字段）
-	modelMappingCache               map[string]string
-	modelMappingCacheReady          bool
-	modelMappingCacheCredentialsPtr uintptr
-	modelMappingCacheRawPtr         uintptr
-	modelMappingCacheRawLen         int
-	modelMappingCacheRawSig         uint64
-	modelMappingCacheRuntimeVersion uint64
-
-	// header_overrides 热路径缓存（非持久化字段，同 model_mapping 缓存先例）
-	headerOverrideCache               map[string]string
-	headerOverrideCacheReady          bool
-	headerOverrideCacheCredentialsPtr uintptr
-	headerOverrideCacheRawPtr         uintptr
-	headerOverrideCacheRawLen         int
-	headerOverrideCacheRawSig         uint64
 }
 
 type OpenAIEndpointCapability string
@@ -590,46 +582,17 @@ func stringMappingFromRaw(raw any) map[string]string {
 }
 
 func (a *Account) GetModelMapping() map[string]string {
-	runtimeVersion := xai.RuntimeModelMappingVersion()
-	credentialsPtr := mapPtr(a.Credentials)
+	// Account snapshots are shared and copied by value. Keep reads free of
+	// receiver writes; rebuilding is linear, unlike the old sorted signature.
 	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
-	rawPtr := mapPtr(rawMapping)
-	rawLen := len(rawMapping)
-	rawSig := uint64(0)
-	rawSigReady := false
-
-	if a.modelMappingCacheReady &&
-		a.modelMappingCacheCredentialsPtr == credentialsPtr &&
-		a.modelMappingCacheRawPtr == rawPtr &&
-		a.modelMappingCacheRawLen == rawLen &&
-		a.modelMappingCacheRuntimeVersion == runtimeVersion {
-		rawSig = modelMappingSignature(rawMapping)
-		rawSigReady = true
-		if a.modelMappingCacheRawSig == rawSig {
-			return a.modelMappingCache
-		}
-	}
-
-	mapping := a.resolveModelMapping(rawMapping)
-	if !rawSigReady {
-		rawSig = modelMappingSignature(rawMapping)
-	}
-
-	a.modelMappingCache = mapping
-	a.modelMappingCacheReady = true
-	a.modelMappingCacheCredentialsPtr = credentialsPtr
-	a.modelMappingCacheRawPtr = rawPtr
-	a.modelMappingCacheRawLen = rawLen
-	a.modelMappingCacheRawSig = rawSig
-	a.modelMappingCacheRuntimeVersion = runtimeVersion
-	return mapping
+	return a.resolveModelMapping(rawMapping)
 }
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {
 	if a.Credentials == nil {
 		// Antigravity 平台使用默认映射
 		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
+			return maps.Clone(domain.DefaultAntigravityModelMapping)
 		}
 		if a.Platform == domain.PlatformGrok {
 			return xai.DefaultModelMapping()
@@ -643,7 +606,7 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		}
 		// Antigravity 平台使用默认映射
 		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
+			return maps.Clone(domain.DefaultAntigravityModelMapping)
 		}
 		if a.Platform == domain.PlatformGrok {
 			return xai.DefaultModelMapping()
@@ -651,7 +614,7 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		return nil
 	}
 
-	result := make(map[string]string)
+	result := make(map[string]string, len(rawMapping))
 	for k, v := range rawMapping {
 		if s, ok := v.(string); ok {
 			result[k] = s
@@ -679,43 +642,12 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		return geminicli.GoogleOneModelMapping()
 	}
 	if a.Platform == domain.PlatformAntigravity {
-		return domain.DefaultAntigravityModelMapping
+		return maps.Clone(domain.DefaultAntigravityModelMapping)
 	}
 	if a.Platform == domain.PlatformGrok {
 		return xai.DefaultModelMapping()
 	}
 	return nil
-}
-
-func mapPtr(m map[string]any) uintptr {
-	if m == nil {
-		return 0
-	}
-	return reflect.ValueOf(m).Pointer()
-}
-
-func modelMappingSignature(rawMapping map[string]any) uint64 {
-	if len(rawMapping) == 0 {
-		return 0
-	}
-	keys := make([]string, 0, len(rawMapping))
-	for k := range rawMapping {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	h := fnv.New64a()
-	for _, k := range keys {
-		_, _ = h.Write([]byte(k))
-		_, _ = h.Write([]byte{0})
-		if v, ok := rawMapping[k].(string); ok {
-			_, _ = h.Write([]byte(v))
-		} else {
-			_, _ = h.Write([]byte{1})
-		}
-		_, _ = h.Write([]byte{0xff})
-	}
-	return h.Sum64()
 }
 
 func ensureAntigravityDefaultPassthrough(mapping map[string]string, model string) {

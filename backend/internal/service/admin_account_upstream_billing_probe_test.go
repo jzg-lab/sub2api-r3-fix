@@ -31,6 +31,7 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
+	concurrency *int,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -40,6 +41,11 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 		return ErrAccountNotFound
 	}
 	updated := *account
+	updated.Concurrency = current.Concurrency
+	if concurrency != nil {
+		updated.Concurrency = *concurrency
+	}
+	account.Concurrency = updated.Concurrency
 	updated.Credentials = mergeMap(nil, account.Credentials)
 	updated.Extra = mergeMap(nil, account.Extra)
 	if updated.Extra == nil {

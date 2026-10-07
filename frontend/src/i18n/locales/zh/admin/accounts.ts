@@ -294,6 +294,10 @@ export default {
       subscriptionExpires: '到期',
       // 容量状态提示
       capacity: {
+        editConcurrency: '调整并发上限',
+        invalidConcurrency: '并发上限须为 1 至 10000 的整数',
+        concurrencySaved: '并发上限已保存',
+        concurrencyFailed: '并发上限保存失败',
         windowCost: {
           blocked: '5h窗口费用超限，账号暂停调度',
           stickyOnly: '5h窗口费用达阈值，仅允许粘性会话',
@@ -1209,6 +1213,25 @@ export default {
           failedToValidateRT: '验证 Refresh Token 失败',
           errors: {
             OPENAI_OAUTH_PROXY_MISMATCH: '网络出口与生成授权链接时的选择不一致，请重新生成授权链接。',
+            ACCOUNT_NOT_FOUND: '该账号已不存在，请刷新账号列表。',
+            OAUTH_REAUTH_STALE_ACCOUNT:
+              '账号状态已变化，请重新生成授权链接。不会提交旧授权结果或切换原登录 IP；若账号类型或代理已变更，请关闭窗口后重新打开。',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE:
+              '暂时无法读取账号状态，请稍后重新生成授权链接。原凭据和原登录 IP 未被修改。',
+            OPENAI_OAUTH_REAUTH_ACCOUNT_UNSUPPORTED:
+              '该账号类型不支持此浏览器重授权流程，仅支持 OpenAI OAuth 主账号。',
+            OPENAI_OAUTH_INITIAL_LOGIN_PROOF_REQUIRED:
+              '请在已核验的固定出口浏览器中重新完成授权。首次登录证明缺失、过期、已使用或与当前账号不匹配。',
+            OPENAI_OAUTH_FIXED_EGRESS_REQUIRED:
+              '重新授权需要与原登录 IP 一致、已核验的固定出口线路。线路配置缺失或变化时，不能仅凭当前 IP 检测结果继续授权。',
+            OPENAI_OAUTH_LOGIN_IP_UNKNOWN:
+              '缺少该账号原登录 IP 的可信记录，已停止重新授权。恢复历史记录后再试，不能用当前出口替代原 IP。',
+            OPENAI_OAUTH_LOGIN_IP_CHANGED:
+              '当前授权出口与该账号原登录 IP 不一致，已停止重新授权，原凭据未被覆盖。',
+            OPENAI_OAUTH_LOGIN_IP_UNAVAILABLE:
+              '无法核验该账号原登录出口，已停止重新授权，不会切换线路或直连。',
+            OPENAI_OAUTH_REAUTH_PROOF_REQUIRED:
+              '请通过原登录 IP 重新完成浏览器授权。授权结果缺失、过期或不匹配时，不会覆盖原凭据。',
             OPENAI_OAUTH_PROXY_REQUIRED:
               '未设置代理，当前服务器无法直连 OpenAI，导致 OpenAI OAuth 请求失败。请先选择可访问 OpenAI 的代理后重试；如果授权码已失效，请重新生成授权链接。'
           },

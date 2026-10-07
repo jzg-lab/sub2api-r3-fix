@@ -1545,8 +1545,8 @@
 
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
-          <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" min="1" step="1" required class="input" data-testid="account-concurrency" />
+          <label for="edit-account-concurrency" class="input-label">{{ t('admin.accounts.concurrency') }}</label>
+          <input id="edit-account-concurrency" v-model.number="form.concurrency" type="number" min="1" step="1" required class="input" data-testid="account-concurrency" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -3691,6 +3691,7 @@ const form = reactive({
   group_ids: [] as number[],
   expires_at: null as number | null
 })
+const initialConcurrency = ref(LOCAL_ACCOUNT_CONCURRENCY)
 
 const handleUpstreamBillingRateSyncChange = (enabled: boolean) => {
   upstreamBillingRateSyncEnabled.value = enabled
@@ -3792,6 +3793,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
   form.concurrency = newAccount.concurrency
+  initialConcurrency.value = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority
   form.rate_multiplier = newAccount.rate_multiplier ?? 1
@@ -4751,6 +4753,10 @@ const handleSubmit = async () => {
 	}
 
   const updatePayload: Record<string, unknown> = { ...form }
+  // An unrelated edit must not restore a limit changed after this form opened.
+  if (form.concurrency === initialConcurrency.value) {
+    delete updatePayload.concurrency
+  }
   try {
     // 后端期望 proxy_id: 0 表示清除代理，而不是 null
     if (updatePayload.proxy_id === null) {

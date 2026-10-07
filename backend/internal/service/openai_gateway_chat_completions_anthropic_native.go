@@ -121,7 +121,7 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 	}

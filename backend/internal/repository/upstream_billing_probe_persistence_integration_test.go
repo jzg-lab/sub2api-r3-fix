@@ -75,7 +75,7 @@ func TestAdminAccountEditPreservesRateSynchronizedAfterLoad(t *testing.T) {
 	}, &synchronizedRate))
 
 	staleAdminEdit.Name = "name-only-edit"
-	require.NoError(t, repo.UpdateWithAccountBillingSettings(ctx, staleAdminEdit, nil, nil, nil))
+	require.NoError(t, repo.UpdateWithAccountBillingSettings(ctx, staleAdminEdit, nil, nil, nil, nil))
 
 	got, err := repo.GetByID(ctx, account.ID)
 	require.NoError(t, err)
@@ -315,7 +315,7 @@ func TestProbeSnapshotCASProtectsManualRateAfterSyncDisabled(t *testing.T) {
 	require.NoError(t, err)
 	manualRate := 0.8
 	syncDisabled := false
-	require.NoError(t, repo.UpdateWithAccountBillingSettings(ctx, manual, nil, &syncDisabled, &manualRate))
+	require.NoError(t, repo.UpdateWithAccountBillingSettings(ctx, manual, nil, &syncDisabled, &manualRate, nil))
 
 	probedRate := 0.1
 	err = repo.UpdateUpstreamBillingProbeSnapshot(ctx, inFlight, &service.UpstreamBillingProbeSnapshot{
@@ -393,7 +393,7 @@ func TestProxyIdentityUpdateInvalidatesProbeAndRejectsInFlightSnapshot(t *testin
 				require.Nil(t, got.Extra[service.UpstreamBillingProbeExtraKey])
 			}
 			if !tt.wantInvalidation {
-				require.Equal(t, inFlight.UpdatedAt, got.UpdatedAt, "missing/null snapshots must not cause an account row write")
+				require.True(t, got.UpdatedAt.After(inFlight.UpdatedAt), "proxy changes invalidate account identity even without a probe snapshot")
 			}
 			err = accountRepo.UpdateUpstreamBillingProbeSnapshot(ctx, inFlight, &service.UpstreamBillingProbeSnapshot{
 				Status:        service.UpstreamBillingProbeStatusOK,
@@ -414,15 +414,13 @@ func TestProxyIdentityUpdateInvalidatesProbeAndRejectsInFlightSnapshot(t *testin
 			)
 			require.NoError(t, rows.Scan(&outboxCount, &payloadJSON))
 			require.NoError(t, rows.Close())
-			if tt.wantInvalidation {
+			{
 				require.Equal(t, 1, outboxCount)
 				var payload struct {
 					AccountIDs []int64 `json:"account_ids"`
 				}
 				require.NoError(t, json.Unmarshal([]byte(payloadJSON), &payload))
 				require.Equal(t, []int64{account.ID}, payload.AccountIDs)
-			} else {
-				require.Zero(t, outboxCount, "no snapshot change means no PR2 cache invalidation event")
 			}
 		})
 	}
@@ -479,11 +477,11 @@ func TestSweepExpiredProxyWithoutFallbackInvalidatesOnlyExistingProbeSnapshot(t 
 	for _, untouched := range []*service.Account{withoutSnapshot, withJSONNull} {
 		got, err = accountRepo.GetByID(ctx, untouched.ID)
 		require.NoError(t, err)
-		require.Equal(t, untouchedUpdatedAt[untouched.ID], got.UpdatedAt)
+		require.True(t, got.UpdatedAt.After(untouchedUpdatedAt[untouched.ID]))
 	}
 
 	payload := latestBulkAccountOutboxPayload(t, ctx, tx)
-	require.Equal(t, []int64{withSnapshot.ID}, payload)
+	require.Equal(t, []int64{withSnapshot.ID, withoutSnapshot.ID, withJSONNull.ID}, payload)
 }
 
 func TestSweepExpiredProxyFallbackRerouteDeletesProbeSnapshot(t *testing.T) {

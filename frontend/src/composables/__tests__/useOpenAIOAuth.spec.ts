@@ -34,6 +34,61 @@ import { adminAPI } from '@/api/admin'
 
 beforeEach(() => vi.clearAllMocks())
 
+describe('useOpenAIOAuth account-bound reauthorization', () => {
+  it('displays the translated original-IP failure without retrying', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockRejectedValueOnce({
+      status: 409, reason: 'OPENAI_OAUTH_LOGIN_IP_CHANGED', message: 'exit changed'
+    })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z'
+    })).toBe(false)
+    expect(oauth.error.value).toBe('exit changed')
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends the account and its captured revision with the original proxy', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://example.test/?state=fixture', session_id: 'fixture'
+    })
+    const oauth = useOpenAIOAuth()
+    const expectedUpdatedAt = '2026-10-03T01:02:03.123456Z'
+    expect(await oauth.generateAuthUrl(7, undefined, { accountId: 42, expectedUpdatedAt })).toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith('/admin/openai/generate-auth-url', {
+      proxy_id: 7, account_id: 42, expected_updated_at: expectedUpdatedAt
+    })
+  })
+
+  it('does not downgrade an unknown original IP into an unbound create request', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockRejectedValueOnce({
+      response: { data: { message: 'original authorization IP is not recorded' } }
+    })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z'
+    })).toBe(false)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledTimes(1)
+    expect(oauth.sessionId.value).toBe('')
+    expect(oauth.authUrl.value).toBe('')
+  })
+
+  it('sends the stable authorization revision separately from runtime updated_at', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://example.test/?state=fixture', session_id: 'fixture'
+    })
+    const oauth = useOpenAIOAuth()
+    const revision = `oauth-v1:${'a'.repeat(64)}`
+    await oauth.generateAuthUrl(7, undefined, {
+      accountId: 42, expectedUpdatedAt: '2026-10-03T01:02:03Z',
+      expectedAuthorizationRevision: revision
+    })
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith('/admin/openai/generate-auth-url', {
+      proxy_id: 7, account_id: 42, expected_updated_at: '2026-10-03T01:02:03Z',
+      expected_authorization_revision: revision
+    })
+  })
+})
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void

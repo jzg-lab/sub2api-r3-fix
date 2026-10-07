@@ -37,9 +37,9 @@ func TestIndependentReviewStaleEditAfterEntry(t *testing.T) {
 				account.Name = "saved stale form"
 				var err error
 				if groups {
-					err = repo.UpdateWithAccountGroups(t.Context(), account, account.GroupIDs, nil, nil, nil)
+					err = repo.UpdateWithAccountGroups(t.Context(), account, account.GroupIDs, nil, nil, nil, nil)
 				} else {
-					err = repo.UpdateWithAccountBillingSettings(t.Context(), account, nil, nil, nil)
+					err = repo.UpdateWithAccountBillingSettings(t.Context(), account, nil, nil, nil, nil)
 				}
 				require.NoError(t, err)
 				current, err := repo.GetByID(t.Context(), account.ID)
@@ -241,7 +241,7 @@ func TestOpenAIRescuePostgresOrdinaryEditWaitsAndRollsBack(t *testing.T) {
 			name := account.Name
 			account.Name = "concurrent stale edit"
 			finished := make(chan error, 1)
-			go func() { finished <- repo.UpdateWithAccountBillingSettings(ctx, account, nil, nil, nil) }()
+			go func() { finished <- repo.UpdateWithAccountBillingSettings(ctx, account, nil, nil, nil, nil) }()
 			require.Eventually(t, func() bool {
 				var blocked bool
 				err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked)
@@ -310,7 +310,7 @@ func TestOpenAIRescuePostgresTerminateAndRestart(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT state FROM openai_downgrade_probe_states WHERE account_id=$1`, account.ID).Scan(&state))
 	require.Equal(t, service.OpenAIDowngradeStatePendingReplace, state)
 	current.Name = "edited after termination"
-	require.NoError(t, repo.UpdateWithAccountGroups(t.Context(), current, []int64{}, nil, nil, nil))
+	require.NoError(t, repo.UpdateWithAccountGroups(t.Context(), current, []int64{}, nil, nil, nil, nil))
 	stopped, err = lane.TerminateRescue(t.Context(), account.ID)
 	require.NoError(t, err)
 	require.False(t, stopped)
@@ -408,7 +408,7 @@ func TestOpenAIRescuePostgresGroupEditRechecksAfterConcurrentEntry(t *testing.T)
 	beforeName := account.Name
 	account.Name = "stale edit must roll back"
 	finished := make(chan error, 1)
-	go func() { finished <- repo.UpdateWithAccountGroups(ctx, account, []int64{origin}, nil, nil, nil) }()
+	go func() { finished <- repo.UpdateWithAccountGroups(ctx, account, []int64{origin}, nil, nil, nil, nil) }()
 	require.Eventually(t, func() bool {
 		var blocked bool
 		err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked)
@@ -527,7 +527,7 @@ func TestOpenAIRescuePostgresGroupEditIsAtomic(t *testing.T) {
 				ordinaryID = ordinary.ID
 				_, err = repo.BulkUpdateWithAccountGroups(t.Context(), []int64{ordinaryID, account.ID}, service.AccountBulkUpdate{Name: &account.Name}, requested)
 			} else {
-				err = repo.UpdateWithAccountGroups(t.Context(), account, requested, nil, nil, nil)
+				err = repo.UpdateWithAccountGroups(t.Context(), account, requested, nil, nil, nil, nil)
 			}
 			if scenario == "unchanged" || scenario == "after_exit" {
 				require.NoError(t, err)

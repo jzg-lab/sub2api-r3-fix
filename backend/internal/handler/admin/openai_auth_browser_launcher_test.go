@@ -80,6 +80,51 @@ func TestLaunchAuthBrowserReturnsProcessOutcome(t *testing.T) {
 	}
 }
 
+func TestLaunchAuthBrowserTransientHTTPBoundary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	marker := strings.Repeat("fixture-input-", 3)
+	for _, tc := range []struct {
+		name    string
+		payload any
+		raw     string
+	}{
+		{name: "malformed JSON", raw: `{"session_id":`},
+		{name: "missing session", payload: map[string]any{"login": map[string]string{"password": marker}}},
+		{name: "wrong field type", payload: map[string]any{"session_id": "one", "login": marker}},
+		{name: "oversized body", payload: map[string]any{"session_id": "one", "login": map[string]string{"password": strings.Repeat(marker, 800)}}},
+		{name: "invalid email", payload: map[string]any{"session_id": "one", "login": map[string]string{"email": "not-an-email", "password": marker}}},
+		{name: "unbound initial login", payload: map[string]any{"session_id": "one", "login": map[string]string{"email": "fixture@example.invalid", "password": marker}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.AuthBrowserLauncher = "/usr/bin/false"
+			store := &oauthRouteSessionStore{session: &service.OpenAIOAuthSession{
+				ID: "one", State: strings.Repeat("a", 64),
+				CodeVerifier: strings.Repeat("b", 128), CreatedAt: time.Now(),
+			}}
+			handler := &OpenAIOAuthHandler{}
+			handler.SetAuthBrowserLauncher(service.NewOpenAIAuthBrowserLauncher(cfg, store, &oauthRouteProxyRepo{}))
+			router := gin.New()
+			router.POST("/admin/openai/launch-auth-browser", handler.LaunchAuthBrowser)
+			payload := []byte(tc.raw)
+			if tc.payload != nil {
+				var err error
+				payload, err = json.Marshal(tc.payload)
+				require.NoError(t, err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/admin/openai/launch-auth-browser", bytes.NewReader(payload))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			require.NotContains(t, response.Body.String(), marker)
+			require.NotContains(t, response.Body.String(), "fixture@example.invalid")
+			require.Contains(t, response.Body.String(), "AUTH_BROWSER_LAUNCH_INVALID_REQUEST")
+		})
+	}
+}
+
 func TestLaunchAuthBrowserClassifiesPreLaunchFailures(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	validProxy := &service.Proxy{

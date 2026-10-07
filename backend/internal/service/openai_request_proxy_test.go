@@ -49,7 +49,7 @@ func TestOpenAIRequestProxyRejectsBeforeTransport(t *testing.T) {
 			upstream := &httpUpstreamRecorder{}
 			gateway := &OpenAIGatewayService{httpUpstream: upstream}
 			request := httptest.NewRequest(http.MethodPost, "https://example.test/v1/responses", nil)
-			response, err := gateway.doOpenAIUpstream(request, route, account)
+			response, err := gateway.doOpenAIUpstream(request.Context(), request, route, account)
 			require.Error(t, err)
 			require.Nil(t, response)
 			tester := &AccountTestService{httpUpstream: upstream}
@@ -80,7 +80,7 @@ func TestOpenAIRequestProxyAcceptsAssignedRouteAndNonBrowserTraffic(t *testing.T
 	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusOK}}
 	gateway := &OpenAIGatewayService{httpUpstream: upstream}
 	request := httptest.NewRequest(http.MethodPost, "https://example.test/v1/responses", nil)
-	_, err := gateway.doOpenAIUpstream(request, account.Proxy.URL(), account)
+	_, err := gateway.doOpenAIUpstream(request.Context(), request, account.Proxy.URL(), account)
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 1)
 	require.Equal(t, account.Proxy.URL(), upstream.lastProxyURL)

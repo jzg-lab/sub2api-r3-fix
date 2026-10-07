@@ -134,7 +134,7 @@ func TestCachedOAuthAccessTokenRequiresPersistedIdentity(t *testing.T) {
 			account := &Account{ID: 51, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ProxyID: &proxyID,
 				Credentials: map[string]any{"access_token": "snapshot", "_token_version": int64(2)}}
 			latest := *account
-			latest.Credentials = map[string]any{"access_token": "cached", "_token_version": int64(3)}
+			latest.Credentials = map[string]any{"access_token": "cached", "_token_version": int64(3), "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}
 			repo := &oauthCacheRecoveryRepo{account: &latest}
 			tc.change(repo)
 			cache := newOpenAITokenCacheStub()
