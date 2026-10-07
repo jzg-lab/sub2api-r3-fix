@@ -67,7 +67,7 @@ archives:
       - deploy/.env.example
       - deploy/tests/*
       - deploy/auth-browser/*
-      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-0.3.11.s2plugin
+      - src: deploy/codex-lb-cookie-pin/dist/lyunlong-codex-lb-cookie-pin-0.3.12.s2plugin
         dst: plugins
         strip_parent: true
       - src: deploy/codex-lb-cookie-pin/README.md

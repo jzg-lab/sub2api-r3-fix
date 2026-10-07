@@ -1,6 +1,6 @@
 # Codex LB Cookie Pin（sub2api 插件）
 
-`lyunlong.codex.lb-cookie-pin` v0.3.11 是本地维护的 sub2api 配套救号插件，
+`lyunlong.codex.lb-cookie-pin` v0.3.12 是本地维护的 sub2api 配套救号插件，
 实现 OpenAI 负载均衡粘性 Cookie 的**被动捕获 → 按账号注入 → 信号自动重摇**闭环；
 并提供可选的**质量探针自愈**：定期判别题检测静默降智，答错自动重摇。
 
@@ -113,7 +113,7 @@ S2PLUGIN_KEY=/existing/publisher.key ./build.sh --release # 默认要求现有�
 省略时沿用公钥前 16 位十六进制 ID。不要为发布生成新信任根或开启生产
 `allow_unsigned`。部署前必须用目标宿主的原有信任配置验证签名、文件哈希和版本兼容性。
 
-产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.11.s2plugin`。旧包保留用于历史核对和回退。
+产物：`dist/lyunlong-codex-lb-cookie-pin-0.3.12.s2plugin`。旧包保留用于历史核对和回退。
 包含 macOS amd64/arm64、Linux amd64/arm64、Windows amd64 的 runtimes 和 UI。
 不要通过删除平台绕过交付矩阵；宿主上传限制须在安装前核验。
 

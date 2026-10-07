@@ -107,6 +107,9 @@ FROM ${POSTGRES_IMAGE} AS pg-client
 # -----------------------------------------------------------------------------
 FROM ${ALPINE_IMAGE}
 
+# Optional Linux automatic OAuth runtime; keep the standard image small.
+ARG INSTALL_AUTH_BROWSER=false
+
 # Labels
 LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
 LABEL description="Sub2API - AI API Gateway Platform"
@@ -125,6 +128,10 @@ RUN apk add --no-cache \
     libedit \
     && rm -rf /var/cache/apk/*
 
+RUN if [ "${INSTALL_AUTH_BROWSER}" = "true" ]; then \
+      apk add --no-cache bash python3 nodejs chromium curl; \
+    fi
+
 # Copy pg_dump and psql from the same postgres image used in docker-compose
 # This ensures version consistency between backup tools and the database server
 COPY --from=pg-client /usr/local/bin/pg_dump /usr/local/bin/pg_dump
@@ -141,6 +148,7 @@ WORKDIR /app
 # Copy binary/resources with ownership to avoid extra full-layer chown copy
 COPY --from=backend-builder --chown=sub2api:sub2api /app/sub2api /app/sub2api
 COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources
+COPY deploy/auth-browser/launch.sh deploy/auth-browser/proxy_address.py deploy/auth-browser/automate.mjs /app/auth-browser/
 
 # Create data directory
 RUN mkdir -p /app/data && chown sub2api:sub2api /app/data

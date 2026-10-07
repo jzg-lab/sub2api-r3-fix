@@ -8,7 +8,10 @@ Linux 自动使用 `--headless=new`，保留 Chrome sandbox；macOS 使用可见
 
 Sub2API 进程所在的运行环境需要 Bash、Python 3、Node.js 20+、Chrome/Chromium、curl。
 启动器和这些程序必须在同一环境：服务在容器内运行时，不能直接执行宿主机浏览器。
-现有基础镜像没有因此自动安装浏览器；部署者需要准备依赖、可写私有配置目录及可用的浏览器 sandbox。
+Docker 构建时传 `--build-arg INSTALL_AUTH_BROWSER=true` 安装浏览器依赖，启动器位于
+`/app/auth-browser/launch.sh`；默认构建不安装浏览器。部署时设置
+`SUB2API_AUTH_BROWSER_LAUNCHER=/app/auth-browser/launch.sh` 和
+`SUB2API_AUTH_BROWSER_PROFILE_ROOT=/app/data/auth-browser`，并验证浏览器 sandbox 可用。
 用非 root 用户运行 Chrome，不以 `--no-sandbox` 绕过部署问题。
 
 ```bash
