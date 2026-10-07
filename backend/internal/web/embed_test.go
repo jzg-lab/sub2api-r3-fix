@@ -623,6 +623,9 @@ func TestFrontendServer_Middleware(t *testing.T) {
 			"/dashboard",
 			"/users/123",
 			"/settings/profile",
+			"/monitor?range=24h&monitor_view=cards",
+			"/monitor?range=24h&monitor_view=details",
+			"/admin/openai-downgrade",
 		}
 
 		for _, path := range spaPaths {

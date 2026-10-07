@@ -165,6 +165,7 @@
 </template>
 
 <script setup lang="ts">
+import { monitorBucketStarts } from './monitorTimeline'
 import { useI18n } from 'vue-i18n'
 import { computed, reactive, ref, watch } from 'vue'
 import type {
@@ -224,26 +225,7 @@ const scrollRef = ref<HTMLElement | null>(null)
 const zoom = ref<ZoomState>(resetZoom())
 const zoomed = computed(() => isZoomed(zoom.value))
 
-const allBucketStarts = computed(() => {
-  // X-axis always spans the UI-selected range [requested_start, requested_end).
-  // Partial backfill leaves empty cells until coverage_start/data_through fill in.
-  const step = Math.max(60, props.coverage.bucket_seconds) * 1000
-  const requestedStart = new Date(props.coverage.requested_start).getTime()
-  const requestedEndRaw = props.coverage.requested_end
-    ? new Date(props.coverage.requested_end).getTime()
-    : NaN
-  // Fallback for older payloads without requested_end.
-  const dataThrough = new Date(props.coverage.data_through).getTime()
-  const end = Number.isFinite(requestedEndRaw) && requestedEndRaw > requestedStart
-    ? requestedEndRaw
-    : dataThrough
-  if (![requestedStart, end].every(Number.isFinite) || requestedStart >= end) return []
-  const starts: string[] = []
-  for (let cursor = Math.floor(requestedStart / step) * step; cursor < end; cursor += step) {
-    starts.push(new Date(cursor).toISOString())
-  }
-  return starts
-})
+const allBucketStarts = computed(() => monitorBucketStarts(props.coverage))
 /** Visible bucket window after X zoom (cursor-centered), not always the tail. */
 const bucketStarts = computed(() => sliceByZoom(allBucketStarts.value, zoom.value))
 const tableStyle = computed(() => ({

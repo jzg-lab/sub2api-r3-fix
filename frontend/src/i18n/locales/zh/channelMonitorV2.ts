@@ -1,6 +1,15 @@
 /** Channel Monitor V2 (user + admin passive monitor UI) */
 export default {
   channelMonitorV2: {
+    cards: {
+      title: '渠道状态', overview: '渠道概览', details: '详细分析',
+      description: '查看各平台与分组的运行状态',
+      rangeSummary: '所选区间 {range} 汇总',
+      availability: '可用率', multiplier: '用户倍率 {value}x',
+      insufficient: '样本不足', history: '状态时间线', refreshIn: '{seconds}s 后刷新',
+      noDataAt: '{time} · 暂无数据', stale: '数据有延迟，请留意更新时间',
+      filtered: '已应用详细分析中的筛选条件',
+    },
     title: '渠道监控',
     updating: '正在更新数据',
     updatedTo: '更新至 {time}',

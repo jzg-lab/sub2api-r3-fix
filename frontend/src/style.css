@@ -72,7 +72,7 @@
   /* ============ 按钮样式 ============ */
   .btn {
     @apply inline-flex items-center justify-center gap-2;
-    @apply rounded-xl px-4 py-2.5 text-sm font-medium;
+    @apply rounded-lg px-4 py-2.5 text-sm font-medium;
     @apply transition-all duration-200 ease-out;
     @apply focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:ring-offset-2;
     @apply disabled:transform-none disabled:cursor-not-allowed disabled:opacity-50;
@@ -80,10 +80,9 @@
   }
 
   .btn-primary {
-    @apply bg-gradient-to-r from-primary-500 to-primary-600;
-    @apply text-white shadow-md shadow-primary-500/25;
-    @apply hover:from-primary-600 hover:to-primary-700 hover:shadow-lg hover:shadow-primary-500/30;
-    @apply dark:shadow-primary-500/20;
+    @apply bg-primary-600 text-white shadow-sm;
+    @apply hover:bg-primary-700;
+    @apply dark:bg-primary-400 dark:text-dark-950 dark:hover:bg-primary-300;
   }
 
   .btn-secondary {
@@ -165,7 +164,7 @@
 
   /* ============ 输入框样式 ============ */
   .input {
-    @apply w-full rounded-xl px-4 py-2.5 text-sm;
+    @apply w-full rounded-lg px-4 py-2.5 text-sm;
     @apply bg-white dark:bg-dark-800;
     @apply border border-gray-200 dark:border-dark-600;
     @apply text-gray-900 dark:text-gray-100;
@@ -216,19 +215,19 @@
   }
 
   .glass-card {
-    @apply bg-white/70 dark:bg-dark-800/70;
+    @apply bg-white dark:bg-dark-800;
     @apply backdrop-blur-xl;
-    @apply rounded-2xl;
-    @apply border border-white/20 dark:border-dark-700/50;
-    @apply shadow-glass;
+    @apply rounded-lg;
+    @apply border border-gray-200 dark:border-dark-700;
+    @apply shadow-card;
     @apply transition-all duration-300;
   }
 
   /* ============ 卡片样式 ============ */
   .card {
-    @apply bg-white dark:bg-dark-800/50;
-    @apply rounded-2xl;
-    @apply border border-gray-100 dark:border-dark-700/50;
+    @apply bg-white dark:bg-dark-800;
+    @apply rounded-lg;
+    @apply border border-gray-200 dark:border-dark-700;
     @apply shadow-card;
     @apply transition-all duration-300;
   }
@@ -239,10 +238,10 @@
   }
 
   .card-glass {
-    @apply bg-white/70 dark:bg-dark-800/70;
+    @apply bg-white dark:bg-dark-800;
     @apply backdrop-blur-xl;
-    @apply border border-white/20 dark:border-dark-700/50;
-    @apply shadow-glass;
+    @apply border border-gray-200 dark:border-dark-700;
+    @apply shadow-card;
   }
 
   .card-header {
@@ -560,7 +559,7 @@
   }
 
   .sidebar-link {
-    @apply flex items-center gap-3 rounded-xl py-2.5;
+    @apply flex items-center gap-3 rounded-lg py-2.5;
     @apply overflow-hidden;
     @apply text-sm font-medium;
     @apply text-gray-600 dark:text-dark-300;
@@ -774,5 +773,33 @@
 
   .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Shared console surfaces, including body-level dialogs. No second theme state. */
+.console-page {
+  background-color: #f5f6f8;
+}
+.dark .console-page { background-color: #111518; }
+.console-grid {
+  background-image: linear-gradient(rgb(87 115 143 / 5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(87 115 143 / 5%) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+.dark .console-grid {
+  background-image: linear-gradient(rgb(151 177 200 / 4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(151 177 200 / 4%) 1px, transparent 1px);
+}
+.public-page h1 {
+  font-family: Georgia, 'Songti SC', 'Noto Serif CJK SC', serif;
+  letter-spacing: -0.025em;
+}
+.sidebar-link-active { box-shadow: inset 3px 0 0 currentColor; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

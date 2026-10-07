@@ -150,6 +150,10 @@ export default {
         custom: 'Custom Range'
       },
       openaiDowngrade: {
+        description: 'Probe statistics for the last 24 hours, refreshed every 60 seconds.',
+        overview: 'Last 24 hours',
+        limits: 'Shows up to 200 accounts and the latest 100 events. Viewing or refreshing does not run probes.',
+        disabled: 'Ops monitoring is disabled. Probe statistics are unavailable.',
         title: 'OpenAI downgrade probes',
         summary: '{probes} probes in 24h, {success} successful',
         degraded: 'Degraded accounts: {count}',

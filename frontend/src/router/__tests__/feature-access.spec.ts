@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createRouter } from 'vue-router'
 
 type NavigationGuard = (
   to: Record<string, any>,
@@ -117,6 +118,17 @@ describe('feature route guard', () => {
     appStore.publicSettingsLoaded = false
     appStore.cachedPublicSettings = null
     appStore.fetchPublicSettings.mockReset()
+  })
+
+  it.each([false, true])('enforces the actual standalone probe route permissions (admin=%s)', async (admin) => {
+    authStore.isAdmin = admin
+    const route = vi.mocked(createRouter).mock.calls[0][0].routes.find(record => record.path === '/admin/openai-downgrade')!
+    expect(route.meta?.requiresAuth).toBe(true)
+    expect(route.meta?.requiresAdmin).toBe(true)
+    const { navigation, next } = runGuard(route.meta || {}, route.path)
+    await navigation
+    if (admin) expect(next).toHaveBeenCalledWith()
+    else expect(next).toHaveBeenCalledWith('/dashboard')
   })
 
   it('waits for the first public-settings request before deciding payment access', async () => {

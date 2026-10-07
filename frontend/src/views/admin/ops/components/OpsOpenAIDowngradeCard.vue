@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   opsAPI,
@@ -9,15 +9,11 @@ import {
 } from '@/api/admin/ops'
 import { formatDateTime } from '../utils/opsFormatters'
 
-interface Props {
-  refreshToken: number
-}
-
-const props = defineProps<Props>()
 const { t } = useI18n()
-const loading = ref(false)
+const loading = ref(true)
 const errorMessage = ref('')
 const snapshot = ref<OpsOpenAIDowngradeDashboard | null>(null)
+let controller: AbortController | null = null
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 
 const buckets = computed(() => snapshot.value?.buckets ?? [])
@@ -61,20 +57,26 @@ function avgTokens(account: OpsOpenAIDowngradeAccountStat): string {
 }
 
 async function load(): Promise<void> {
+  controller?.abort()
+  const request = new AbortController()
+  controller = request
   loading.value = true
   errorMessage.value = ''
   try {
-    snapshot.value = await opsAPI.getOpenAIDowngradeDashboard()
+    const data = await opsAPI.getOpenAIDowngradeDashboard({ signal: request.signal })
+    if (!request.signal.aborted) snapshot.value = data
   } catch (error: any) {
-    errorMessage.value = error?.message || t('admin.ops.openaiDowngrade.loadFailed')
+    if (!request.signal.aborted) errorMessage.value = error?.message || t('admin.ops.openaiDowngrade.loadFailed')
   } finally {
-    loading.value = false
+    if (controller === request) loading.value = false
   }
 }
 
 function restartTimer(): void {
   if (refreshTimer) clearInterval(refreshTimer)
-  refreshTimer = setInterval(() => void load(), 60_000)
+  refreshTimer = setInterval(() => {
+    if (!loading.value && !document.hidden) void load()
+  }, 60_000)
 }
 
 onMounted(() => {
@@ -83,10 +85,11 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  controller?.abort()
+  controller = null
   if (refreshTimer) clearInterval(refreshTimer)
 })
 
-watch(() => props.refreshToken, () => void load())
 </script>
 
 <template>
@@ -94,32 +97,35 @@ watch(() => props.refreshToken, () => void load())
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
       <div>
         <h3 class="text-sm font-bold text-gray-900 dark:text-white">
-          {{ t('admin.ops.openaiDowngrade.title') }}
+          {{ t('admin.ops.openaiDowngrade.overview') }}
         </h3>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        <p v-if="snapshot" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
           {{ t('admin.ops.openaiDowngrade.summary', {
             probes: snapshot?.probe_count_24h ?? 0,
             success: snapshot?.success_count_24h ?? 0
           }) }}
         </p>
       </div>
-      <div class="flex flex-wrap gap-2 text-xs">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <button class="btn btn-secondary btn-sm" type="button" :disabled="loading" @click="load">{{ t('common.refresh') }}</button>
+        <template v-if="snapshot">
         <span class="rounded-md bg-red-50 px-2 py-1 text-red-700 dark:bg-red-900/20 dark:text-red-300">
           {{ t('admin.ops.openaiDowngrade.degraded', { count: snapshot?.degraded_account_count ?? 0 }) }}
         </span>
         <span class="rounded-md bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
           {{ t('admin.ops.openaiDowngrade.fullBuckets', { count: snapshot?.at_capacity_bucket_count ?? 0 }) }}
         </span>
+        </template>
       </div>
     </div>
 
-    <div v-if="errorMessage" class="mb-4 rounded-md bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
+    <div v-if="errorMessage" role="alert" class="mb-4 rounded-md bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-900/20 dark:text-red-400">
       {{ errorMessage }}
     </div>
     <div v-if="loading && !snapshot" class="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
       {{ t('admin.ops.loadingText') }}
     </div>
-    <div v-else class="space-y-5">
+    <div v-else-if="snapshot" class="space-y-5">
       <div>
         <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           {{ t('admin.ops.openaiDowngrade.buckets') }}
@@ -162,6 +168,7 @@ watch(() => props.refreshToken, () => void load())
               </tr>
             </thead>
             <tbody>
+              <tr v-if="!accounts.length"><td colspan="5" class="px-3 py-5 text-center text-gray-500">{{ t('common.noData') }}</td></tr>
               <tr v-for="account in accounts" :key="account.account_id" class="border-t border-gray-100 dark:border-dark-800">
                 <td class="px-3 py-2 font-mono text-gray-700 dark:text-gray-200">{{ account.account_id }}</td>
                 <td class="px-3 py-2"><span class="rounded-md px-2 py-1" :class="stateClass(account.state)">{{ stateLabel(account.state) }}</span></td>

@@ -39,10 +39,13 @@
         @exit-fullscreen="exitFullscreen"
       />
 
-      <OpsOpenAIDowngradeCard
+      <router-link
         v-if="opsEnabled && !(loading && !hasLoadedOnce)"
-        :refresh-token="dashboardRefreshToken"
-      />
+        to="/admin/openai-downgrade"
+        class="btn btn-secondary"
+      >
+        {{ t('admin.ops.openaiDowngrade.title') }} →
+      </router-link>
 
       <!-- Row: Concurrency + Throughput -->
       <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
@@ -165,7 +168,6 @@ import { useAdminSettingsStore, useAppStore } from '@/stores'
 import OpsDashboardHeader from './components/OpsDashboardHeader.vue'
 import OpsDashboardSkeleton from './components/OpsDashboardSkeleton.vue'
 import OpsConcurrencyCard from './components/OpsConcurrencyCard.vue'
-import OpsOpenAIDowngradeCard from './components/OpsOpenAIDowngradeCard.vue'
 import OpsErrorDetailModal from './components/OpsErrorDetailModal.vue'
 import OpsErrorDistributionChart from './components/OpsErrorDistributionChart.vue'
 import OpsErrorDetailsModal from './components/OpsErrorDetailsModal.vue'

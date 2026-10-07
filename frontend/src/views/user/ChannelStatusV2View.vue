@@ -43,6 +43,10 @@
               </span>
             </div>
           </div>
+          <router-link
+            class="btn btn-secondary btn-sm ml-auto"
+            :to="{ query: { ...route.query, monitor_view: 'cards' } }"
+          >{{ t('channelMonitorV2.cards.overview') }}</router-link>
           <button
             class="btn btn-secondary btn-icon flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-dark-700 dark:text-gray-400 dark:hover:bg-dark-600"
             type="button"
@@ -682,6 +686,8 @@ function parseTrendView(value: unknown): TrendView {
 function syncQuery() {
   void router.replace({
     query: {
+      ...route.query,
+      monitor_view: 'details',
       range: filter.value.range,
       platform: filter.value.platforms.join(',') || undefined,
       group: filter.value.groupIds.join(',') || undefined,
@@ -806,7 +812,7 @@ function scheduleAutoRefresh() {
     ? 10
     : snapshot.value?.config?.refresh_interval_seconds || 300
   autoRefreshTimer = window.setInterval(() => {
-    if (!loading.value && !refreshing.value) {
+    if (!loading.value && !refreshing.value && !document.hidden) {
       void reload(true)
     }
   }, Math.max(bootstrapActive.value ? 10 : 60, seconds) * 1000)
@@ -882,6 +888,21 @@ function toggleError(category: string) {
   expandedErrors.value = next
 }
 
+// Restore state for browser history and links into the existing analysis view.
+watch(() => route.query, (query) => {
+  const next: MonitorFilter = {
+    range: parseRange(query.range),
+    platforms: csv(query.platform),
+    groupIds: csv(query.group).map(Number).filter(Boolean),
+    models: csv(query.model),
+  }
+  if (JSON.stringify(next) !== JSON.stringify(filter.value)) filter.value = next
+  matrixGroupBy.value = parseMatrixGroupBy(query.group_by)
+  healthMode.value = parseHealthMode(query.health_mode)
+  trendView.value = parseTrendView(query.trend_view)
+  activeTab.value = (['models', 'errors', 'users'].includes(String(query.tab)) ? query.tab : 'models') as Tab
+})
+
 let lastRange: MonitorRange = filter.value.range
 watch(
   filter,
@@ -906,6 +927,7 @@ watch(activeTab, () => {
 })
 onMounted(() => void reload(false))
 onBeforeUnmount(() => {
+  sequence += 1
   controller?.abort()
   if (autoRefreshTimer) window.clearInterval(autoRefreshTimer)
 })

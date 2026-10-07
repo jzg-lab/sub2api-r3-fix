@@ -34,6 +34,29 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 
 回归入口：`frontend/src/components/admin/usage/__tests__/UsageTable.spec.ts`。
 
+## 前端主题、渠道概览与探针独立页
+
+2026-10-08 工作区实现统一蓝色主题、浅深色网格背景及共享控件样式；保持各业务页面原有
+功能，用量表缓存率/TPS 徽标与口径不变。当前尚未部署，来源与验证见
+[前端适配记录](upstream-sync-state.md#前端视觉适配与探针独立页)。
+
+V2 渠道状态默认展示平台/分组卡片、所选区间指标及状态时间线；“详细分析”可进入原有
+筛选/矩阵/趋势/明细页面。`monitor_view=details`（兼容 `v2`）和旧分析查询链接进入分析，
+`monitor_view=cards` 显式进入概览，往返保留查询。V1 仍使用原页面和开关，详见
+[渠道监控](CHANNEL_MONITOR.md)。
+
+管理员 OpenAI 降智探针为账号管理下一行同级菜单，路径 `/admin/openai-downgrade`。
+复用原运维统计接口，展示 24 小时、最多 200 个账号及 100 条事件，60 秒自动刷新并支持手动
+刷新；沿用管理员认证和监控开关，不改变探针或救治业务。原运维页仅保留跳转入口。
+
+实现入口：`frontend/tailwind.config.js`、`frontend/src/style.css`、
+`frontend/src/views/user/ChannelStatusOverview.vue`、
+`frontend/src/components/user/monitor/ChannelStatusCard.vue`、
+`frontend/src/views/admin/OpenAIDowngradeView.vue`。
+回归入口：`ChannelStatusView.mode.spec.ts`、`ChannelStatusOverview.spec.ts`、
+`monitorTimeline.spec.ts`、`OpsOpenAIDowngradeCard.spec.ts`、`feature-access.spec.ts`；
+内嵌资源与直达路由使用 `backend/internal/web/embed_test.go`（`embed` 标签）。
+
 ## 质量调度限制分组
 
 入口：后台 → 插件管理 → Codex LB Cookie Pin → 配置 → 质量调度限制。

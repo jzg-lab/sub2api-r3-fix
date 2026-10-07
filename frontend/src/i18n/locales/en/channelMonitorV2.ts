@@ -1,6 +1,15 @@
 /** Channel Monitor V2 (user + admin passive monitor UI) */
 export default {
   channelMonitorV2: {
+    cards: {
+      title: 'Channel status', overview: 'Channel overview', details: 'Detailed analysis',
+      description: 'Service status by platform and group',
+      rangeSummary: 'Summary for {range}',
+      availability: 'Availability', multiplier: 'Your rate {value}x',
+      insufficient: 'Insufficient samples', history: 'Status timeline', refreshIn: 'Refresh in {seconds}s',
+      noDataAt: '{time} · No data', stale: 'Data is delayed. Check the update time.',
+      filtered: 'Filters from detailed analysis are active',
+    },
     title: 'Channel Monitor',
     updating: 'Updating data',
     updatedTo: 'Updated to {time}',

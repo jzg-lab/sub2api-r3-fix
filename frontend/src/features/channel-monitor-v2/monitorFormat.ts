@@ -6,7 +6,7 @@
  * request/error/token counts in user-facing surfaces.
  */
 
-import type { HealthScoreBand, MonitorHealth } from '@/api/channelMonitorV2'
+import type { HealthScoreBand, MonitorHealth, MonitorMetric } from '@/api/channelMonitorV2'
 import { formatCompactNumber } from '@/utils/format'
 
 export function monitorIntlLocale(): string {
@@ -170,4 +170,17 @@ export function formatLatencyKpiSecondary(
 /** Fallback when i18n key is missing; prefer `channelMonitorV2.errorCategories.*`. */
 export function monitorErrorCategoryLabel(category: string): string {
   return category
+}
+
+/** Public metrics redact counts. Health states retain whether samples are usable. */
+export function monitorCardMetrics(metrics: MonitorMetric, health: MonitorHealth) {
+  const hasRequests = metrics.request_count > 0 || health.error_rate !== 'unknown'
+  const hasCache = metrics.cache_rate_denominator > 0 || (health.cache != null && health.cache !== 'unknown')
+  return {
+    availability: hasRequests && Number.isFinite(metrics.error_rate)
+      ? formatMonitorPercent(1 - metrics.error_rate) : '—',
+    cache: hasCache && Number.isFinite(metrics.cache_rate) ? formatMonitorPercent(metrics.cache_rate) : '—',
+    ttft: metrics.ttft.p50_ms != null && Number.isFinite(metrics.ttft.p50_ms)
+      ? formatMonitorMs(metrics.ttft.p50_ms) : '—',
+  }
 }

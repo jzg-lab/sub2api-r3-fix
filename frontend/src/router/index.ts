@@ -414,6 +414,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/openai-downgrade',
+    name: 'AdminOpenAIDowngrade',
+    component: () => import('@/views/admin/OpenAIDowngradeView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'OpenAI downgrade probes',
+      titleKey: 'admin.ops.openaiDowngrade.title',
+      descriptionKey: 'admin.ops.openaiDowngrade.description'
+    }
+  },
+  {
     path: '/admin/ops',
     name: 'AdminOps',
     component: () => import('@/views/admin/ops/OpsDashboard.vue'),

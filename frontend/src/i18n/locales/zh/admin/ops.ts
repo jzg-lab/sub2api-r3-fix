@@ -170,6 +170,10 @@ export default {
         }
       },
       openaiDowngrade: {
+        description: '查看现有探针的近 24 小时统计；自动刷新间隔 60 秒。',
+        overview: '近 24 小时概览',
+        limits: '最多展示 200 个账号及最近 100 条事件。查看和刷新不会发起探针。',
+        disabled: '运维监控已关闭，暂无可查询的探针统计。',
         title: 'OpenAI 降智探针',
         summary: '近24小时探针 {probes} 次，成功 {success} 次',
         degraded: '异常账号：{count}',
