@@ -57,7 +57,9 @@ V2 渠道状态默认展示平台/分组卡片、所选区间指标及状态时�
 `monitorTimeline.spec.ts`、`OpsOpenAIDowngradeCard.spec.ts`、`feature-access.spec.ts`；
 内嵌资源与直达路由使用 `backend/internal/web/embed_test.go`（`embed` 标签）。
 
-### 用户页面第二轮对齐（本地，尚未部署）
+### 用户页面第二轮对齐
+
+2026-10-08 北京时间 04:06:45 已完成生产切换及应用验收，公网资源和流式调用随后通过。
 
 用户仪表盘改为余额/累计 Token/快捷操作、今日指标/模型摘要、全宽趋势的排布；趋势可切换
 总用量和原 Token 明细，原模型图表及完整表格在“模型分布 · 明细”展开查看。累计、今日、
@@ -72,7 +74,8 @@ API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；�
 
 回归入口增加 `UserDashboard.spec.ts`、`TokenUsageTrend.spec.ts`，并继续运行
 `monitorTimeline.spec.ts`、`KeysView.spec.ts`、`UsageView.spec.ts` 和共享 `UsageTable.spec.ts`。
-本轮来源、验证及未部署状态见[第二轮对齐记录](upstream-sync-state.md#用户页面第二轮视觉对齐)。
+本轮来源和验证见[第二轮对齐记录](upstream-sync-state.md#用户页面第二轮视觉对齐)，
+运行制品和回退证据见[部署状态](deployment-state.md)。
 
 ## 质量调度限制分组
 
