@@ -21,6 +21,7 @@ import UsageTable from '../UsageTable.vue'
 const messages: Record<string, string> = {
   'admin.usage.userDeletedBadge': 'Deleted',
   'usage.costDetails': 'Cost Breakdown',
+  'usage.cacheMetricLabel': 'Cache',
   'admin.usage.inputCost': 'Input Cost',
   'admin.usage.outputCost': 'Output Cost',
   'admin.usage.cacheCreationCost': 'Cache Creation Cost',
@@ -124,6 +125,63 @@ const baseImageRow = {
   image_size_source: null,
   image_size_breakdown: null,
 }
+
+describe('UsageTable cache metrics', () => {
+  it.each([
+    { name: 'screenshot example', changes: {}, cache: '96.27%', tps: '48.2 t/s' },
+    { name: 'cache creation in denominator', changes: { input_tokens: 3, cache_read_tokens: 176300, cache_creation_tokens: 1400 }, cache: '99.21%' },
+    { name: 'no cache reads', changes: { cache_read_tokens: 0 }, cache: '0.00%' },
+    { name: 'all cached', changes: { input_tokens: 0 }, cache: '100.00%' },
+    { name: 'tiny cache share', changes: { input_tokens: 1000000, cache_read_tokens: 1 }, cache: '<0.01%' },
+    { name: 'nearly all cached', changes: { input_tokens: 1, cache_read_tokens: 1000000 }, cache: '>99.99%' },
+    { name: 'no prompt', changes: { input_tokens: 0, cache_read_tokens: 0 }, cache: '—' },
+    { name: 'missing cache count', changes: { cache_read_tokens: undefined }, cache: '—' },
+    { name: 'invalid prompt count', changes: { input_tokens: -1 }, cache: '—' },
+    { name: 'missing first token', changes: { first_token_ms: null }, tps: '—' },
+    { name: 'missing duration', changes: { duration_ms: null }, tps: '—' },
+    { name: 'zero output duration', changes: { duration_ms: 17740 }, tps: '—' },
+    { name: 'negative output duration', changes: { duration_ms: 1000 }, tps: '—' },
+    { name: 'negative first token', changes: { first_token_ms: -1 }, tps: '—' },
+    { name: 'invalid duration', changes: { duration_ms: Infinity }, tps: '—' },
+    { name: 'no output', changes: { output_tokens: 0 }, tps: '—' },
+    { name: 'invalid output', changes: { output_tokens: NaN }, tps: '—' },
+    { name: 'slow output', changes: { output_tokens: 1, first_token_ms: 0, duration_ms: 100000 }, tps: '0.010 t/s' },
+    { name: 'image billed by tokens', changes: { image_output_tokens: 1 }, tps: '—' },
+    { name: 'image request', changes: { image_count: 1 }, tps: '—' },
+    { name: 'video request', changes: { billing_mode: 'video' }, tps: '—' },
+    { name: 'audio endpoint', changes: { inbound_endpoint: '/v1/audio/speech' }, tps: '—' },
+    { name: 'image upstream endpoint', changes: { upstream_endpoint: '/v1/images/edits' }, tps: '—' },
+    { name: 'live request', changes: { request_type: 'live' }, tps: '—' },
+    { name: 'security policy request', changes: { request_type: 'cyber' }, tps: '—' },
+  ])('renders $name without a formula or tooltip', ({ changes, cache, tps }) => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{
+          ...baseImageRow,
+          image_count: 0,
+          billing_mode: 'token',
+          input_tokens: 8044,
+          cache_read_tokens: 207500,
+          output_tokens: 255,
+          duration_ms: 23030,
+          first_token_ms: 17740,
+          ...changes,
+        }],
+        columns: [{ key: 'cache_hit_rate', label: 'Cache hit rate' }],
+      },
+      global: {
+        stubs: {
+          DataTable: { props: ['data'], template: '<div><slot name="cell-cache_hit_rate" :row="data[0]" /></div>' },
+          Teleport: true,
+        },
+      },
+    })
+    expect(wrapper.get('[data-testid="cache-hit-rate"]').text()).toBe(`Cache ${cache ?? '96.27%'}`)
+    expect(wrapper.get('[data-testid="request-tps"]').text()).toBe(`TPS: ${tps ?? '48.2 t/s'}`)
+    expect(wrapper.find('[title], [role="tooltip"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toMatch(/[÷×=]/)
+  })
+})
 
 describe('admin UsageTable tooltip', () => {
   beforeEach(() => {

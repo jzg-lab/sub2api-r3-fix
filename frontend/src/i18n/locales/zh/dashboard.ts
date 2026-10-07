@@ -373,6 +373,7 @@ export default {
     cacheHit: '缓存命中',
     cacheCreate: '缓存创建',
     cacheHitRate: '缓存命中率',
+    cacheMetricLabel: '缓存',
     inputTokenPrice: '输入单价',
     outputTokenPrice: '输出单价',
     perMillionTokens: '/ 1M Token',

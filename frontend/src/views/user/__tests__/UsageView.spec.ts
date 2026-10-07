@@ -98,6 +98,7 @@ vi.mock('vue-i18n', async () => {
 
 const simpleStub = { template: '<div><slot /></div>' }
 const chartStub = { template: '<div />' }
+const usageTableStub = { props: ['columns'], template: '<div />' }
 
 const usageLog = {
   id: 1,
@@ -141,7 +142,7 @@ function mountUsageView() {
         DateRangePicker: true,
         Icon: true,
         UsageStatsCards: chartStub,
-        UsageTable: chartStub,
+        UsageTable: usageTableStub,
         ModelDistributionChart: chartStub,
         GroupDistributionChart: chartStub,
         EndpointDistributionChart: chartStub,
@@ -152,6 +153,21 @@ function mountUsageView() {
 }
 
 describe('user UsageView', () => {
+  it('shows cache metrics by default and allows hiding the column', async () => {
+    const wrapper = mountUsageView()
+    await flushPromises()
+    const table = wrapper.findComponent(usageTableStub)
+    expect(table.props('columns')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'cache_hit_rate', sortable: false })]),
+    )
+    await wrapper.get('button[title="Columns"]').trigger('click')
+    const toggle = wrapper.findAll('button').find((button) => button.text() === 'usage.cacheHitRate')
+    await toggle!.trigger('click')
+    expect(table.props('columns')).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'cache_hit_rate' })]),
+    )
+  })
+
   beforeEach(() => {
     query.mockReset()
     getStats.mockReset()

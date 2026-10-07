@@ -145,6 +145,22 @@
           </span>
         </template>
 
+        <template #cell-cache_hit_rate="{ row }">
+          <div class="flex flex-col items-start gap-1 whitespace-nowrap text-xs font-medium leading-4 tabular-nums">
+            <span data-testid="cache-hit-rate" class="inline-flex items-center gap-1.5 rounded-md bg-violet-50 px-1.5 py-0.5 text-violet-700 ring-1 ring-inset ring-violet-200 dark:bg-violet-500/10 dark:text-violet-300 dark:ring-violet-400/20">
+              <Icon name="database" size="sm" aria-hidden="true" />
+              <span>{{ t('usage.cacheMetricLabel') }} {{ formatCacheHitRate(row) }}</span>
+            </span>
+            <span data-testid="request-tps" class="inline-flex items-center gap-1.5 rounded-md bg-cyan-50 px-1.5 py-0.5 text-cyan-700 ring-1 ring-inset ring-cyan-200 dark:bg-cyan-500/10 dark:text-cyan-300 dark:ring-cyan-400/20">
+              <svg aria-hidden="true" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 19a9 9 0 1 1 14 0M12 3v2M5.6 5.6 7 7M3 12h2M19 12h2M17 7l-4 5M8 20h8" />
+                <circle cx="12" cy="13" r="2" />
+              </svg>
+              <span>TPS: {{ formatRequestTps(row) }}</span>
+            </span>
+          </div>
+        </template>
+
         <template #cell-tokens="{ row }">
           <!-- 图片生成请求（仅按次计费时显示图片格式） -->
           <div v-if="isImageUsage(row)" class="flex items-center gap-1.5">
@@ -700,6 +716,37 @@ const getRequestTypeBadgeClass = (row: AdminUsageLog): string => {
 
 const formatUserAgent = (ua: string): string => {
   return ua
+}
+
+const formatCacheHitRate = (row: AdminUsageLog): string => {
+  const tokens = [row.input_tokens, row.cache_read_tokens, row.cache_creation_tokens]
+  if (tokens.some((value) => !Number.isSafeInteger(value) || value < 0)) return '—'
+  const total = tokens.reduce((sum, value) => sum + value, 0)
+  if (!Number.isSafeInteger(total) || total === 0) return '—'
+  const rate = row.cache_read_tokens / total * 100
+  const rounded = rate.toFixed(2)
+  if (rate > 0 && rounded === '0.00') return '<0.01%'
+  if (rate < 100 && rounded === '100.00') return '>99.99%'
+  return `${rounded}%`
+}
+
+const formatRequestTps = (row: AdminUsageLog): string => {
+  if (
+    row.request_type === 'live' || row.request_type === 'cyber' ||
+    ['image', 'video', 'audio'].includes(row.billing_mode ?? '') ||
+    row.image_count > 0 || hasImageOutputTokens(row) ||
+    [row.inbound_endpoint, row.upstream_endpoint].some((endpoint) =>
+      /\/(?:images\/(?:generations|edits)|videos(?:\/|$)|audio\/|realtime(?:\/|$))/i.test(endpoint ?? '')
+    )
+  ) return '—'
+  const { duration_ms: duration, first_token_ms: firstToken, output_tokens: output } = row
+  if (
+    duration == null || firstToken == null ||
+    !Number.isSafeInteger(duration) || !Number.isSafeInteger(firstToken) ||
+    firstToken < 0 || duration <= firstToken || !Number.isSafeInteger(output) || output <= 0
+  ) return '—'
+  const tps = output / (duration - firstToken) * 1000
+  return `${tps < 0.1 ? tps.toPrecision(2) : tps.toFixed(1)} t/s`
 }
 
 // 超过 1 分钟简化为 "Xm Ys"，免去人工换算（超过 1 小时再进位为 "Xh Ym"）
