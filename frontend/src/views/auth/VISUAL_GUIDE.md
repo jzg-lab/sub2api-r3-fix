@@ -532,57 +532,6 @@ animation: spin 1s linear infinite;
 
 (Not applicable for authentication pages - users shouldn't print login forms)
 
-## Dark Mode Considerations
-
-**Future Enhancement:**
-
-- Dark mode toggle in user preferences
-- System preference detection
-- Persistent dark mode setting
-- Adjusted color palette for dark backgrounds
-
-```css
-/* Example dark mode colors (not implemented yet) */
-dark:bg-gray-900
-dark:text-white
-dark:border-gray-700
-```
-
-## Performance Metrics
-
-### Target Metrics
-
-- First Contentful Paint (FCP): < 1s
-- Largest Contentful Paint (LCP): < 2.5s
-- Time to Interactive (TTI): < 3s
-- Cumulative Layout Shift (CLS): < 0.1
-- First Input Delay (FID): < 100ms
-
-### Optimization Strategies
-
-- Lazy load non-critical resources
-- Minimize initial bundle size
-- Use efficient animations (transform, opacity)
-- Optimize images (logo, icons)
-- Preconnect to API domain
-- Cache static assets
-
-## Component Size
-
-### Bundle Impact
-
-- LoginView.vue: ~4 KB (minified)
-- RegisterView.vue: ~6 KB (minified)
-- AuthLayout.vue: ~1 KB (minified)
-- Total: ~11 KB (excluding dependencies)
-
-### Dependencies
-
-- Vue 3: ~40 KB (runtime)
-- Vue Router: ~15 KB
-- Pinia: ~10 KB
-- Total framework overhead: ~65 KB (gzipped)
-
 ## Testing Checklist
 
 ### Visual Regression Tests

@@ -45,8 +45,17 @@ archives:
     files:
       - LICENSE*
       - README*
+      - AGENTS.md
       - RELEASE-POLICY.md
-      - RELEASE-R11.md
+      - DEV_GUIDE.md
+      - docs/[A-Z]*.md
+      - docs/local-customizations.md
+      - docs/upstream-integration-policy.md
+      - docs/upstream-sync-state.md
+      - docs/deployment-state.md
+      - docs/legal/*.md
+      - backend/pkg/pluginapi/**/*.md
+      - backend/migrations/README.md
       - deploy/*.md
       - deploy/*.sh
       - deploy/*.yml

@@ -3,7 +3,7 @@ package service
 // 救治区编排器（r17ax Phase 3）：判死号自动进入插件运行的生产内实验台。
 // 三入口（自动钩子 / 手动端点 / 对账清扫）汇入同一 EnterRescue 转换：
 // 快照原组 → 标记入区 → 绑救治组并隔离 → 种子流量 → 事件。
-// 设计与通道结论见 openspec/changes/add-account-rescue-lane/design.md 0.3/0.4。
+// 当前行为与合并约束见 docs/upstream-integration-policy.md。
 
 import (
 	"context"
@@ -138,7 +138,7 @@ type OpenAIRescueLaneConfig struct {
 	ReconcileInterval time.Duration
 }
 
-// DefaultOpenAIRescueLaneConfig 安全缺省：关、无组、阈值 6、5min 对账。
+// DefaultOpenAIRescueLaneConfig 安全缺省：关、无组、阈值 3、5min 对账。
 func DefaultOpenAIRescueLaneConfig() OpenAIRescueLaneConfig {
 	return OpenAIRescueLaneConfig{
 		Enabled:                false,

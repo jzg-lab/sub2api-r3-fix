@@ -316,10 +316,6 @@ Feature flags default to disabled.
 - Confirm billing pricing.
 - Run smoke tests before enabling.
 
-## Future Optimization
-
-- Optional object-storage download offload: persist completed image outputs to an operator-configured object store such as GCS, S3, or R2, then issue short-lived signed download links to users. This would avoid routing large image/ZIP downloads through the Sub2API server, which is useful for small-bandwidth deployments. Keep it opt-in because it needs extra storage credentials, lifecycle cleanup, signed-URL expiry policy, access auditing, and compatibility with output deletion.
-
 ## Security Checklist
 
 - No provider refs in public responses.

@@ -1,78 +1,54 @@
-# 本地自主修改记录
+# 当前实现与回归入口
 
-本记录汇总用户自行提出、在本项目中自主调整或修复的内容，不是从其他项目或上游
-合并引入的功能清单。更新日期：2026-10-07。
-这里说明的是本地修改的来源与目的，不表示相关底层功能或全部代码都是本地原创。
+本文描述当前源码中已存在的行为及代码入口，包含老板版基础能力和本项目调整。
+LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
+产品选择及尚未实施的决定统一见 [产品规则与上游差异](upstream-integration-policy.md)，
+来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
 
-这些自主修改需要长期记录，后续合并上游时也要保留，不是“文件永远不能改”的清单。
-合并采用上游更好的实现时，
-必须保持本地已确认行为并通过相应回归；如需取消或改变，先让用户确认。
-计划中的功能不等于已实现，代码完成不等于已部署，配置生效不等于效果已证明。
+## 行为与入口
 
-## 自主修改内容
-
-| 编号 | 要保留的点 | 依据与边界 |
+| 编号 | 当前行为 | 依据与边界 |
 | --- | --- | --- |
-| LOCAL-001 | 无代理 OpenAI OAuth 保留直连；显式代理无效时拒绝，不静默直连；不加入固定登录出口门槛 | [上游合并约束](upstream-integration-policy.md)；保留授权身份绑定、令牌并发保护 |
-| LOCAL-002 | 救援期间分组保护、人工暂停/终止、原子毕业及旧轮次隔离 | [上游合并约束](upstream-integration-policy.md)；普通设置不能重新启用停调账号 |
-| LOCAL-003 | 质量检测可靠判分；模糊答案不当作错答，正确低 reasoning token 不单独判质量失败 | [r17bg 修复记录](r17bg-plugin-improvement-results.md)；中性结果不算恢复通过，不修改已有资格门槛 |
-| LOCAL-004 | Cookie Pin 按账号隔离、白名单 Cookie 合并、身份变化/迟到响应隔离、暂停与代理保护 | [r17bg 修复记录](r17bg-plugin-improvement-results.md)；[被动启用记录](cookie-pin-passive-activation-20261006.md)；不能承诺防账号降级 |
-| LOCAL-005 | 健康列持续支持宿主当前返回结构及插件桥状态，不能以旧前端字段假定新接口 | 前后端版本必须一起验收；此前空白由旧前端资源造成，不记录成不存在的代码修复 |
-| LOCAL-006 | Workspace 列保留短 ID、颜色辅助分组及完整 ID 提示 | `frontend/src/views/admin/AccountsView.vue`；颜色是 ID 哈希，不是健康等级，同色不保证同 Workspace |
-| LOCAL-007 | 并发数/优先级自由编辑，默认 5/2，明确值真实保存 | [调度设置记录](account-scheduling-settings-20261006.md)；新规则取代旧“强制 50”规则；不重写已有值 |
-| LOCAL-008 | 插件配置页遵循 UI Bridge v1，显示具体保存错误，保留未展示参数 | [配置页保存修复](cookie-pin-ui-save-fix-20261006.md)；0.3.11 已打包并由用户上传，后续只读复核已启用；修保存不自动开启质量探针 |
-| LOCAL-009 | 救治区前置条件失败返回具体原因，不伪装成 internal error | [救治区报错记录](cookie-pin-ui-save-fix-20261006.md)；宿主修复已随 r17bh 部署；不自动开启救治区 |
-| LOCAL-010 | 经用户确认启用生产独立救治区，保持客户隔离及原分组快照 | [生产配置记录](cookie-pin-ui-save-fix-20261006.md)；组 #74 `rescue-lab` 专属且停用，3 次连续通过阈值、5 分钟巡检；保留生产设置，不把其他环境的安全默认关闭改成自动开启；#13559 入区验收通过，不等于质量恢复 |
-| LOCAL-011 | 质量调度限制仅作用于选中组，混合组按最宽松规则允许手动开启 | 2026-10-07 最小实现，详见下节；已随 [r17bh](r17bh-deployment-20261007.md) 推送并部署 |
+| LOCAL-001 | 无代理 OpenAI OAuth 保留直连；显式代理无效时拒绝，不静默直连 | [授权、代理和导入](upstream-integration-policy.md#授权代理和导入)；保留身份绑定及令牌并发保护 |
+| LOCAL-002 | 救治期间保护分组，保留人工暂停、手动终止、原子毕业与旧轮次隔离 | [救治规则](upstream-integration-policy.md#救治)；普通设置不能重新启用停调账号 |
+| LOCAL-003 | 质量检测以最终答案判分；模糊答案、正确但 reasoning token 低的答案不单独判失败 | [Cookie Pin](../deploy/codex-lb-cookie-pin/README.md)；中性结果不算恢复通过 |
+| LOCAL-004 | Cookie Pin 按账号隔离，合并白名单 Cookie，隔离身份变化及迟到响应 | [Cookie Pin](../deploy/codex-lb-cookie-pin/README.md)；保留暂停及代理保护，不保证模型质量改善 |
+| LOCAL-005 | 健康列消费宿主健康信封及插件桥状态 | `backend/internal/service/openai_account_health.go`、`frontend/src/views/admin/AccountsView.vue`；前后端资源须配套 |
+| LOCAL-006 | Workspace 显示短 ID、颜色分组及完整 ID 提示 | `frontend/src/views/admin/AccountsView.vue`；颜色来自 ID 哈希，同色不保证同 Workspace，也不是健康等级 |
+| LOCAL-007 | 并发数/优先级可编辑，默认 5/2，明确合法值真实保存 | [并发与优先级](upstream-integration-policy.md#账号并发数与优先级)；不重写已有值 |
+| LOCAL-008 | 插件配置页遵循 UI Bridge v1，显示具体保存错误，保留未展示参数 | `deploy/codex-lb-cookie-pin/ui/index.html`；保存配置不自动开启质量探针 |
+| LOCAL-009 | 救治前置条件失败返回具体原因 | `backend/internal/service/openai_rescue_lane.go`；未启用、未配置和不适用均返回可识别错误 |
+| LOCAL-010 | 独立救治区保留客户隔离与原组快照 | 新环境默认关闭；生产显式配置见 [部署状态](deployment-state.md)，不能用生产设置覆盖产品默认值 |
+| LOCAL-011 | 质量调度限制按所选分组判断，混合组采用最宽松规则 | 详见下节；不提供按请求隔离混合账号的保证 |
 
-本记录汇总当前请求涉及及已有文档明确确认的本地调整，不声称已完整审计历史所有修改。
-以后每次自主修改应追加/更新条目，记录代码位置、验证及部署状态，不能只留在聊天里。
+## 质量调度限制分组
 
-## 已撤回的试作
+入口：后台 → 插件管理 → Codex LB Cookie Pin → 配置 → 质量调度限制。
+选择器由宿主渲染，使用现有 OpenAI 运维设置接口，不扩展插件 iframe 权限。
 
-- 2026-10-07：[分组质量保护修改计划](group-scoped-quality-protection-plan-20261007.md)。
-  用户要求回退并重新明确最小范围。本轮曾新增的配置/分类/只读预览代码已撤回；
-  LOCAL-011 不再列为已完成自主修改或后续合并保留点。
-  [撤回记录](group-scoped-quality-protection-progress-20261007.md)仅保留历史；未推送、未部署，
-  不影响 LOCAL-001 至 LOCAL-010。随后用户明确要求最小实现，LOCAL-011 现指下述新实现。
+存储字段为 `openai_operations.quality_protected_group_ids`：
 
-## LOCAL-011：质量调度限制分组
+| 配置 | 行为 |
+| --- | --- |
+| 缺失或 `null` | 全部分组沿用质量限制 |
+| `[]` | 不限制任何分组 |
+| 非空 ID 数组 | 只有全部绑定都在所选组内的账号受质量限制；有任一未选中绑定或无绑定即放宽 |
 
-用户于 2026-10-07 重新明确：改动简单、尽快可用，未选中的分组允许开启调度；
-混合分组沿用此前确认的最宽松规则。没有恢复旧方案的请求级严格组过滤、预览或版本机制。
+- 救治账号按严格校验的原组快照判断，不能把救治组当作普通组。
+- 范围外救治账号明确手动开启时，在同一事务内恢复原组、终止救治并开启调度；
+  保留终止标记及失败证据，不计质量恢复。原组损坏、目标组被删或显式代理无效时回滚。
+- 范围外账号不因纯质量结果停调或自动入区；认证首振暂停、认证错误、限流、人工暂停
+  和正常恢复继续适用。
+- 保存分组选择不批量开启或释放账号。已在救治区的账号需要明确点击开启。
+- 混合账号整体开启后，所选组也可能使用它；没有“所选组只用质量合格账号”的保证。
 
-- 插件管理页的 Cookie Pin“配置”弹窗增加“质量调度限制”：全部分组或仅选中分组，
-  由宿主渲染并使用现有 OpenAI 运维设置接口，不扩展插件 iframe 权限。
-- 存储字段 `openai_operations.quality_protected_group_ids`：缺失/null 沿用全局旧规则；
-  空数组不限制任何组；账号有任一未选中绑定即放宽，无分组也放宽。
-- 救治中的账号按严格校验的原分组快照判断，不能把救治组当作普通组。
-  范围外账号明确开启时，复用原有终止救治事务恢复原组并开启，保留终止标记及失败证据，
-  不计质量恢复。原组损坏、目标组被删或显式代理无效时，整个操作回滚。
-- 范围外账号不因纯质量结果再次停调或自动进入救治；认证首振暂停、认证错误、限流、
-  手动暂停及正常恢复保持。Cookie、检测判题、模型降级规则与代理处理没有改动。
-- 保存分组选择不会批量开启或释放账号。已在救治区的账号仍需明确点击开启。
-- 混合账号总调度开启后，选中组也可能使用它；本版本不提供“选中组只使用质量合格账号”的保证。
-- 入口：`frontend/src/components/plugins/OpenAIQualityScope.vue`；共享判定：
-  `backend/internal/repository/openai_quality_scope.go`，接入手动调度、检测提交和自动入区。
-- 验证：真实隔离 PostgreSQL 测试覆盖选中/未选中/混合/空选组、单独与批量开启、原组恢复、
-  错误回滚、巡检不会重新停调、检测证据保留及认证首振/终态保护；前端保存和既有回归通过。
-- 宿主及前端生产构建通过；Playwright 在 1440px 和 390px 下验证选择、保存、刷新保留，
-  没有横向溢出或页面脚本错误。页面检查使用模拟 API，没有发送真实账号请求。
-- 部署状态：已于 2026-10-07 随 r17bh 更新宿主和前端。Cookie Pin 0.3.11 原包继续运行，
-  插件绑定及生产运维配置未改；限制分组仍为 null（全部分组），需要管理员在弹窗内选择并保存。
+实现入口：
 
-## 后续合并时的保护要求
+- `frontend/src/components/plugins/OpenAIQualityScope.vue`
+- `backend/internal/repository/openai_quality_scope.go`（共享判定）
+- `backend/internal/repository/openai_rescue_termination.go`（手动开启）
+- `backend/internal/repository/openai_downgrade_commit.go`（检测提交）
+- `backend/internal/repository/openai_oauth_proxy_binding.go`（入区资格）
 
-1. 合并前读取本文件、`upstream-integration-policy.md` 和对应条目的实施记录。
-2. 对照上游 diff 标注受影响条目；文本没有冲突不代表行为没有回退。
-3. 同时核对前端表单/返回结构、handler、service、repository、调度缓存和迁移。
-4. 每个受影响条目保留或补充回归。重点检查“省略字段保留”和“明确值不被默认覆盖”。
-5. 不修改已执行迁移的 SQL/checksum，不靠全池重写数据掩盖配置问题。
-6. 更新实施记录，注明通过项、未测项、既有失败和部署版本。验收未完成不得写“已保留”。
-7. 部署是独立操作；只有用户要求部署时才执行，并保留备份/回退与发布证据。
-
-## 其他方案的边界
-
-“官方同步新增接口”和“用户平台限额 D09”属于另外的上游合并方案约束，见
-`upstream-integration-policy.md`；不计入上面的自主修改内容，也不表示已经实施。
-不得因此擅自执行迁移或部署。
+对应回归位于 `backend/internal/repository/openai_quality_scope_test.go`；
+运行方法及通用检查见 [开发指南](../DEV_GUIDE.md)。

@@ -1,8 +1,6 @@
-> 最新源码：**R11**，在 R10 上增加 HTTP 追踪 ID 兼容修复和 OAuth 会话保持优化。
-> 验证与交付状态见 [RELEASE-R11.md](RELEASE-R11.md)。R11 尚未成为已验证的二进制发布。
-> R10（`10e35ba`）已是历史源码；R11 源码以当前 `main` 为准，旧 R10 压缩包不包含本次修复。
-> 源码提交不等于已有运行服务已经升级。
-> 后续发布必须同时提供 macOS、Windows、Linux 部署包，交付要求见 [RELEASE-POLICY.md](RELEASE-POLICY.md)。
+> 当前文档从[文档索引](docs/README.md)进入，本地行为和长期合并规则在对应主题中维护。
+> 源码身份以当前检出提交为准；[部署状态](docs/deployment-state.md)注明最近一次环境核验时间。
+> 正式发布要求见 [RELEASE-POLICY.md](RELEASE-POLICY.md)。
 
 <div align="center">
 

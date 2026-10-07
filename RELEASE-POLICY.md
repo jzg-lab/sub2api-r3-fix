@@ -69,7 +69,3 @@ A tested native artifact may follow its existing authorized local deployment
 process; the subsequent Git release still requires the complete matrix.
 Service switching retains its own source/build bindings, single publisher,
 runtime acceptance and rollback requirements.
-
-Existing R10 source-only and macOS-arm64 deliveries retain their historical
-scope. This policy does not relabel them as a three-system release or claim
-that later optimization candidates have been built or deployed.

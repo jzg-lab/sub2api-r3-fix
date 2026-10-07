@@ -23,8 +23,8 @@ Dependency installation does not authorize arbitrary lifecycle scripts.
 ## Shutdown
 
 `SERVER_SHUTDOWN_TIMEOUT` accepts a positive Go duration up to one hour.
-The default remains five seconds; this production launcher explicitly uses
-`55m`. HTTP and upgraded WebSocket shutdown are separate checks.
+The default is five seconds; inspect the target launcher or environment for
+its actual override. HTTP and upgraded WebSocket shutdown are separate checks.
 
 The registry lives in the real request context, covers coder WebSocket and
 Gorilla management monitoring, and retains pending upgrades until their handler

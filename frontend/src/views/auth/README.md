@@ -307,21 +307,6 @@ appStore.showError('Username already exists')
 - API integration
 - Success/error states
 
-## Future Enhancements
-
-Potential improvements:
-
-- OAuth/SSO integration (Google, GitHub)
-- Two-factor authentication (2FA)
-- Password strength meter
-- Email verification flow
-- Forgot password functionality
-- Social login buttons
-- CAPTCHA integration
-- Session timeout warnings
-- Password visibility toggle
-- Autofill support enhancement
-
 ## Security Considerations
 
 - Passwords are never logged or displayed
@@ -353,8 +338,8 @@ Potential improvements:
 
 ## Related Documentation
 
-- [Auth Store Documentation](/src/stores/README.md#auth-store)
-- [AuthLayout Component](/src/components/layout/README.md#authlayout)
-- [Router Configuration](/src/router/index.ts)
-- [API Documentation](/src/api/README.md#authentication)
-- [Type Definitions](/src/types/index.ts)
+- [Auth Store Documentation](../../stores/README.md#auth-store)
+- [AuthLayout Component](../../components/layout/README.md#authlayout)
+- [Router Configuration](../../router/index.ts)
+- [API Documentation](../../api/auth.ts)
+- [Type Definitions](../../types/index.ts)
