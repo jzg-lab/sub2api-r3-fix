@@ -392,6 +392,10 @@ export default {
       subscriptionExpires: 'Expires',
       // Capacity status tooltips
       capacity: {
+        editConcurrency: 'Edit concurrency limit',
+        invalidConcurrency: 'Concurrency must be an integer between 1 and 10000',
+        concurrencySaved: 'Concurrency limit saved',
+        concurrencyFailed: 'Failed to save concurrency limit',
         windowCost: {
           blocked: '5h window cost exceeded, account scheduling paused',
           stickyOnly: '5h window cost at threshold, only sticky sessions allowed',

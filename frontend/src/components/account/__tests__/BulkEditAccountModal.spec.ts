@@ -81,14 +81,18 @@ function mountModal(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('BulkEditAccountModal', () => {
-  it('keeps the concurrency control at 50 when enabled and reopened', async () => {
+  it('allows an explicit concurrency and resets the draft when reopened', async () => {
     const wrapper = mountModal()
     const limit = wrapper.get<HTMLInputElement>('#bulk-edit-concurrency')
     expect(limit.element.value).toBe('50')
-    expect(limit.element.readOnly).toBe(true)
+    expect(limit.element.readOnly).toBe(false)
     await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
     expect(limit.element.disabled).toBe(false)
     expect(limit.element.value).toBe('50')
+    await limit.setValue('7')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { concurrency: 7 })
     await wrapper.setProps({ show: false })
     await wrapper.setProps({ show: true })
     expect(limit.element.value).toBe('50')

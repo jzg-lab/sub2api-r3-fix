@@ -334,8 +334,14 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	return duplicate, nil
 }
 
-func normalizeAccountConcurrency(_, _ string, _ int) int {
-	return LocalAccountConcurrency
+func validateAccountConcurrency(concurrency int, allowDefault bool) error {
+	if allowDefault && concurrency == 0 {
+		return nil
+	}
+	if concurrency < 1 || concurrency > MaxAccountConcurrency {
+		return infraerrors.BadRequest("INVALID_ACCOUNT_CONCURRENCY", "concurrency must be an integer between 1 and 10000")
+	}
+	return nil
 }
 
 // ValidateOpenAILongContextBillingExtra validates the OpenAI account billing flag when present.
@@ -394,6 +400,9 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
+	if err := validateAccountConcurrency(input.Concurrency, true); err != nil {
+		return nil, err
+	}
 	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingRateSyncEnabledExtraKey)
@@ -411,7 +420,7 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Credentials: input.Credentials,
 		Extra:       accountExtra,
 		ProxyID:     input.ProxyID,
-		Concurrency: normalizeAccountConcurrency(input.Platform, input.Type, input.Concurrency),
+		Concurrency: NormalizeAccountConcurrency(input.Concurrency),
 		Priority:    input.Priority,
 		Status:      StatusActive,
 		Schedulable: true,
@@ -651,6 +660,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
+	if input.Concurrency != nil {
+		if err := validateAccountConcurrency(*input.Concurrency, false); err != nil {
+			return nil, err
+		}
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -859,9 +873,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			delete(account.Extra, OllamaCloudUsageSnapshotExtraKey)
 		}
 	}
-	// 只在指针非 nil 时更新 Concurrency（支持设置为 0）
+	// Omitted limits are preserved; explicit limits have already been validated.
 	if input.Concurrency != nil {
-		account.Concurrency = normalizeAccountConcurrency(account.Platform, account.Type, *input.Concurrency)
+		account.Concurrency = *input.Concurrency
 	}
 	// 只在指针非 nil 时更新 Priority（支持设置为 0）
 	if input.Priority != nil {
@@ -933,6 +947,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			requestedProbeEnabledUpdate,
 			requestedRateSyncEnabledUpdate,
 			input.RateMultiplier,
+			input.Concurrency,
 		); err != nil {
 			return nil, err
 		}
@@ -1051,6 +1066,11 @@ func (s *adminServiceImpl) ApplyOAuthCredentials(
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
+	if input.Concurrency != nil {
+		if err := validateAccountConcurrency(*input.Concurrency, false); err != nil {
+			return nil, err
+		}
+	}
 	// Managed probe/session state may only enter through dedicated typed endpoints.
 	// Codex 指纹 seed 同理：批量更新不预写 seed，需要时由 repo 层原子 ensure。
 	input.Extra = sanitizedCodexFingerprintExtraUpdates(input.Extra)
@@ -1249,8 +1269,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.ProxyID = input.ProxyID
 	}
 	if input.Concurrency != nil {
-		concurrency := LocalAccountConcurrency
-		repoUpdates.Concurrency = &concurrency
+		repoUpdates.Concurrency = input.Concurrency
 	}
 	if input.Priority != nil {
 		repoUpdates.Priority = input.Priority
@@ -1475,6 +1494,9 @@ func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id in
 // CreateShadow 为指定 OpenAI OAuth 母账号创建 spark 维度影子账号（一母一影）。
 // 安全不变量：Credentials 恒不含 auth token（仅 model_mapping，守卫 isAllowedSparkShadowCredentialsUpdate 放行）。
 func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error) {
+	if err := validateAccountConcurrency(opts.Concurrency, true); err != nil {
+		return nil, err
+	}
 	// 1. 加载母账号并校验平台/类型
 	parent, err := s.accountRepo.GetByID(ctx, parentID)
 	if err != nil {
@@ -1536,11 +1558,14 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	if runes := []rune(name); len(runes) > 100 {
 		name = string(runes[:100])
 	}
-	concurrency := LocalAccountConcurrency
+	concurrency := opts.Concurrency
+	if concurrency == 0 {
+		concurrency = NormalizeAccountConcurrency(parent.Concurrency)
+	}
 	// 优先级未指定(<=0)时继承母账号——前端一键创建只传 name,opts.Priority 省略即 0,而调度
 	// 比较是「数值越小越优先」(openai_account_scheduler.isOpenAIAccountCandidateBetter),且 repo
 	// 显式 SetPriority 会绕过 ent 默认 50,直写 0 会让影子意外抢到最高优先级(外审第5轮 P1)。
-	// Priority inherits the parent when omitted; concurrency follows local policy.
+	// Priority and concurrency inherit the parent when omitted.
 	priority := opts.Priority
 	if priority <= 0 {
 		priority = parent.Priority

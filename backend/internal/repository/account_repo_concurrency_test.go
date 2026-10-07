@@ -12,14 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func assertLocalConcurrencyMutation(t *testing.T, repo *accountRepository) *bool {
+func assertConcurrencyMutation(t *testing.T, repo *accountRepository, expected int) *bool {
 	t.Helper()
 	seen := false
 	repo.client.Account.Use(func(next dbent.Mutator) dbent.Mutator {
 		return dbent.MutateFunc(func(ctx context.Context, mutation dbent.Mutation) (dbent.Value, error) {
 			value, ok := mutation.(*dbent.AccountMutation).Concurrency()
 			require.True(t, ok)
-			require.Equal(t, 50, value)
+			require.Equal(t, expected, value)
 			seen = true
 			return next.Mutate(ctx, mutation)
 		})
@@ -27,12 +27,13 @@ func assertLocalConcurrencyMutation(t *testing.T, repo *accountRepository) *bool
 	return &seen
 }
 
-func TestAccountRepositoryCreateUsesLocalConcurrency(t *testing.T) {
+func TestAccountRepositoryCreatePreservesConcurrency(t *testing.T) {
 	for _, platform := range []string{service.PlatformOpenAI, service.PlatformAnthropic, service.PlatformGrok, "future-platform"} {
 		for _, requested := range []int{-1, 0, 1, 50, 1000} {
 			t.Run(fmt.Sprintf("%s/%d", platform, requested), func(t *testing.T) {
 				repo, mock := atomicCreateRepository(t)
-				seen := assertLocalConcurrencyMutation(t, repo)
+				expected := service.NormalizeAccountConcurrency(requested)
+				seen := assertConcurrencyMutation(t, repo, expected)
 				account := atomicCreateAccount()
 				account.Platform = platform
 				account.Concurrency = requested
@@ -46,7 +47,7 @@ func TestAccountRepositoryCreateUsesLocalConcurrency(t *testing.T) {
 
 				require.NoError(t, repo.Create(t.Context(), account))
 				require.True(t, *seen)
-				require.Equal(t, 50, account.Concurrency, "the returned account must match persistence")
+				require.Equal(t, expected, account.Concurrency, "the returned account must match persistence")
 			})
 		}
 	}
@@ -63,11 +64,11 @@ func TestAccountRepositoryCreateFailureKeepsRequestedConcurrency(t *testing.T) {
 	require.Zero(t, account.ID)
 }
 
-func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
+func TestAccountRepositoryUpdatePreservesConcurrency(t *testing.T) {
 	for _, failure := range []string{"none", "outbox", "commit"} {
 		t.Run(failure, func(t *testing.T) {
 			repo, mock := atomicCreateRepository(t)
-			seen := assertLocalConcurrencyMutation(t, repo)
+			seen := assertConcurrencyMutation(t, repo, 1)
 			account := atomicCreateAccount()
 			account.ID = 71
 			mock.ExpectBegin()
@@ -79,7 +80,7 @@ func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
 			mock.ExpectExec(`UPDATE "accounts"`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(`(?s)SELECT .* FROM "accounts" WHERE "id" = \$1`).
 				WithArgs(int64(71)).
-				WillReturnRows(sqlmock.NewRows([]string{"id", "concurrency"}).AddRow(int64(71), 50))
+				WillReturnRows(sqlmock.NewRows([]string{"id", "concurrency"}).AddRow(int64(71), 1))
 			injected := errors.New("injected " + failure)
 			outbox := mock.ExpectExec(`INSERT INTO scheduler_outbox`)
 			if failure == "outbox" {
@@ -93,11 +94,11 @@ func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
 				}
 			}
 
-			err := repo.Update(t.Context(), account)
+			err := repo.UpdateWithAccountBillingSettings(t.Context(), account, nil, nil, nil, &account.Concurrency)
 			require.True(t, *seen)
 			if failure == "none" {
 				require.NoError(t, err)
-				require.Equal(t, 50, account.Concurrency)
+				require.Equal(t, 1, account.Concurrency)
 			} else {
 				require.ErrorIs(t, err, injected)
 				require.Equal(t, 1, account.Concurrency, "an uncommitted limit must not be published")
@@ -106,13 +107,13 @@ func TestAccountRepositoryUpdateUsesLocalConcurrency(t *testing.T) {
 	}
 }
 
-func TestAccountRepositoryBulkConcurrencyUsesLocalPolicy(t *testing.T) {
+func TestAccountRepositoryBulkPreservesConcurrency(t *testing.T) {
 	for _, requested := range []int{-1, 0, 1, 50, 1000} {
 		t.Run(fmt.Sprint(requested), func(t *testing.T) {
 			repo, mock := atomicCreateRepository(t)
 			mock.ExpectBegin()
 			mock.ExpectExec(`UPDATE accounts SET concurrency = \$1, updated_at = NOW\(\) WHERE id = ANY\(\$2\) AND deleted_at IS NULL`).
-				WithArgs(50, "{71,72}").WillReturnResult(sqlmock.NewResult(0, 2))
+				WithArgs(service.NormalizeAccountConcurrency(requested), "{71,72}").WillReturnResult(sqlmock.NewResult(0, 2))
 			mock.ExpectExec(`INSERT INTO scheduler_outbox`).
 				WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, []byte(`{"account_ids":[71,72]}`)).
 				WillReturnResult(sqlmock.NewResult(0, 1))

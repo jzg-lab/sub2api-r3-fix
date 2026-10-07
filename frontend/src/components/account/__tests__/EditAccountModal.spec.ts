@@ -328,11 +328,42 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
-  it('shows the fixed concurrency instead of a stale account limit', async () => {
-    const wrapper = mountModal(buildGrokAPIKeyAccount())
+  it('preserves the stored concurrency and allows editing it', async () => {
+    const account = buildGrokAPIKeyAccount()
+    const wrapper = mountModal(account)
     await flushPromises()
-    const limit = wrapper.get('input[type="number"][readonly]')
-    expect((limit.element as HTMLInputElement).value).toBe('50')
+    const limit = wrapper.get<HTMLInputElement>('#edit-account-concurrency')
+    expect(limit.element.value).toBe(String(account.concurrency))
+    expect(limit.element.readOnly).toBe(false)
+    await limit.setValue('7')
+    expect(limit.element.value).toBe('7')
+    await wrapper.setProps({ account: { ...account, id: account.id + 1, concurrency: 4 } })
+    expect(limit.element.value).toBe('4')
+    wrapper.unmount()
+  })
+
+  it('omits unchanged concurrency from an unrelated account edit', async () => {
+    const account = buildGrokAPIKeyAccount()
+    updateAccountMock.mockReset().mockResolvedValue({ ...account, concurrency: 9 })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledOnce()
+    expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('concurrency')
+    wrapper.unmount()
+  })
+
+  it('submits an explicitly changed concurrency limit', async () => {
+    const account = buildGrokAPIKeyAccount()
+    updateAccountMock.mockReset().mockResolvedValue({ ...account, concurrency: 7 })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('#edit-account-concurrency').setValue('7')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledOnce()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.concurrency).toBe(7)
     wrapper.unmount()
   })
 

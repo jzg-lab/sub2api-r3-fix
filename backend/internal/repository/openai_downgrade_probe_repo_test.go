@@ -29,6 +29,7 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		for _, predicate := range []string{
 			"JOIN accounts a ON a.id = s.account_id",
 			"a.deleted_at IS NULL",
+			"a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $1",
 			"a.platform = 'openai' AND a.type = 'oauth'",
 			"a.parent_account_id IS NULL",
 			"AND s.state <> 'pending_replace'",

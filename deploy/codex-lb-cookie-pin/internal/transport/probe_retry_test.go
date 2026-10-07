@@ -10,6 +10,7 @@ import (
 
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/cookiestore"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/prober"
+	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
 func TestProbeRetryDeadline(t *testing.T) {
@@ -19,10 +20,10 @@ func TestProbeRetryDeadline(t *testing.T) {
 		header string
 		delay  time.Duration
 	}{
-		{429, "", time.Minute},
-		{429, "0", time.Minute},
-		{429, "-1", time.Minute},
-		{429, "garbage", time.Minute},
+		{429, "", pluginv1.DefaultProbe429Fallback},
+		{429, "0", pluginv1.DefaultProbe429Fallback},
+		{429, "-1", pluginv1.DefaultProbe429Fallback},
+		{429, "garbage", pluginv1.DefaultProbe429Fallback},
 		{429, "120", 2 * time.Minute},
 		{429, now.Add(4 * time.Minute).Format(http.TimeFormat), 4 * time.Minute},
 		{503, "90", 90 * time.Second},
@@ -52,6 +53,7 @@ func TestRateLimitedProbeDoesNotRetryRerollOrBypassCooldown(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		w.Header().Set("Retry-After", "120")
+		w.Header().Set("Set-Cookie", "__cflb=rejected; Max-Age=3500")
 		w.WriteHeader(http.StatusTooManyRequests)
 		fmt.Fprint(w, `{"error":{"code":"rate_limit_exceeded"}}`)
 	}))
@@ -59,6 +61,7 @@ func TestRateLimitedProbeDoesNotRetryRerollOrBypassCooldown(t *testing.T) {
 	store := cookiestore.New()
 	cfg := probeTestConfig()
 	store.SetConfig(cfg)
+	store.Capture(42, []string{"__cflb=original; Max-Age=3500"}, time.Now())
 	srv := stoppedProbeServer(t, store)
 	stashFrom(srv, 42, up.URL, time.Now())
 	state := prober.NewState(42)
@@ -73,6 +76,9 @@ func TestRateLimitedProbeDoesNotRetryRerollOrBypassCooldown(t *testing.T) {
 	}
 	if state.RetryNotBefore.Before(start.Add(2 * time.Minute)) {
 		t.Fatal("server cooldown was lost")
+	}
+	if store.MergeHeader(42, "", time.Now()) != "__cflb=original" {
+		t.Fatal("rate-limited probe replaced the pinned cookie")
 	}
 	// A new cookie and adaptive scheduling must not supersede Retry-After.
 	pullForFreshSign(state, time.Now(), time.Now())

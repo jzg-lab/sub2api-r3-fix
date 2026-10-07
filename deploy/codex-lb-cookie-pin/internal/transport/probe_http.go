@@ -4,12 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
 const maxProbeErrorBody = 16 << 10
@@ -17,25 +20,101 @@ const maxProbeErrorBody = 16 << 10
 // Rate limits are scheduling signals, not reasons to reroll or retry the
 // same request immediately. Even Retry-After: 0 retains a one-minute floor.
 func probeRetryDeadline(status int, header http.Header, now time.Time) time.Time {
+	return probeRetryDeadlineWithPolicy(status, header, now, pluginv1.ProbeRateLimitPolicy{})
+}
+
+func probeRetryDeadlineWithPolicy(status int, header http.Header, now time.Time, policy pluginv1.ProbeRateLimitPolicy) time.Time {
 	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
 		return time.Time{}
 	}
 	raw := strings.TrimSpace(header.Get("Retry-After"))
 	var deadline time.Time
-	if seconds, err := strconv.ParseUint(raw, 10, 64); err == nil {
-		// Saturate before converting to Duration to prevent integer overflow.
-		const maxSeconds = uint64((1<<63 - 1) / int64(time.Second))
-		if seconds > maxSeconds {
-			seconds = maxSeconds
-		}
-		deadline = now.Add(time.Duration(seconds) * time.Second)
+	if seconds, ok := retrySeconds(raw); ok {
+		deadline = retryResetAfter(seconds, now)
 	} else if date, err := http.ParseTime(raw); err == nil {
 		deadline = date
 	}
+	if status == http.StatusTooManyRequests {
+		for _, slot := range []string{"primary", "secondary"} {
+			prefix := "x-codex-" + slot + "-"
+			used, valid := retrySeconds(header.Get(prefix + "used-percent"))
+			if !valid || used < 100 {
+				continue
+			}
+			if rawWindow := header.Get(prefix + "window-minutes"); rawWindow != "" {
+				if minutes, valid := retrySeconds(rawWindow); !valid || minutes <= 0 {
+					continue
+				}
+			}
+			if seconds, valid := retrySeconds(header.Get(prefix + "reset-after-seconds")); valid {
+				deadline = maxTime(deadline, retryResetAfter(seconds, now))
+			}
+		}
+	}
 	if status == http.StatusTooManyRequests || !deadline.IsZero() {
+		if status == http.StatusTooManyRequests && !deadline.After(now) {
+			deadline = now.Add(policy.FallbackDuration())
+		}
+		deadline = maxTime(deadline, policy.NotBefore)
 		return maxTime(deadline, now.Add(time.Minute))
 	}
 	return time.Time{}
+}
+
+func retrySeconds(raw string) (float64, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	return value, err == nil && value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func retryResetAfter(seconds float64, now time.Time) time.Time {
+	const maximum = time.Duration(1<<63 - 1)
+	if seconds >= float64(maximum)/float64(time.Second) {
+		return now.Add(maximum)
+	}
+	return now.Add(time.Duration(seconds * float64(time.Second)))
+}
+
+// Read only recognized quota fields from an already bounded error body. The
+// message is never persisted and non-quota errors cannot establish a reset.
+func probeQuotaBodyDeadline(raw []byte, now time.Time) time.Time {
+	if len(raw) > maxProbeErrorBody {
+		return time.Time{}
+	}
+	var envelope struct {
+		Error struct {
+			Type            string          `json:"type"`
+			ResetsAt        json.RawMessage `json:"resets_at"`
+			ResetsInSeconds json.RawMessage `json:"resets_in_seconds"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return time.Time{}
+	}
+	switch envelope.Error.Type {
+	case "usage_limit_reached", "rate_limit_exceeded", "GoUsageLimitError":
+	default:
+		return time.Time{}
+	}
+	number := func(raw json.RawMessage) (float64, bool) {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			return retrySeconds(text)
+		}
+		return retrySeconds(string(raw))
+	}
+	var deadline time.Time
+	if seconds, valid := number(envelope.Error.ResetsAt); valid {
+		maximum := now.Add(time.Duration(1<<63 - 1))
+		if seconds >= float64(maximum.Unix()) {
+			deadline = maximum
+		} else {
+			deadline = time.Unix(int64(seconds), 0)
+		}
+	}
+	if seconds, valid := number(envelope.Error.ResetsInSeconds); valid {
+		deadline = maxTime(deadline, retryResetAfter(seconds, now))
+	}
+	return deadline
 }
 
 func maxTime(a, b time.Time) time.Time {

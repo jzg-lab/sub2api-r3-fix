@@ -288,6 +288,10 @@ export default {
       subscriptionExpires: '到期',
       // 容量状态提示
       capacity: {
+        editConcurrency: '调整并发上限',
+        invalidConcurrency: '并发上限须为 1 至 10000 的整数',
+        concurrencySaved: '并发上限已保存',
+        concurrencyFailed: '并发上限保存失败',
         windowCost: {
           blocked: '5h窗口费用超限，账号暂停调度',
           stickyOnly: '5h窗口费用达阈值，仅允许粘性会话',

@@ -106,7 +106,7 @@ func TestCRSSyncOpenAILongContextBilling(t *testing.T) {
 				if tt.collection == "openaiResponsesAccounts" {
 					accountType = AccountTypeAPIKey
 				}
-				existing = &Account{ID: 41, Platform: PlatformOpenAI, Type: accountType, Extra: existingExtra}
+				existing = &Account{ID: 41, Platform: PlatformOpenAI, Type: accountType, Extra: existingExtra, Concurrency: 7}
 			}
 			repo := newCRSLongContextAccountRepo(existing)
 			result := runCRSOpenAILongContextSync(t, repo, crsOpenAILongContextSource{
@@ -124,6 +124,9 @@ func TestCRSSyncOpenAILongContextBilling(t *testing.T) {
 			stored, ok := repo.accounts[crsID].Extra[openAILongContextBillingEnabledKey]
 			require.True(t, ok)
 			require.Equal(t, tt.wantEnabled, stored)
+			if existing != nil {
+				require.Equal(t, 7, repo.accounts[crsID].Concurrency, "CRS refresh must preserve the local concurrency limit")
+			}
 		})
 	}
 }

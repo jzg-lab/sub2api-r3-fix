@@ -164,7 +164,7 @@ type AccountDuplicateRepository interface {
 
 // AccountBillingSettingsRepository applies an admin edit without overwriting a
 // rate_multiplier that a successful upstream probe synchronized after the edit
-// form was loaded. A nil rateMultiplier means the request did not edit it.
+// form was loaded. Nil rateMultiplier/concurrency preserve the persisted values.
 type AccountBillingSettingsRepository interface {
 	UpdateWithAccountBillingSettings(
 		ctx context.Context,
@@ -172,6 +172,7 @@ type AccountBillingSettingsRepository interface {
 		probeEnabled *bool,
 		rateSyncEnabled *bool,
 		rateMultiplier *float64,
+		concurrency *int,
 	) error
 }
 
@@ -255,6 +256,9 @@ func NewAccountService(accountRepo AccountRepository, groupRepo GroupRepository)
 
 // Create 创建账号
 func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (*Account, error) {
+	if err := validateAccountConcurrency(req.Concurrency, true); err != nil {
+		return nil, err
+	}
 	if req.Platform == PlatformOpenAI {
 		settings, err := s.settings.GetOpenAIOperationsSettings(ctx)
 		if err != nil {
@@ -282,7 +286,7 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Credentials: SanitizeStoredCredentials(req.Platform, req.Credentials),
 		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra),
 		ProxyID:     req.ProxyID,
-		Concurrency: req.Concurrency,
+		Concurrency: NormalizeAccountConcurrency(req.Concurrency),
 		Priority:    req.Priority,
 		Status:      StatusActive,
 		ExpiresAt:   req.ExpiresAt,
@@ -367,6 +371,11 @@ func (s *AccountService) ListByGroup(ctx context.Context, groupID int64) ([]Acco
 
 // Update 更新账号
 func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccountRequest) (*Account, error) {
+	if req.Concurrency != nil {
+		if err := validateAccountConcurrency(*req.Concurrency, false); err != nil {
+			return nil, err
+		}
+	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)
@@ -428,7 +437,12 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	// 执行更新
-	if err := s.accountRepo.Update(ctx, account); err != nil {
+	if updater, ok := s.accountRepo.(AccountBillingSettingsRepository); ok {
+		err = updater.UpdateWithAccountBillingSettings(ctx, account, nil, nil, account.RateMultiplier, req.Concurrency)
+	} else {
+		err = s.accountRepo.Update(ctx, account)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("update account: %w", err)
 	}
 

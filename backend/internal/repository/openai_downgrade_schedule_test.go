@@ -27,7 +27,7 @@ func seedLongProbeSchedule(t *testing.T, db *sql.DB, now time.Time, age time.Dur
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		UPDATE accounts SET rate_limited_at=$1, rate_limit_reset_at=$2 WHERE id=7
-	`, last, now.Add(7*24*time.Hour))
+	`, last, now.Add(8*24*time.Hour))
 	require.NoError(t, err)
 }
 
@@ -144,6 +144,7 @@ func TestOpenAIInterruptedProbeRecheckPostgresEligibility(t *testing.T) {
 		"platform":        "UPDATE accounts SET platform='anthropic'",
 		"api_key":         "UPDATE accounts SET type='apikey'",
 		"already_soon":    "UPDATE openai_downgrade_probe_states SET next_probe_at=NOW()+INTERVAL '30 seconds'",
+		"active_cooldown": "UPDATE accounts SET rate_limit_reset_at=NOW()+INTERVAL '7 days'",
 	} {
 		t.Run(name, func(t *testing.T) {
 			db := newProbePostgres(t)
@@ -216,14 +217,8 @@ func TestOpenAIProbePostgresScheduleReconciliationAdoption(t *testing.T) {
 			require.EqualValues(t, 1, count)
 			state, err := repo.GetOpenAIDowngradeState(context.Background(), 7)
 			require.NoError(t, err)
-			earliest := now.Add(-age + 22*time.Hour)
-			latest := now.Add(-age + 27*time.Hour + 30*time.Minute)
-			if earliest.Before(now.Add(15 * time.Minute)) {
-				earliest = now.Add(15 * time.Minute)
-			}
-			if latest.Before(now.Add(45 * time.Minute)) {
-				latest = now.Add(45 * time.Minute)
-			}
+			earliest := now.Add(8*24*time.Hour + 15*time.Minute)
+			latest := now.Add(8*24*time.Hour + 45*time.Minute)
 			require.False(t, state.NextProbeAt.Before(earliest))
 			require.False(t, state.NextProbeAt.After(latest))
 			require.True(t, now.Equal(state.UpdatedAt))
@@ -256,8 +251,7 @@ func TestOpenAIProbePostgresScheduleReconciliationAdoption(t *testing.T) {
 
 func TestOpenAIProbePostgresScheduleReconciliationEligibility(t *testing.T) {
 	for name, change := range map[string]string{
-		"valid_sparse":   "UPDATE openai_downgrade_probe_states SET next_probe_at=last_probe_at+INTERVAL '26 hours'",
-		"already_due":    "UPDATE openai_downgrade_probe_states SET next_probe_at=last_probe_at",
+		"valid_cooldown": "UPDATE openai_downgrade_probe_states SET next_probe_at=(SELECT rate_limit_reset_at+INTERVAL '20 minutes' FROM accounts WHERE id=7)",
 		"no_probe":       "UPDATE openai_downgrade_probe_states SET last_probe_at=NULL",
 		"no_evidence":    "DELETE FROM openai_downgrade_probe_results",
 		"latest_success": "INSERT INTO openai_downgrade_probe_results(account_id,proxy_id,http_status) VALUES(7,3,200)",

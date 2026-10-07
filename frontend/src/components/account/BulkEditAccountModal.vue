@@ -715,7 +715,10 @@
             v-model.number="concurrency"
             id="bulk-edit-concurrency"
             type="number"
-            readonly
+            min="1"
+            :max="MAX_ACCOUNT_CONCURRENCY"
+            step="1"
+            :required="enableConcurrency"
             :disabled="!enableConcurrency"
             class="input"
             :class="!enableConcurrency && 'cursor-not-allowed opacity-50'"
@@ -1472,7 +1475,7 @@
 </template>
 
 <script setup lang="ts">
-import { LOCAL_ACCOUNT_CONCURRENCY } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, MAX_ACCOUNT_CONCURRENCY } from '@/constants/account'
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'

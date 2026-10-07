@@ -297,7 +297,7 @@
             <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
           <template #cell-capacity="{ row }">
-            <AccountCapacityCell :account="row" />
+            <AccountCapacityCell :account="row" @edit-concurrency="concurrencyAccount = row" />
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
@@ -546,6 +546,7 @@
     </TablePageLayout>
     <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
+    <AccountConcurrencyModal :account="concurrencyAccount" @close="concurrencyAccount = null" @updated="handleAccountUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
@@ -617,6 +618,7 @@ import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
+import AccountConcurrencyModal from '@/components/account/AccountConcurrencyModal.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -703,6 +705,7 @@ const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
 const showOpenAIOperations = ref(false)
 const edAcc = ref<Account | null>(null)
+const concurrencyAccount = ref<Account | null>(null)
 const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
 const creatingShadowAcc = ref<Account | null>(null)

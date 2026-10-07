@@ -366,6 +366,14 @@ func ProvideAccountUsageService(
 	return service
 }
 
+func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config,
+	hostInfo PluginHostInfo, rateLimitService *RateLimitService,
+) *PluginManager {
+	manager := NewPluginManager(repo, encryptor, cfg, hostInfo)
+	manager.rateLimitService = rateLimitService
+	return manager
+}
+
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
@@ -1066,7 +1074,7 @@ var ProviderSet = wire.NewSet(
 	NewTotpService,
 	NewErrorPassthroughService,
 	ProvideTLSFingerprintProfileService,
-	NewPluginManager,
+	ProvidePluginManager,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,
 	ProvideSystemOperationLockService,

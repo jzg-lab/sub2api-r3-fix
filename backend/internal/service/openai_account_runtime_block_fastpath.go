@@ -45,41 +45,24 @@ const (
 	openAIOAuth429QuotaReset
 )
 
-// classifyOpenAIOAuth429 区分账号配额耗尽信号与普通瞬时 429。明确窗口达到
-// 100% 时以该窗口为准；没有 100% 标记但包含重置头时，沿用 v179 的兼容语义，
-// 仍视为配额限流信号。
+// Classify the cause independently from the latest explicit release boundary.
 func classifyOpenAIOAuth429(headers http.Header, responseBody []byte) (openAIOAuth429Disposition, *time.Time) {
+	now := time.Now()
+	deadline := openAI429ResetTimeAt(headers, responseBody, now)
 	if snapshot := ParseCodexRateLimitHeaders(headers); snapshot != nil {
 		if normalized := snapshot.Normalize(); normalized != nil {
 			if normalized.Used7dPercent != nil && *normalized.Used7dPercent >= 100 {
-				if normalized.Reset7dSeconds != nil {
-					now := time.Now()
-					resetAt := now.Add(time.Duration(*normalized.Reset7dSeconds) * time.Second)
-					return openAIOAuth429Quota7d, &resetAt
-				}
-				return openAIOAuth429Quota7d, nil
+				return openAIOAuth429Quota7d, deadline
 			}
 			if normalized.Used5hPercent != nil && *normalized.Used5hPercent >= 100 {
-				if normalized.Reset5hSeconds != nil {
-					now := time.Now()
-					resetAt := now.Add(time.Duration(*normalized.Reset5hSeconds) * time.Second)
-					return openAIOAuth429Quota5h, &resetAt
-				}
-				return openAIOAuth429Quota5h, nil
+				return openAIOAuth429Quota5h, deadline
 			}
 		}
 	}
-	if resetAt := calculateOpenAI429ResetTime(headers); resetAt != nil {
-		return openAIOAuth429QuotaReset, resetAt
+	if resetUnix := parseOpenAIRateLimitResetTimeAt(responseBody, now); resetUnix != nil {
+		return openAIOAuth429QuotaReset, deadline
 	}
-	if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
-		resetAt := time.Unix(*resetUnix, 0)
-		return openAIOAuth429QuotaReset, &resetAt
-	}
-	if resetAt := parseRetryAfterResetTime(headers, time.Now()); resetAt != nil {
-		return openAIOAuth429Transient, resetAt
-	}
-	return openAIOAuth429Transient, nil
+	return openAIOAuth429Transient, deadline
 }
 
 func openAIAccountStateContext(ctx context.Context) (context.Context, context.CancelFunc) {

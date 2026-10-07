@@ -152,9 +152,7 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 	require.Equal(t, "primary (Copy)", duplicate.Name)
 	require.Equal(t, source.Platform, duplicate.Platform)
 	require.Equal(t, source.Type, duplicate.Type)
-	// 并发统一（Codex 2026-09-16 批次）：本地部署一律 LocalAccountConcurrency，
-	// 复制账号不再继承源账号的个性化并发值。
-	require.Equal(t, LocalAccountConcurrency, duplicate.Concurrency, "duplicate must adopt the unified local concurrency")
+	require.Equal(t, source.Concurrency, duplicate.Concurrency, "duplicate must preserve the configured concurrency")
 	require.Equal(t, source.Priority, duplicate.Priority)
 	require.Equal(t, source.AutoPauseOnExpired, duplicate.AutoPauseOnExpired)
 	require.Equal(t, source.GroupIDs, duplicate.GroupIDs)

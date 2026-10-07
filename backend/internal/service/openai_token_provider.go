@@ -230,6 +230,12 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	}
 
+	// A lock loser or a failed refresh may reuse a still-valid token, never
+	// one known to be expired. Unknown expiry is not a safe refresh fallback.
+	if !account.IsOpenAIPersonalAccessToken() &&
+		((expiresAt != nil && !time.Now().Before(*expiresAt)) || (needsRefresh && expiresAt == nil)) {
+		return "", errors.New("openai credential freshness could not be established")
+	}
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
 		return "", errors.New("access_token not found in credentials")

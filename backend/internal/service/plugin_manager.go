@@ -41,11 +41,12 @@ type pluginRoute struct {
 
 // PluginManager 管理插件安装、配置、进程生命周期和 OpenAI OAuth 能力绑定。
 type PluginManager struct {
-	repo      PluginRepository
-	encryptor SecretEncryptor
-	cfg       *config.Config
-	hostInfo  PluginHostInfo
-	installer *PluginPackageInstaller
+	repo             PluginRepository
+	encryptor        SecretEncryptor
+	cfg              *config.Config
+	hostInfo         PluginHostInfo
+	installer        *PluginPackageInstaller
+	rateLimitService *RateLimitService
 
 	operationMu        sync.Mutex
 	mu                 sync.Mutex
@@ -844,9 +845,9 @@ const (
 // 区段），旧插件无此字段时为空。保持字符串透传——插件 UI 侧自行 JSON.parse，
 // 与官方宿主的桥接协议同形。
 type PluginStatus struct {
-	PluginID int64  `json:"plugin_id"`
-	Running  bool   `json:"running"`
-	Healthy  bool   `json:"healthy"`
+	PluginID int64 `json:"plugin_id"`
+	Running  bool  `json:"running"`
+	Healthy  bool  `json:"healthy"`
 	// Offline 读取时刻现算（withOffline）：距最近一次成功 Health RPC 超过
 	// pluginBridgeOfflineAfter。不随缓存冻结——离线是时间敏感判定。
 	Offline    bool      `json:"offline"`
@@ -1158,7 +1159,14 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 	if !route.runtime.beginRequest() {
 		return nil, true, errors.New("OpenAI OAuth 插件正在停止")
 	}
-	response, err := route.runtime.roundTrip(ctx, request, proxyURL, account)
+	policy := pluginv1.ProbeRateLimitPolicy{}
+	if m.rateLimitService != nil {
+		policy.Fallback, _ = m.rateLimitService.get429FallbackCooldown(ctx, account)
+	}
+	if account.RateLimitResetAt != nil {
+		policy.NotBefore = *account.RateLimitResetAt
+	}
+	response, err := route.runtime.roundTrip(pluginv1.WithProbeRateLimitPolicy(ctx, policy), request, proxyURL, account)
 	if err != nil {
 		route.runtime.finishRequest()
 		if route.runtime.client.Exited() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 )
 
 // A failed eviction must not let a recovered cache override committed OAuth
@@ -14,6 +15,9 @@ func cachedOAuthAccessToken(ctx context.Context, cache GeminiTokenCache, key str
 		return "", err
 	}
 	if token == account.GetCredential("access_token") {
+		if !oauthCachedTokenFresh(account) {
+			return "", nil
+		}
 		return token, nil
 	}
 	if repo == nil {
@@ -38,7 +42,20 @@ func cachedOAuthAccessToken(ctx context.Context, cache GeminiTokenCache, key str
 	if token != latest.GetCredential("access_token") {
 		return "", nil
 	}
+	if !oauthCachedTokenFresh(latest) {
+		return "", nil
+	}
 	return token, nil
+}
+
+// Cache TTL is not credential expiry. Keep other providers' expiry policies
+// unchanged; OpenAI OAuth must still enter its normal pre-expiry refresh path.
+func oauthCachedTokenFresh(account *Account) bool {
+	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsOpenAIPersonalAccessToken() {
+		return true
+	}
+	expiresAt := account.GetCredentialAsTime("expires_at")
+	return expiresAt != nil && time.Until(*expiresAt) > openAITokenRefreshSkew
 }
 
 func oauthTokenAccountIdentityMatches(account, latest *Account) bool {

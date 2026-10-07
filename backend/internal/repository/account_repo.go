@@ -169,7 +169,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(normalizeJSONMap(account.Extra)).
-		SetConcurrency(service.LocalAccountConcurrency).
+		SetConcurrency(service.NormalizeAccountConcurrency(account.Concurrency)).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
@@ -500,7 +500,7 @@ func (r *accountRepository) ListCRSAccountIDs(ctx context.Context) (map[string]i
 }
 
 func (r *accountRepository) Update(ctx context.Context, account *service.Account) error {
-	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier)
+	return r.updateAccount(ctx, account, nil, nil, account.RateMultiplier, nil)
 }
 
 // UpdateWithAccountBillingSettings applies an admin account edit while
@@ -512,8 +512,9 @@ func (r *accountRepository) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
+	concurrency *int,
 ) error {
-	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier)
+	return r.updateAccount(ctx, account, probeEnabled, rateSyncEnabled, rateMultiplier, concurrency)
 }
 
 func (r *accountRepository) updateAccount(
@@ -522,6 +523,7 @@ func (r *accountRepository) updateAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	explicitConcurrency *int,
 ) error {
 	if account == nil {
 		return nil
@@ -556,6 +558,7 @@ func (r *accountRepository) updateAccount(
 		explicitProbeEnabled,
 		explicitRateSyncEnabled,
 		explicitRateMultiplier,
+		explicitConcurrency,
 	)
 	if err != nil {
 		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
@@ -588,6 +591,7 @@ func (r *accountRepository) updateLockedAccount(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
+	explicitConcurrency *int,
 ) (*dbent.Account, error) {
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
@@ -607,13 +611,16 @@ func (r *accountRepository) updateLockedAccount(
 		SetType(account.Type).
 		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(extra).
-		SetConcurrency(service.LocalAccountConcurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
 		SetSchedulable(schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
 
+	// Background refreshes and stale account snapshots do not own this setting.
+	if explicitConcurrency != nil {
+		builder.SetConcurrency(*explicitConcurrency)
+	}
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
 	}
@@ -3137,7 +3144,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	if updates.Concurrency != nil {
 		setClauses = append(setClauses, "concurrency = $"+itoa(idx))
-		args = append(args, service.LocalAccountConcurrency)
+		args = append(args, service.NormalizeAccountConcurrency(*updates.Concurrency))
 		idx++
 	}
 	if updates.Priority != nil {
@@ -3359,7 +3366,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 	if rows > 0 && contextTx == nil {
-		shouldSync := false
+		// Limits affect slot admission immediately, including when a limit is
+		// lowered below the number of in-flight requests.
+		shouldSync := updates.Concurrency != nil
 		if updates.Status != nil && (*updates.Status == service.StatusError || *updates.Status == service.StatusDisabled) {
 			shouldSync = true
 		}

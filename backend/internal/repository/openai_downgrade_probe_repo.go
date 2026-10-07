@@ -114,6 +114,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			LEFT JOIN proxies p ON p.id = a.proxy_id
 			WHERE s.next_probe_at <= $1
 				AND a.deleted_at IS NULL
+				AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= $1)
 				AND a.platform = 'openai' AND a.type = 'oauth'
 				AND a.parent_account_id IS NULL
 				-- 判死即终态（r17x 用户裁定 2026-09-21，选项A）：

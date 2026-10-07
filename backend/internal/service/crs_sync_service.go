@@ -442,7 +442,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -571,7 +570,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -721,7 +719,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -878,7 +875,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -1010,7 +1006,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = 3
 		existing.Priority = clampPriority(src.Priority)
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable
@@ -1137,7 +1132,6 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
-		existing.Concurrency = 3
 		existing.Priority = clampPriority(src.Priority)
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable

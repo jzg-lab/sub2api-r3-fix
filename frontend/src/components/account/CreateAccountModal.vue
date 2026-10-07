@@ -2974,7 +2974,7 @@
       <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <div>
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
-          <input v-model.number="form.concurrency" type="number" readonly class="input" />
+          <input v-model.number="form.concurrency" type="number" min="1" :max="MAX_ACCOUNT_CONCURRENCY" step="1" required class="input" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -3883,7 +3883,7 @@ import {
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { extractApiErrorCode, extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
-import { LOCAL_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { LOCAL_ACCOUNT_CONCURRENCY, MAX_ACCOUNT_CONCURRENCY, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
