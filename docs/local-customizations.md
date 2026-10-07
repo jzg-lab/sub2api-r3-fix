@@ -77,6 +77,23 @@ API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；�
 本轮来源和验证见[第二轮对齐记录](upstream-sync-state.md#用户页面第二轮视觉对齐)，
 运行制品和回退证据见[部署状态](deployment-state.md)。
 
+### 密钥厂商分类筛选
+
+2026-10-08 已在本地实现，尚未合并、推送或部署。创建/编辑密钥与列表内切换分组复用
+`frontend/src/components/keys/GroupProviderFilter.vue`，提供 Anthropic、OpenAI、国产模型、
+其他四张卡片；默认显示全部，再次点击选中分类或“全部分组”恢复完整列表。
+
+`frontend/src/utils/keyGroupProvider.ts` 按原平台分类：Kimi、智谱、DeepSeek 归国产模型；
+为兼容截图中的旧分组，OpenAI 协议且名称含“国产”的组也归此类。其余 Anthropic / OpenAI
+分别归对应分类，Gemini、Antigravity、Grok、组合及未知平台归其他。名称规则仅为展示兼容，
+若以后命名无法表达分类，再增加显式展示分类字段，不更改现有平台和路由。
+
+分类与原文字搜索共同筛选；切换分类不保存密钥。表单中若原草稿分组被分类隐藏则清空选择，
+继续沿用必选校验；编辑初始分组保留，列表只有点击具体分组才调用原更新接口。切换菜单
+限制在视口内，分组列表独立滚动。接口、权限、倍率、额度与其他密钥操作保持原样。
+回归入口：`frontend/src/views/user/__tests__/KeysView.spec.ts`；验证见
+[密钥筛选记录](upstream-sync-state.md#密钥厂商分类筛选)。
+
 ## 质量调度限制分组
 
 入口：后台 → 插件管理 → Codex LB Cookie Pin → 配置 → 质量调度限制。

@@ -472,11 +472,13 @@
           />
         </div>
 
+        <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
+
         <div>
           <label class="input-label">{{ t('keys.groupLabel') }}</label>
           <Select
             v-model="formData.group_id"
-            :options="groupOptions"
+            :options="formGroupOptions"
             :placeholder="t('keys.selectGroup')"
             :searchable="true"
             :search-placeholder="t('keys.searchGroup')"
@@ -1058,16 +1060,18 @@
       <div
         v-if="groupSelectorKeyId !== null && dropdownPosition"
         ref="dropdownRef"
-        class="animate-in fade-in slide-in-from-top-2 fixed z-[100000020] w-max max-w-[calc(100vw-16px)] overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5 duration-200 sm:min-w-[380px] dark:bg-dark-800 dark:ring-white/10"
+        class="animate-in fade-in slide-in-from-top-2 fixed z-[100000020] flex w-[420px] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5 duration-200 dark:bg-dark-800 dark:ring-white/10"
         style="pointer-events: auto !important;"
         :style="{
           top: dropdownPosition.top !== undefined ? dropdownPosition.top + 'px' : undefined,
           bottom: dropdownPosition.bottom !== undefined ? dropdownPosition.bottom + 'px' : undefined,
-          left: dropdownPosition.left + 'px'
+          left: dropdownPosition.left + 'px',
+          maxHeight: `calc(100vh - ${dropdownPosition.top ?? dropdownPosition.bottom ?? 0}px - 8px)`
         }"
       >
+        <GroupProviderFilter v-model="dropdownProvider" compact class="shrink-0 border-b border-gray-100 p-3 dark:border-dark-700" />
         <!-- Search box -->
-        <div class="border-b border-gray-100 p-2 dark:border-dark-700">
+        <div class="shrink-0 border-b border-gray-100 p-2 dark:border-dark-700">
           <div class="relative">
             <svg class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -1082,7 +1086,7 @@
           </div>
         </div>
         <!-- Group list -->
-        <div class="max-h-80 overflow-y-auto p-1.5">
+        <div class="min-h-0 max-h-80 overflow-y-auto p-1.5">
           <button
             v-for="option in filteredGroupOptions"
             :key="option.value ?? 'null'"
@@ -1126,6 +1130,8 @@
 
 <script setup lang="ts">
 import '@/styles/user-console.css'
+import GroupProviderFilter from '@/components/keys/GroupProviderFilter.vue'
+import { keyGroupProvider, type KeyGroupProvider } from '@/utils/keyGroupProvider'
 	import { ref, reactive, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 	import { useI18n } from 'vue-i18n'
 	import { useAppStore } from '@/stores/app'
@@ -1429,18 +1435,28 @@ const groupOptions = computed(() =>
     peakEnd: group.peak_end,
     peakRateMultiplier: group.peak_rate_multiplier,
     subscriptionType: group.subscription_type,
-    platform: group.platform
+    platform: group.platform,
+    provider: keyGroupProvider(group)
   }))
 )
+
+const formProvider = ref<KeyGroupProvider | null>(null)
+const dropdownProvider = ref<KeyGroupProvider | null>(null)
+const formGroupOptions = computed(() => groupOptions.value.filter(option => !formProvider.value || option.provider === formProvider.value))
+const setFormProvider = (provider: KeyGroupProvider | null) => {
+  formProvider.value = provider
+  if (!formGroupOptions.value.some(option => option.value === formData.value.group_id)) {
+    formData.value.group_id = null
+  }
+}
 
 // Group dropdown search
 const groupSearchQuery = ref('')
 const filteredGroupOptions = computed(() => {
   const query = groupSearchQuery.value.trim().toLowerCase()
-  if (!query) return groupOptions.value
   return groupOptions.value.filter((opt) => {
-    return opt.label.toLowerCase().includes(query) ||
-      (opt.description && opt.description.toLowerCase().includes(query))
+    return (!dropdownProvider.value || opt.provider === dropdownProvider.value) &&
+      (!query || opt.label.toLowerCase().includes(query) || opt.description?.toLowerCase().includes(query))
   })
 })
 
@@ -1567,6 +1583,7 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 }
 
 const editKey = (key: ApiKey) => {
+  formProvider.value = null
   selectedKey.value = key
   const hasIPRestriction = (key.ip_whitelist?.length > 0) || (key.ip_blacklist?.length > 0)
   const hasExpiration = !!key.expires_at
@@ -1613,8 +1630,8 @@ const openGroupSelector = (key: ApiKey) => {
     const buttonEl = groupButtonRefs.value.get(key.id)
     if (buttonEl) {
       const rect = buttonEl.getBoundingClientRect()
-      const dropdownEstHeight = 400 // estimated max dropdown height
-      const dropdownEstWidth = Math.min(380, window.innerWidth - 16)
+      const dropdownEstHeight = 500 // provider filter, search and scrollable groups
+      const dropdownEstWidth = Math.min(420, window.innerWidth - 16)
       const spaceBelow = window.innerHeight - rect.bottom
       const spaceAbove = rect.top
       // 夹取 left，避免窄屏下浮层超出视口右缘
@@ -1635,6 +1652,7 @@ const openGroupSelector = (key: ApiKey) => {
       }
     }
     groupSelectorKeyId.value = key.id
+    dropdownProvider.value = null
     groupSearchQuery.value = ''
   }
 }
@@ -1793,6 +1811,7 @@ const handleDelete = async () => {
 }
 
 const closeModals = () => {
+  formProvider.value = null
   showCreateModal.value = false
   showEditModal.value = false
   selectedKey.value = null

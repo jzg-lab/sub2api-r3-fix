@@ -7,6 +7,7 @@ import KeysView from '../KeysView.vue'
 
 const {
   listKeys,
+  updateKey,
   getPublicSettings,
   getDashboardApiKeysUsage,
   getAvailableGroups,
@@ -18,6 +19,7 @@ const {
   nextStep,
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
+  updateKey: vi.fn(),
   getPublicSettings: vi.fn(),
   getDashboardApiKeysUsage: vi.fn(),
   getAvailableGroups: vi.fn(),
@@ -53,13 +55,15 @@ const messages: Record<string, string> = {
   'keys.status.inactive': 'Inactive',
   'keys.status.quota_exhausted': 'Quota exhausted',
   'keys.usage': 'Usage',
+  'keys.providerCN': 'Chinese models',
+  'keys.providerOther': 'Other',
 }
 
 vi.mock('@/api', () => ({
   keysAPI: {
     list: listKeys,
     create: vi.fn(),
-    update: vi.fn(),
+    update: updateKey,
     delete: vi.fn(),
     toggleStatus: vi.fn(),
   },
@@ -170,6 +174,8 @@ const DataTableStub = {
           <slot name="cell-id" :value="row.id" :row="row" />
         </div>
         <slot name="cell-name" :value="row.name" :row="row" />
+        <slot name="cell-group" :row="row" />
+        <slot name="cell-actions" :row="row" />
         <div data-test="current-concurrency">
           <slot name="cell-current_concurrency" :value="row.current_concurrency" :row="row" />
         </div>
@@ -223,7 +229,7 @@ const mountView = async () => {
         TablePageLayout: TablePageLayoutStub,
         DataTable: DataTableStub,
         Pagination: PaginationStub,
-        BaseDialog: true,
+        BaseDialog: { props: ['show'], template: '<div v-if="show"><slot /><slot name="footer" /></div>' },
         ConfirmDialog: true,
         EmptyState: true,
         Select: SelectStub,
@@ -232,7 +238,7 @@ const mountView = async () => {
         UseKeyModal: true,
         EndpointPopover: true,
         GroupBadge: true,
-        GroupOptionItem: true,
+        GroupOptionItem: { name: 'GroupOptionItem', props: ['name'], template: '<span>{{ name }}</span>' },
         Teleport: true,
       },
     },
@@ -261,6 +267,7 @@ describe('user KeysView column settings', () => {
     localStorage.clear()
 
     listKeys.mockReset()
+    updateKey.mockReset().mockResolvedValue({})
     getPublicSettings.mockReset()
     getDashboardApiKeysUsage.mockReset()
     getAvailableGroups.mockReset()
@@ -303,6 +310,66 @@ describe('user KeysView column settings', () => {
     expect(visibleColumnKeys(wrapper)).not.toContain('last_used_at')
     expect(visibleColumnKeys(wrapper)).not.toContain('last_used_ip')
     expect(visibleColumnKeys(wrapper)).not.toContain('id')
+  })
+
+  const providerGroups = [
+    { id: 11, name: 'Claude', platform: 'anthropic' },
+    { id: 12, name: 'GPT', platform: 'openai' },
+    { id: 13, name: 'Kimi', platform: 'kimi' },
+    { id: 14, name: 'DeepSeek', platform: 'deepseek' },
+    { id: 15, name: 'GLM', platform: 'zhipu' },
+    { id: 16, name: 'Gemini', platform: 'gemini' },
+    { id: 17, name: 'Antigravity', platform: 'antigravity' },
+    { id: 18, name: 'Grok', platform: 'grok' },
+    { id: 19, name: 'Mixed', platform: 'composite' },
+    { id: 20, name: '国产模型', platform: 'openai', description: 'Qwen / GLM' },
+  ]
+
+  it('filters create/edit groups by provider and clears a hidden draft selection without saving', async () => {
+    getAvailableGroups.mockResolvedValue(providerGroups)
+    listKeys.mockResolvedValue({ items: [{ ...createApiKey(), group_id: 12 }], total: 1 })
+    const wrapper = await mountView()
+    await wrapper.get('[data-tour="keys-create-btn"]').trigger('click')
+    const filter = () => wrapper.findComponent({ name: 'GroupProviderFilter' })
+    const select = () => wrapper.findComponent('[data-tour="key-form-group"]')
+    for (const [label, ids] of [
+      ['Anthropic', [11]], ['OpenAI', [12]], ['Chinese models', [13, 14, 15, 20]], ['Other', [16, 17, 18, 19]],
+    ] as const) {
+      await getButtonByText(filter(), label).trigger('click')
+      expect(select().props('options').map((option: { value: number }) => option.value)).toEqual(ids)
+    }
+    await getButtonByText(filter(), 'All Groups').trigger('click')
+    expect(select().props('options')).toHaveLength(providerGroups.length)
+    await getButtonByText(wrapper, 'common.cancel').trigger('click')
+    await getButtonByText(wrapper, 'common.edit').trigger('click')
+    expect(select().props('modelValue')).toBe(12)
+    await getButtonByText(filter(), 'Chinese models').trigger('click')
+    expect(select().props('modelValue')).toBeNull()
+    await wrapper.get('#key-form').trigger('submit')
+    expect(showError).toHaveBeenCalledWith('keys.groupRequired')
+    expect(updateKey).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('combines inline provider and text filters; only selecting a group saves the change', async () => {
+    getAvailableGroups.mockResolvedValue(providerGroups)
+    const wrapper = await mountView()
+    const open = () => wrapper.get('button[title="keys.clickToChangeGroup"]').trigger('click')
+    await open()
+    const filter = () => wrapper.findComponent({ name: 'GroupProviderFilter' })
+    const optionNames = () => wrapper.findAllComponents({ name: 'GroupOptionItem' }).map(option => option.props('name'))
+    await getButtonByText(filter(), 'Chinese models').trigger('click')
+    expect(optionNames()).toEqual(['Kimi', 'DeepSeek', 'GLM', '国产模型'])
+    await wrapper.get('input[placeholder="keys.searchGroup"]').setValue('qWeN')
+    expect(optionNames()).toEqual(['国产模型'])
+    expect(updateKey).not.toHaveBeenCalled()
+    await getButtonByText(wrapper, '国产模型').trigger('click')
+    await flushPromises()
+    expect(updateKey).toHaveBeenCalledWith(1, { group_id: 20 })
+    await open()
+    expect(filter().props('modelValue')).toBeNull()
+    expect(optionNames()).toHaveLength(providerGroups.length)
+    wrapper.unmount()
   })
 
   it('shows a hidden column when toggled and persists the preference', async () => {
