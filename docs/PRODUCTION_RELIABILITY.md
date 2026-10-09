@@ -25,6 +25,9 @@ Dependency installation does not authorize arbitrary lifecycle scripts.
 `SERVER_SHUTDOWN_TIMEOUT` accepts a positive Go duration up to one hour.
 The default is five seconds; inspect the target launcher or environment for
 its actual override. HTTP and upgraded WebSocket shutdown are separate checks.
+Zero account/user concurrency does not prove HTTP handlers have exited. Before
+switching, block ingress and verify actual application connections have drained;
+a shutdown deadline is a failed drain even when usage counters were zero.
 
 The registry lives in the real request context, covers coder WebSocket and
 Gorilla management monitoring, and retains pending upgrades until their handler
