@@ -472,69 +472,112 @@
           />
         </div>
 
-        <label class="flex cursor-pointer items-center gap-2 text-sm font-medium text-gray-700 dark:text-dark-200">
-          <input type="checkbox" :checked="formData.smart_routing" class="rounded border-gray-300 text-primary-600" data-testid="smart-routing-toggle" @change="setSmartRouting(($event.target as HTMLInputElement).checked)" />
-          {{ t('keys.smartRouting') }}
-        </label>
-        <p v-if="formData.smart_routing" class="text-sm text-gray-500 dark:text-dark-400">{{ t('keys.smartRoutingHint') }}</p>
-        <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <span class="input-label mb-0">{{ t('keys.groupLabel') }}</span>
+            <label class="flex cursor-pointer items-center gap-2 text-sm font-medium text-gray-700 dark:text-dark-200">
+              <input type="checkbox" :checked="formData.smart_routing" class="rounded border-gray-300 text-primary-600" data-testid="smart-routing-toggle" @change="setSmartRouting(($event.target as HTMLInputElement).checked)" />
+              {{ t('keys.smartRouting') }}
+            </label>
+          </div>
+          <p v-if="formData.smart_routing" class="text-sm text-gray-500 dark:text-dark-400">{{ t('keys.smartRoutingHint') }}</p>
+          <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
 
-        <div v-if="!formData.smart_routing">
-          <label class="input-label">{{ t('keys.groupLabel') }}</label>
-          <Select
-            v-model="formData.group_id"
-            :options="formGroupOptions"
-            :placeholder="t('keys.selectGroup')"
-            :searchable="true"
-            :search-placeholder="t('keys.searchGroup')"
-            data-tour="key-form-group"
-          >
-            <template #selected="{ option }">
-              <GroupBadge
-                v-if="option"
-                :name="(option as unknown as GroupOption).label"
-                :platform="(option as unknown as GroupOption).platform"
-                :subscription-type="(option as unknown as GroupOption).subscriptionType"
-                :rate-multiplier="(option as unknown as GroupOption).rate"
-                :user-rate-multiplier="(option as unknown as GroupOption).userRate"
-                :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
-                :peak-start="(option as unknown as GroupOption).peakStart"
-                :peak-end="(option as unknown as GroupOption).peakEnd"
-                :peak-rate-multiplier="(option as unknown as GroupOption).peakRateMultiplier"
-              />
-              <span v-else class="text-gray-400">{{ t('keys.selectGroup') }}</span>
-            </template>
-            <template #option="{ option, selected }">
-              <GroupOptionItem
-                :name="(option as unknown as GroupOption).label"
-                :platform="(option as unknown as GroupOption).platform"
-                :subscription-type="(option as unknown as GroupOption).subscriptionType"
-                :rate-multiplier="(option as unknown as GroupOption).rate"
-                :user-rate-multiplier="(option as unknown as GroupOption).userRate"
-                :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
-                :peak-start="(option as unknown as GroupOption).peakStart"
-                :peak-end="(option as unknown as GroupOption).peakEnd"
-                :peak-rate-multiplier="(option as unknown as GroupOption).peakRateMultiplier"
-                :description="(option as unknown as GroupOption).description"
-                :selected="selected"
-              />
-            </template>
-          </Select>
-        </div>
+          <div v-if="!formData.smart_routing">
+            <Select
+              v-model="formData.group_id"
+              :options="formGroupOptions"
+              :placeholder="t('keys.selectGroup')"
+              :searchable="true"
+              :search-placeholder="t('keys.searchGroup')"
+              data-tour="key-form-group"
+            >
+              <template #selected="{ option }">
+                <GroupBadge
+                  v-if="option"
+                  :name="(option as unknown as GroupOption).label"
+                  :platform="(option as unknown as GroupOption).platform"
+                  :subscription-type="(option as unknown as GroupOption).subscriptionType"
+                  :rate-multiplier="(option as unknown as GroupOption).rate"
+                  :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                  :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
+                  :peak-start="(option as unknown as GroupOption).peakStart"
+                  :peak-end="(option as unknown as GroupOption).peakEnd"
+                  :peak-rate-multiplier="(option as unknown as GroupOption).peakRateMultiplier"
+                />
+                <span v-else class="text-gray-400">{{ t('keys.selectGroup') }}</span>
+              </template>
+              <template #option="{ option, selected }">
+                <GroupOptionItem
+                  :name="(option as unknown as GroupOption).label"
+                  :platform="(option as unknown as GroupOption).platform"
+                  :subscription-type="(option as unknown as GroupOption).subscriptionType"
+                  :rate-multiplier="(option as unknown as GroupOption).rate"
+                  :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                  :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
+                  :peak-start="(option as unknown as GroupOption).peakStart"
+                  :peak-end="(option as unknown as GroupOption).peakEnd"
+                  :peak-rate-multiplier="(option as unknown as GroupOption).peakRateMultiplier"
+                  :description="(option as unknown as GroupOption).description"
+                  :selected="selected"
+                />
+              </template>
+            </Select>
+          </div>
 
-        <div v-if="formData.smart_routing" class="space-y-3" data-testid="smart-routing-groups">
-          <ol class="space-y-2">
-            <li v-for="(id, index) in formData.group_ids" :key="id" class="flex items-center gap-2 rounded-lg border border-gray-200 p-2 dark:border-dark-600">
-              <span class="text-xs text-gray-500">{{ index + 1 }}</span>
-              <span class="min-w-0 flex-1 break-words text-sm text-gray-800 dark:text-dark-100">{{ groupOptions.find(option => option.value === id)?.label ?? `#${id}` }}</span>
-              <span class="shrink-0 text-xs text-gray-500">{{ groupOptions.find(option => option.value === id)?.userRate ?? groupOptions.find(option => option.value === id)?.rate ?? '—' }}×</span>
-              <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === 0" :aria-label="t('keys.routeMoveUp')" @click="moveRouteGroup(index, -1)">↑</button>
-              <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === formData.group_ids.length - 1" :aria-label="t('keys.routeMoveDown')" @click="moveRouteGroup(index, 1)">↓</button>
-              <button type="button" class="rounded p-2 text-red-500" :aria-label="t('keys.routeRemove')" @click="removeRouteGroup(id)">×</button>
-            </li>
-          </ol>
-          <Select v-if="formData.group_ids.length < 10" :model-value="null" :options="routeGroupOptions" :placeholder="t('keys.routeAdd')" :searchable="true" @update:model-value="addRouteGroup" />
-          <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('keys.routeLimit') }} · {{ formData.group_ids.length }}/10</p>
+          <div v-if="formData.smart_routing" class="space-y-3" data-testid="smart-routing-groups">
+            <ol class="space-y-2">
+              <li v-for="({ id, option }, index) in selectedRouteGroups" :key="id" class="flex items-center gap-2 rounded-lg border border-gray-200 p-2 dark:border-dark-600">
+                <span class="text-xs text-gray-500">{{ index + 1 }}</span>
+                <div class="min-w-0 flex-1">
+                  <GroupBadge
+                    v-if="option"
+                    :name="option.label"
+                    :platform="option.platform"
+                    :subscription-type="option.subscriptionType"
+                    :rate-multiplier="option.rate"
+                    :user-rate-multiplier="option.userRate"
+                    :peak-rate-enabled="option.peakRateEnabled"
+                    :peak-start="option.peakStart"
+                    :peak-end="option.peakEnd"
+                    :peak-rate-multiplier="option.peakRateMultiplier"
+                    class="max-w-full"
+                  />
+                  <span v-else class="text-sm text-gray-500">#{{ id }}</span>
+                </div>
+                <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === 0" :aria-label="t('keys.routeMoveUp')" @click="moveRouteGroup(index, -1)">↑</button>
+                <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === formData.group_ids.length - 1" :aria-label="t('keys.routeMoveDown')" @click="moveRouteGroup(index, 1)">↓</button>
+                <button type="button" class="rounded p-2 text-red-500" :aria-label="t('keys.routeRemove')" @click="removeRouteGroup(id)">×</button>
+              </li>
+            </ol>
+            <Select
+              v-if="formData.group_ids.length < 10"
+              :model-value="null"
+              :options="routeGroupOptions"
+              :placeholder="t('keys.routeAdd')"
+              :searchable="true"
+              :search-placeholder="t('keys.searchGroup')"
+              :aria-label="t('keys.routeAdd')"
+              @update:model-value="addRouteGroup"
+            >
+              <template #option="{ option, selected }">
+                <GroupOptionItem
+                  :name="(option as unknown as GroupOption).label"
+                  :platform="(option as unknown as GroupOption).platform"
+                  :subscription-type="(option as unknown as GroupOption).subscriptionType"
+                  :rate-multiplier="(option as unknown as GroupOption).rate"
+                  :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                  :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
+                  :peak-start="(option as unknown as GroupOption).peakStart"
+                  :peak-end="(option as unknown as GroupOption).peakEnd"
+                  :peak-rate-multiplier="(option as unknown as GroupOption).peakRateMultiplier"
+                  :description="(option as unknown as GroupOption).description"
+                  :selected="selected"
+                />
+              </template>
+            </Select>
+            <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('keys.routeLimit') }} · {{ formData.group_ids.length }}/10</p>
+          </div>
         </div>
 
         <!-- Custom Key Section (only for create) -->
@@ -1466,6 +1509,10 @@ const formProvider = ref<KeyGroupProvider | null>(null)
 const dropdownProvider = ref<KeyGroupProvider | null>(null)
 const formGroupOptions = computed(() => groupOptions.value.filter(option => !formProvider.value || option.provider === formProvider.value))
 const routeGroupOptions = computed(() => formGroupOptions.value.filter(option => !formData.value.group_ids.includes(option.value)))
+const selectedRouteGroups = computed(() => formData.value.group_ids.map(id => ({
+  id,
+  option: groupOptions.value.find(option => option.value === id)
+})))
 const setSmartRouting = (enabled: boolean) => {
   formData.value.smart_routing = enabled
   if (enabled) {

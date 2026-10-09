@@ -223,7 +223,7 @@ const IconStub = {
   template: '<span data-test="icon">{{ name }}</span>',
 }
 
-const mountView = async () => {
+const mountView = async (realGroupControls = false) => {
   const wrapper = mount(KeysView, {
     global: {
       stubs: {
@@ -234,13 +234,13 @@ const mountView = async () => {
         BaseDialog: { props: ['show'], template: '<div v-if="show"><slot /><slot name="footer" /></div>' },
         ConfirmDialog: true,
         EmptyState: true,
-        Select: SelectStub,
+        Select: realGroupControls ? false : SelectStub,
         SearchInput: SearchInputStub,
         Icon: IconStub,
         UseKeyModal: true,
         EndpointPopover: true,
-        GroupBadge: true,
-        GroupOptionItem: { name: 'GroupOptionItem', props: ['name'], template: '<span>{{ name }}</span>' },
+        GroupBadge: realGroupControls ? false : { name: 'GroupBadge', props: ['name'], template: '<span>{{ name }}</span>' },
+        GroupOptionItem: realGroupControls ? false : { name: 'GroupOptionItem', props: ['name'], template: '<span>{{ name }}</span>' },
         Teleport: true,
       },
     },
@@ -391,6 +391,48 @@ describe('user KeysView column settings', () => {
     expect(createKey).toHaveBeenCalledTimes(1)
     expect(createKey.mock.calls[0][1]).toBe(12)
     expect(createKey.mock.calls[0][8]).toEqual([12, 11])
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps full group presentation in single and smart selection (editing=%s)', async (editing) => {
+    const groups = [
+      { id: 11, name: 'Claude', platform: 'anthropic', rate_multiplier: 0.8, description: 'Claude package' },
+      { id: 12, name: 'GPT', platform: 'openai', rate_multiplier: 0.2, description: 'Astra only',
+        peak_rate_enabled: true, peak_start: '18:00', peak_end: '23:00', peak_rate_multiplier: 0.4 },
+    ]
+    getAvailableGroups.mockResolvedValue(groups)
+    getUserGroupRates.mockResolvedValue({ 12: 0.16 })
+    listKeys.mockResolvedValue({ items: [{ ...createApiKey(), group_id: 11 }], total: 1 })
+    const wrapper = await mountView(true)
+    if (editing) await getButtonByText(wrapper, 'common.edit').trigger('click')
+    else await wrapper.get('[data-tour="keys-create-btn"]').trigger('click')
+
+    const toggle = wrapper.get('[data-testid="smart-routing-toggle"]')
+    expect(toggle.element.parentElement?.parentElement?.textContent).toContain('keys.groupLabel')
+    const single = wrapper.findComponent('[data-tour="key-form-group"]')
+    await single.get('button').trigger('click')
+    const normalOptions = single.findAllComponents({ name: 'GroupOptionItem' })
+    const normalGPT = normalOptions.find(option => option.props('name') === 'GPT')!
+    const normalProps = normalGPT.props()
+    expect(normalGPT.text()).toContain('Astra only')
+    expect(normalGPT.text()).toContain('0.16x')
+    expect(normalGPT.text()).toContain('×0.4')
+    await single.findAll('[role="option"]')[0].trigger('click')
+
+    await toggle.setValue(true)
+    const routes = wrapper.get('[data-testid="smart-routing-groups"]')
+    expect(routes.findComponent({ name: 'GroupBadge' }).props()).toMatchObject({ name: 'Claude', platform: 'anthropic', rateMultiplier: 0.8 })
+    const add = routes.findComponent({ name: 'Select' })
+    await add.get('button').trigger('click')
+    expect(add.get('input').attributes('placeholder')).toBe('keys.searchGroup')
+    expect(add.findComponent({ name: 'GroupOptionItem' }).props()).toEqual(normalProps)
+    await add.get('input').setValue('GPT')
+    await add.get('[role="option"]').trigger('click')
+    const selected = routes.findAllComponents({ name: 'GroupBadge' })
+    expect(selected.map(badge => badge.props('name'))).toEqual(['Claude', 'GPT'])
+    expect(selected[1].props()).toMatchObject({ platform: 'openai', rateMultiplier: 0.2, userRateMultiplier: 0.16, peakRateEnabled: true, peakRateMultiplier: 0.4 })
+    expect(selected[1].text()).toContain('0.16x')
+    expect(selected[0].classes()).not.toEqual(selected[1].classes())
     wrapper.unmount()
   })
 
