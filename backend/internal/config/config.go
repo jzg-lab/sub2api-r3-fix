@@ -959,7 +959,7 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
-	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
+	// OpenAIFirstOutputTimeoutSeconds: OpenAI 文本上游首个有效输出超时（含响应头等待）（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
 	// 0 表示回退到 OpenAIFirstOutputTimeoutSeconds。
@@ -1367,13 +1367,14 @@ func (w GatewayOpenAIWSSchedulerScoreWeights) IsValid() bool {
 		!math.IsNaN(w.TotalWeightSum()) && !math.IsInf(w.TotalWeightSum(), 0)
 }
 
-// GatewayOpenAISchedulerConfig OpenAI 高级调度器配置。
+// GatewayOpenAISchedulerConfig retains legacy fields for config compatibility.
+// Deprecated: account-wide scores no longer displace healthy conversation affinity.
 type GatewayOpenAISchedulerConfig struct {
-	// StickyEscapeEnabled: 是否允许 session_hash sticky 在账号健康度劣化时临时逃逸
+	// StickyEscapeEnabled is retained for legacy configuration.
 	StickyEscapeEnabled bool `mapstructure:"sticky_escape_enabled"`
-	// StickyEscapeTTFTMs: TTFT EWMA 超过该阈值时跳过 sticky
+	// StickyEscapeTTFTMs is retained for legacy configuration.
 	StickyEscapeTTFTMs int `mapstructure:"sticky_escape_ttft_ms"`
-	// StickyEscapeErrorRate: 错误率 EWMA 超过该阈值时跳过 sticky
+	// StickyEscapeErrorRate is retained for legacy configuration.
 	StickyEscapeErrorRate float64 `mapstructure:"sticky_escape_error_rate"`
 }
 
@@ -2374,8 +2375,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
-	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
-	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
+	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 180)
+	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 600)
 	// Upstream bodies may contain provider-echoed user data or credentials.
 	// Diagnostics should opt in explicitly rather than logging them by default.
 	viper.SetDefault("gateway.log_upstream_error_body", false)

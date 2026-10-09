@@ -92,17 +92,6 @@ func withRecentAccountStats(ctx context.Context, cache GatewayCache, accounts []
 	return context.WithValue(ctx, recentAccountStatsKey{}, stats)
 }
 
-// A recorded failure breaks affinity; a slow successful request does not.
-func recentAccountFailed(ctx context.Context, cache GatewayCache, id int64) bool {
-	stats, ok := ctx.Value(recentAccountStatsKey{}).(map[int64]AccountRecentStats)
-	if !ok {
-		stats, _ = LoadAccountRecentStats(ctx, cache, []int64{id})
-	}
-	stat := stats[id]
-	age := time.Now().Unix() - stat.LastObservedAt
-	return stat.ConsecutiveFailures > 0 && age >= 0 && age < 60
-}
-
 func recentAccountReliability(ctx context.Context, id int64) float64 {
 	stats, _ := ctx.Value(recentAccountStatsKey{}).(map[int64]AccountRecentStats)
 	return stats[id].Reliability(time.Now())

@@ -21,11 +21,11 @@ func TestOpenAIScheduler_OAuthCacheAffinity(t *testing.T) {
 		{name: "oauth_slow_healthy", accountType: AccountTypeOAuth, slow: true, wantSticky: true},
 		{name: "setup_token_slow_healthy", accountType: AccountTypeSetupToken, slow: true, wantSticky: true},
 		{name: "oauth_fast_healthy", accountType: AccountTypeOAuth, wantSticky: true},
-		{name: "oauth_slow_failing", accountType: AccountTypeOAuth, slow: true, failing: true},
-		{name: "setup_token_slow_failing", accountType: AccountTypeSetupToken, slow: true, failing: true},
-		{name: "oauth_failing", accountType: AccountTypeOAuth, failing: true},
-		{name: "oauth_slow_full", accountType: AccountTypeOAuth, slow: true, full: true},
-		{name: "setup_token_slow_full", accountType: AccountTypeSetupToken, slow: true, full: true},
+		{name: "oauth_slow_failing", accountType: AccountTypeOAuth, slow: true, failing: true, wantSticky: true},
+		{name: "setup_token_slow_failing", accountType: AccountTypeSetupToken, slow: true, failing: true, wantSticky: true},
+		{name: "oauth_failing", accountType: AccountTypeOAuth, failing: true, wantSticky: true},
+		{name: "oauth_slow_full", accountType: AccountTypeOAuth, slow: true, full: true, wantSticky: true},
+		{name: "setup_token_slow_full", accountType: AccountTypeSetupToken, slow: true, full: true, wantSticky: true},
 		{name: "oauth_slow_excluded", accountType: AccountTypeOAuth, slow: true, excluded: true},
 		{name: "api_key_slow_healthy", accountType: AccountTypeAPIKey, slow: true, wantSticky: true},
 		{name: "api_key_fast_legacy_sticky", accountType: AccountTypeAPIKey, wantSticky: true},
@@ -98,31 +98,4 @@ func TestOpenAIScheduler_OAuthCacheAffinity(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestOpenAIScheduler_CacheAffinityNeverMasksHealthFailure(t *testing.T) {
-	stats := newOpenAIAccountRuntimeStats()
-	const accountID = int64(21703)
-	ttft := 60000
-	stats.report(accountID, true, &ttft)
-	scheduler := &defaultOpenAIAccountScheduler{stats: stats}
-	cfg := openAIStickyEscapeConfig{
-		enabled: true, ttftMs: 15000, errorRate: 0.5, preserveCacheAffinity: true,
-	}
-
-	reason, _, observedTTFT, escape := scheduler.shouldEscapeStickyAccount(accountID, cfg)
-	require.False(t, escape)
-	require.Empty(t, reason)
-	require.Equal(t, float64(ttft), observedTTFT)
-	for i := 0; i < 4; i++ {
-		stats.report(accountID, false, nil)
-	}
-	reason, _, observedTTFT, escape = scheduler.shouldEscapeStickyAccount(accountID, cfg)
-	require.True(t, escape)
-	require.Equal(t, "error_rate", reason)
-	require.Equal(t, float64(ttft), observedTTFT)
-
-	cfg.enabled = false
-	_, _, _, escape = scheduler.shouldEscapeStickyAccount(accountID, cfg)
-	require.False(t, escape)
 }

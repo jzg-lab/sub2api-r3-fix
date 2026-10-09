@@ -28,11 +28,12 @@ import (
 func f64p(v float64) *float64 { return &v }
 
 type httpUpstreamRecorder struct {
-	lastReq      *http.Request
-	lastBody     []byte
-	lastProxyURL string
-	requests     []*http.Request
-	bodies       [][]byte
+	lastReq           *http.Request
+	requestContextErr error
+	lastBody          []byte
+	lastProxyURL      string
+	requests          []*http.Request
+	bodies            [][]byte
 
 	resp      *http.Response
 	responses []*http.Response
@@ -65,6 +66,7 @@ func (r passthroughErrReadCloser) Close() error {
 }
 
 func (u *httpUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	u.requestContextErr = req.Context().Err()
 	u.lastReq = req
 	u.lastProxyURL = proxyURL
 	if req != nil && req.Body != nil {
@@ -881,7 +883,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_UpstreamRequestIgnoresClientCance
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_CodexMissingInstructionsGetsDefault(t *testing.T) {
@@ -1088,7 +1090,7 @@ func TestOpenAIGatewayService_OAuthLegacy_UpstreamRequestIgnoresClientCancel(t *
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
 }
 
 func TestOpenAIGatewayService_OAuthLegacy_CompositeCodexUAUsesCodexOriginator(t *testing.T) {

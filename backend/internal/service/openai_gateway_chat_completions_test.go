@@ -1262,7 +1262,7 @@ func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
 }
 
 // TestBuildChatStreamErrorSSE verifies F4: the error chunk payload follows the

@@ -691,6 +691,33 @@ func TestSmartRouteKeepsExistingCacheBillingProtection(t *testing.T) {
 	require.Equal(t, 2, calls)
 }
 
+func TestSmartRouteKeepsHeartbeatAccountingAcrossAttempts(t *testing.T) {
+	h, key, _ := smartRoutingFixture(t)
+	calls := 0
+	run := h.WithSmartRoutes(func(c *gin.Context) {
+		calls++
+		require.Equal(t, -1, service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
+		if calls <= 2 {
+			service.MarkOpenAICompactClientStream(c)
+			stop := service.StartOpenAICompactSSEKeepalive(c, time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
+			stop()
+			require.True(t, c.Writer.Written())
+			require.Equal(t, -1, service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
+			failure := &service.UpstreamFailoverError{StatusCode: 502}
+			require.True(t, openAIForwardMayFailover(c, -1, failure))
+			require.True(t, nextSmartRoute(c, failure, &service.Account{ID: int64(calls)}))
+			return
+		}
+		_, err := c.Writer.WriteString("data: done\n\n")
+		require.NoError(t, err)
+	}, nil, nil)
+	c, rec := smartRoutingContext(key, `{"model":"gpt-test","stream":true}`)
+	run(c)
+	require.Equal(t, 3, calls)
+	require.Contains(t, rec.Body.String(), "data: done")
+}
+
 func TestSmartRouteFailureBudgetsAcrossPackages(t *testing.T) {
 	for _, endpoint := range []string{"responses", "messages", "chat/completions"} {
 		for _, stream := range []bool{false, true} {
@@ -799,5 +826,37 @@ func TestSmartRouteModelsLookupFailures(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSmartRouteFailuresAreConversationScoped(t *testing.T) {
+	h, key, _ := smartRoutingFixture(t)
+	scope := "responses\x00gpt-test"
+	backup, err := h.apiKeyService.APIKeyForRoute(context.Background(), key, 2)
+	require.NoError(t, err)
+	h.apiKeyService.RememberAPIKeyRouteSession(context.Background(), backup, scope, "healthy")
+	h.apiKeyService.RememberAPIKeyRouteSession(context.Background(), backup, scope, "failing")
+	var groups []int64
+	run := h.WithSmartRoutes(func(c *gin.Context) {
+		routed, _ := middleware2.GetAPIKeyFromContext(c)
+		groups = append(groups, *routed.GroupID)
+		if c.GetHeader("Session_id") == "failing" && *routed.GroupID == 2 {
+			require.True(t, nextSmartRoute(c, &service.UpstreamFailoverError{StatusCode: 502}, nil))
+			return
+		}
+		c.JSON(200, gin.H{"ok": true})
+	}, nil, nil)
+	for _, tc := range []struct {
+		session string
+		want    []int64
+	}{
+		{"failing", []int64{2, 1}}, {"healthy", []int64{2}}, {"failing", []int64{1}}, {"new", []int64{1}},
+	} {
+		groups = nil
+		c, rec := smartRoutingContext(key, `{"model":"gpt-test"}`)
+		c.Request.Header.Set("Session_id", tc.session)
+		run(c)
+		require.Equal(t, 200, rec.Code)
+		require.Equal(t, tc.want, groups, tc.session)
 	}
 }

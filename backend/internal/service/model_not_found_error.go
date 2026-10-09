@@ -3,19 +3,30 @@ package service
 import (
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
-var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found"}
+var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found", "not supported by any configured account in this group"}
 
 func isUpstreamModelNotFoundError(statusCode int, body []byte) bool {
 	if statusCode != http.StatusNotFound {
 		return false
 	}
-	normalized := normalizeModelNotFoundBody(body)
-	if normalized == "" || !strings.Contains(normalized, "model") {
+	match := func(value string) bool {
+		normalized := normalizeModelNotFoundBody([]byte(value))
+		return strings.Contains(normalized, "model") && containsModelNotFoundKeyword(normalized)
+	}
+	if gjson.ValidBytes(body) {
+		for _, path := range []string{"error", "error.message", "error.code", "error.type", "error.detail", "response.error", "response.error.message", "response.error.code", "message", "code", "detail"} {
+			value := gjson.GetBytes(body, path)
+			if value.Type == gjson.String && match(value.String()) {
+				return true
+			}
+		}
 		return false
 	}
-	return containsModelNotFoundKeyword(normalized)
+	return match(string(body))
 }
 
 func isModelNotFoundError(statusCode int, body []byte) bool {

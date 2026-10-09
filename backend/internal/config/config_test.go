@@ -418,8 +418,8 @@ func TestLoadDefaultOpenAIFirstOutputTimeoutsDisabled(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Zero(t, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
-	require.Zero(t, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
+	require.Equal(t, 180, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
+	require.Equal(t, 600, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
 }
 
 func TestLoadOpenAIFirstOutputTimeoutsFromEnv(t *testing.T) {

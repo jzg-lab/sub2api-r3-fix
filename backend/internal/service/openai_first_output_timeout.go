@@ -333,3 +333,49 @@ func (r *openAIRequestContextReadCloser) Close() error {
 	})
 	return r.err
 }
+
+// Only disconnected clients start this grace period; live requests retain their normal limits.
+const openAIUsageDrainTimeout = 180 * time.Second
+
+func detachUpstreamContextWithDrain(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return withUpstreamDrain(ctx, context.WithoutCancel(ctx), timeout)
+}
+
+func withUpstreamDrain(ctx, base context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	upstream, cancel := context.WithCancelCause(base)
+	stop := context.AfterFunc(ctx, func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel(errors.New("stream usage incomplete: client disconnect drain timeout"))
+		case <-upstream.Done():
+		}
+	})
+	return upstream, func() { stop(); cancel(context.Canceled) }
+}
+
+// Closing the reader also interrupts a blocked synchronous scanner.
+type openAIReadDeadline struct {
+	timer *time.Timer
+	state atomic.Int32 // 0 waiting, 1 stopped, 2 expired
+}
+
+func newOpenAIReadDeadline(body io.ReadCloser, deadline time.Time) *openAIReadDeadline {
+	guard := &openAIReadDeadline{}
+	guard.timer = time.AfterFunc(time.Until(deadline), func() {
+		if guard.state.CompareAndSwap(0, 2) {
+			_ = body.Close()
+		}
+	})
+	return guard
+}
+
+func (g *openAIReadDeadline) stop() bool {
+	if g == nil {
+		return true
+	}
+	g.state.CompareAndSwap(0, 1)
+	g.timer.Stop()
+	return g.state.Load() != 2
+}

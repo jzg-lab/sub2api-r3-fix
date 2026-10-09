@@ -137,7 +137,7 @@ func TestForwardAsRawChatCompletions_ForcesStreamUsageUpstreamAndPassesUsageDown
 	require.Equal(t, 4, result.Usage.OutputTokens)
 	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
 	require.Contains(t, rec.Body.String(), `"usage"`)
@@ -909,7 +909,7 @@ func TestForwardAsRawChatCompletions_ClientDisconnectTruncationStillBills(t *tes
 	}
 
 	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, rawChatCompletionsTestAccount(), body, "")
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "usage incomplete")
 	require.NotNil(t, result)
 }
 
@@ -937,7 +937,7 @@ func TestForwardAsRawChatCompletions_ClientCancelTruncationStillBills(t *testing
 	}
 
 	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, rawChatCompletionsTestAccount(), body, "")
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "usage incomplete")
 	require.NotNil(t, result)
 }
 
@@ -1078,7 +1078,7 @@ func TestForwardAsRawChatCompletions_UpstreamRequestIgnoresClientCancel(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.lastReq.Context().Err())
+	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
 }
 
 func TestForwardAsChatCompletions_UnknownResponsesSupportFallbackUsesVersionedChatURL(t *testing.T) {

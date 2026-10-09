@@ -376,13 +376,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			return nil, buildErr
 		}
 
-		upstreamStart := time.Now()
 		// Codex 客户端遥测：以终态出站头为身份，异步补发分析事件与 OTLP 指标。
 		// 失败仅记日志，绝不影响主链路（openai_codex_telemetry.go）。
 		telemetryAttempt := beginOpenAICodexTelemetry(s, account, body, upstreamReq.Header, proxyURL, imageIntent, isOpenAIResponsesCompactPath(c))
-		resp, err = s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
+		resp, err = s.doOpenAITextUpstream(ctx, c, upstreamReq, proxyURL, account, body, startTime, reqStream)
 		account = openAIResponseAccount(resp, account)
-		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			telemetryAttempt.finishFailed()
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
@@ -432,7 +430,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			// 透传模式默认保持原样代理；容量错误以及 API-key 上游的瞬时
 			// 5xx 应先触发多账号 failover，且此时尚未写入下游响应。
 			// probeBody 已在上方任务探测时读取过一次，直接复用避免重复读取。
-			if shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, probeBody) {
+			if shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, probeBody, resp.Header) {
 				return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
 			}
 			return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
@@ -471,7 +469,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				if signal, ok := asOpenAICompactFallbackSignal(handleErr); ok {
 					_ = resp.Body.Close()
 					compactResp, compactBody := openAICompactFallbackErrorResponse(resp, signal)
-					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody) {
+					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody, compactResp.Header) {
 						return nil, s.handleFailoverErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
 					}
 					return nil, s.handleErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
@@ -498,7 +496,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				if signal, ok := asOpenAICompactFallbackSignal(handleErr); ok {
 					_ = resp.Body.Close()
 					compactResp, compactBody := openAICompactFallbackErrorResponse(resp, signal)
-					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody) {
+					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody, compactResp.Header) {
 						return nil, s.handleFailoverErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
 					}
 					return nil, s.handleErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
@@ -774,7 +772,7 @@ func stripOpenAILegacyResponsesBeta(headers http.Header) {
 	}
 }
 
-func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, responseBody []byte) bool {
+func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, responseBody []byte, responseHeaders ...http.Header) bool {
 	if hit, _, _ := detectOpenAICyberPolicy(responseBody); hit {
 		return false
 	}
@@ -785,6 +783,13 @@ func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, r
 		return true
 	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, "", responseBody) {
+		return true
+	}
+	var headers http.Header
+	if len(responseHeaders) > 0 {
+		headers = responseHeaders[0]
+	}
+	if isUpstreamModelNotFoundError(statusCode, responseBody) || isOpenAIUpstreamRouteRejected(statusCode, headers, responseBody) {
 		return true
 	}
 	if account != nil && account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode) {
@@ -1114,7 +1119,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 				return false
 			}
 			for _, part := range summary.Array() {
-				if strings.TrimSpace(part.Get("type").String()) != "summary_text" || part.Get("text").String() != "" {
+				if strings.TrimSpace(part.Get("type").String()) != "summary_text" || strings.TrimSpace(part.Get("text").String()) != "" {
 					return true
 				}
 			}
@@ -1127,7 +1132,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 			for _, part := range content.Array() {
 				switch strings.TrimSpace(part.Get("type").String()) {
 				case "output_text":
-					if part.Get("text").String() != "" {
+					if strings.TrimSpace(part.Get("text").String()) != "" {
 						return true
 					}
 				case "refusal":
@@ -1155,7 +1160,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 		}
 		switch strings.TrimSpace(part.Get("type").String()) {
 		case "output_text":
-			return part.Get("text").String() != ""
+			return strings.TrimSpace(part.Get("text").String()) != ""
 		case "refusal":
 			return part.Get("refusal").String() != ""
 		default:
@@ -1166,7 +1171,7 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 		if !part.Exists() || !part.IsObject() || strings.TrimSpace(part.Get("type").String()) != "summary_text" {
 			return true
 		}
-		return part.Get("text").String() != ""
+		return strings.TrimSpace(part.Get("text").String()) != ""
 	default:
 		return true
 	}
@@ -1178,6 +1183,10 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 		return false
 	}
 	switch strings.TrimSpace(eventType) {
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.audio_transcript.delta":
+		return !gjson.Valid(trimmed) || strings.TrimSpace(gjson.Get(trimmed, "delta").String()) != ""
+	case "response.output_text.done", "response.reasoning_text.done", "response.reasoning_summary_text.done", "response.audio_transcript.done":
+		return !gjson.Valid(trimmed) || strings.TrimSpace(gjson.Get(trimmed, "text").String()) != ""
 	case "response.failed":
 		return false
 	case "error":
@@ -1200,7 +1209,7 @@ func openAIStreamItemHasVisibleOutput(item gjson.Result) bool {
 	}
 	for _, path := range []string{"content", "summary"} {
 		for _, part := range item.Get(path).Array() {
-			if part.Get("text").String() != "" || part.Get("transcript").String() != "" {
+			if strings.TrimSpace(part.Get("text").String()) != "" || strings.TrimSpace(part.Get("transcript").String()) != "" {
 				return true
 			}
 		}
@@ -1221,14 +1230,14 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	}
 	if strings.HasSuffix(eventType, ".delta") {
 		delta := gjson.Get(trimmed, "delta")
-		return delta.Exists() && delta.String() != ""
+		return delta.Exists() && strings.TrimSpace(delta.String()) != ""
 	}
 	switch eventType {
 	case "response.output_text.done",
 		"response.reasoning_summary_text.done",
 		"response.reasoning_text.done",
 		"response.audio_transcript.done":
-		return gjson.Get(trimmed, "text").String() != ""
+		return strings.TrimSpace(gjson.Get(trimmed, "text").String()) != ""
 	case "response.function_call_arguments.done":
 		return gjson.Get(trimmed, "arguments").String() != ""
 	case "response.custom_tool_call_input.done":
@@ -1238,7 +1247,7 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	case "response.content_part.added", "response.content_part.done",
 		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		part := gjson.Get(trimmed, "part")
-		return part.Get("text").String() != "" || part.Get("transcript").String() != ""
+		return strings.TrimSpace(part.Get("text").String()) != "" || strings.TrimSpace(part.Get("transcript").String()) != ""
 	case "response.output_item.added", "response.output_item.done":
 		return openAIStreamItemHasVisibleOutput(gjson.Get(trimmed, "item"))
 	case "response.completed", "response.done":
@@ -1251,26 +1260,16 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	return false
 }
 
-// openAIStreamDataStartsSemanticTTFT 保留 900194fab 之前的 first_token_ms
-// 口径：跳过 Responses preamble 后，首个语义 SSE 事件即视为首 token。
+// Semantic TTFT includes meaningful structural events, but excludes blank output.
 func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" {
 		return false
 	}
-	eventType = strings.TrimSpace(eventType)
-	if eventType == "" && gjson.Valid(trimmed) {
-		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
+	if strings.TrimSpace(eventType) == "" && gjson.Valid(trimmed) {
+		eventType = gjson.Get(trimmed, "type").String()
 	}
-	switch eventType {
-	case "response.failed":
-		return false
-	case "error":
-		payload := []byte(trimmed)
-		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
-	default:
-		return !openAIStreamEventIsPreamble(eventType)
-	}
+	return openAIStreamDataStartsClientOutput(trimmed, eventType)
 }
 
 func (s *OpenAIGatewayService) openAITTFTMode(ctx context.Context) string {
@@ -1881,38 +1880,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
-	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
-	pendingLines := make([]string, 0, 8)
-
-	// ── 首个可见输出之前的下游 keepalive ──────────────────────────────────
-	//
-	// 与 Forward 路径同源的问题。openai_gateway_response_handling.go 里那句注释
-	// 说得最清楚：
-	//
-	//   "Track downstream writes separately from upstream reads: pre-output
-	//    failover can buffer response.created / response.in_progress, so
-	//    keepalive must be based on downstream idle time."
-	//
-	// 上面的 pendingLines 正是同一种缓冲：首个可见输出到来之前，下游【一个字节
-	// 都收不到】—— 连 HTTP 响应头都不会提交（gin 的 ResponseWriter 直到首次写入
-	// 才发送 header）。Forward 路径为此加了心跳，透传路径漏了。
-	//
-	// 推理模型在首个可见输出前思考数百秒是常态，于是中间层代理会按空闲超时把
-	// 连接判死。这不是假设：某生产部署实测 12 小时内 44 个 /v1/responses 请求在
-	// 600~900s 才产出首个可见输出（每个 3~5 万 output token，上游其实算完了），
-	// 全部被中间 nginx 的 proxy_read_timeout(600s) 判超时回 504，用户一个字没拿到。
-	//
-	// 心跳写出的 SSE 注释同时做到三件事：
-	//   1. 提交 HTTP 响应头，让下游知道连接活着；
-	//   2. 刷新中间层的空闲超时（proxy_read_timeout 衡量的是两次读之间的间隔，
-	//      不是请求总时长），长推理因此不再被误杀；
-	//   3. 不写出任何 pendingLines、不泄露账号相关的头，
-	//      且心跳字节已由 OpenAICompactKeepaliveAdjustedWrittenSize 排除，
-	//      所以 pre-output failover 的能力完全不受影响（#3887 的记账在此复用）。
-	//
-	// 用 startOpenAISSEKeepalive 而不是 StartOpenAICompactSSEKeepalive：后者会检查
-	// compact 标记，而这里是普通 /v1/responses 透传。走到这一行时上游已回
-	// text/event-stream、SSE 响应头也已设好，处于流式上下文是确定的。
+	stage := newDefaultOpenAIFirstOutputStage()
+	defer stage.Close()
+	// Only comments are emitted until a meaningful event is ready to commit.
 	stopKeepalive := func() {}
 	if s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
 		stopKeepalive = startOpenAISSEKeepalive(c,
@@ -1933,14 +1903,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 	defer flushPendingOutput()
 	writePendingLines := func() bool {
-		for _, pending := range pendingLines {
-			if _, err := fmt.Fprintln(w, pending); err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-				return false
-			}
+		if stage.closed {
+			return true
 		}
-		pendingLines = pendingLines[:0]
+		if err := stage.CommitTo(w); err != nil {
+			clientDisconnected = true
+			return false
+		}
 		return true
 	}
 	ensureResponseFailedTerminal := func() {
@@ -2164,13 +2133,18 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if suppressCurrentEvent {
 				suppressCurrentEvent = false
 				responseFailedPending = false
+				if sawDone {
+					break
+				}
 				continue
 			}
 		}
 
 		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
 			if !clientOutputStarted && !lineStartsClientOutput {
-				pendingLines = append(pendingLines, line)
+				if _, err := stage.WriteString(line + "\n"); err != nil {
+					return resultWithUsage(), fmt.Errorf("stage upstream pre-output events: %w", err)
+				}
 				continue
 			}
 			// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
@@ -2178,7 +2152,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if !clientOutputStarted {
 				stopKeepalive()
 			}
-			if !clientOutputStarted && len(pendingLines) > 0 {
+			if !clientOutputStarted && stage.Buffered() > 0 {
 				if !writePendingLines() {
 					continue
 				}
@@ -2197,6 +2171,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if line == "" && responseFailedPending {
 			responseFailedPending = false
 			failureDelivered = true
+		}
+		if line == "" && (sawDone || sawResponseFailed || (sawTerminalEvent && terminalEventType != "error" && !sawBareError)) {
+			break
 		}
 	}
 	ensureResponseFailedTerminal()
@@ -2267,7 +2244,16 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	originalModel string,
 	mappedModel string,
 ) (*openaiNonStreamingResultPassthrough, error) {
-	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	var body []byte
+	var err error
+	if isEventStreamResponse(resp.Header) {
+		body, err = readOpenAIResponseBodyThroughTerminal(resp, resolveUpstreamResponseReadLimit(s.cfg))
+		if errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
+			openAITooLargeError(c)
+		}
+	} else {
+		body, err = ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	}
 	if err != nil {
 		return nil, err
 	}

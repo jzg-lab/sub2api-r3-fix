@@ -2432,6 +2432,11 @@ const tempUnschedMessageMaxBytes = 2048
 // cooldown expires, instead of re-selecting an account that can never serve
 // the model.
 func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, account *Account, requestedModel string, statusCode int, responseBody []byte) bool {
+	return s.handleUpstreamModelNotFound(ctx, account, requestedModel, modelRateLimitKeyForUpstreamModelNotFound(ctx, account, requestedModel), statusCode, responseBody)
+}
+
+// The OpenAI gateway supplies an already mapped model; do not map it twice.
+func (s *RateLimitService) handleUpstreamModelNotFound(ctx context.Context, account *Account, requestedModel, modelKey string, statusCode int, responseBody []byte) bool {
 	if s == nil || account == nil || s.accountRepo == nil {
 		return false
 	}
@@ -2448,7 +2453,6 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	default:
 		return false
 	}
-	modelKey := modelRateLimitKeyForUpstreamModelNotFound(ctx, account, requestedModel)
 	if modelKey == "" {
 		return false
 	}

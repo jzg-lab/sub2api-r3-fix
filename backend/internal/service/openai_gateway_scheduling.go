@@ -1081,7 +1081,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 
 	// 检查账号是否需要清理粘性会话
 	// Check if sticky session should be cleared
-	if shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID) {
+	if shouldClearStickySession(account, requestedModel) {
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 		return nil
 	}
@@ -1317,9 +1317,36 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if err == nil && result != nil && result.Acquired {
 			return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 		}
+		if stickyAccountID == account.ID && account.Type == AccountTypeAPIKey && s.concurrencyService != nil {
+			// Without batch load data, try each eligible alternative once before waiting.
+			busy := make(map[int64]struct{}, len(excludedIDs)+1)
+			for id := range excludedIDs {
+				busy[id] = struct{}{}
+			}
+			busy[account.ID] = struct{}{}
+			for {
+				candidate, selectErr := s.selectAccountForModelWithExclusions(ctx, groupID, platform, "", requestedModel, busy, requireCompact, 0, requiredCapability, preferLowUpstreamRate)
+				if selectErr != nil {
+					break
+				}
+				busy[candidate.ID] = struct{}{}
+				slot, slotErr := s.tryAcquireAccountSlot(ctx, candidate.ID, candidate.Concurrency)
+				if slotErr != nil {
+					break
+				}
+				if slot != nil && slot.Acquired {
+					selection, selectionErr := s.newAcquiredSelectionResult(ctx, candidate, slot.ReleaseFunc)
+					if selectionErr != nil {
+						return nil, selectionErr
+					}
+					_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, candidate.ID)
+					return selection, nil
+				}
+			}
+		}
 		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-			if waitingCount < cfg.StickySessionMaxWaiting {
+			if account.Type != AccountTypeAPIKey && waitingCount < cfg.StickySessionMaxWaiting {
 				return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 					AccountID:      account.ID,
 					MaxConcurrency: account.Concurrency,
@@ -1363,7 +1390,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
 			if err == nil {
-				clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+				clearSticky := shouldClearStickySession(account, requestedModel)
 				if clearSticky {
 					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 				}
@@ -1391,7 +1418,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						}
 
 						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
+						if account.Type != AccountTypeAPIKey && waitingCount < cfg.StickySessionMaxWaiting {
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,
@@ -1399,7 +1426,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
 							})
 						}
-						stickySpillover = true
+						stickySpillover = account.Type != AccountTypeAPIKey
 					}
 				}
 			}

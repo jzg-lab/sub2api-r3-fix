@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/util/httputil"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -278,7 +279,7 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 	if isOpenAIHTTPUpstreamAccessStateError(statusCode, upstreamMsg, upstreamBody) {
 		return true
 	}
-	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, upstreamBody) {
+	if isUpstreamModelNotFoundError(statusCode, upstreamBody) || isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, upstreamBody) {
 		return true
 	}
 	if s.shouldFailoverUpstreamError(statusCode) {
@@ -338,7 +339,26 @@ func newOpenAIUpstreamFailoverError(
 		failoverErr.ClientStatusCode = http.StatusServiceUnavailable
 		failoverErr.ClientMessage = openAICapacityShedClientMessage(upstreamMsg, responseBody)
 	}
+	if isUpstreamModelNotFoundError(statusCode, responseBody) || isOpenAIUpstreamRouteRejected(statusCode, responseHeaders, responseBody) {
+		failoverErr.RetryableOnSameAccount = false
+		failoverErr.RequestScopedTransient = false
+		failoverErr.Scope = GatewayFailureScopeAccount
+		failoverErr.NextAccountAction = NextAccountRetry
+	}
 	return failoverErr
+}
+
+// Only explicit provider configuration/edge rejections bypass pool-mode retries.
+func isOpenAIUpstreamRouteRejected(status int, headers http.Header, body []byte) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	for _, path := range []string{"error.code", "code"} {
+		if gjson.GetBytes(body, path).String() == "token_group_required" {
+			return true
+		}
+	}
+	return !gjson.ValidBytes(body) && httputil.IsCloudflareChallengeResponse(status, headers, body)
 }
 
 func (s *OpenAIGatewayService) newOpenAIAccountFailoverError(

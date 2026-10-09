@@ -182,18 +182,9 @@ func (s *OpenAIOperationsService) Pool(ctx context.Context, groupID int64) (*Ope
 	now := time.Now()
 	out := &OpenAIAccountPoolState{ObservedAt: now, Total: len(accounts), Accounts: make([]OpenAIAccountOperationalState, 0, len(accounts))}
 	ids := make([]int64, 0, len(accounts))
-	var scheduler *defaultOpenAIAccountScheduler
-	if s.gateway != nil {
-		scheduler, _ = s.gateway.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
-	}
 	for i := range accounts {
 		a := &accounts[i]
 		state := accountOperationalState(a, now)
-		if scheduler != nil {
-			cfg := s.gateway.openAIStickyEscapeConfig()
-			cfg.preserveCacheAffinity = true
-			state.StickyEscapeReason, _, _, _ = scheduler.shouldEscapeStickyAccount(a.ID, cfg)
-		}
 		if state.Schedulable {
 			out.Schedulable++
 		}

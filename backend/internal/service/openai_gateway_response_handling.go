@@ -798,6 +798,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
 			}
+			if !eventInProgress && (terminalEventType == "[DONE]" || sawResponseFailed || (sawTerminalEvent && terminalEventType != "error" && !sawBareError)) {
+				return finalizeStream()
+			}
 		}
 		if result, err, done := handleScanErr(documentScanner.Err()); done {
 			return result, err
@@ -876,6 +879,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			markEventProcessed(ev)
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
+			}
+			if !eventInProgress && (terminalEventType == "[DONE]" || sawResponseFailed || (sawTerminalEvent && terminalEventType != "error" && !sawBareError)) {
+				return finalizeStream()
 			}
 
 		case <-intervalCh:
@@ -1565,7 +1571,16 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 }
 
 func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
-	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	var body []byte
+	var err error
+	if isEventStreamResponse(resp.Header) {
+		body, err = readOpenAIResponseBodyThroughTerminal(resp, resolveUpstreamResponseReadLimit(s.cfg))
+		if errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
+			openAITooLargeError(c)
+		}
+	} else {
+		body, err = ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	}
 	if err != nil {
 		return nil, err
 	}

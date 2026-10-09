@@ -217,15 +217,18 @@ gateway:
   # Grok text Responses first-byte timeout (seconds, 0=disabled; default 120)
   # Grok 文本 Responses 首字节超时时间（秒，0=禁用；默认 120）
   grok_response_header_timeout: 120
-  # Native OpenAI HTTP Responses first semantic output timeout (seconds, 0=disabled)
-  # Includes response-header wait; does not apply to passthrough or WebSocket transports.
+  # OpenAI text upstream first effective output timeout (seconds, 0=disabled).
+  # Covers Responses/Messages/Chat HTTP ingress, passthrough and the existing WS first-turn guard.
+  # Includes response-header wait; whitespace and heartbeats do not restart the HTTP timer.
+  # Native Anthropic upstreams retain their existing timeouts; established WS sessions cannot migrate.
+  # After a client disconnect, OpenAI HTTP usage collection is limited to 180 additional seconds.
   # A timed-out request may already have incurred upstream usage; account failover can therefore duplicate upstream billing.
   # 超时请求可能已产生上游用量；切换账号重试可能导致上游重复计费。
   # Pre-output attempt staging is capped at 8 MiB; overflow fails over without exposing partial SSE data.
   # 首次输出前的单次尝试暂存上限为 8 MiB；溢出时切号且不暴露不完整 SSE 数据。
-  openai_first_output_timeout_seconds: 0
+  openai_first_output_timeout_seconds: 180
   # Optional high/xhigh/max override (seconds, 0=use the standard timeout)
-  openai_high_effort_first_output_timeout_seconds: 0
+  openai_high_effort_first_output_timeout_seconds: 600
   # Max request body size in bytes (default: 256MB)
   # 请求体最大字节数（默认 256MB）
   max_body_size: 268435456
@@ -406,14 +409,6 @@ gateway:
       quota_headroom: 0.0
       # 倾向上游声明倍率更低的账号；0 表示关闭（默认），建议启用时从 1.5 开始。
       upstream_cost: 0.0
-  # OpenAI 高级调度器补充配置
-  openai_scheduler:
-    # 是否允许 session_hash sticky 在账号健康度恶化时临时逃逸；false 可一键回退旧行为
-    sticky_escape_enabled: true
-    # TTFT EWMA 超过该阈值（毫秒）时跳过 sticky，默认 15s，避免轻微抖动就逃逸
-    sticky_escape_ttft_ms: 15000
-    # 错误率 EWMA 超过该阈值时跳过 sticky，默认 0.5，仅在明显降级时触发
-    sticky_escape_error_rate: 0.5
   # OpenAI HTTP upstream protocol strategy.
   # OpenAI HTTP 上游协议策略（默认 HTTP/2；代理明确不兼容时可临时回退 HTTP/1.1）。
   openai_http2:

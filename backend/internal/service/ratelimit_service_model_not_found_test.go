@@ -525,3 +525,15 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelStillCoolsD
 	require.Len(t, repo.modelRateLimitCalls, 1, "守卫只作用于 codex plan-gated 分支")
 	require.Equal(t, upstreamModelNotFoundReason, repo.modelRateLimitCalls[0].reason)
 }
+
+func TestUnsupportedModelCoolsOnlyCanonicalModel(t *testing.T) {
+	repo := &modelNotFoundAccountRepoStub{}
+	gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+	account := &Account{ID: 123, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"alias": "upstream-model", "upstream-model": "must-not-remap"}}}
+	handled := gateway.handleOpenAIAccountUpstreamError(context.Background(), account, 404, http.Header{}, []byte(`{"error":{"message":"Model upstream-model is not supported by any configured account in this group"}}`), "upstream-model")
+	require.True(t, handled)
+	require.Zero(t, repo.tempCalls)
+	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Equal(t, "upstream-model", repo.modelRateLimitCalls[0].scope)
+	require.Equal(t, upstreamModelNotFoundReason, repo.modelRateLimitCalls[0].reason)
+}

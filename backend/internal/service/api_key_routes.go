@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -142,6 +143,14 @@ type apiKeyRouteSessionCache interface {
 	RememberAPIKeyRouteSession(context.Context, int64, string, string, int64) error
 }
 
+// A failed conversation must not displace another conversation's healthy package.
+func apiKeyRouteFailureScope(scope string, sessions []string) string {
+	if len(sessions) == 0 || sessions[0] == "" {
+		return scope
+	}
+	return fmt.Sprintf("%s\x00session:%x", scope, sha256.Sum256([]byte(sessions[0])))
+}
+
 func (s *APIKeyService) OrderAPIKeyRoutes(ctx context.Context, key *APIKey, scope string, sessions ...string) []int64 {
 	ids := key.CandidateGroupIDs()
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -150,7 +159,7 @@ func (s *APIKeyService) OrderAPIKeyRoutes(ctx context.Context, key *APIKey, scop
 	if !ok {
 		return ids
 	}
-	failed, err := cache.FailedAPIKeyRouteGroups(ctx, key.ID, scope, ids)
+	failed, err := cache.FailedAPIKeyRouteGroups(ctx, key.ID, apiKeyRouteFailureScope(scope, sessions), ids)
 	if err != nil {
 		logger.LegacyPrintf("service.api_key_routes", "read failure preferences: %v", err)
 		return ids
@@ -191,14 +200,14 @@ func (s *APIKeyService) RememberAPIKeyRouteSession(ctx context.Context, key *API
 	}
 }
 
-func (s *APIKeyService) MarkAPIKeyRouteFailed(ctx context.Context, key *APIKey, scope string) {
+func (s *APIKeyService) MarkAPIKeyRouteFailed(ctx context.Context, key *APIKey, scope string, sessions ...string) {
 	if key == nil || key.GroupID == nil || ctx.Err() != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	if cache, ok := s.cache.(apiKeyRouteFailureCache); ok {
-		if err := cache.MarkAPIKeyRouteFailed(ctx, key.ID, scope, *key.GroupID); err != nil {
+		if err := cache.MarkAPIKeyRouteFailed(ctx, key.ID, apiKeyRouteFailureScope(scope, sessions), *key.GroupID); err != nil {
 			logger.LegacyPrintf("service.api_key_routes", "write failure preference: %v", err)
 		}
 	}

@@ -1003,15 +1003,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		if reqStream {
+			upstreamCtx, releaseUpstreamCtx = detachUpstreamContextWithDrain(ctx, openAIUsageDrainTimeout)
+		}
 		var headerGuard *openAIFirstOutputHeaderGuard
-		if firstOutputTimeout > 0 {
+		if reqStream && firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
 				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
 			)
 		}
 		upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, reqStream, promptCacheKey, isCodexCLI)
 		if headerGuard == nil {
-			releaseUpstreamCtx()
+			defer releaseUpstreamCtx()
 		}
 		if err != nil {
 			if headerGuard != nil {
@@ -1031,9 +1034,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Codex 客户端遥测：身份取自终态出站头，异步补发分析事件与 OTLP 指标，
 		// 失败仅记日志，绝不影响主链路（openai_codex_telemetry.go）。
 		telemetryAttempt := beginOpenAICodexTelemetry(s, account, body, upstreamReq.Header, proxyURL, false, isOpenAIResponsesCompactPath(c))
-		resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
+		var resp *http.Response
+		if reqStream {
+			resp, err = s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
+		} else {
+			resp, err = s.doOpenAITextUpstream(ctx, c, upstreamReq, proxyURL, account, body, startTime, false)
+		}
 		account = openAIResponseAccount(resp, account)
-		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		if reqStream {
+			SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		}
 		if headerGuard != nil && headerGuard.stopHeaderWait() {
 			telemetryAttempt.finishFailed()
 			if resp != nil && resp.Body != nil {

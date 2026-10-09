@@ -159,6 +159,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	firstOutputTimeoutSwitchCount := 0
 	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -249,7 +250,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		writerSizeBeforeForward := c.Writer.Size()
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -336,11 +337,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
+					streamStarted = streamStarted || c.Writer.Written()
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
@@ -348,7 +350,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 						return
 					}
-					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
+					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) || openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

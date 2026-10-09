@@ -402,7 +402,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return nil, fmt.Errorf("build grok retry request: %w", err)
 			}
 		}
-		resp, err = s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
+		resp, err = s.doOpenAITextUpstream(ctx, c, upstreamReq, proxyURL, account, responsesBody, startTime, clientStream)
 		account = openAIResponseAccount(resp, account)
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -935,9 +935,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	var usage OpenAIUsage
 	responseID := ""
 	var firstTokenMs *int
-	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	pending := newDefaultOpenAIFirstOutputStage()
+	defer pending.Close()
 	var streamFailoverErr error
 	var streamNonFailoverErr error
 	terminalEventType := ""
@@ -991,8 +992,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	// processDataLine handles a single "data: ..." SSE line from upstream.
 	processDataLine := func(payload string) bool {
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
-		if firstChunk {
-			firstChunk = false
+		if firstTokenMs == nil && openAIStreamDataStartsVisibleOutput(payload, gjson.Get(payload, "type").String()) {
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
 		}
@@ -1106,7 +1106,22 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					)
 					continue
 				}
+				if !clientOutputStarted && !openAIStreamDataStartsClientOutput(payload, event.Type) {
+					if _, err := pending.WriteString(sse); err != nil {
+						failure := s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, err.Error())
+						failure.SafeToFailoverAfterWrite = true
+						streamFailoverErr = failure
+						return true
+					}
+					continue
+				}
 				writeStreamHeaders()
+				if !clientOutputStarted {
+					if err := pending.CommitTo(c.Writer); err != nil {
+						clientDisconnected = true
+						break
+					}
+				}
 				if _, err := fmt.Fprint(c.Writer, sse); err != nil {
 					clientDisconnected = true
 					logger.L().Info("openai messages stream: client disconnected, continuing to drain upstream for billing",

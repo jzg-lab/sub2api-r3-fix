@@ -1361,6 +1361,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	firstOutputTimeoutSwitchCount := 0
 	var capacityRetryBudget openAICapacityRetryBudget
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -1461,7 +1462,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
-		writerSizeBeforeForward := c.Writer.Size()
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1550,11 +1551,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
 					}
+					streamStarted = streamStarted || c.Writer.Written()
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
@@ -1562,7 +1564,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 						return
 					}
-					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
+					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) || openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -2793,7 +2795,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		)
 		if err != nil {
 			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && lastFailoverErr != nil {
-				h.apiKeyService.MarkAPIKeyRouteFailed(ctx, apiKey, wsRouteScope)
+				h.apiKeyService.MarkAPIKeyRouteFailed(ctx, apiKey, wsRouteScope, smartRouteSession(c, firstMessage))
 			}
 			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && advanceWSRoute() {
 				continue

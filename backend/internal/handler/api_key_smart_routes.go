@@ -218,6 +218,7 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 			}
 			attempt := base.Copy()
 			attempt.Writer = c.Writer
+			service.CopyOpenAIKeepaliveState(attempt, c)
 			attempt.Request = base.Request.Clone(routeCtx)
 			attempt.Request.Body = io.NopCloser(bytes.NewReader(body))
 			attempt.Request.ContentLength = int64(len(body))
@@ -252,11 +253,11 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 				failedGroups[id] = true
 			}
 			if state.err != nil && failedGroups[id] {
-				h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope)
+				h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 			}
 			if !state.retry {
 				if state.upstream != nil && state.failedAccountID == 0 {
-					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope)
+					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 				}
 				if state.upstream == nil && c.Writer.Status() < 400 && c.Request.Context().Err() == nil {
 					if streamErr, found := service.GetOpsStreamError(attempt); !found || !streamErr.CountTowardsSLA {
@@ -274,14 +275,14 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 					forwards >= h.maxAccountSwitches+1 ||
 					(openAI != nil && state.failedAccount != nil && openAI.gatewayService.ShouldStopOpenAIOAuth429Failover(state.failedAccount, state.upstream.StatusCode, forwards, &oauth429FailoverState)) {
 					if failedGroups[id] {
-						h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope)
+						h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 					}
 					break
 				}
 				if state.failedAccountID > 0 {
 					routeIndex--
 				} else if failedGroups[id] {
-					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope)
+					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 				}
 			}
 			if state.err != nil {

@@ -146,7 +146,7 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		s.rateLimitService.maybeHandleOpenAITeamLinkedError(stateCtx, account, statusCode, responseBody)
 	}
 	stateCtx = withTempUnschedulableModel(stateCtx, canonicalModel)
-	if s.rateLimitService != nil && len(canonicalModel) > 0 && s.rateLimitService.HandleUpstreamModelNotFound(stateCtx, account, canonicalModel[0], statusCode, responseBody) {
+	if s.rateLimitService != nil && len(canonicalModel) > 0 && s.rateLimitService.handleUpstreamModelNotFound(stateCtx, account, canonicalModel[0], canonicalModel[0], statusCode, responseBody) {
 		return true
 	}
 	// Isolate a custom temporary-unschedulable match to the known upstream

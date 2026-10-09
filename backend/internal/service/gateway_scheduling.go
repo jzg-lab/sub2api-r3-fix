@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	mathrand "math/rand"
@@ -169,9 +170,20 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			localExcluded[k] = v
 		}
 
+		var busySticky *Account
 		for {
-			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, localExcluded)
+			selectionSession := sessionHash
+			if busySticky != nil {
+				selectionSession = ""
+			}
+			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, selectionSession, requestedModel, localExcluded)
 			if err != nil {
+				if busySticky != nil && ctx.Err() == nil && errors.Is(err, ErrNoAvailableAccounts) {
+					return s.newSelectionResult(ctx, busySticky, false, nil, &AccountWaitPlan{
+						AccountID: busySticky.ID, MaxConcurrency: busySticky.Concurrency,
+						Timeout: cfg.FallbackWaitTimeout, MaxWaiting: cfg.FallbackMaxWaiting,
+					})
+				}
 				return nil, err
 			}
 
@@ -182,6 +194,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					result.ReleaseFunc()                   // 释放槽位
 					localExcluded[account.ID] = struct{}{} // 排除此账号
 					continue                               // 重新选择
+				}
+				if busySticky != nil {
+					_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, account.ID)
 				}
 				return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 			}
@@ -194,7 +209,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 				waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-				if waitingCount < cfg.StickySessionMaxWaiting {
+				if account.Type != AccountTypeAPIKey && waitingCount < cfg.StickySessionMaxWaiting {
 					return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 						AccountID:      account.ID,
 						MaxConcurrency: account.Concurrency,
@@ -203,6 +218,14 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					})
 				}
 			}
+			if s.concurrencyService != nil && err == nil && (busySticky != nil || (stickyAccountID == account.ID && account.Type == AccountTypeAPIKey)) {
+				if busySticky == nil {
+					busySticky = account
+				}
+				localExcluded[account.ID] = struct{}{}
+				continue
+			}
+
 			return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 				AccountID:      account.ID,
 				MaxConcurrency: account.Concurrency,
@@ -345,7 +368,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if stickyAccount, ok := accountByID[stickyAccountID]; ok {
 						var stickyCacheMissReason string
 
-						gatePass := !recentAccountFailed(ctx, s.cache, stickyAccountID) && s.isAccountSchedulableForSelection(stickyAccount) &&
+						gatePass := s.isAccountSchedulableForSelection(stickyAccount) &&
 							s.isGatewayAccountProfitEligible(ctx, stickyAccount) &&
 							s.isAccountAllowedForPlatform(stickyAccount, platform, useMixed) &&
 							(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, stickyAccount, requestedModel)) &&
@@ -378,7 +401,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 							if stickyCacheMissReason == "" {
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-								if waitingCount < cfg.StickySessionMaxWaiting {
+								if stickyAccount.Type != AccountTypeAPIKey && waitingCount < cfg.StickySessionMaxWaiting {
 									// 会话数量限制检查（等待计划也需要占用会话配额）
 									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
 										stickyCacheMissReason = "session_limit"
@@ -527,7 +550,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			account, ok := accountByID[accountID]
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
-				clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+				clearSticky := shouldClearStickySession(account, requestedModel)
 				if clearSticky {
 					slog.Debug("sticky.layer1_5_no_routing_clear",
 						"account_id", accountID,
@@ -593,7 +616,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 
 					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-					if waitingCount < cfg.StickySessionMaxWaiting {
+					if account.Type != AccountTypeAPIKey && waitingCount < cfg.StickySessionMaxWaiting {
 						// 会话数量限制检查（等待计划也需要占用会话配额）
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							// 会话限制已满，继续到 Layer 2
@@ -1857,7 +1880,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+						clearSticky := shouldClearStickySession(account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -1980,7 +2003,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+					clearSticky := shouldClearStickySession(account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
@@ -2123,7 +2146,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+						clearSticky := shouldClearStickySession(account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -2248,7 +2271,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel) || recentAccountFailed(ctx, s.cache, accountID)
+					clearSticky := shouldClearStickySession(account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
