@@ -472,6 +472,8 @@
           />
         </div>
 
+        <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
+
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-3">
             <span class="input-label mb-0">{{ t('keys.groupLabel') }}</span>
@@ -481,8 +483,6 @@
             </label>
           </div>
           <p v-if="formData.smart_routing" class="text-sm text-gray-500 dark:text-dark-400">{{ t('keys.smartRoutingHint') }}</p>
-          <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
-
           <div v-if="!formData.smart_routing">
             <Select
               v-model="formData.group_id"

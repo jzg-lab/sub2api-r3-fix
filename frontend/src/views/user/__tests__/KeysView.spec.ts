@@ -409,6 +409,8 @@ describe('user KeysView column settings', () => {
 
     const toggle = wrapper.get('[data-testid="smart-routing-toggle"]')
     expect(toggle.element.parentElement?.parentElement?.textContent).toContain('keys.groupLabel')
+    const provider = wrapper.findComponent({ name: 'GroupProviderFilter' })
+    expect(provider.element.compareDocumentPosition(toggle.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     const single = wrapper.findComponent('[data-tour="key-form-group"]')
     await single.get('button').trigger('click')
     const normalOptions = single.findAllComponents({ name: 'GroupOptionItem' })
