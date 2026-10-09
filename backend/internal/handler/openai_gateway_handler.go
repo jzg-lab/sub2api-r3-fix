@@ -442,6 +442,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
+		if skipUnavailableSmartRoute(c, service.ErrNoAvailableAccounts) {
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
@@ -581,6 +584,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// 2. Re-check billing eligibility after wait
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+		if skipIneligibleSmartRoute(c, err) {
+			return
+		}
 		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
 		if retryAfter > 0 {
@@ -650,6 +656,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if skipUnavailableSmartRoute(c, err) {
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
 				return
@@ -763,6 +772,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		h.gatewayService.ObserveAccountAttempt(c, account, result, err)
 		var cyberBlockBodyHTTP []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
@@ -834,6 +844,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					observeSmartRouteFailure(c, failoverErr, account.ID)
 					if failoverClientGone(c) {
 						reqLog.Info("openai.failover_aborted_client_disconnected",
 							zap.Int64("account_id", account.ID),
@@ -853,6 +864,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
+					}
+					if nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+						return
 					}
 					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
@@ -1238,6 +1253,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	// 检查分组是否允许 /v1/messages 调度
 	if !allowOpenAICompatibleMessagesDispatch(c, apiKey) {
+		if skipUnavailableSmartRoute(c, service.ErrNoAvailableAccounts) {
+			return
+		}
 		h.anthropicErrorResponse(c, http.StatusForbidden, "permission_error",
 			"This group does not allow /v1/messages dispatch")
 		return
@@ -1275,6 +1293,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
+		if skipUnavailableSmartRoute(c, service.ErrNoAvailableAccounts) {
+			return
+		}
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
@@ -1317,6 +1338,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+		if skipIneligibleSmartRoute(c, err) {
+			return
+		}
 		reqLog.Info("openai_messages.billing_eligibility_check_failed", zap.Error(err))
 		status, code, message, retryAfter := billingErrorDetails(err)
 		if retryAfter > 0 {
@@ -1370,6 +1394,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if skipUnavailableSmartRoute(c, err) {
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("openai_messages.account_select_aborted_client_disconnected", zap.Error(err))
 				return
@@ -1443,6 +1470,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		h.gatewayService.ObserveAccountAttempt(c, account, result, err)
 		var cyberBlockBodyMsg []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyMsg = body
@@ -1514,6 +1542,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					observeSmartRouteFailure(c, failoverErr, account.ID)
 					if failoverClientGone(c) {
 						reqLog.Info("openai_messages.failover_aborted_client_disconnected",
 							zap.Int64("account_id", account.ID),
@@ -1528,6 +1557,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
+					}
+					if nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+						return
 					}
 					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
@@ -2294,6 +2327,10 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint
 // GET /openai/v1/responses (Upgrade: websocket)
 func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
+	h.ResponsesWebSocketWithSubscriptions(c, nil)
+}
+
+func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Context, routeSubscriptions *service.SubscriptionService) {
 	if !isOpenAIWSUpgradeRequest(c.Request) {
 		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
 		return
@@ -2408,6 +2445,83 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
 	if reqModel == "" {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
+		return
+	}
+	wsRouteKey := apiKey
+	wsRouteScope := "responses-ws\x00" + reqModel
+	wsRouteIDs := []int64(nil)
+	wsRouteIndex := 0
+	var wsRouteCommitted atomic.Bool
+	wsRouteBaseCtx := ctx
+	wsRoutePinned := gjson.GetBytes(firstMessage, "previous_response_id").String() != "" || gjson.GetBytes(firstMessage, "conversation").Exists() || smartRouteImageRequest(firstMessage)
+	if wsRouteKey.HasSmartRoutes() {
+		wsRouteBaseCtx = service.WithAPIKeyRouteAdmission(ctx, !wsRoutePinned)
+		wsRouteIDs = h.apiKeyService.OrderAPIKeyRoutes(ctx, wsRouteKey, wsRouteScope, smartRouteSession(c, firstMessage))
+		if wsRoutePinned && wsRouteKey.GroupID != nil {
+			wsRouteIDs = []int64{*wsRouteKey.GroupID}
+			if previous := gjson.GetBytes(firstMessage, "previous_response_id").String(); previous != "" {
+				id, err := h.gatewayService.SmartRouteResponseGroup(ctx, wsRouteKey, previous, false)
+				if err != nil {
+					closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "response route lookup failed")
+					return
+				}
+				if id > 0 {
+					wsRouteIDs = []int64{id}
+				}
+			}
+		}
+	}
+	selectWSRoute := func() bool {
+		for wsRouteIndex < len(wsRouteIDs) {
+			id := wsRouteIDs[wsRouteIndex]
+			wsRouteIndex++
+			candidate, routeErr := h.apiKeyService.APIKeyForRoute(wsRouteBaseCtx, wsRouteKey, id)
+			if routeErr != nil {
+				if !errors.Is(routeErr, service.ErrGroupNotFound) && !errors.Is(routeErr, service.ErrGroupNotAllowed) {
+					return false
+				}
+				continue
+			}
+			if !isResponsesWebSocketCompositePlatform(candidate.Group.Platform) && candidate.Group.Platform != service.PlatformComposite {
+				continue
+			}
+			sub, routeErr := routeSubscription(wsRouteBaseCtx, routeSubscriptions, candidate, h.cfg != nil && h.cfg.RunMode == config.RunModeSimple)
+			if routeErr != nil {
+				if !isSmartRouteEligibilityError(routeErr) {
+					return false
+				}
+				continue
+			}
+			candidate.RouteGroupIDs = nil
+			candidateCtx := service.ContextWithAPIKeyRoute(wsRouteBaseCtx, candidate)
+			if _, restricted := h.gatewayService.ResolveChannelMappingAndRestrict(candidateCtx, candidate.GroupID, reqModel); restricted {
+				continue
+			}
+			apiKey = candidate
+			ctx = candidateCtx
+			c.Request = c.Request.WithContext(ctx)
+			c.Set(string(middleware2.ContextKeyAPIKey), candidate)
+			c.Set(string(middleware2.ContextKeySubscription), sub)
+			ensureCompositeTargetPlatform(c, apiKey, reqModel)
+			ctx = c.Request.Context()
+			if candidate.Group.Platform == service.PlatformComposite {
+				platform, resolved := service.ResolvedTargetPlatformFromContext(ctx)
+				if !resolved || !isResponsesWebSocketCompositePlatform(platform) {
+					continue
+				}
+			}
+			if routeErr := h.billingCacheService.CheckBillingEligibility(ctx, candidate.User, candidate, candidate.Group, sub, service.QuotaPlatform(ctx, candidate)); routeErr != nil {
+				if !isSmartRouteEligibilityError(routeErr) {
+					return false
+				}
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	if wsRouteKey.HasSmartRoutes() && !selectWSRoute() {
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no compatible, eligible group")
 		return
 	}
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
@@ -2532,10 +2646,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if requestPlatform == service.PlatformGrok {
 		requiredTransport = service.OpenAIUpstreamTransportHTTPSSE
 	}
-	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
-		return
+	if !wsRouteKey.HasSmartRoutes() {
+		if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
+			return
+		}
 	}
 
 	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(
@@ -2553,8 +2669,33 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
+	advanceWSRoute := func() bool {
+		if !wsRouteKey.HasSmartRoutes() || wsRoutePinned || wsRouteCommitted.Load() || !selectWSRoute() {
+			return false
+		}
+		subscription, _ = middleware2.GetSubscriptionFromContext(c)
+		requestPlatform = openAICompatibleRequestPlatform(ctx, apiKey)
+		requiredTransport = service.OpenAIUpstreamTransportResponsesWebsocketV2Ingress
+		if requestPlatform == service.PlatformGrok {
+			requiredTransport = service.OpenAIUpstreamTransportHTTPSSE
+		}
+		channelMappingWS, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+		wsForwardModel = reqModel
+		if channelMappingWS.Mapped {
+			wsForwardModel = channelMappingWS.MappedModel
+		}
+		ctx, _ = h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
+		ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
+		c.Request = c.Request.WithContext(ctx)
+		if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage, "first_turn"); decision != nil && !decision.AllowNextStage {
+			writeSecurityAuditWSError(ctx, wsConn, decision)
+			return false
+		}
+		return true
+	}
+
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
-		if account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.SameAccountRetryDeadline.IsZero() {
+		if (wsRouteKey.HasSmartRoutes() && !wsRoutePinned && !wsRouteCommitted.Load()) || account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.SameAccountRetryDeadline.IsZero() {
 			return false
 		}
 		retryLimit := effectiveSameAccountRetryLimit(failoverErr, account)
@@ -2651,6 +2792,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && lastFailoverErr != nil {
+				h.apiKeyService.MarkAPIKeyRouteFailed(ctx, apiKey, wsRouteScope)
+			}
+			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && advanceWSRoute() {
+				continue
+			}
+
 			reqLog.Warn("openai.websocket_account_select_failed",
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -2798,6 +2946,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// turn 级定价：BeforeTurn 重新冻结 pricingAt 并按最新门复核当前账号；
 		// passthrough 没有 BeforeTurn 时，AfterTurn 回退到 TurnStarted 的所属 turn 时刻。
 		var turnPricing openAIWSTurnPricing
+		var wsFailureObserved atomic.Bool
 		hooks := &service.OpenAIWSIngressHooks{
 			ClientLifecycleContext:      clientLifecycleCtx,
 			InitialRequestModel:         reqModel,
@@ -2854,6 +3003,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return mapping.MappedModel, nil
 			},
 			BeforeTurn: func(turn int) error {
+				if turn > 1 {
+					wsRouteCommitted.Store(true)
+				}
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
@@ -2901,6 +3053,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				h.gatewayService.ObserveAccountAttempt(c, account, result, turnErr)
+				if turnErr != nil || (result != nil && !result.SucceededForScheduling()) {
+					wsFailureObserved.Store(true)
+				}
+				if result != nil {
+					if turnErr == nil && result.SucceededForScheduling() && !result.ClientDisconnect {
+						h.apiKeyService.RememberAPIKeyRouteSession(ctx, apiKey, wsRouteScope, smartRouteSession(c, firstMessage))
+					}
+				}
+				if result != nil || turn > 1 {
+					wsRouteCommitted.Store(true)
+				}
 				defer antibypass.FinishFrameTurn(clientLifecycleCtx, turn)
 				turnStart := getTurnStart(turn)
 				cyberBlockBody := takeCyberTurnBody(turn)
@@ -3028,6 +3192,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				closeOpenAIClientWS(wsConn, coderws.StatusServiceRestart, "server restarting")
 				return
 			}
+			wsFailureObserved.Store(false)
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, attemptHooks)
 			finishAttempt()
 			if err == nil {
@@ -3036,6 +3201,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			}
 			if service.IsOpenAIWSSessionPreemptedError(err) {
 				return
+			}
+			if wsRouteKey.HasSmartRoutes() && !wsRoutePinned && !wsRouteCommitted.Load() {
+				if dialFailure := service.SmartRouteWebSocketDialFailure(err); dialFailure != nil {
+					err = dialFailure
+				}
+			}
+			if !wsFailureObserved.Load() {
+				observedErr := err
+				if dialFailure := service.SmartRouteWebSocketDialFailure(err); dialFailure != nil {
+					observedErr = dialFailure
+				}
+				h.gatewayService.ObserveAccountAttempt(c, account, nil, observedErr)
 			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {

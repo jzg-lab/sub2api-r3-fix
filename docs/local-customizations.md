@@ -89,11 +89,88 @@ API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；�
 分别归对应分类，Gemini、Antigravity、Grok、组合及未知平台归其他。名称规则仅为展示兼容，
 若以后命名无法表达分类，再增加显式展示分类字段，不更改现有平台和路由。
 
-分类与原文字搜索共同筛选；切换分类不保存密钥。表单中若原草稿分组被分类隐藏则清空选择，
+分类与原文字搜索共同筛选；切换分类不保存密钥。单组表单中若原草稿分组被分类隐藏则清空选择，
 继续沿用必选校验；编辑初始分组保留，列表只有点击具体分组才调用原更新接口。切换菜单
 限制在视口内，分组列表独立滚动。接口、权限、倍率、额度与其他密钥操作保持原样。
 回归入口：`frontend/src/views/user/__tests__/KeysView.spec.ts`；验证见
 [密钥筛选记录](upstream-sync-state.md#密钥厂商分类筛选)。
+
+## 密钥智能路由
+
+2026-10-09 已在 `codex/key-smart-routing` 完成当时范围的本地实现及回归，尚未提交或部署。
+产品边界见[智能路由规则](upstream-integration-policy.md#密钥智能路由)，
+固定来源与验证见[版本记录](upstream-sync-state.md#密钥智能路由与重连避让)。
+
+创建/编辑可启用智能路由并按顺序配置最多 10 个组；跨厂商筛选不会清除已选候选。
+列表内智能密钥的快捷切组进入编辑窗口，旧的仅修改主组接口拒绝覆盖智能列表；显式解除绑定
+清除列表。`group_ids` 第一项是主组，API 校验正数、去重、数量与全部候选权限。
+迁移 `252_api_key_smart_routes.sql` 只新增 `api_keys.route_group_ids` JSONB 列；
+单组保留 NULL。主组/列表同一行原子写入，移除或替换分组同步去重、提升主组与失效鉴权缓存。
+鉴权快照版本 23 携带列表，按备用组筛选/统计密钥也能命中。
+
+HTTP 三种文本协议复用原转发器：发送错误前显式让出请求，先换同套餐其他合格账号，
+再尝试客户配置的下一兼容套餐，保留原计费、调度及协议转换。每个候选重新读取分组并检查余额/订阅；旧主组专属 RPM 覆盖不会带到备用。
+全局用户 RPM 和同套餐的组 RPM 成功准入结果在同次请求中共享。模型列表合并合格候选并去重，Codex 清单保留 ETag；
+现有自定义模型展示配置仍只影响展示，本轮不提前实施独立的模型白名单迁移。
+
+Redis 按密钥/端点/模型/组记录失败 60 秒，只调整候选顺序；不可用时沿用配置顺序。
+已输出后的上游失败仅影响下次请求。HTTP 响应 ID 续接查找已有归属并固定组；WebSocket 首轮
+尚可安全重试时允许换组，首轮完成后不搬迁会话。图片工具、Gemini 原生和视频维持原路由。
+分组或订阅查询异常返回服务不可用，不误报收费资格不足，也不把它记作上游健康故障。
+模型清单同样区分资格不符与查询故障：前者跳过该套餐，后者返回 503，不发布
+空或不完整模型清单的成功响应与 ETag。
+
+实现入口：
+
+- `frontend/src/views/user/KeysView.vue`、`frontend/src/api/keys.ts`。
+- `backend/internal/service/api_key_routes.go`、`api_key_service.go`、`billing_cache_service.go`。
+- `backend/internal/handler/api_key_smart_routes.go`、`api_key_route_models.go`、`openai_gateway_handler.go`。
+- `backend/internal/server/routes/gateway.go`、`server/middleware/api_key_auth.go`。
+- `backend/internal/repository/api_key_repo.go`、`api_key_route_cache.go`。
+
+回归入口：`api_key_smart_routes_test.go`（本地 HTTP/WS 上游及计费）、`api_key_routes_test.go`、
+`api_key_route_cache_test.go`、`api_key_repo_integration_test.go`、`api_key_auth_test.go`、
+`billing_cache_service_rpm_test.go`、鉴权快照/更新字段测试和 `KeysView.spec.ts`。
+实际供应商切换、生产 Redis/超时与客户端五次重连窗口未验证；不将本地模拟通过等同线上保证。
+
+2026-10-10 已将追加要求适配到本地代码，未提交或部署：
+
+- 一个账号就是一条线路；同请求共享失败账号集合，跨组不重试同一失败账号。
+  所有账号/套餐共用现有最大切换数加一次的上游尝试预算，不按每个套餐重置预算。
+  HTTP 外层同时共享原有容量故障三次上限、OAuth 429 切换限制和首输出超时最多
+  切换一次的计数；普通 502 不被容量三次上限截断。容量故障终态复用原协议错误响应。
+  一个账号失败不直接判定套餐故障；耗尽账号或尝试预算才记录套餐失败偏好。
+- 有智能备用时跳过内层最多 5 分钟的临时可用性恢复等待；单套餐、已绑定响应续接保留
+  原有等待。已发出的请求沿用现有超时；管理员内部备用池仍受原有准入控制，账号来源
+  不自动改变客户计费套餐。Anthropic 原有故障切换缓存计费保护跨重入保留。
+- 显式会话标识（已有 session headers 或 Claude metadata.user_id 中的 session）按
+  密钥/端点/模型保存成功套餐 1 小时，每次成功刷新。健康成功套餐优先，失败套餐后置；
+  没有显式会话标识时不能可靠识别跨请求对话，只使用配置顺序和近期故障偏好。
+- 新增 `service/account_recent_stats.go` 与同名 repository：Redis 原子聚合当前分钟及前
+  9 个分钟桶的真实文本转发尝试，空闲 11 分钟过期、多实例共享。不是自然语言答案
+  正确性评分，不混入管理员探测、用户取消、请求参数错误或本地额度拒绝。
+  WebSocket 统计只使用当前轮次的错误标记；历史错误保留给 Ops，不将后续成功记成失败。
+- 前端 `AccountRecentStatsCell.vue` 默认显示近 10 分钟成功率（成功/尝试数）、紫色缓存
+  命中率、平均首字延迟；不足 10 次提示样本少，无样本和无延迟显示未知。
+  复用账号批量统计接口及 30 秒快照缓存，随列表/手动/自动刷新；Redis 查询失败显示
+  统计暂不可用。延迟只包含有首字观测的成功样本。缓存使用转发结果的归一化输入 token；
+  强制缓存计费转换路径不计入缓存样本，避免把优惠计费当作上游物理缓存命中。
+- 调度可靠度采用 `(成功数+9)/(总尝试数+10)`，避免 1/1 样本压过大量稳定样本；
+  最近 60 秒连续失败额外降权。OpenAI 高级调度接入既有 ErrorRate 和 TTFT 权重，
+  普通/混合与 OpenAI 旧调度在同优先级内参考可靠度，原能力/价格/配额约束仍有效。
+  连续失败的分数上限为 `1 - 0.15 * min(连续失败数, 5)`，与平滑可靠度取小值。
+  OpenAI 高级调度默认基础评分为 `1*优先级因子 + 1*空闲因子 + 0.7*排队因子 +
+  0.8*可靠度 + 0.5*首字速度因子`；管理员运行时权重可覆盖，保留已有成本/额度等可选因子。
+  在合格候选 Top-K 中按 `分数 - 最低分 + 1` 加权选择，并非始终固定选最高分。
+  缓存命中率当前只记录与展示，不单独加分；缓存收益主要由健康会话亲和保留。
+  无样本回中性值，Redis 异常不阻断请求；不按成功率百分比永久禁用账号。
+- 智能路由优先保留健康账号粘性，最近记录失败解除普通会话亲和；响应 ID 归属仍不可
+  随意搬迁。仅首字慢不再触发 API Key 账号逃逸；未开启智能路由的显式粘性加权设置
+  保留原路径。现有管理员 `scheduler_score` 快照仍是配置分数，不等于实际选择分数。
+
+新增回归入口：`account_recent_stats_test.go`（service/repository/admin）、
+`account_recent_scheduler_test.go`、`openai_account_availability_wait_test.go`、
+`AccountRecentStatsCell.spec.ts`、`AccountsView.usageRefresh.spec.ts`。
 
 ## 质量调度限制分组
 

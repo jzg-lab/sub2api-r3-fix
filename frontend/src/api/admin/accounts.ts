@@ -601,6 +601,20 @@ export async function getTodayStats(id: number): Promise<WindowStats> {
 
 export interface BatchTodayStatsResponse {
   stats: Record<string, WindowStats>
+  recent_stats?: Record<string, AccountRecentStats>
+  recent_stats_unavailable?: boolean
+}
+
+export interface AccountRecentStats {
+  successes: number
+  failures: number
+  attempts: number
+  success_rate: number | null
+  cache_hit_rate: number | null
+  ttft_avg_ms: number | null
+  latency_samples: number
+  last_observed_at: number
+  consecutive_failures: number
 }
 
 /**

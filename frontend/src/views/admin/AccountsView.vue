@@ -409,6 +409,13 @@
               :error="todayStatsError"
             />
           </template>
+          <template #cell-recent_stats="{ row }">
+            <AccountRecentStatsCell
+              :stats="recentStatsByAccountId[String(row.id)] ?? null"
+              :loading="todayStatsLoading"
+              :unavailable="recentStatsUnavailable || !!todayStatsError"
+            />
+          </template>
           <template #cell-groups="{ row }">
             <AccountGroupsCell :groups="row.groups" :max-display="4" />
           </template>
@@ -627,6 +634,8 @@ import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
+import AccountRecentStatsCell from '@/components/account/AccountRecentStatsCell.vue'
+import type { AccountRecentStats } from '@/api/admin/accounts'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 import CapacityBadge from '@/components/account/CapacityBadge.vue'
@@ -815,6 +824,8 @@ const AUTO_REFRESH_SILENT_WINDOW_MS = 15000
 const autoRefreshSilentUntil = ref(0)
 const hasPendingListSync = ref(false)
 const todayStatsByAccountId = ref<Record<string, WindowStats>>({})
+const recentStatsByAccountId = ref<Record<string, AccountRecentStats>>({})
+const recentStatsUnavailable = ref(false)
 const todayStatsLoading = ref(false)
 const todayStatsError = ref<string | null>(null)
 const todayStatsReqSeq = ref(0)
@@ -1029,11 +1040,7 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean; source
 }
 
 const refreshTodayStatsBatch = async () => {
-  // Why this checks both columns:
-  // - today_stats column shows dedicated today's metrics.
-  // - usage column also embeds today's stats for Key/Bedrock rows.
-  // So we only skip fetching when BOTH columns are hidden.
-  if (hiddenColumns.has('today_stats') && hiddenColumns.has('usage')) {
+  if (hiddenColumns.has('today_stats') && hiddenColumns.has('usage') && hiddenColumns.has('recent_stats')) {
     todayStatsLoading.value = false
     todayStatsError.value = null
     return
@@ -1043,6 +1050,7 @@ const refreshTodayStatsBatch = async () => {
   const reqSeq = ++todayStatsReqSeq.value
   if (accountIDs.length === 0) {
     todayStatsByAccountId.value = {}
+    recentStatsByAccountId.value = {}
     todayStatsError.value = null
     todayStatsLoading.value = false
     return
@@ -1054,6 +1062,8 @@ const refreshTodayStatsBatch = async () => {
   try {
     const result = await adminAPI.accounts.getBatchTodayStats(accountIDs)
     if (reqSeq !== todayStatsReqSeq.value) return
+    recentStatsByAccountId.value = result.recent_stats ?? {}
+    recentStatsUnavailable.value = !!result.recent_stats_unavailable
     const serverStats = result.stats ?? {}
     const nextStats: Record<string, WindowStats> = {}
     for (const accountID of accountIDs) {
@@ -1667,7 +1677,7 @@ const toggleColumn = (key: string) => {
     hiddenColumns.add(key)
   }
   saveColumnsToStorage()
-  if ((key === 'today_stats' || key === 'usage') && wasHidden) {
+  if ((key === 'today_stats' || key === 'usage' || key === 'recent_stats') && wasHidden) {
     refreshTodayStatsBatch().catch((error) => {
       console.error('Failed to load account today stats after showing column:', error)
     })
@@ -2493,6 +2503,7 @@ const allColumns = computed(() => {
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'health', label: t('admin.accounts.columns.health'), sortable: false },
+    { key: 'recent_stats', label: t('admin.accounts.recentStats.title'), sortable: false },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
   if (!authStore.isSimpleMode) {

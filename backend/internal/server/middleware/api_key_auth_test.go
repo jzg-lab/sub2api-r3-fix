@@ -1792,3 +1792,37 @@ func (r *stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64,
 func (r *stubUserSubscriptionRepo) BatchUpdateExpiredStatus(ctx context.Context) (int64, error) {
 	return 0, errors.New("not implemented")
 }
+
+func TestSmartRouteAuthDefersOnlyGroupChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*service.APIKey)
+		path   string
+		status int
+	}{
+		{"inactive primary", func(k *service.APIKey) { k.Group.Status = "inactive" }, "/v1/responses", 204},
+		{"primary subscription", func(k *service.APIKey) { k.Group.SubscriptionType = service.SubscriptionTypeSubscription }, "/v1/messages", 204},
+		{"disabled key", func(k *service.APIKey) { k.Status = "inactive" }, "/v1/responses", 401},
+		{"disabled user", func(k *service.APIKey) { k.User.Status = "inactive" }, "/v1/responses", 401},
+		{"expired key", func(k *service.APIKey) { past := time.Now().Add(-time.Hour); k.ExpiresAt = &past }, "/v1/responses", 403},
+		{"key quota", func(k *service.APIKey) { k.Quota = 1; k.QuotaUsed = 1 }, "/v1/responses", 429},
+		{"image unchanged", func(k *service.APIKey) { k.Group.Status = "inactive" }, "/v1/images/generations", 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := &service.Group{ID: 1, Status: service.StatusActive, Hydrated: true, Platform: service.PlatformOpenAI}
+			key := &service.APIKey{ID: 2, Key: "sk-smart-auth", Status: service.StatusActive, UserID: 3, GroupID: &group.ID, Group: group, RouteGroupIDs: []int64{1, 2}, User: &service.User{ID: 3, Status: service.StatusActive}}
+			tc.mutate(key)
+			cfg := &config.Config{RunMode: config.RunModeStandard}
+			repo := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) { return key, nil }}
+			svc := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
+			r := gin.New()
+			r.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(svc, nil, cfg)))
+			r.POST(tc.path, func(c *gin.Context) { c.Status(204) })
+			req := httptest.NewRequest("POST", tc.path, strings.NewReader(`{"model":"gpt-5.1"}`))
+			req.Header.Set("x-api-key", key.Key)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+		})
+	}
+}

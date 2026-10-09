@@ -251,3 +251,34 @@ func TestBillingCacheService_CheckRPM_NilUserIsNoop(t *testing.T) {
 	require.EqualValues(t, 0, atomic.LoadInt32(&cache.userCalls))
 	require.EqualValues(t, 0, atomic.LoadInt32(&repo.calls))
 }
+
+func TestSmartRouteGlobalRPMAdmissionIsSharedAndCannotBypassLimit(t *testing.T) {
+	for _, count := range []int{1, 2} {
+		cache := &userRPMCacheStub{userCounts: []int{count}}
+		svc := newBillingServiceForRPM(t, cache, nil)
+		ctx := WithAPIKeyRouteAdmission(context.Background())
+		user := &User{ID: 8, RPMLimit: 1}
+		for _, id := range []int64{1, 2} {
+			err := svc.checkRPM(ctx, user, &Group{ID: id, RPMLimit: 10})
+			if count == 1 {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrUserRPMExceeded)
+			}
+		}
+		require.EqualValues(t, 1, cache.userCalls)
+		require.EqualValues(t, 2, cache.userGroupCalls)
+	}
+}
+
+func TestSmartRouteSameGroupAccountRetriesShareGroupRPM(t *testing.T) {
+	cache := &userRPMCacheStub{}
+	svc := newBillingServiceForRPM(t, cache, nil)
+	ctx := WithAPIKeyRouteAdmission(context.Background())
+	user := &User{ID: 8, RPMLimit: 10}
+	for _, id := range []int64{1, 1, 1, 2, 2} {
+		require.NoError(t, svc.checkRPM(ctx, user, &Group{ID: id, RPMLimit: 10}))
+	}
+	require.EqualValues(t, 1, cache.userCalls)
+	require.EqualValues(t, 2, cache.userGroupCalls)
+}

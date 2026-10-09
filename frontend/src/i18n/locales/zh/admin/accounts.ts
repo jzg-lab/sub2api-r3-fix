@@ -1615,6 +1615,15 @@ export default {
       viewStats: '查看统计',
       usageStatistics: '使用统计',
       last30DaysUsage: '近30天使用统计（日均基于实际使用天数）',
+      recentStats: {
+        title: '近期表现 · 10 分钟',
+        success: '成功率',
+        cache: '缓存命中率',
+        ttft: '平均首字延迟',
+        fewSamples: '样本较少',
+        noData: '暂无近期数据',
+        unavailable: '统计暂不可用'
+      },
       stats: {
         totalCost: '30天总费用',
         accumulatedCost: '累计成本',

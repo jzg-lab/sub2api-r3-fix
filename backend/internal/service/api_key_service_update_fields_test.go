@@ -131,3 +131,11 @@ func TestUpdateQuotaUsed_ExhaustedMarkOnlyDeclaresStatus(t *testing.T) {
 	require.NoError(t, svc.UpdateQuotaUsed(context.Background(), 1, 5))
 	require.Equal(t, []APIKeyUpdateFields{{Status: true}}, repo.updateFields)
 }
+
+func TestSmartRouteUpdateCannotSilentlyDiscardBackups(t *testing.T) {
+	primary := int64(1)
+	svc, repo := newUpdateFieldsAPIKeyService(&APIKey{ID: 1, UserID: 7, GroupID: &primary, RouteGroupIDs: []int64{1, 2}, Status: StatusActive})
+	_, err := svc.Update(context.Background(), 1, 7, UpdateAPIKeyRequest{GroupID: &primary})
+	require.Error(t, err)
+	require.Empty(t, repo.updateFields)
+}

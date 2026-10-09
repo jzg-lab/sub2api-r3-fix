@@ -790,8 +790,17 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 		return nil
 	}
 
-	// ── 第一层：分组级检查（override 或 group.rpm_limit） ──
-	if group != nil {
+	admission, _ := ctx.Value(apiKeyRouteAdmissionKey{}).(*APIKeyRouteAdmission)
+	if admission != nil {
+		admission.mu.Lock()
+		defer admission.mu.Unlock()
+	}
+	groupAdmitted := false
+	if admission != nil && group != nil {
+		_, groupAdmitted = admission.groupRPM[group.ID]
+	}
+	// Same-package account failover consumes one group admission per client request.
+	if group != nil && !groupAdmitted {
 		// 解析 override：优先从 auth cache snapshot，nil 时回退 DB。
 		// snapshot 带 checked 标记（负缓存）时，nil 就是"已确认无 override"，
 		// 不再每请求回源；只有 unmarked 的 nil（snapshot 构建时查询失败/未查）才走 DB。
@@ -845,6 +854,20 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 		}
 	}
 
+	if admission != nil && group != nil {
+		if admission.groupRPM == nil {
+			admission.groupRPM = make(map[int64]error)
+		}
+		admission.groupRPM[group.ID] = nil
+	}
+	if admission != nil {
+		admission.once.Do(func() { admission.err = s.checkRouteUserRPM(ctx, user) })
+		return admission.err
+	}
+	return s.checkRouteUserRPM(ctx, user)
+}
+
+func (s *BillingCacheService) checkRouteUserRPM(ctx context.Context, user *User) error {
 	// ── 第二层：用户级全局硬上限（始终生效） ──
 	if user.RPMLimit > 0 {
 		count, err := s.userRPMCache.IncrementUserRPM(ctx, user.ID)

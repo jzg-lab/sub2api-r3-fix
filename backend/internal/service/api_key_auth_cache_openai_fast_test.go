@@ -11,7 +11,7 @@ import (
 func TestAPIKeyAuthSnapshotGroupForceOpenAIFastRoundtrip(t *testing.T) {
 	groupID := int64(50)
 	apiKey := &APIKey{
-		ID: 82, UserID: 40, GroupID: &groupID, Key: "sk-fast-roundtrip", Status: StatusActive,
+		ID: 82, UserID: 40, GroupID: &groupID, RouteGroupIDs: []int64{50, 51}, Key: "sk-fast-roundtrip", Status: StatusActive,
 		User: &User{ID: 40, Status: StatusActive},
 		Group: &Group{
 			ID: groupID, Name: "fast-roundtrip", Platform: PlatformOpenAI, Status: StatusActive,
@@ -32,5 +32,8 @@ func TestAPIKeyAuthSnapshotGroupForceOpenAIFastRoundtrip(t *testing.T) {
 	require.True(t, materialized.Group.Hydrated)
 	require.True(t, materialized.Group.ForceOpenAIFast)
 	require.True(t, materialized.Group.FreeOpenAIFast)
-	require.Equal(t, 22, cached.Snapshot.Version)
+	require.Equal(t, []int64{50, 51}, materialized.RouteGroupIDs)
+	materialized.RouteGroupIDs[0] = 99
+	require.Equal(t, int64(50), cached.Snapshot.RouteGroupIDs[0])
+	require.Equal(t, apiKeyAuthSnapshotVersion, cached.Snapshot.Version)
 }

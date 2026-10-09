@@ -64,6 +64,7 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+	recentStatsCache        service.GatewayCache
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -2485,7 +2486,14 @@ func (h *AccountHandler) GetBatchTodayStats(c *gin.Context) {
 		return
 	}
 
-	payload := gin.H{"stats": stats}
+	recent, recentErr := service.LoadAccountRecentStats(c.Request.Context(), h.recentStatsCache, accountIDs)
+	views := make(map[int64]service.AccountRecentStatsView, len(accountIDs))
+	if recentErr == nil {
+		for _, id := range accountIDs {
+			views[id] = recent[id].View()
+		}
+	}
+	payload := gin.H{"stats": stats, "recent_stats": views, "recent_stats_unavailable": recentErr != nil}
 	cached := accountTodayStatsBatchCache.Set(cacheKey, payload)
 	if cached.ETag != "" {
 		c.Header("ETag", cached.ETag)

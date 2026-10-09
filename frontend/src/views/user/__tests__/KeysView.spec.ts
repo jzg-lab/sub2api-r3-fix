@@ -7,6 +7,7 @@ import KeysView from '../KeysView.vue'
 
 const {
   listKeys,
+  createKey,
   updateKey,
   getPublicSettings,
   getDashboardApiKeysUsage,
@@ -19,6 +20,7 @@ const {
   nextStep,
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
+  createKey: vi.fn(),
   updateKey: vi.fn(),
   getPublicSettings: vi.fn(),
   getDashboardApiKeysUsage: vi.fn(),
@@ -62,7 +64,7 @@ const messages: Record<string, string> = {
 vi.mock('@/api', () => ({
   keysAPI: {
     list: listKeys,
-    create: vi.fn(),
+    create: createKey,
     update: updateKey,
     delete: vi.fn(),
     toggleStatus: vi.fn(),
@@ -348,6 +350,47 @@ describe('user KeysView column settings', () => {
     await wrapper.get('#key-form').trigger('submit')
     expect(showError).toHaveBeenCalledWith('keys.groupRequired')
     expect(updateKey).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('preserves mixed provider routes, reorders them, and saves the actual first group', async () => {
+    getAvailableGroups.mockResolvedValue(providerGroups)
+    listKeys.mockResolvedValue({ items: [{ ...createApiKey(), group_id: 12, group_ids: [12, 11, 18] }], total: 1 })
+    const wrapper = await mountView()
+    await wrapper.get('button[title="keys.clickToChangeGroup"]').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="smart-routing-toggle"]').element.checked).toBe(true)
+    await getButtonByText(wrapper.findComponent({ name: 'GroupProviderFilter' }), 'Chinese models').trigger('click')
+    const rows = () => wrapper.findAll('[data-testid="smart-routing-groups"] li')
+    expect(rows().map(row => row.text())).toEqual(expect.arrayContaining([expect.stringContaining('GPT'), expect.stringContaining('Claude'), expect.stringContaining('Grok')]))
+    await rows()[1].get('button[aria-label="keys.routeMoveUp"]').trigger('click')
+    await rows()[2].get('button[aria-label="keys.routeRemove"]').trigger('click')
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+    expect(updateKey).toHaveBeenCalledWith(1, expect.objectContaining({ group_id: 11, group_ids: [11, 12] }))
+    wrapper.unmount()
+  })
+
+  it('requires a selected route and allows adding across provider filters', async () => {
+    getAvailableGroups.mockResolvedValue(providerGroups)
+    const wrapper = await mountView()
+    await wrapper.get('[data-tour="keys-create-btn"]').trigger('click')
+    await wrapper.get('[data-testid="smart-routing-toggle"]').setValue(true)
+    await wrapper.get('#key-form').trigger('submit')
+    expect(showError).toHaveBeenCalledWith('keys.groupRequired')
+    const routeSelect = () => wrapper.get('[data-testid="smart-routing-groups"]').findComponent({ name: 'Select' })
+    routeSelect().vm.$emit('update:modelValue', 12)
+    await nextTick()
+    await getButtonByText(wrapper.findComponent({ name: 'GroupProviderFilter' }), 'Anthropic').trigger('click')
+    routeSelect().vm.$emit('update:modelValue', 11)
+    await nextTick()
+    expect(wrapper.findAll('[data-testid="smart-routing-groups"] li')).toHaveLength(2)
+    expect(routeSelect().props('options')).toHaveLength(0)
+    await wrapper.get('[data-tour="key-form-name"]').setValue('Mixed route')
+    await wrapper.get('#key-form').trigger('submit')
+    await flushPromises()
+    expect(createKey).toHaveBeenCalledTimes(1)
+    expect(createKey.mock.calls[0][1]).toBe(12)
+    expect(createKey.mock.calls[0][8]).toEqual([12, 11])
     wrapper.unmount()
   })
 

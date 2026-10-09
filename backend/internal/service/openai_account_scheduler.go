@@ -446,7 +446,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
+	if !req.StickyWeighted || HasAPIKeyRouteAdmission(ctx) {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -522,7 +522,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
-	if shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
+	if recentAccountFailed(ctx, s.service.cache, accountID) || shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
 		clearBinding()
 		return nil, false, nil
 	}
@@ -556,9 +556,8 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	// Account-wide TTFT mixes models, reasoning and cold/long prompts. It is
-	// not evidence that moving an OAuth session will improve its next request.
-	escapeCfg.preserveCacheAffinity = account.IsOpenAIOAuthLike()
+	// Account-wide TTFT mixes models and prompts; only failures should break healthy affinity.
+	escapeCfg.preserveCacheAffinity = true
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
@@ -866,6 +865,11 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	filtered []*Account,
 	loadMap map[int64]*AccountLoadInfo,
 ) openAIAccountLoadPlan {
+	ids := make([]int64, 0, len(filtered))
+	for _, account := range filtered {
+		ids = append(ids, account.ID)
+	}
+	recent, _ := LoadAccountRecentStats(ctx, s.service.cache, ids)
 	allCandidates := make([]openAIAccountCandidateScore, 0, len(filtered))
 	for _, account := range filtered {
 		loadInfo, loadKnown := loadMap[account.ID]
@@ -876,6 +880,12 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		errorRate, ttft, hasTTFT := 0.0, 0.0, false
 		if s.stats != nil {
 			errorRate, ttft, hasTTFT = s.stats.snapshot(account.ID)
+		}
+		if stats, ok := recent[account.ID]; ok {
+			errorRate = 1 - stats.Reliability(time.Now())
+			if stats.TTFTCount > 0 {
+				ttft, hasTTFT = float64(stats.TTFTSumMs)/float64(stats.TTFTCount), true
+			}
 		}
 		allCandidates = append(allCandidates, openAIAccountCandidateScore{
 			account:   account,
@@ -2206,6 +2216,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	excludedIDs = APIKeyRouteExcludedAccounts(ctx, excludedIDs)
 	currentGroupID := groupID
 	visited := make(map[int64]struct{})
 	availabilityWaited := false
@@ -2243,7 +2254,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			return nil, decision, fallbackErr
 		}
 		if nextGroupID == nil {
-			if !availabilityWaited &&
+			if !HasAPIKeyRouteAdmission(ctx) && !availabilityWaited &&
 				NormalizeOpenAICompatiblePlatform(platform) == PlatformOpenAI &&
 				len(excludedIDs) == 0 {
 				waited, waitErr := s.waitForOpenAITransientAvailability(

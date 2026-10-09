@@ -163,7 +163,7 @@
                 <span v-else class="text-sm text-gray-400 dark:text-dark-500">{{
                   t('keys.noGroup')
                 }}</span>
-                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.selectGroup') }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ (row.group_ids?.length ?? 0) > 1 ? `${t('keys.smartRouting')} · ${row.group_ids?.length}` : t('keys.selectGroup') }}</span>
                 <svg
                   class="h-3.5 w-3.5 text-gray-400 opacity-60 transition-opacity group-hover/dropdown:opacity-100"
                   fill="none"
@@ -472,9 +472,14 @@
           />
         </div>
 
+        <label class="flex cursor-pointer items-center gap-2 text-sm font-medium text-gray-700 dark:text-dark-200">
+          <input type="checkbox" :checked="formData.smart_routing" class="rounded border-gray-300 text-primary-600" data-testid="smart-routing-toggle" @change="setSmartRouting(($event.target as HTMLInputElement).checked)" />
+          {{ t('keys.smartRouting') }}
+        </label>
+        <p v-if="formData.smart_routing" class="text-sm text-gray-500 dark:text-dark-400">{{ t('keys.smartRoutingHint') }}</p>
         <GroupProviderFilter :model-value="formProvider" @update:model-value="setFormProvider" />
 
-        <div>
+        <div v-if="!formData.smart_routing">
           <label class="input-label">{{ t('keys.groupLabel') }}</label>
           <Select
             v-model="formData.group_id"
@@ -515,6 +520,21 @@
               />
             </template>
           </Select>
+        </div>
+
+        <div v-if="formData.smart_routing" class="space-y-3" data-testid="smart-routing-groups">
+          <ol class="space-y-2">
+            <li v-for="(id, index) in formData.group_ids" :key="id" class="flex items-center gap-2 rounded-lg border border-gray-200 p-2 dark:border-dark-600">
+              <span class="text-xs text-gray-500">{{ index + 1 }}</span>
+              <span class="min-w-0 flex-1 break-words text-sm text-gray-800 dark:text-dark-100">{{ groupOptions.find(option => option.value === id)?.label ?? `#${id}` }}</span>
+              <span class="shrink-0 text-xs text-gray-500">{{ groupOptions.find(option => option.value === id)?.userRate ?? groupOptions.find(option => option.value === id)?.rate ?? '—' }}×</span>
+              <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === 0" :aria-label="t('keys.routeMoveUp')" @click="moveRouteGroup(index, -1)">↑</button>
+              <button type="button" class="rounded p-2 disabled:opacity-30" :disabled="index === formData.group_ids.length - 1" :aria-label="t('keys.routeMoveDown')" @click="moveRouteGroup(index, 1)">↓</button>
+              <button type="button" class="rounded p-2 text-red-500" :aria-label="t('keys.routeRemove')" @click="removeRouteGroup(id)">×</button>
+            </li>
+          </ol>
+          <Select v-if="formData.group_ids.length < 10" :model-value="null" :options="routeGroupOptions" :placeholder="t('keys.routeAdd')" :searchable="true" @update:model-value="addRouteGroup" />
+          <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('keys.routeLimit') }} · {{ formData.group_ids.length }}/10</p>
         </div>
 
         <!-- Custom Key Section (only for create) -->
@@ -1345,6 +1365,8 @@ const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance 
 const formData = ref({
   name: '',
   group_id: null as number | null,
+  group_ids: [] as number[],
+  smart_routing: false,
   status: 'active' as 'active' | 'inactive',
   use_custom_key: false,
   custom_key: '',
@@ -1443,9 +1465,38 @@ const groupOptions = computed(() =>
 const formProvider = ref<KeyGroupProvider | null>(null)
 const dropdownProvider = ref<KeyGroupProvider | null>(null)
 const formGroupOptions = computed(() => groupOptions.value.filter(option => !formProvider.value || option.provider === formProvider.value))
+const routeGroupOptions = computed(() => formGroupOptions.value.filter(option => !formData.value.group_ids.includes(option.value)))
+const setSmartRouting = (enabled: boolean) => {
+  formData.value.smart_routing = enabled
+  if (enabled) {
+    if (!formData.value.group_ids.length && formData.value.group_id) formData.value.group_ids = [formData.value.group_id]
+  } else {
+    formData.value.group_id = formData.value.group_ids[0] ?? formData.value.group_id
+    formData.value.group_ids = []
+    formProvider.value = null
+  }
+}
+const addRouteGroup = (id: string | number | boolean | null) => {
+  if (typeof id !== 'number' || formData.value.group_ids.includes(id) || formData.value.group_ids.length >= 10) return
+  formData.value.group_ids.push(id)
+  formData.value.group_id = formData.value.group_ids[0] ?? null
+}
+const moveRouteGroup = (index: number, offset: number) => {
+  const ids = [...formData.value.group_ids]
+  const to = index + offset
+  if (to < 0 || to >= ids.length) return
+  ;[ids[index], ids[to]] = [ids[to], ids[index]]
+  formData.value.group_ids = ids
+  formData.value.group_id = ids[0] ?? null
+}
+const removeRouteGroup = (id: number) => {
+  formData.value.group_ids = formData.value.group_ids.filter(value => value !== id)
+  formData.value.group_id = formData.value.group_ids[0] ?? null
+}
+
 const setFormProvider = (provider: KeyGroupProvider | null) => {
   formProvider.value = provider
-  if (!formGroupOptions.value.some(option => option.value === formData.value.group_id)) {
+  if (!formData.value.smart_routing && !formGroupOptions.value.some(option => option.value === formData.value.group_id)) {
     formData.value.group_id = null
   }
 }
@@ -1590,6 +1641,8 @@ const editKey = (key: ApiKey) => {
   formData.value = {
     name: key.name,
     group_id: key.group_id,
+    group_ids: [...(key.group_ids ?? (key.group_id ? [key.group_id] : []))],
+    smart_routing: (key.group_ids?.length ?? 0) > 1,
     status: key.status === 'quota_exhausted' || key.status === 'expired' ? 'inactive' : key.status,
     use_custom_key: false,
     custom_key: '',
@@ -1623,6 +1676,7 @@ const toggleKeyStatus = async (key: ApiKey) => {
 }
 
 const openGroupSelector = (key: ApiKey) => {
+  if ((key.group_ids?.length ?? 0) > 1) { editKey(key); return }
   if (groupSelectorKeyId.value === key.id) {
     groupSelectorKeyId.value = null
     dropdownPosition.value = null
@@ -1658,6 +1712,7 @@ const openGroupSelector = (key: ApiKey) => {
 }
 
 const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
+  if ((key.group_ids?.length ?? 0) > 1) { editKey(key); return }
   groupSelectorKeyId.value = null
   dropdownPosition.value = null
   if (key.group_id === newGroupId) return
@@ -1689,6 +1744,7 @@ const confirmDelete = (key: ApiKey) => {
 }
 
 const handleSubmit = async () => {
+  if (formData.value.smart_routing) formData.value.group_id = formData.value.group_ids[0] ?? null
   // Validate group_id is required
   if (formData.value.group_id === null) {
     appStore.showError(t('keys.groupRequired'))
@@ -1748,6 +1804,7 @@ const handleSubmit = async () => {
       const updates: UpdateApiKeyRequest = {
         name: formData.value.name,
         group_id: formData.value.group_id,
+        group_ids: formData.value.smart_routing ? formData.value.group_ids : [formData.value.group_id],
         ip_whitelist: ipWhitelist,
         ip_blacklist: ipBlacklist,
         quota: quota,
@@ -1771,7 +1828,8 @@ const handleSubmit = async () => {
         ipBlacklist,
         quota,
         expiresInDays,
-        rateLimitData
+        rateLimitData,
+        formData.value.smart_routing ? formData.value.group_ids : undefined
       )
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded
@@ -1818,6 +1876,8 @@ const closeModals = () => {
   formData.value = {
     name: '',
     group_id: null,
+    group_ids: [],
+    smart_routing: false,
     status: 'active',
     use_custom_key: false,
     custom_key: '',

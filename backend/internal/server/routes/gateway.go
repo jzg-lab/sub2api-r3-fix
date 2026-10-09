@@ -64,6 +64,17 @@ func RegisterGatewayRoutes(
 			return false
 		}
 	}
+	smart := func(next gin.HandlerFunc) gin.HandlerFunc {
+		return h.Gateway.WithSmartRoutes(func(c *gin.Context) {
+			before := c.Writer.Size()
+			compositeTarget(c)
+			if c.Writer.Size() != before {
+				return
+			}
+			next(c)
+		}, subscriptionService, h.OpenAIGateway)
+	}
+
 	countTokensHandler := func(c *gin.Context) {
 		switch getGroupPlatform(c) {
 		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek:
@@ -75,9 +86,17 @@ func RegisterGatewayRoutes(
 		}
 	}
 	codexModelsHandler := func(c *gin.Context) {
+		if key, _ := middleware.GetAPIKeyFromContext(c); key.HasSmartRoutes() {
+			h.Gateway.SmartRouteModels(c, subscriptionService, true)
+			return
+		}
 		dispatchCodexModelsGateway(c, h.OpenAIGateway.CodexModels, h.Gateway.CodexModels)
 	}
 	modelsHandler := func(c *gin.Context) {
+		if key, _ := middleware.GetAPIKeyFromContext(c); key.HasSmartRoutes() {
+			h.Gateway.SmartRouteModels(c, subscriptionService, c.Query("client_version") != "")
+			return
+		}
 		if c.Query("client_version") != "" {
 			codexModelsHandler(c)
 			return
@@ -203,13 +222,13 @@ func RegisterGatewayRoutes(
 	gateway.Use(requireGroupAnthropic)
 	{
 		// /v1/messages: auto-route based on group platform
-		gateway.POST("/messages", func(c *gin.Context) {
+		gateway.POST("/messages", smart(func(c *gin.Context) {
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.Messages(c)
 				return
 			}
 			h.Gateway.Messages(c)
-		})
+		}))
 		// /v1/messages/count_tokens: OpenAI bridges upstream, Grok estimates
 		// locally, and Anthropic-compatible platforms retain their existing path.
 		gateway.POST("/messages/count_tokens", countTokensHandler)
@@ -221,13 +240,13 @@ func RegisterGatewayRoutes(
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		// OpenAI Responses API: auto-route based on group platform
-		gateway.POST("/responses", func(c *gin.Context) {
+		gateway.POST("/responses", smart(func(c *gin.Context) {
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.Responses(c)
 				return
 			}
 			h.Gateway.Responses(c)
-		})
+		}))
 		gateway.POST("/responses/*subpath", guardResponsesSubpath(func(c *gin.Context) {
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.Responses(c)
@@ -237,16 +256,16 @@ func RegisterGatewayRoutes(
 		}))
 		gateway.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		gateway.GET("/responses", func(c *gin.Context) {
-			h.OpenAIGateway.ResponsesWebSocket(c)
+			h.OpenAIGateway.ResponsesWebSocketWithSubscriptions(c, subscriptionService)
 		})
 		// OpenAI Chat Completions API: auto-route based on group platform
-		gateway.POST("/chat/completions", func(c *gin.Context) {
+		gateway.POST("/chat/completions", smart(func(c *gin.Context) {
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 				h.OpenAIGateway.ChatCompletions(c)
 				return
 			}
 			h.Gateway.ChatCompletions(c)
-		})
+		}))
 		gateway.POST("/embeddings", textBodyLimit, func(c *gin.Context) {
 			if !isOpenAIOnlyEndpointGatewayPlatform(c) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
@@ -362,13 +381,13 @@ func RegisterGatewayRoutes(
 	}
 
 	// OpenAI Responses API（不带v1前缀的别名）— auto-route based on group platform
-	responsesHandler := func(c *gin.Context) {
+	responsesHandler := smart(func(c *gin.Context) {
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.Responses(c)
 			return
 		}
 		h.Gateway.Responses(c)
-	}
+	})
 	rootGateway := r.Group("")
 	rootGateway.Use(bodyLimit)
 	rootGateway.Use(clientRequestID)
@@ -389,7 +408,7 @@ func RegisterGatewayRoutes(
 	rootGateway.POST("/responses/*subpath", compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))
 	rootTextGateway.POST("/alpha/search", compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	rootGateway.GET("/responses", compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
-		h.OpenAIGateway.ResponsesWebSocket(c)
+		h.OpenAIGateway.ResponsesWebSocketWithSubscriptions(c, subscriptionService)
 	})
 	rootGateway.GET("/models", requireGroupAnthropic, modelsHandler)
 	rootGateway.POST("/messages/count_tokens", compositeTarget, requireGroupAnthropic, countTokensHandler)
@@ -404,18 +423,18 @@ func RegisterGatewayRoutes(
 		codexDirect.POST("/responses/*subpath", guardResponsesSubpath(responsesHandler))
 		codexDirect.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		codexDirect.GET("/responses", func(c *gin.Context) {
-			h.OpenAIGateway.ResponsesWebSocket(c)
+			h.OpenAIGateway.ResponsesWebSocketWithSubscriptions(c, subscriptionService)
 		})
 		codexDirect.GET("/models", codexModelsHandler)
 	}
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
-	rootGateway.POST("/chat/completions", compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+	rootGateway.POST("/chat/completions", compositeTarget, requireGroupAnthropic, smart(func(c *gin.Context) {
 		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
 			h.OpenAIGateway.ChatCompletions(c)
 			return
 		}
 		h.Gateway.ChatCompletions(c)
-	})
+	}))
 	rootTextGateway.POST("/embeddings", compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
 		if !isOpenAIOnlyEndpointGatewayPlatform(c) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
@@ -566,6 +585,11 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 	}
 	return func(c *gin.Context) {
 		apiKey, ok := middleware.GetAPIKeyFromContext(c)
+		if ok && apiKey.HasSmartRoutes() && service.APIKeySmartRouteEndpoint(c.Request.Method, c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+
 		if !ok || apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
 			c.Next()
 			return

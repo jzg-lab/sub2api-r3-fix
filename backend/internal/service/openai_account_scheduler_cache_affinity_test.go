@@ -27,7 +27,7 @@ func TestOpenAIScheduler_OAuthCacheAffinity(t *testing.T) {
 		{name: "oauth_slow_full", accountType: AccountTypeOAuth, slow: true, full: true},
 		{name: "setup_token_slow_full", accountType: AccountTypeSetupToken, slow: true, full: true},
 		{name: "oauth_slow_excluded", accountType: AccountTypeOAuth, slow: true, excluded: true},
-		{name: "api_key_slow_legacy_escape", accountType: AccountTypeAPIKey, slow: true},
+		{name: "api_key_slow_healthy", accountType: AccountTypeAPIKey, slow: true, wantSticky: true},
 		{name: "api_key_fast_legacy_sticky", accountType: AccountTypeAPIKey, wantSticky: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

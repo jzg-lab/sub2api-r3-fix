@@ -71,6 +71,14 @@ export default {
 
   // API Keys
   keys: {
+    smartRouting: '智能路由',
+    smartRoutingHint: '按顺序尝试兼容分组，遇到可重试故障自动切换。按实际使用分组计费，备用组费用可能不同。',
+    routeAdd: '添加备用分组',
+    routeMoveUp: '上移分组',
+    routeMoveDown: '下移分组',
+    routeRemove: '移除分组',
+    routeLimit: '最多 10 个分组，第一项优先',
+
     title: 'API 密钥',
     description: '管理您的 API 密钥和访问令牌',
     searchPlaceholder: '搜索名称或Key...',

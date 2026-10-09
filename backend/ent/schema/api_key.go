@@ -44,6 +44,7 @@ func (APIKey) Fields() []ent.Field {
 		field.Int64("group_id").
 			Optional().
 			Nillable(),
+		field.JSON("route_group_ids", []int64{}).Optional(),
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),

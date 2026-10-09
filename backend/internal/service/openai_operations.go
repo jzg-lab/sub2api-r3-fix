@@ -191,7 +191,7 @@ func (s *OpenAIOperationsService) Pool(ctx context.Context, groupID int64) (*Ope
 		state := accountOperationalState(a, now)
 		if scheduler != nil {
 			cfg := s.gateway.openAIStickyEscapeConfig()
-			cfg.preserveCacheAffinity = a.IsOpenAIOAuthLike()
+			cfg.preserveCacheAffinity = true
 			state.StickyEscapeReason, _, _, _ = scheduler.shouldEscapeStickyAccount(a.ID, cfg)
 		}
 		if state.Schedulable {

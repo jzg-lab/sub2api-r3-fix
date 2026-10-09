@@ -604,3 +604,47 @@ func (s *APIKeyRepoSuite) TestDeleteWithAudit_NotFound() {
 	err := s.repo.DeleteWithAudit(s.ctx, 999999)
 	s.Require().ErrorIs(err, service.ErrAPIKeyNotFound)
 }
+
+func (s *APIKeyRepoSuite) TestSmartRoutesAtomicSaveAndGroupLifecycle() {
+	user := s.mustCreateUser("smart-routes@test.com")
+	a, b, c := s.mustCreateGroup("route-a"), s.mustCreateGroup("route-b"), s.mustCreateGroup("route-c")
+	key := &service.APIKey{UserID: user.ID, Key: "sk-smart-routes", Name: "Smart", Status: service.StatusActive, GroupID: &a.ID, RouteGroupIDs: []int64{a.ID, b.ID, c.ID}}
+	s.Require().NoError(s.repo.Create(s.ctx, key))
+	loaded, err := s.repo.GetByKeyForAuth(s.ctx, key.Key)
+	s.Require().NoError(err)
+	s.Equal(key.RouteGroupIDs, loaded.RouteGroupIDs)
+	listed, err := s.repo.ListKeysByGroupID(s.ctx, b.ID)
+	s.Require().NoError(err)
+	s.Equal([]string{key.Key}, listed)
+	count, err := s.repo.CountByGroupID(s.ctx, b.ID)
+	s.Require().NoError(err)
+	s.Equal(int64(1), count)
+	// Name/quota edits must not erase routes or overwrite concurrent billing counters.
+	loaded.Name = "Renamed"
+	s.Require().NoError(s.repo.Update(s.ctx, loaded, service.APIKeyUpdateFields{Name: true}))
+	loaded.RouteGroupIDs = nil
+	s.Require().NoError(s.repo.Update(s.ctx, loaded, service.APIKeyUpdateFields{GroupRoutes: true}))
+	cleared, err := s.repo.GetByID(s.ctx, key.ID)
+	s.Require().NoError(err)
+	s.Empty(cleared.RouteGroupIDs)
+	loaded.RouteGroupIDs = []int64{a.ID, b.ID, c.ID}
+	s.Require().NoError(s.repo.Update(s.ctx, loaded, service.APIKeyUpdateFields{GroupRoutes: true}))
+	_, err = s.repo.UpdateGroupIDByUserAndGroup(s.ctx, user.ID, a.ID, b.ID)
+	s.Require().NoError(err)
+	loaded, err = s.repo.GetByID(s.ctx, key.ID)
+	s.Require().NoError(err)
+	s.Equal(b.ID, *loaded.GroupID)
+	s.Equal([]int64{b.ID, c.ID}, loaded.RouteGroupIDs)
+	_, err = s.repo.ClearGroupIDByGroupID(s.ctx, b.ID)
+	s.Require().NoError(err)
+	loaded, err = s.repo.GetByID(s.ctx, key.ID)
+	s.Require().NoError(err)
+	s.Equal(c.ID, *loaded.GroupID)
+	s.Equal([]int64{c.ID}, loaded.RouteGroupIDs)
+	_, err = s.repo.ClearGroupIDByGroupID(s.ctx, c.ID)
+	s.Require().NoError(err)
+	loaded, err = s.repo.GetByID(s.ctx, key.ID)
+	s.Require().NoError(err)
+	s.Nil(loaded.GroupID)
+	s.Empty(loaded.RouteGroupIDs)
+}

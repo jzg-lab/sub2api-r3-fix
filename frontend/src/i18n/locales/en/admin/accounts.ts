@@ -1558,6 +1558,15 @@ export default {
       viewStats: 'View Stats',
       usageStatistics: 'Usage Statistics',
       last30DaysUsage: 'Last 30 days usage statistics (based on actual usage days)',
+      recentStats: {
+        title: 'Recent performance · 10 min',
+        success: 'Success rate',
+        cache: 'Cache hit rate',
+        ttft: 'Avg. first token',
+        fewSamples: 'Few samples',
+        noData: 'No recent data',
+        unavailable: 'Stats unavailable'
+      },
       stats: {
         totalCost: '30-Day Total Cost',
         accumulatedCost: 'Accumulated cost',

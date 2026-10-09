@@ -71,6 +71,14 @@ export default {
 
   // API Keys
   keys: {
+    smartRouting: 'Smart routing',
+    smartRoutingHint: 'Try compatible groups in order and switch on retryable failures. Billing follows the selected group; backup rates may differ.',
+    routeAdd: 'Add a backup group',
+    routeMoveUp: 'Move group up',
+    routeMoveDown: 'Move group down',
+    routeRemove: 'Remove group',
+    routeLimit: 'Up to 10 groups; first group has priority',
+
     title: 'API Keys',
     description: 'Manage your API keys and access tokens',
     searchPlaceholder: 'Search name or key...',
