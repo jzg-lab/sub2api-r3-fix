@@ -14,6 +14,7 @@
 | [产品规则与上游差异](upstream-integration-policy.md) | 两个来源的选择、长期规则及待决问题 |
 | [版本与合并记录](upstream-sync-state.md) | 三个项目的版本对应、历次合并事实、当前基线和待核对差异 |
 | [部署状态](deployment-state.md) | 最近一次已记录的生产版本、配置和回退资源，含核验时间 |
+| [合并与部署更新指南](merge-deploy-guide.md) | 更新操作顺序、切换前检查、回退边界及持续积累的经验 |
 | [开发指南](../DEV_GUIDE.md) | 工具版本来源、构建和测试入口 |
 | [部署指南](../deploy/README.md) | 安装、配置和运维方法 |
 | [生产可靠性](PRODUCTION_RELIABILITY.md) | 容量、计费、连接排空和验收边界 |

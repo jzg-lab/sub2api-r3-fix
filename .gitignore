@@ -159,6 +159,7 @@ docs/*
 !docs/upstream-integration-policy.md
 !docs/upstream-sync-state.md
 !docs/deployment-state.md
+!docs/merge-deploy-guide.md
 !docs/PROMPT_AUDIT.md
 !docs/CHANNEL_MONITOR.md
 !docs/legal/
