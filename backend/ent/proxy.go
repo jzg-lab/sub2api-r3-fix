@@ -57,9 +57,11 @@ type ProxyEdges struct {
 	Accounts []*Account `json:"accounts,omitempty"`
 	// BackupProxy holds the value of the backup_proxy edge.
 	BackupProxy *Proxy `json:"backup_proxy,omitempty"`
+	// BackupDependents holds the value of the backup_dependents edge.
+	BackupDependents []*Proxy `json:"backup_dependents,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [2]bool
+	loadedTypes [3]bool
 }
 
 // AccountsOrErr returns the Accounts value or an error if the edge
@@ -80,6 +82,15 @@ func (e ProxyEdges) BackupProxyOrErr() (*Proxy, error) {
 		return nil, &NotFoundError{label: proxy.Label}
 	}
 	return nil, &NotLoadedError{edge: "backup_proxy"}
+}
+
+// BackupDependentsOrErr returns the BackupDependents value or an error if the edge
+// was not loaded in eager-loading.
+func (e ProxyEdges) BackupDependentsOrErr() ([]*Proxy, error) {
+	if e.loadedTypes[2] {
+		return e.BackupDependents, nil
+	}
+	return nil, &NotLoadedError{edge: "backup_dependents"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -224,6 +235,11 @@ func (_m *Proxy) QueryAccounts() *AccountQuery {
 // QueryBackupProxy queries the "backup_proxy" edge of the Proxy entity.
 func (_m *Proxy) QueryBackupProxy() *ProxyQuery {
 	return NewProxyClient(_m.config).QueryBackupProxy(_m)
+}
+
+// QueryBackupDependents queries the "backup_dependents" edge of the Proxy entity.
+func (_m *Proxy) QueryBackupDependents() *ProxyQuery {
+	return NewProxyClient(_m.config).QueryBackupDependents(_m)
 }
 
 // Update returns a builder for updating this Proxy.

@@ -186,6 +186,7 @@ func (c *userMsgQueueCache) ReconcileExpiredLockCandidates(ctx context.Context, 
 	if err != nil {
 		return 0, err
 	}
+	//nolint:staticcheck // Keep Redis 6.0 compatibility; ZRANGE BYSCORE requires Redis 6.2.
 	members, err := c.rdb.ZRangeByScore(ctx, umqLockIndexKey, &redis.ZRangeBy{
 		Min:   "-inf",
 		Max:   strconv.FormatInt(nowMs, 10),

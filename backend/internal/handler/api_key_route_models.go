@@ -34,6 +34,40 @@ func (h *GatewayHandler) SmartRouteModels(c *gin.Context, subscriptions *service
 			continue
 		}
 		ctx := service.ContextWithAPIKeyRoute(c.Request.Context(), routed)
+		if routed.Group.Platform == service.PlatformOpenAI && routed.Group.CodexModelsManifestConfig.Enabled {
+			if h.openAIGatewayService == nil {
+				h.responsesErrorResponse(c, 503, "api_error", "OpenAI model discovery is not configured")
+				return
+			}
+			var response *service.OpenAIModelsResponse
+			if codex {
+				response, _, err = h.openAIGatewayService.FetchGroupPinnedCodexModels(ctx, routed.Group, c.Query("client_version"), h.maxAccountSwitches, "")
+			} else {
+				response, _, err = h.openAIGatewayService.FetchPinnedOpenAIModelsList(ctx, routed.Group, h.maxAccountSwitches, "")
+			}
+			if err != nil {
+				h.responsesErrorResponse(c, 503, "upstream_error", "Failed to discover route group models")
+				return
+			}
+			if codex {
+				for _, model := range gjson.GetBytes(response.Body, "models").Array() {
+					id := model.Get("slug").String()
+					if id != "" && !seen[id] {
+						seen[id] = true
+						manifests = append(manifests, json.RawMessage(model.Raw))
+					}
+				}
+			} else {
+				for _, model := range gjson.GetBytes(response.Body, "data").Array() {
+					id := model.Get("id").String()
+					if id != "" && !seen[id] {
+						seen[id] = true
+						ids = append(ids, id)
+					}
+				}
+			}
+			continue
+		}
 		modelIDs := h.modelIDsForGroup(ctx, routed.Group, "", codex)
 		if codex {
 			modelIDs = service.FilterCodexModelIDsForGroup(modelIDs, routed.Group)

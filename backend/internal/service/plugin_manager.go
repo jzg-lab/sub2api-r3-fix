@@ -51,6 +51,9 @@ type PluginManager struct {
 	installer              *PluginPackageInstaller
 	pausedAccountIDsSource func(context.Context) ([]int64, error)
 	rateLimitService       *RateLimitService
+	kvStore                PluginKVStore
+	accountDirectory       PluginAccountDirectory
+	accountHealth          OpenAIProbeHealthLister
 
 	operationMu        sync.Mutex
 	mu                 sync.Mutex
@@ -1272,16 +1275,90 @@ func (m *PluginManager) publishRuntimeLocked(installation *PluginInstallation, r
 }
 
 func (m *PluginManager) newRuntime(ctx context.Context, installation *PluginInstallation) (*pluginRuntime, error) {
+	snapshot := *installation
+	installation = &snapshot
 	socketDir := filepath.Join(m.installer.RootDir(), "runtime")
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return nil, err
 	}
 	timeout := time.Duration(m.cfg.Plugins.StartTimeoutSeconds) * time.Second
-	runtime, err := startPluginRuntime(ctx, installation, timeout, socketDir)
+	runtime, err := startPluginRuntime(ctx, installation, timeout, socketDir, m.buildHostServices(installation))
 	if err == nil && installation.PluginKey == rescueCookiePinPluginID {
 		runtime.pausedAccountIDsSource = m.pausedAccountIDsSource
 	}
 	return runtime, err
+}
+
+// SetAccountDirectory 注入账号目录实现（敏感能力）。仅在启动装配阶段调用一次，
+// 早于 Start，因此运行期读取无需额外同步。
+func (m *PluginManager) SetAccountDirectory(directory PluginAccountDirectory) {
+	m.mu.Lock()
+	m.accountDirectory = directory
+	m.mu.Unlock()
+}
+
+// buildHostServices 为单个插件构造绑定其 pluginKey 的宿主服务端点。返回 nil（未配置
+// 键值存储或缺少 pluginKey）时，startPluginRuntime 不会向插件暴露任何宿主服务。
+// 账号目录（会向插件交付账号凭据与全量元数据）只对「清单声明的能力授予了账号范围」的
+// 插件开放，且严格限定在该范围内，从而把暴露面收敛到本就要处理这些账号的插件。
+func (m *PluginManager) buildHostServices(installation *PluginInstallation) pluginv1.HostServiceServer {
+	if m.kvStore == nil || installation == nil || strings.TrimSpace(installation.PluginKey) == "" {
+		return nil
+	}
+	scope := pluginAccountScopeFromManifest(installation.Manifest)
+	scope.accountAllowed = func(accountID int64) bool {
+		route := m.route.Load()
+		return route != nil && route.pluginID == installation.ID && route.runtime != nil &&
+			route.unavailable == "" && !route.runtime.draining.Load() && !route.runtime.healthUnavailable.Load() &&
+			route.runtime.installation == installation &&
+			route.rolloutPercent > 0 && int(stablePluginBucket(accountID)) < route.rolloutPercent
+	}
+	scope.pausedAccounts = func(ctx context.Context, ids []int64) (map[int64]bool, error) {
+		if m.accountHealth == nil {
+			return nil, errors.New("plugin account health unavailable")
+		}
+		snapshots, err := m.accountHealth.ListOpenAIProbeHealthSnapshots(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		paused := make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			paused[id] = true
+		}
+		for _, snapshot := range snapshots {
+			paused[snapshot.AccountID] = snapshot.ManualPaused || snapshot.RescueTerminated || !snapshot.Schedulable
+		}
+		return paused, nil
+	}
+	var directory PluginAccountDirectory
+	if !scope.Empty() {
+		m.mu.Lock()
+		directory = m.accountDirectory
+		m.mu.Unlock()
+	}
+	return newPluginHostServiceServer(installation.PluginKey, m.kvStore, directory, scope)
+}
+
+// pluginCapabilityAccountScopeGrants 把「能力 id」映射到它授予的账号范围条目。这是
+// 唯一放宽账号可见性的通用入口：为需要账号访问的新能力扩权只需在此加一行，无需新增
+// RPC 或按插件定制目录实现。授予的范围以能力 id 为准并被固定，清单无法通过声明不同的
+// platform/account_type 来扩大它。
+var pluginCapabilityAccountScopeGrants = map[string]pluginAccountScopeEntry{
+	PluginCapabilityOpenAIOAuthOutbound: {Platform: PlatformOpenAI, AccountType: AccountTypeOAuth},
+}
+
+// pluginAccountScopeFromManifest 从（安装期已校验的）清单声明能力推导出账号可见范围
+// （各能力授予范围的并集）。
+func pluginAccountScopeFromManifest(manifest PluginManifest) PluginAccountScope {
+	entries := make([]pluginAccountScopeEntry, 0, len(manifest.Capabilities))
+	for _, capability := range manifest.Capabilities {
+		grant, ok := pluginCapabilityAccountScopeGrants[capability.ID]
+		if !ok {
+			continue
+		}
+		entries = append(entries, grant)
+	}
+	return newPluginAccountScope(entries...)
 }
 
 func (m *PluginManager) removeRuntimeLocked(id int64) *pluginRuntime {

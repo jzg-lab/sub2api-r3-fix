@@ -47,6 +47,8 @@ const (
 	EdgeAccounts = "accounts"
 	// EdgeBackupProxy holds the string denoting the backup_proxy edge name in mutations.
 	EdgeBackupProxy = "backup_proxy"
+	// EdgeBackupDependents holds the string denoting the backup_dependents edge name in mutations.
+	EdgeBackupDependents = "backup_dependents"
 	// Table holds the table name of the proxy in the database.
 	Table = "proxies"
 	// AccountsTable is the table that holds the accounts relation/edge.
@@ -60,6 +62,10 @@ const (
 	BackupProxyTable = "proxies"
 	// BackupProxyColumn is the table column denoting the backup_proxy relation/edge.
 	BackupProxyColumn = "backup_proxy_id"
+	// BackupDependentsTable is the table that holds the backup_dependents relation/edge.
+	BackupDependentsTable = "proxies"
+	// BackupDependentsColumn is the table column denoting the backup_dependents relation/edge.
+	BackupDependentsColumn = "backup_proxy_id"
 )
 
 // Columns holds all SQL columns for proxy fields.
@@ -225,6 +231,20 @@ func ByBackupProxyField(field string, opts ...sql.OrderTermOption) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newBackupProxyStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByBackupDependentsCount orders the results by backup_dependents count.
+func ByBackupDependentsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newBackupDependentsStep(), opts...)
+	}
+}
+
+// ByBackupDependents orders the results by backup_dependents terms.
+func ByBackupDependents(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newBackupDependentsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newAccountsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -236,6 +256,13 @@ func newBackupProxyStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(Table, FieldID),
-		sqlgraph.Edge(sqlgraph.O2O, false, BackupProxyTable, BackupProxyColumn),
+		sqlgraph.Edge(sqlgraph.M2O, true, BackupProxyTable, BackupProxyColumn),
+	)
+}
+func newBackupDependentsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(Table, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, BackupDependentsTable, BackupDependentsColumn),
 	)
 }

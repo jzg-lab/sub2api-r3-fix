@@ -1,0 +1,1 @@
+function d(r,o,t=0){if(r==null)return"-";let e=Number((r*o).toPrecision(10)).toString();if(t>0&&!e.includes("e")){const n=e.indexOf("."),f=n===-1?0:e.length-n-1;f<t&&(e=(n===-1?`${e}.`:e)+"0".repeat(t-f))}return`$${e}`}export{d as f};

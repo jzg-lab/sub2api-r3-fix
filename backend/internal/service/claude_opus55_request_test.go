@@ -15,7 +15,7 @@ func TestValidateClaudeOpus55Request(t *testing.T) {
 		`{"tool_choice":{"type":"tool","name":"lookup"}}`,
 		`{"tool_choice":{"type":"function","name":"lookup"}}`,
 	} {
-		require.Error(t, validateClaudeOpus55Request([]byte(body), "claude-opus-5-5"))
+		require.Error(t, validateClaude55Request([]byte(body), "claude-opus-5-5"))
 	}
 
 	for _, body := range []string{
@@ -25,7 +25,7 @@ func TestValidateClaudeOpus55Request(t *testing.T) {
 		`{"tool_choice":{"type":"auto"}}`,
 		`{"thinking":{"type":"enabled"},"tool_choice":{"type":"tool","name":"lookup"}}`,
 	} {
-		err := validateClaudeOpus55Request([]byte(body), "claude-opus-5")
+		err := validateClaude55Request([]byte(body), "claude-opus-5")
 		require.NoError(t, err)
 	}
 }

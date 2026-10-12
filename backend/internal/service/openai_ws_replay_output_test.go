@@ -30,8 +30,8 @@ func TestOpenAIWSReplayOutputPreservesCompleteHistory(t *testing.T) {
 		}
 	}
 	copy := collector.Items()
-	copy[0][0] = '!'
-	require.True(t, json.Valid(collector.Items()[0]), "callers must not mutate collector state")
+	copy[0] = json.RawMessage(`{"replaced":true}`)
+	require.True(t, json.Valid(collector.Items()[0]), "replacing a slice entry must not mutate collector state")
 }
 
 func TestOpenAIWSReplayOutputFiltersUnusableReasoningAfterEnrichment(t *testing.T) {

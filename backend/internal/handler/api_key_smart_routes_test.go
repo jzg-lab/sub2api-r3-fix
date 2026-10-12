@@ -317,7 +317,17 @@ func TestSmartRoutesRealTextForwardAndBilling(t *testing.T) {
 						gatewayCfg.RunMode = config.RunModeStandard
 						usage := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 10)}
 						ledger := &smartRouteLedger{}
-						billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
+						var billingCache service.BillingCache
+						inflight := newHandlerInflightCache(100)
+						if !subscription {
+							billingCache = inflight
+							gatewayCfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60, DefaultMaxTokens: 8192, MaxOutputTokens: 64000, MaxInputTokens: 1000000}
+						}
+						billingCfg := h.cfg
+						if !subscription {
+							billingCfg = &gatewayCfg
+						}
+						billing := service.NewBillingCacheService(billingCache, nil, nil, nil, nil, nil, billingCfg, nil)
 						gateway := service.NewOpenAIGatewayService(accounts, usage, ledger, nil, nil, nil, nil, &gatewayCfg, nil, nil, service.NewBillingService(&gatewayCfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
 						t.Cleanup(billing.Stop)
 						openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, h.apiKeyService, nil, nil, nil, nil, h.cfg)
@@ -363,6 +373,18 @@ func TestSmartRoutesRealTextForwardAndBilling(t *testing.T) {
 								require.InDelta(t, log.TotalCost*multiplier, log.ActualCost, 0.00000001)
 							case <-time.After(time.Second):
 								t.Fatal("usage was not recorded")
+							}
+							if !subscription {
+								require.Eventually(t, func() bool { return inflight.count() == 0 }, time.Second, time.Millisecond)
+								inflight.mu.Lock()
+								amounts := append([]float64(nil), inflight.reserved...)
+								active := inflight.maxActive
+								inflight.mu.Unlock()
+								require.NotEmpty(t, amounts, "real forwarding must reserve balance")
+								require.Equal(t, 1, active, "failed attempts must release before the next reservation")
+								if !samePackage {
+									require.InDelta(t, amounts[0]*3, amounts[len(amounts)-1], 1e-9, "backup reservation uses the selected package multiplier")
+								}
 							}
 							require.Equal(t, i+1, len(ledger.commands), "only the successful group is charged")
 							require.Equal(t, successID, ledger.commands[i].AccountID)
@@ -640,10 +662,10 @@ func TestSmartRouteRevokedGroupAndExpiredSubscriptionUseBackup(t *testing.T) {
 	}
 }
 
-func TestSmartRouteModelsUnionKeepsMediaAndCustomDisplayOnly(t *testing.T) {
+func TestSmartRouteModelsUnionKeepsModelsAllowedByBackup(t *testing.T) {
 	h, key, _ := smartRoutingFixture(t)
 	h.gatewayService = newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{}).gatewayService
-	key.Group.ModelsListConfig = service.GroupModelsListConfig{Enabled: true, Models: []string{"gpt-5.1"}}
+	key.Group.ModelAllowlist = service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.1"}}
 	c, rec := smartRoutingContext(key, "")
 	h.SmartRouteModels(c, nil, false)
 	ids := gjson.GetBytes(rec.Body.Bytes(), "data.#.id").Array()
@@ -655,7 +677,7 @@ func TestSmartRouteModelsUnionKeepsMediaAndCustomDisplayOnly(t *testing.T) {
 	for _, id := range defaultModelIDsForPlatform(service.PlatformOpenAI) {
 		require.True(t, seen[id], id)
 	}
-	require.True(t, h.gatewayService.SmartRouteModelCompatible(c.Request.Context(), key, "responses", "gpt-5.4"), "display-only list must not reject another supported model")
+	require.False(t, key.Group.ModelAllowlist.Allows("gpt-5.4"), "the primary allowlist does not hide models allowed by the backup")
 }
 
 func TestSmartRouteGlobalBudgetAndCrossPackageExclusion(t *testing.T) {
@@ -711,6 +733,10 @@ func TestSmartRouteKeepsHeartbeatAccountingAcrossAttempts(t *testing.T) {
 		calls++
 		require.Equal(t, -1, service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
 		if calls <= 2 {
+			n, err := c.Writer.WriteString(": ping\n\n")
+			require.NoError(t, err)
+			service.RecordOpenAIStreamKeepaliveBytes(c, n)
+
 			service.MarkOpenAICompactClientStream(c)
 			stop := service.StartOpenAICompactSSEKeepalive(c, time.Millisecond)
 			time.Sleep(10 * time.Millisecond)

@@ -1104,6 +1104,7 @@ func (c *concurrencyCache) reconcileExpiredIndexCandidates(ctx context.Context, 
 	if err != nil {
 		return err
 	}
+	//nolint:staticcheck // Keep Redis 6.0 compatibility; ZRANGE BYSCORE requires Redis 6.2.
 	members, err := c.rdb.ZRangeByScore(ctx, spec.indexKey, &redis.ZRangeBy{
 		Min:   "-inf",
 		Max:   strconv.FormatInt(now, 10),

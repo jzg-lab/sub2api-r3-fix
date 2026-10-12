@@ -1404,13 +1404,13 @@ func TestNormalizeCodexModel_Gpt53(t *testing.T) {
 }
 
 func TestNormalizeCodexModelGPT61SolDoesNotRewriteUnverifiedSuffixes(t *testing.T) {
-	for _, model := range []string{"gpt-6.1-sol-xhigh", "gpt-6.1-sol-preview"} {
+	for _, model := range []string{"gpt-6.1-sol-preview"} {
 		require.Equal(t, model, normalizeCodexModel(model))
 	}
 }
 
-func TestSupportsVerbosityGPT61SolFailsClosed(t *testing.T) {
-	require.False(t, SupportsVerbosity("gpt-6.1-sol"))
+func TestSupportsVerbosityGPT61SolFromOfficialMetadata(t *testing.T) {
+	require.True(t, SupportsVerbosity("gpt-6.1-sol"))
 }
 
 func TestNormalizeCodexModel_RemovedModelsFallbackToSupportedTargets(t *testing.T) {
@@ -1506,6 +1506,20 @@ func TestApplyCodexOAuthTransform_GPT55SuppliesModelSpecificInstructions(t *test
 	require.True(t, ok)
 	require.Contains(t, instructions, "You are Codex, a coding agent based on GPT-5")
 	require.NotContains(t, instructions, "You are GPT-5.1 running in the Codex CLI")
+	require.True(t, result.Modified)
+}
+
+func TestApplyCodexOAuthTransform_GPT6AstraSuppliesModelSpecificInstructions(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-6-astra",
+	}
+
+	result := applyCodexOAuthTransform(reqBody, true, false)
+
+	instructions, ok := reqBody["instructions"].(string)
+	require.True(t, ok)
+	require.True(t, strings.HasPrefix(strings.TrimSpace(instructions), "You are Codex, an agent based on GPT-6."))
+	require.NotContains(t, instructions, "You are Codex, a coding agent based on GPT-5.")
 	require.True(t, result.Modified)
 }
 

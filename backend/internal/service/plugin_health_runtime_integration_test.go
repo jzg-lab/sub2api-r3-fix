@@ -59,7 +59,7 @@ func TestPluginHealthNativeStreamSurvivesTimeout(t *testing.T) {
 	require.NoError(t, os.Mkdir(socketDir, 0700))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir)
+	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir, nil)
 	require.NoError(t, err)
 	t.Cleanup(runtime.kill)
 	api := &injectedHealthTimeoutClient{TransportPluginClient: runtime.api}

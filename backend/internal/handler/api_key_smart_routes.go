@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -224,6 +225,9 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 			return
 		}
 		model := gjson.GetBytes(body, "model").String()
+		modelCandidates := requestmodel.FromBodyCandidates(c.FullPath(), c.GetHeader("Content-Type"), body)
+		var blockedModel string
+		allowlistedRoute := false
 		scope := smartRouteScope(c.Request.URL.Path, model)
 		session := smartRouteSession(c, body)
 		ids := h.apiKeyService.OrderAPIKeyRoutes(c.Request.Context(), key, scope, session)
@@ -269,6 +273,11 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 				}
 				continue
 			}
+			if blocked := blockedModelAllowlistCandidate(routed.Group, modelCandidates); blocked != "" {
+				blockedModel = blocked
+				continue
+			}
+			allowlistedRoute = true
 			sub, err := routeSubscription(base.Request.Context(), subscriptions, routed, h.cfg != nil && h.cfg.RunMode == config.RunModeSimple)
 			if err != nil {
 				lastErr = err
@@ -364,6 +373,12 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 			if state.err != nil {
 				lastErr = state.err
 			}
+		}
+		if !allowlistedRoute && blockedModel != "" {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+			middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+			h.smartRouteError(c, http.StatusNotFound, "model_not_found", "Model is not available for any eligible route group")
+			return
 		}
 		if lastUpstream != nil {
 			if lastUpstream.IsOpenAICapacityShed() && openAI != nil {

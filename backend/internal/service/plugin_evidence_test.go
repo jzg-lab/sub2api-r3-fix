@@ -123,7 +123,7 @@ func TestPluginEvidenceCandidateProcess(t *testing.T) {
 	var runtime *pluginRuntime
 	launch := func() {
 		var err error
-		runtime, err = startPluginRuntime(t.Context(), installation, 10*time.Second, socket)
+		runtime, err = startPluginRuntime(t.Context(), installation, 10*time.Second, socket, nil)
 		require.NoError(t, err)
 	}
 	launch()

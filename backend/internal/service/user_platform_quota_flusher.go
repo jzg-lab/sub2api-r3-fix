@@ -154,6 +154,7 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 			continue
 		}
 		snaps = append(snaps, UserPlatformQuotaSnapshot{
+			QuotaID:            e.QuotaID,
 			UserID:             key.UserID,
 			Platform:           key.Platform,
 			DailyUsageUSD:      e.DailyUsageUSD,
@@ -175,16 +176,8 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 		return true
 	}
 
-	// 已知竞态(admin 写 × flusher 刷,仅 flusher_enabled=true 时存在):
-	// admin ResetExpiredWindow/UpsertForUser 是"先写 DB 再 DeleteCache"。若本批已 SPOP + BatchGet
-	// 读到旧 usage 快照(此刻 member 已离开脏集),而 admin 随后写 DB、本行 UPSERT 又在 admin 写之后落库,
-	// 则旧快照会覆盖 admin 刚写入的值;DeleteCache 后 Redis MISS,下次 preflight 从 DB 重载被覆盖的旧值。
-	// 因 member 已被 SPOP,admin 侧 SREM/清脏标记无法拦截本批(故未做)。影响有限,暂列为已知取舍:
-	//   - UpsertForUser 改 limit,而本 UPSERT 不写 limit 列 → limit 配置不受影响;
-	//   - ResetExpiredWindow 改 usage,但 preflight windowExpired 会在窗口真正过期时自愈重置,
-	//     仅"强制重置未过期窗口"且与本批精确交错时短暂失效;
-	//   - 低频 admin 操作 + 默认 flusher_enabled=false。彻底消除需 version OCC(DB 加 version 列条件 UPSERT),
-	//     成本高;启用 flusher 后如需强一致再评估。
+	// Row identity fences snapshots read before an administrator clears and recreates a quota.
+	// shortcut: force-reset of the same row can still race a flush; add a revision if enabled deployments require that guarantee.
 
 	// 5. 写入 DB
 	start := time.Now()
@@ -193,11 +186,9 @@ func (s *UserPlatformQuotaUsageFlusher) flushOneBatch(parentCtx context.Context)
 
 	if writeErr != nil {
 		if errors.Is(writeErr, ErrUserPlatformQuotaFKViolation) {
-			// 注意:PG FK violation 是整条 INSERT 回滚 → 整批(含同批正常用户)均未写入 DB,
-			// 且这些 key 已被 SPOP 出脏集、此处不 Readd。活跃 key 会在下次请求重新 SADD,
-			// flusher 读 Redis 当前累计绝对值刷库即自愈;低活跃 key 这轮 DB usage 偏低
-			// (Redis 仍是 enforcement 权威,不受影响;DB 仅展示)。已删用户边角的接受取舍,不做逐行重试。
-			// FK 违反：用户已被删除，直接丢弃不 Readd
+			// FK 违反表示对应用户已不存在,快照无处可落:整批丢弃、不 Readd。
+			// 同批其它 key 会在下次请求重新 SADD,flusher 读 Redis 当前累计绝对值刷库即自愈
+			// (Redis 仍是 enforcement 权威;DB 仅展示)。
 			s.metrics.FlushFKViolationTotal.Add(1)
 			s.metrics.FlushErrorTotal.Add(1)
 			logger.LegacyPrintf("quota_flusher", "[QuotaFlusher] FK violation (dropped %d snaps): %v", len(snaps), writeErr)

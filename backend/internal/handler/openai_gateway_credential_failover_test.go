@@ -164,7 +164,7 @@ func TestResponsesFailoverExhaustedAfterForwardedTerminalMarksOpsWithoutDuplicat
 	heartbeat := ": keepalive\n\n"
 	written, err := heartbeatRecorder.Write([]byte(heartbeat))
 	require.NoError(t, err)
-	recordGatewayStreamHeartbeat(heartbeatContext, written)
+	service.RecordOpenAIStreamKeepaliveBytes(heartbeatContext, written)
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(heartbeatContext, &service.UpstreamFailoverError{
 		StatusCode: http.StatusBadGateway,
 	}, true)
@@ -399,4 +399,22 @@ func TestOpsWebSocketCredentialFailoverExhaustedIsRecorded(t *testing.T) {
 	require.Equal(t, "account_auth", job.entry.ErrorPhase)
 	require.Equal(t, http.StatusServiceUnavailable, job.entry.StatusCode)
 	require.Equal(t, service.GrokCredentialUnavailableClientMessage, job.entry.ErrorMessage)
+}
+
+func TestChatExhaustionAfterHeartbeatEmitsOneTerminalError(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Header("Content-Type", "text/event-stream")
+	n, err := c.Writer.WriteString(": ping\n\n")
+	require.NoError(t, err)
+	service.RecordOpenAIStreamKeepaliveBytes(c, n)
+	require.True(t, gatewayStreamHasOnlyHeartbeats(c))
+	h := &GatewayHandler{}
+	failure := &service.UpstreamFailoverError{StatusCode: 502}
+	h.handleCCFailoverExhausted(c, failure, true)
+	size := c.Writer.Size()
+	require.Greater(t, size, n)
+	require.False(t, gatewayStreamHasOnlyHeartbeats(c))
+	h.handleCCFailoverExhausted(c, failure, true)
+	require.Equal(t, size, c.Writer.Size(), "semantic output must not be replayed or duplicated")
 }

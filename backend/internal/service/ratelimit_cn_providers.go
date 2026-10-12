@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -108,9 +109,17 @@ func (s *RateLimitService) handleCNProviderInsufficientBalance(
 // 默认 20 分钟）。周期任务会在余额恢复后提前清除，故此处只需保证冷却覆盖到下一次
 // 周期检测即可。
 func (s *RateLimitService) cnBalanceCooldownDuration() time.Duration {
+	if s == nil {
+		return cnBalanceCheckCooldown(nil)
+	}
+	return cnBalanceCheckCooldown(s.cfg)
+}
+
+// cnBalanceCheckCooldown 返回余额类冷却时长（= 2× 余额检测周期，默认周期 10 分钟）。
+func cnBalanceCheckCooldown(cfg *config.Config) time.Duration {
 	minutes := 10
-	if s != nil && s.cfg != nil {
-		if cfgMin := s.cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes; cfgMin > 0 {
+	if cfg != nil {
+		if cfgMin := cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes; cfgMin > 0 {
 			minutes = cfgMin
 		}
 	}
@@ -127,12 +136,27 @@ func (s *RateLimitService) cnBalanceCooldownDuration() time.Duration {
 // 周期额度探测刷新快照后阈值评估会再次停调到正确的时间点。
 // 无快照或均已过期返回 nil。
 func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
-	if account == nil || !account.IsCNProvider() || !account.IsCodingPlan() || len(account.Extra) == 0 {
+	if account == nil || len(account.Extra) == 0 {
+		return nil
+	}
+	switch {
+	case account.IsOpenCodeGo():
+	case account.IsCommandCode():
+		// 有充值积分时上游跳过窗口检查，429 与窗口无关。
+		if !commandCodeWindowsBinding(account.Extra) {
+			return nil
+		}
+	case account.IsCNProvider() && account.IsCodingPlan():
+	default:
 		return nil
 	}
 	provider := account.Platform
+	suffixes := []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset}
+	if cnQuotaHasMonthlyWindow(provider) {
+		suffixes = append(suffixes, cnExtraSuffixMonthlyReset)
+	}
 	var earliest *time.Time
-	for _, suffix := range []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset} {
+	for _, suffix := range suffixes {
 		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, suffix)])
 		if t == nil || !t.After(now) {
 			continue
@@ -152,6 +176,36 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	headers http.Header,
 	responseBody []byte,
 ) bool {
+	if account.IsOpenCodeGo() {
+		if until := cnProviderQuotaSnapshotReset(account, time.Now()); until != nil {
+			s.notifyAccountSchedulingBlocked(account, *until, "429")
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *until); err != nil {
+				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+				return true
+			}
+			slog.Info("opencode_go_rate_limited",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"reset_at", *until,
+			)
+			return true
+		}
+		if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
+			resetTime := time.Unix(*resetAt, 0)
+			s.notifyAccountSchedulingBlocked(account, resetTime, "429")
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
+				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+				return true
+			}
+			slog.Info("opencode_go_rate_limited",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"reset_at", resetTime,
+			)
+			return true
+		}
+		return false
+	}
 	if !account.IsCNProvider() {
 		return false
 	}

@@ -14,6 +14,8 @@ import (
 )
 
 type rateLimitAccountRepoStub struct {
+	rateLimitedCalls  int
+	lastRateLimitedAt time.Time
 	mockAccountRepoForGemini
 	setErrorCalls          int
 	tempCalls              int
@@ -352,4 +354,10 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
 		require.Len(t, invalidator.accounts, 1)
 	})
+}
+
+func (r *rateLimitAccountRepoStub) SetRateLimited(ctx context.Context, id int64, until time.Time) error {
+	r.rateLimitedCalls++
+	r.lastRateLimitedAt = until
+	return r.mockAccountRepoForGemini.SetRateLimited(ctx, id, until)
 }

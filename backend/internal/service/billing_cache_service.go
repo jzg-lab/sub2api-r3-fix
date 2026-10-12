@@ -1128,7 +1128,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 	}
 
 	// --- cache HIT with current schema → 直接用 entry，不查 DB ---
-	if cacheErr == nil && ok && entry != nil && entry.SchemaVersion == UserPlatformQuotaCacheSchemaV1 {
+	if cacheErr == nil && ok && entry != nil && entry.SchemaVersion == UserPlatformQuotaCacheSchemaV2 {
 		now := time.Now()
 		dailyUsage := entry.DailyUsageUSD
 		weeklyUsage := entry.WeeklyUsageUSD
@@ -1166,17 +1166,17 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 		// 超时 50ms:覆盖正常路径与可接受抖动;Redis 异常时 hot path 不阻塞超过此值。
 		// 用 context.Background()+短超时,避免请求 ctx 取消导致刷新丢失。
 		// 显式 setCancel()(而非 defer):缩短 context 生命周期,避免 defer 延迟到函数返回。
-		// isSentinel 判定「该 entry 无任何 limit」,涵盖两类,跨窗口命中时都跳过 refresh:
-		//   1) A3 回填的 sentinel(DB 无行,短 TTL):refresh 会把短 TTL 误升级为 86400s,有害;
-		//   2) DB 有行但三 limit 全未配置的用户(TTL 86400s):refresh 纯属无意义(TTL 升级本身无害)。
-		// 两类的 enforcement(下方 limit!=nil 比较)都因 limit 全 nil 永远放行,跳过 refresh 均正确。
+		// isSentinel 判定「该 entry 无任何 limit」(DB 无行时回填的短 TTL sentinel),跨窗口命中时跳过 refresh:
+		// refresh 会把短 TTL 误升级为 86400s;其 enforcement(下方 limit!=nil 比较)因 limit 全 nil 永远放行,
+		// 跳过 refresh 不改变结果。
 		isSentinel := entry.DailyLimitUSD == nil && entry.WeeklyLimitUSD == nil && entry.MonthlyLimitUSD == nil
 		if windowExpired && s.cache != nil && !isSentinel {
 			refreshed := &UserPlatformQuotaCacheEntry{
+				QuotaID:            entry.QuotaID,
 				DailyUsageUSD:      dailyUsage,
 				WeeklyUsageUSD:     weeklyUsage,
 				MonthlyUsageUSD:    monthlyUsage,
-				SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
+				SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
 				DailyLimitUSD:      entry.DailyLimitUSD,
 				WeeklyLimitUSD:     entry.WeeklyLimitUSD,
 				MonthlyLimitUSD:    entry.MonthlyLimitUSD,
@@ -1242,7 +1242,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 			startOfDay := timezone.StartOfDay(now)
 			startOfWeek := timezone.StartOfWeek(now)
 			sentinel := &UserPlatformQuotaCacheEntry{
-				SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
+				SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
 				DailyWindowStart:   &startOfDay,
 				WeeklyWindowStart:  &startOfWeek,
 				MonthlyWindowStart: &now,
@@ -1294,10 +1294,11 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 
 	// cache MISS 或旧版 entry → 回填完整 entry（含 limits 和 window_start）
 	newEntry := &UserPlatformQuotaCacheEntry{
+		QuotaID:            rec.QuotaID,
 		DailyUsageUSD:      dailyUsage,
 		WeeklyUsageUSD:     weeklyUsage,
 		MonthlyUsageUSD:    monthlyUsage,
-		SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
+		SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
 		DailyLimitUSD:      rec.DailyLimitUSD,
 		WeeklyLimitUSD:     rec.WeeklyLimitUSD,
 		MonthlyLimitUSD:    rec.MonthlyLimitUSD,

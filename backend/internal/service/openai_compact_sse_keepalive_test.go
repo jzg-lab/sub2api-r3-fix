@@ -75,7 +75,7 @@ func TestOpenAIAdjustedWrittenSizeExcludesResponsesStreamKeepalive(t *testing.T)
 	c, rec := newCompactBridgeTestContext(t, false)
 	n, err := c.Writer.Write([]byte(":\n\n"))
 	require.NoError(t, err)
-	recordOpenAIStreamKeepaliveBytes(c, n)
+	RecordOpenAIStreamKeepaliveBytes(c, n)
 
 	require.Equal(t, -1, OpenAICompactKeepaliveAdjustedWrittenSize(c))
 

@@ -71,7 +71,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	socketDir, err := os.MkdirTemp(os.TempDir(), "rescue-rpc-")
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir)
+	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir, nil)
 	require.NoError(t, err)
 	defer runtime.kill()
 	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{

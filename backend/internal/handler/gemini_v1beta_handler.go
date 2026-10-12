@@ -46,8 +46,33 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 
+	// 分组级模型白名单开启时过滤 models[].name（名字形如 models/xxx）。
+	filterGeminiModels := func(models []gemini.Model) []gemini.Model {
+		if apiKey.Group == nil || !apiKey.Group.ModelAllowlistEnabled() {
+			return models
+		}
+		filtered := make([]gemini.Model, 0, len(models))
+		for _, model := range models {
+			if apiKey.Group.ModelAllowlist.Allows(model.Name) {
+				filtered = append(filtered, model)
+			}
+		}
+		return filtered
+	}
+
 	// 强制 antigravity 模式：返回 antigravity 支持的模型列表
 	if forcePlatform == service.PlatformAntigravity {
+		if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+			agModels := antigravity.DefaultGeminiModels()
+			filtered := make([]antigravity.GeminiModel, 0, len(agModels))
+			for _, model := range agModels {
+				if apiKey.Group.ModelAllowlist.Allows(model.Name) {
+					filtered = append(filtered, model)
+				}
+			}
+			c.JSON(http.StatusOK, antigravity.GeminiModelsListResponse{Models: filtered})
+			return
+		}
 		c.JSON(http.StatusOK, antigravity.FallbackGeminiModelsList())
 		return
 	}
@@ -58,7 +83,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		hasAntigravity, _ := h.geminiCompatService.HasAntigravityAccounts(c.Request.Context(), apiKey.GroupID)
 		if hasAntigravity {
 			// antigravity 账户使用静态模型列表
-			c.JSON(http.StatusOK, gemini.FallbackModelsList())
+			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(gemini.DefaultModels())})
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -72,10 +97,64 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 	if shouldFallbackGeminiModels(res) {
-		c.JSON(http.StatusOK, gemini.FallbackModelsList())
+		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(gemini.DefaultModels())})
 		return
 	}
+	if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+		if filtered, dropped, ok := filterUpstreamGeminiModelsBody(res.Body, apiKey.Group.ModelAllowlist); ok && dropped {
+			// 只在确有条目被过滤时替换响应体；全命中或解析失败时保持原始响应，
+			// 统一经 writeUpstreamResponse 写出（保留全部上游响应头）。
+			res.Body = filtered
+		}
+	}
 	writeUpstreamResponse(c, res)
+}
+
+// filterUpstreamGeminiModelsBody 按白名单过滤上游 /v1beta/models 响应中的
+// models[].name，其余信封字段（如 nextPageToken）原样保留。
+// 返回值：filtered 为过滤后的响应体；dropped 表示是否有条目被移除（全命中时
+// 为 false，调用方应保持原始响应以完整透传上游头）；ok=false 表示解析失败，
+// 调用方同样应透传原始响应。
+func filterUpstreamGeminiModelsBody(body []byte, allowlist service.GroupModelAllowlist) (filtered []byte, dropped bool, ok bool) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, false, false
+	}
+	rawModels, hasModels := envelope["models"]
+	if !hasModels {
+		return body, false, true
+	}
+	type geminiModelName struct {
+		Name string `json:"name"`
+	}
+	var models []json.RawMessage
+	if err := json.Unmarshal(rawModels, &models); err != nil {
+		return nil, false, false
+	}
+	kept := make([]json.RawMessage, 0, len(models))
+	for _, raw := range models {
+		var model geminiModelName
+		if err := json.Unmarshal(raw, &model); err != nil {
+			return nil, false, false
+		}
+		if allowlist.Allows(model.Name) {
+			kept = append(kept, raw)
+		}
+	}
+	if len(kept) == len(models) {
+		// 全部命中时直接透传原始响应体。
+		return body, false, true
+	}
+	mergedModels, err := json.Marshal(kept)
+	if err != nil {
+		return nil, false, false
+	}
+	envelope["models"] = mergedModels
+	merged, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false, false
+	}
+	return merged, true, true
 }
 
 // GeminiV1BetaGetModel proxies:
@@ -233,7 +312,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	userReleaseFunc, err := geminiConcurrency.AcquireUserSlotWithWait(c, authSubject.UserID, authSubject.Concurrency, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
-		googleError(c, http.StatusTooManyRequests, err.Error())
+		googleConcurrencyError(c, err, "user")
 		return
 	}
 	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
@@ -252,6 +331,19 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		googleError(c, status, message)
 		return
 	}
+
+	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
+	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(modelName, body))
+	if err != nil {
+		reqLog.Info("gemini.inflight_reservation_rejected", zap.Error(err))
+		status, _, message, retryAfter := billingErrorDetails(err)
+		if retryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+		}
+		googleError(c, status, message)
+		return
+	}
+	defer inflightRelease()
 
 	// 3) select account (sticky session based on request body)
 	// 优先使用 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）
@@ -369,6 +461,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	for {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err != nil {
+			if failoverClientGone(c) {
+				reqLog.Info("gemini.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
 			if len(fs.FailedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, modelName, modelName, service.PlatformGemini)
 				if !cls.ModelNotFound {
@@ -461,7 +557,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				googleError(c, http.StatusTooManyRequests, err.Error())
+				googleConcurrencyError(c, err, "account")
 				return
 			}
 			if accountWaitCounted {
@@ -537,7 +633,8 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					return
 				}
 			}
-			// ForwardNative already wrote the response
+			// 转发层已写出错误响应；客户端断开时转发层不写，响应未提交则标记 499。
+			failoverClientGone(c)
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return
 		}
@@ -697,6 +794,13 @@ func googleError(c *gin.Context, status int, message string) {
 			"status":  googleapi.HTTPStatusToGoogleStatus(status),
 		},
 	})
+}
+
+// googleConcurrencyError 以 Google 错误格式回写并发槽获取失败，状态码与文案
+// 沿用 concurrencyErrorResponse 的统一映射（客户端断开为 499）。
+func googleConcurrencyError(c *gin.Context, err error, slotType string) {
+	status, _, message := concurrencyErrorResponse(err, slotType)
+	googleError(c, status, message)
 }
 
 func writeUpstreamResponse(c *gin.Context, res *service.UpstreamHTTPResult) {

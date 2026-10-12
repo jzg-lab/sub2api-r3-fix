@@ -369,8 +369,12 @@ func ProvideAccountUsageService(
 
 func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config,
 	hostInfo PluginHostInfo, rateLimitService *RateLimitService, accountRepo AccountRepository,
+	kvStore PluginKVStore, gateway *OpenAIGatewayService, probeStore OpenAIDowngradeProbeStore,
 ) *PluginManager {
 	manager := NewPluginManager(repo, encryptor, cfg, hostInfo)
+	manager.kvStore = kvStore
+	manager.accountHealth, _ = probeStore.(OpenAIProbeHealthLister)
+	manager.SetAccountDirectory(gateway)
 	manager.rateLimitService = rateLimitService
 	if source, ok := accountRepo.(OpenAIRescueTerminatedAccountLister); ok {
 		manager.SetRescueTerminatedAccountSource(source.ListOpenAIRescueTerminatedAccountIDs)
@@ -402,6 +406,7 @@ func ProvideAccountTestService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
 	if openAIGatewayService != nil {
@@ -1007,6 +1012,7 @@ var ProviderSet = wire.NewSet(
 	ProvideBatchImageWorkerRuntime,
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
 	NewOAuthService,
+	ProvideClaudeResetCreditService,
 	ProvideOpenAIOAuthService,
 	ProvideOpenAIOperationsService,
 	ProvideGrokOAuthService,
@@ -1037,6 +1043,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAccountTestService,
 	ProvideUpstreamBillingProbeService,
 	ProvideOllamaCloudUsageService,
+	ProvideOpenCodeGoUsageService,
 	ProvideSettingService,
 	NewDataManagementService,
 	ProvideBackupService,
@@ -1233,4 +1240,12 @@ func ProvideOpenAIRescueLane(accounts AccountRepository, store OpenAIDowngradePr
 	runner.Start()
 	lane.Start()
 	return lane
+}
+
+// ProvideClaudeResetCreditService wires the Claude reset query and, with the
+// idempotency store and Redis leases, manual redemption.
+func ProvideClaudeResetCreditService(accounts AccountRepository, tokens *ClaudeTokenProvider, proxies ProxyRepository, settings *SettingService, idem *IdempotencyCoordinator, locks LeaderLockCache) *ClaudeResetCreditService {
+	s := NewClaudeResetCreditService(accounts, tokens, proxies, settings)
+	s.ConfigureRedemption(idem, locks)
+	return s
 }

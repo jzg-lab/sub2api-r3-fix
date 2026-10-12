@@ -41,7 +41,8 @@ func TestUserPlatformQuotaCache_SetThenGet(t *testing.T) {
 		WeeklyUsageUSD:   3.0,
 		MonthlyUsageUSD:  10.0,
 		Version:          7,
-		SchemaVersion:    service.UserPlatformQuotaCacheSchemaV1,
+		QuotaID:          73,
+		SchemaVersion:    service.UserPlatformQuotaCacheSchemaV2,
 		DailyLimitUSD:    &dailyLimit,
 		DailyWindowStart: &ts,
 	}
@@ -55,8 +56,11 @@ func TestUserPlatformQuotaCache_SetThenGet(t *testing.T) {
 	if got.DailyUsageUSD != 1.5 || got.WeeklyUsageUSD != 3.0 || got.MonthlyUsageUSD != 10.0 || got.Version != 7 {
 		t.Errorf("got = %+v, want %+v", got, in)
 	}
-	if got.SchemaVersion != service.UserPlatformQuotaCacheSchemaV1 {
-		t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, service.UserPlatformQuotaCacheSchemaV1)
+	if got.QuotaID != 73 {
+		t.Fatalf("quota generation lost: %d", got.QuotaID)
+	}
+	if got.SchemaVersion != service.UserPlatformQuotaCacheSchemaV2 {
+		t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, service.UserPlatformQuotaCacheSchemaV2)
 	}
 	if got.DailyLimitUSD == nil || *got.DailyLimitUSD != dailyLimit {
 		t.Errorf("DailyLimitUSD = %v, want %v", got.DailyLimitUSD, dailyLimit)
@@ -71,7 +75,7 @@ func TestUserPlatformQuotaCache_NilLimitSetThenGet(t *testing.T) {
 	ctx := context.Background()
 	in := &service.UserPlatformQuotaCacheEntry{
 		DailyUsageUSD: 1.0,
-		SchemaVersion: service.UserPlatformQuotaCacheSchemaV1,
+		SchemaVersion: service.UserPlatformQuotaCacheSchemaV2,
 		// DailyLimitUSD nil → 无限额
 	}
 	if err := c.SetUserPlatformQuotaCache(ctx, 1, "openai", in, time.Minute); err != nil {
@@ -103,7 +107,7 @@ func TestUserPlatformQuotaCache_IncrHitAccumulates(t *testing.T) {
 	// SchemaVersion 必须显式设为 V1,否则 Lua 脚本会因 schema 不匹配而 return 0,跳过累加。
 	_ = c.SetUserPlatformQuotaCache(ctx, 1, "openai", &service.UserPlatformQuotaCacheEntry{
 		Version:       1,
-		SchemaVersion: service.UserPlatformQuotaCacheSchemaV1,
+		SchemaVersion: service.UserPlatformQuotaCacheSchemaV2,
 	}, time.Minute)
 	if err := c.IncrUserPlatformQuotaUsageCache(ctx, 1, "openai", 0.5, time.Minute, false); err != nil {
 		t.Fatal(err)
