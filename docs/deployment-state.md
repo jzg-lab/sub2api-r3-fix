@@ -1,24 +1,25 @@
 # 部署状态
 
-最近部署：北京时间 **2026-10-10 06:17:56** 切换，**06:18:05** 验收后恢复公网接入。
-用户纠正分组标题位置后明确授权上传、部署。目标仍为 `account-manager`，Linux amd64，
-`/opt/sub2api-deploy`。本次仅调整创建/编辑密钥的布局顺序，沿用上一版后端逻辑。
+最近部署：北京时间 **2026-10-13 05:43:21** 切换，**05:43:29** 验收后恢复公网接入。
+用户授权按最小变更方式部署当前 `main`。目标仍为 `account-manager`，Linux amd64，
+`/opt/sub2api-deploy`；仅替换应用容器，保留 PostgreSQL、Redis、数据卷、Compose、Nginx
+和业务配置。应用启动自动执行缺失的必要迁移，未重启数据库或 Redis。
 
 ## 当前运行版本与配置
 
 | 项目 | 本次核验结果 |
 | --- | --- |
-| 运行代码 | `76d211c7260b7b37aac99716c17f19d86c46d4c8` |
-| 生产镜像 | `sub2api:key-group-layout-76d211c72` |
-| 镜像身份 | `sha256:2d6624f579aea1e47aecee04053547e1a7f2c7977782474d216e116c3bfc907d` |
-| 程序 SHA-256 | `356aaa30b3b6aeb4b403870f210c58d204d6d19c7cab427f28330d487c4d4754`，制品、容器文件和 `/proc/1/exe` 一致 |
-| 部署标识 | `0.3.0+r17bj.76d211c72`，没有创建正式标签或 Release |
-| 前端入口 | `/assets/index-OkM1uqu4.js`；密钥页面 `/assets/KeysView-4ax6N-xP.js` |
+| 运行代码 | `609f8b23cd2bb10fe64c1a6fcdf422ece13ff4cb` |
+| 生产镜像 | `sub2api:key-smart-default-609f8b23c` |
+| 镜像身份 | `sha256:d2fbb02d19c21d73aa429690339ceb50638fde9a21d0b2f3a2945c1a652740b1` |
+| 程序 SHA-256 | `d10adc838555cf183c7aa190120ff729c13e4fafcaab5ca385a5e73d3cbd12e7`，制品和容器文件一致 |
+| 部署标识 | `0.3.0+key-smart-default.609f8b23c`，没有创建正式标签或 Release |
+| 前端入口 | `/assets/index-Dik7uiKK.js`；密钥页面随本次内嵌资源更新 |
 | 表单顺序 | 厂商卡片 → 左侧“分组”、右侧“智能路由” → 分组选择；保留彩色标签及完整下拉信息 |
 | OpenAI 首有效输出 | 保留普通 180 秒、high/xhigh/max 600 秒默认值，实际 YAML/运行环境无覆盖 |
 | 客户端断线补收 | 保留 OpenAI HTTP 用量补收最多 180 秒；原生 Claude 超时不变 |
 | 数据库及连接池 | PostgreSQL 256；应用最大 128、空闲 32，数据库与 Redis 未重启 |
-| 数据迁移 | 无新增迁移；既有 checksum 保持，迁移 252 校验通过 |
+| 数据迁移 | 新执行 253–260 共 8 个必要迁移；既有迁移 checksum 保持，数据库总记录 330 |
 | 插件与运行时 | Cookie Pin 0.3.12 健康；原签名、配置和浏览器运行时保持 |
 | 质量与救治 | 设置哈希保持；原质量/救治及 v2 渠道、运维配置未改 |
 
@@ -119,6 +120,19 @@
 验收属于前次发布，不冒充本次实测。私有备份与凭据不进入 Git。
 
 ## 当前回退方式
+
+本次当前版本回退目标为 `sub2api:key-group-layout-76d211c72`，镜像身份
+`sha256:2d6624f579aea1e47aecee04053547e1a7f2c7977782474d216e116c3bfc907d`。
+部署证据保存在 `/opt/sub2api-backups/releases/key-smart-default-20261013-609f8b23c/`，
+包含切换前 2.7 GB PostgreSQL 自定义格式备份及 SHA-256、配置/容器快照、构建日志、
+迁移前后清单、切换排空和验收记录。回退只替换应用镜像，不恢复整库；已执行的 253–260
+迁移为前向结构变更，旧程序不保证识别新增字段。
+
+本次成功验收：应用、PostgreSQL、Redis 健康；公网 `/health` 返回 200；应用配置和 Compose
+除镜像绑定外未变；PostgreSQL/Redis 容器身份未变；旧迁移 checksum 保持，新迁移 checksum
+与固定提交一致；Cookie Pin 健康；管理员接口仍要求鉴权。首次切换因验收脚本缺失自动回退，
+未影响数据库；补齐验收后第二次切换成功。未发送收费模型请求、未修改客户 Key、未执行压力或
+真实供应商故障切换验收。
 
 回退到 `sub2api:routing-affinity-b628e0c32`，镜像身份
 `sha256:821eade1ab32b02d9477b52cacad3bb043a32809171146806d3da152d7e0713b`，程序摘要
