@@ -2,13 +2,18 @@ import { describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import OpsDashboardHeader from '../OpsDashboardHeader.vue'
 import type { OpsDashboardOverview } from '@/api/admin/ops'
+import zhOps from '@/i18n/locales/zh/admin/ops'
 
 vi.mock('@/api', () => ({ adminAPI: { groups: { getAll: vi.fn().mockResolvedValue([]) } } }))
 vi.mock('@/api/admin/ops', () => ({ opsAPI: { getRealtimeTrafficSummary: vi.fn().mockResolvedValue({ enabled: true, summary: null }) } }))
 vi.mock('@/stores', () => ({ useAdminSettingsStore: () => ({ opsRealtimeMonitoringEnabled: true, setOpsRealtimeMonitoringEnabledLocal: vi.fn() }) }))
 vi.mock('vue-i18n', async () => ({
   ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'),
-  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => params ? `${key}:${JSON.stringify(params)}` : key })
+  useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => {
+    if (key === 'admin.ops.outputTps') return zhOps.ops.outputTps
+    if (key === 'admin.ops.tooltips.outputTps') return zhOps.ops.tooltips.outputTps
+    return params ? `${key}:${JSON.stringify(params)}` : key
+  } })
 }))
 
 const overview = { tps: { avg: 242.7 } } as OpsDashboardOverview
@@ -25,6 +30,8 @@ describe('OpsDashboardHeader output TPS', () => {
     const wrapper = mountHeader({ ...overview, output_tps: { p5: 2.35, p10: 3.7, p50: 55, avg: 277.75, sample_count: 4 } })
     await flushPromises()
     const card = wrapper.get('[data-testid="output-tps-card"]')
+    expect(card.text()).toContain('输出速率（首字后）')
+    expect(card.get('help-tooltip-stub').attributes('content')).toContain('不含首字等待')
     expect(card.get('[data-testid="output-tps-p50"]').text()).toBe('55.0')
     expect(card.get('[data-testid="output-tps-p5"]').text()).toBe('2.4')
     expect(card.get('[data-testid="output-tps-p10"]').text()).toBe('3.7')

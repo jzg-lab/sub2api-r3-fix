@@ -29,7 +29,7 @@ type OpsPercentiles struct {
 	Max *int `json:"max_ms"`
 }
 
-// OpsOutputTPS describes per-request output rates, not aggregate token throughput.
+// OpsOutputTPS describes per-request output rates after the first token, excluding first-token wait.
 type OpsOutputTPS struct {
 	P5          *float64 `json:"p5"`
 	P10         *float64 `json:"p10"`
