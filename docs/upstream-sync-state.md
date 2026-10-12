@@ -1,7 +1,7 @@
 # 版本与合并记录
 
 核对日期：2026-10-13。本页统一记录三个项目涉及的版本、当前同步状态和历次合并事实，产品选择见
-[产品规则与上游差异](upstream-integration-policy.md)。老板 r17bm 已合入并推送，尚未部署；官方 v0.2.15 已按确认范围提交并合入本地 main，尚未推送或部署。各轮实际提交、制品与验证见下文；历史授权不自动扩展至新一轮。未创建正式版本标签或 GitHub Release。来源由用户在每次合并时另行指定。
+[产品规则与上游差异](upstream-integration-policy.md)。老板 r17bm 已合入并推送，尚未部署；官方 v0.2.15 已按确认范围合入 main，连同运维 TPS 首 token 口径修订推送至 GitHub，尚未部署。各轮实际提交、制品与验证见下文；历史授权不自动扩展至新一轮。未创建正式版本标签或 GitHub Release。来源由用户在每次合并时另行指定。
 用户个人要求优先于两个上游；下表中的“已确认”表示产品选择，实施仍须遵循
 [升级授权流程](upstream-integration-policy.md#决策优先级与升级授权)。
 当前基线与待办随进展更新；已经发生的合并和发布记录长期保留，不随完成的计划一起删除。
@@ -109,6 +109,18 @@
   用量表与运维组件共 56 项测试、修改文件 ESLint、前端类型检查及构建通过；内嵌资源已重建，
   `go test -tags embed ./internal/web` 通过。隔离 PostgreSQL/Redis 已停止。
   未推送或部署；未做生产查询性能或真实供应商验证。
+
+### GitHub 主分支推送（2026-10-13）
+
+用户明确“先推送到云端”，授权推送当前主分支。拉取远端引用后执行普通
+`git push origin main`，远端由 `f61819a8565b569bd3885d98556ca2abfcfed870`
+快进至 `c87d186e23ba5ff9844afc3ddbfc4bb02097a85c`，包含官方适配提交
+`64bda45c3e53d18810b0f300aff4e7ec48dd1d0c`、TPS 修订提交
+`5d52b46fd951648a9ffffb1ddafbb6ddc1206040` 及两项结果记录提交。
+通过 `git ls-remote origin refs/heads/main` 核实远端完整 SHA 一致。
+目标仓库为 `git@github.com:jzg-lab/sub2api-r3-fix.git`；本次仅推送 main，
+本条及当前状态文档随后补充提交。未创建标签或 Release，未执行部署或生产迁移，
+未核验远端 CI；此前各阶段“未推送”的记录保留其历史含义。
 
 ### 固定来源与旧版本核实
 
