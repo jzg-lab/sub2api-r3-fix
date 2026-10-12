@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ type tokenRefreshCandidateRepo struct {
 	accounts              []Account
 	updatedCredentialIDs  []int64
 	setErrorCalls         int
+	conditionalErrorCalls int
 	setTempUnschedCalls   int
 	clearTempCalls        int
 	lastTempUnschedReason string
@@ -81,6 +83,34 @@ func (r *tokenRefreshCandidateRepo) SetError(context.Context, int64, string) err
 	defer r.mu.Unlock()
 	r.setErrorCalls++
 	return nil
+}
+
+func (r *tokenRefreshCandidateRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	r.conditionalErrorCalls++
+	for i := range r.accounts {
+		account := &r.accounts[i]
+		if account.ID != before.ID || account.Status != before.Status || account.Schedulable != before.Schedulable ||
+			!reflect.DeepEqual(account.Credentials, before.Credentials) || !reflect.DeepEqual(account.ProxyID, before.ProxyID) {
+			continue
+		}
+		if change.ErrorMessage != nil {
+			account.Status = StatusError
+			account.ErrorMessage = *change.ErrorMessage
+		}
+		if change.CooldownUntil != nil {
+			account.TempUnschedulableUntil = change.CooldownUntil
+			account.TempUnschedulableReason = change.CooldownReason
+			r.setTempUnschedCalls++
+			r.lastTempUnschedReason = change.CooldownReason
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (r *tokenRefreshCandidateRepo) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, reason string) error {
@@ -231,11 +261,14 @@ func TestTokenRefreshService_RefreshFailureDoesNotCallPrivacy(t *testing.T) {
 				},
 			}
 
+			repo.accounts = []Account{*snapshotOAuthRefreshAccount(account)}
 			err := svc.refreshWithRetry(context.Background(), account, &tokenRefreshTestRefresher{err: tt.err}, nil, time.Hour)
 
 			require.Error(t, err)
 			if isNonRetryableRefreshError(tt.err) {
-				require.Equal(t, 1, repo.setErrorCalls)
+				require.Equal(t, 1, repo.conditionalErrorCalls)
+				require.Zero(t, repo.setErrorCalls)
+				require.Equal(t, StatusError, repo.accounts[0].Status)
 				require.Zero(t, repo.setTempUnschedCalls)
 			} else {
 				require.Zero(t, repo.setErrorCalls)

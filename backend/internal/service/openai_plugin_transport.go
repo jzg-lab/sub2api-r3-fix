@@ -1,6 +1,10 @@
 package service
 
-import "net/http"
+import (
+	"net/http"
+
+	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
+)
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
@@ -45,7 +49,7 @@ func (s *AccountTestService) roundTripOpenAIAccountTestUpstream(
 		return nil, err
 	}
 	if s.pluginManager != nil {
-		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
+		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(pluginv1.WithProbeTraffic(request.Context()), request, proxyURL, account)
 		if handled {
 			return response, err
 		}

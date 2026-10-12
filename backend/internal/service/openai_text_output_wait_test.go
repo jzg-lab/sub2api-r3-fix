@@ -128,7 +128,7 @@ func TestTextDeadlineCoversHeadersAndUnaryBody(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 			req := httptest.NewRequest("POST", "https://provider.example/v1/responses", nil)
-			_, err := svc.doOpenAITextUpstream(c.Request.Context(), c, req, "", &Account{ID: 1, Platform: PlatformOpenAI}, []byte(`{"model":"gpt-test"}`), time.Now().Add(-900*time.Millisecond), false)
+			_, err := svc.doOpenAITextUpstream(c.Request.Context(), c, req, "", &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, []byte(`{"model":"gpt-test"}`), time.Now().Add(-900*time.Millisecond), false)
 			var failure *UpstreamFailoverError
 			require.ErrorAs(t, err, &failure)
 			require.Contains(t, string(failure.ResponseBody), "first_output_timeout")
@@ -152,7 +152,7 @@ func TestTextPrefixKeepalivePreservesHeadersAndRetry(t *testing.T) {
 	c, rec := newPassthroughKeepaliveTestContext(t)
 	c.Set("openai_passthrough", true)
 	req := httptest.NewRequest("POST", "https://provider.example/v1/responses", nil)
-	account := &Account{ID: 1, Platform: PlatformOpenAI}
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	resp, err := svc.doOpenAITextUpstream(c.Request.Context(), c, req, "", account, []byte(`{"model":"gpt-test","stream":true}`), time.Now(), true)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -211,7 +211,7 @@ func TestTextOutputDisarmsDeadlineEvenWithoutSSEContentType(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 	req := httptest.NewRequest("POST", "https://provider.example/v1/responses", nil)
-	resp, err := svc.doOpenAITextUpstream(c.Request.Context(), c, req, "", &Account{ID: 1, Platform: PlatformOpenAI}, []byte(`{"model":"gpt-test","stream":true}`), time.Now().Add(-900*time.Millisecond), true)
+	resp, err := svc.doOpenAITextUpstream(c.Request.Context(), c, req, "", &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, []byte(`{"model":"gpt-test","stream":true}`), time.Now().Add(-900*time.Millisecond), true)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
@@ -245,7 +245,7 @@ func TestWhitespaceBeforeFailureRemainsReplayable(t *testing.T) {
 			body := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" \"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"upstream unavailable\"}}}\n\n"
 			resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}
 			svc := &OpenAIGatewayService{}
-			account := &Account{ID: 1, Platform: PlatformOpenAI}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 			var err error
 			switch protocol {
 			case "responses":
@@ -280,9 +280,9 @@ func TestResponsesTerminalDoesNotRequireEOF(t *testing.T) {
 				var err error
 				switch mode {
 				case "native":
-					_, err = svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "m", "m")
+					_, err = svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, time.Now(), "m", "m")
 				case "passthrough":
-					_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "m", "m")
+					_, err = svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, time.Now(), "m", "m")
 				case "buffered":
 					var data []byte
 					data, err = readOpenAIResponseBodyThroughTerminal(resp, 1024)

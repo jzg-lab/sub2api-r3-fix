@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -117,6 +118,7 @@ func TestReleaseIncludesCurrentRescuePackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	var manifest struct {
+		ID      string `json:"id"`
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
@@ -124,6 +126,10 @@ func TestReleaseIncludesCurrentRescuePackage(t *testing.T) {
 	}
 	if manifest.Version == "" {
 		t.Fatal("rescue manifest is missing a version")
+	}
+	if manifest.ID != transport.PluginID || manifest.Version != transport.PluginVersion {
+		t.Fatalf("release manifest %s@%s does not match runtime %s@%s",
+			manifest.ID, manifest.Version, transport.PluginID, transport.PluginVersion)
 	}
 	for _, name := range []string{".goreleaser.yaml", ".goreleaser.simple.yaml"} {
 		t.Run(name, func(t *testing.T) {

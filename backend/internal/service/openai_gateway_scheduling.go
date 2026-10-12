@@ -57,7 +57,7 @@ func explicitOpenAIHeaderSessionID(c *gin.Context) string {
 // ExtractSessionID extracts the raw session ID from headers or body without hashing.
 // Used by ForwardAsAnthropic to pass as prompt_cache_key for upstream cache.
 func (s *OpenAIGatewayService) ExtractSessionID(c *gin.Context, body []byte) string {
-	return explicitOpenAIRequestSessionID(c, body)
+	return ExtractOpenAIRequestSessionID(c, body)
 }
 
 func explicitOpenAISessionID(c *gin.Context, body []byte) string {
@@ -86,7 +86,7 @@ func openAIRequestPayloadView(body []byte) gjson.Result {
 	return root
 }
 
-// explicitOpenAIRequestSessionID extends the common OpenAI session signals
+// ExtractOpenAIRequestSessionID extends the common OpenAI session signals
 // with Grok's native conversation header only for requests authenticated to a
 // Grok group. This keeps an unrelated x-grok-conv-id header from changing
 // scheduling or upstream session behavior for non-Grok groups.
@@ -96,7 +96,7 @@ func openAIRequestPayloadView(body []byte) gjson.Result {
 // session/conversation/prompt_cache_key is present. Non-Grok groups omit this
 // so HTTP OpenAI paths that delete previous_response_id before upstream are
 // unchanged.
-func explicitOpenAIRequestSessionID(c *gin.Context, body []byte) string {
+func ExtractOpenAIRequestSessionID(c *gin.Context, body []byte) string {
 	if c == nil {
 		return ""
 	}
@@ -133,7 +133,7 @@ func grokPreviousResponseSessionSeed(body []byte) string {
 // client session signals. It intentionally skips content-derived fallback and is
 // used by stateless endpoints such as /v1/images.
 func (s *OpenAIGatewayService) GenerateExplicitSessionHash(c *gin.Context, body []byte) string {
-	sessionID := explicitOpenAIRequestSessionID(c, body)
+	sessionID := ExtractOpenAIRequestSessionID(c, body)
 	if sessionID == "" {
 		return ""
 	}
@@ -165,7 +165,7 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 		return ""
 	}
 
-	sessionID := explicitOpenAIRequestSessionID(c, body)
+	sessionID := ExtractOpenAIRequestSessionID(c, body)
 	if sessionID == "" && len(body) > 0 {
 		sessionID = deriveOpenAIContentSessionSeed(body)
 	}
@@ -183,7 +183,7 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 }
 
 // GenerateSessionHashAndSessionID 是 GenerateSessionHash + ExtractSessionID 的
-// 合并形态：两者都要先算 explicitOpenAIRequestSessionID（各扫一遍 header+body），
+// 合并形态：两者都要先算 ExtractOpenAIRequestSessionID（各扫一遍 header+body），
 // 调用方两个都要时用这一份，一次提取两个返回值。sessionID 返回的是
 // explicit 信号原值（与 ExtractSessionHash 语义一致），不做 Grok sticky 整形、
 // 也不做 content-seed 兜底——那两步只属于 sessionHash 侧。
@@ -192,7 +192,7 @@ func (s *OpenAIGatewayService) GenerateSessionHashAndSessionID(c *gin.Context, b
 		return "", ""
 	}
 
-	explicitID := explicitOpenAIRequestSessionID(c, body)
+	explicitID := ExtractOpenAIRequestSessionID(c, body)
 
 	sessionID := explicitID
 	if sessionID == "" && len(body) > 0 {
@@ -1191,11 +1191,14 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		if rateCmp := rateOrder.compare(a, b); rateCmp != 0 {
 			return rateCmp < 0
 		}
-		if a.Priority == b.Priority && recentAccountReliability(ctx, a.ID) != recentAccountReliability(ctx, b.ID) {
-			return recentAccountReliability(ctx, a.ID) > recentAccountReliability(ctx, b.ID)
-		}
 		return s.isBetterAccount(a, b)
 	})
+	// Keep compact/cost tiers ahead of the bounded quality adjustment.
+	end := 1
+	for end < len(eligible) && compactTiers[eligible[end].ID] == compactTiers[eligible[0].ID] && rateOrder.compare(eligible[end], eligible[0]) == 0 {
+		end++
+	}
+	sortByRecentQuality(ctx, eligible[:end])
 	return eligible[0], compactBlocked, filterStats
 }
 
@@ -1536,13 +1539,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 		})
 		shuffleWithinSortGroups(available)
-		sort.SliceStable(available, func(i, j int) bool {
-			a, b := available[i].account, available[j].account
-			if a.Priority != b.Priority {
-				return a.Priority < b.Priority
-			}
-			return recentAccountReliability(ctx, a.ID) > recentAccountReliability(ctx, b.ID)
-		})
+		orderLoadedAccountsByRecentQuality(ctx, available)
 		if rateOrder.enabled {
 			sort.SliceStable(available, func(i, j int) bool {
 				return rateOrder.compare(available[i].account, available[j].account) < 0
@@ -1599,7 +1596,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if err != nil {
 		ordered := append([]*Account(nil), candidates...)
 		sortAccountsByPriorityAndLastUsed(ordered, false)
-		sortByRecentReliability(ctx, ordered)
+		sortByRecentQuality(ctx, ordered)
 		if rateOrder.enabled {
 			sort.SliceStable(ordered, func(i, j int) bool {
 				return rateOrder.compare(ordered[i], ordered[j]) < 0
@@ -1650,7 +1647,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 
 	// ============ Layer 3: Fallback wait ============
 	sortAccountsByPriorityAndLastUsed(candidates, false)
-	sortByRecentReliability(ctx, candidates)
+	sortByRecentQuality(ctx, candidates)
 	if rateOrder.enabled {
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return rateOrder.compare(candidates[i], candidates[j]) < 0
@@ -1736,6 +1733,9 @@ func (s *OpenAIGatewayService) resolveFreshSchedulableOpenAIAccount(ctx context.
 }
 
 func (s *OpenAIGatewayService) resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
+	if !s.apiKeyRoutePluginAvailable(ctx, account) {
+		return nil
+	}
 	if account == nil {
 		return nil
 	}
@@ -1794,6 +1794,9 @@ func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDB(ctx context.Co
 }
 
 func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx context.Context, account *Account, groupID *int64, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
+	if !s.apiKeyRoutePluginAvailable(ctx, account) {
+		return nil
+	}
 	if account == nil {
 		return nil
 	}

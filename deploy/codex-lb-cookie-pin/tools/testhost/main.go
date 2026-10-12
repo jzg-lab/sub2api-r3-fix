@@ -7,7 +7,8 @@
 //	go run ./tools/testhost -plugin ./dist/darwin-arm64/cookiepin            # 协议冒烟
 //	go run ./tools/testhost -plugin ... -mock                                # 本地假上游全链路
 //	go run ./tools/testhost -plugin ... -forward -url https://chatgpt.com/... \
-//	    -token $CODEX_TOKEN -proxy http://u:p@127.0.0.1:17922 -account 1210   # 真实上游单发
+//	    -token $CODEX_TOKEN -proxy http://u:p@127.0.0.1:17922 -account 1210 \
+//	    -state-dir /absolute/private/state                                # 真实上游单发
 package main
 
 import (
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	hcplugin "github.com/hashicorp/go-plugin"
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/evidence"
 	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
@@ -46,6 +48,7 @@ func run(args []string) error {
 	proxy := flags.String("proxy", "", "代理 URL（真实上游模式，可选）")
 	account := flags.Int64("account", 1, "账号 ID（真实上游模式 / mock 模式共用）")
 	timeout := flags.Duration("timeout", time.Minute, "整个验证流程的超时")
+	stateDir := flags.String("state-dir", "", "Private persistent state directory; required for real upstream mode")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -65,6 +68,20 @@ func run(args []string) error {
 	if *doForward && *token == "" {
 		return fmt.Errorf("-forward 需要 -token")
 	}
+	if *doForward && *stateDir == "" {
+		return fmt.Errorf("-forward requires -state-dir to retain outbound evidence")
+	}
+	if *stateDir == "" {
+		dir, err := os.MkdirTemp("", "cookiepin-test-state-")
+		if err != nil {
+			return fmt.Errorf("create isolated test state: %w", err)
+		}
+		*stateDir = dir
+		defer os.RemoveAll(dir)
+	}
+	if _, err := evidence.Open(*stateDir); err != nil {
+		return fmt.Errorf("test state directory must already exist, be private and absolute")
+	}
 	// mock 假上游是 127.0.0.1，必须放开 inject_scope 才会走注入分支。
 	if *doMock && *configJSON == `{"enabled":true}` {
 		*configJSON = `{"enabled":true,"inject_scope":"all"}`
@@ -76,10 +93,13 @@ func run(args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
+	cmd := exec.CommandContext(ctx, *pluginPath)
+	cmd.Env = append(os.Environ(), "SUB2API_PLUGIN_STATE_DIR="+*stateDir)
 	client := hcplugin.NewClient(&hcplugin.ClientConfig{
 		HandshakeConfig:  pluginv1.HandshakeConfig,
 		Plugins:          pluginv1.ClientPluginMap(),
-		Cmd:              exec.CommandContext(ctx, *pluginPath),
+		Cmd:              cmd,
+		SkipHostEnv:      true,
 		AllowedProtocols: []hcplugin.Protocol{hcplugin.ProtocolGRPC},
 		StartTimeout:     min(10*time.Second, *timeout),
 	})

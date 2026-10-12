@@ -114,11 +114,13 @@ func ProvideOpenAIOAuthService(
 	privacyClientFactory PrivacyClientFactory,
 	tlsProfiles *TLSFingerprintProfileService,
 	authPendingIdentityService *AuthPendingIdentityService,
+	refreshAPI *OAuthRefreshAPI,
 ) *OpenAIOAuthService {
 	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
 	svc.SetSessionStore(NewPendingAuthOpenAIOAuthSessionStore(authPendingIdentityService))
 	svc.SetPrivacyClientFactory(privacyClientFactory)
 	svc.tlsProfiles = tlsProfiles
+	svc.refreshAPI = refreshAPI
 	return svc
 }
 

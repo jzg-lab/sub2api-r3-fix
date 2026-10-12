@@ -6,7 +6,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -86,44 +85,72 @@ type recentAccountStatsKey struct{}
 func withRecentAccountStats(ctx context.Context, cache GatewayCache, accounts []Account) context.Context {
 	ids := make([]int64, 0, len(accounts))
 	for _, account := range accounts {
-		ids = append(ids, account.ID)
+		if account.Type == AccountTypeAPIKey {
+			ids = append(ids, account.ID)
+		}
 	}
 	stats, _ := LoadAccountRecentStats(ctx, cache, ids)
 	return context.WithValue(ctx, recentAccountStatsKey{}, stats)
 }
 
-func recentAccountReliability(ctx context.Context, id int64) float64 {
+// Preserve the existing eligibility and priority tiers; quality only tilts the weighted order.
+func sortByRecentQuality(ctx context.Context, accounts []*Account) bool {
 	stats, _ := ctx.Value(recentAccountStatsKey{}).(map[int64]AccountRecentStats)
-	return stats[id].Reliability(time.Now())
-}
-
-func sortByRecentReliability(ctx context.Context, accounts []*Account) {
-	sort.SliceStable(accounts, func(i, j int) bool {
-		if accounts[i].Priority != accounts[j].Priority {
-			return accounts[i].Priority < accounts[j].Priority
+	applied := false
+	for start := 0; start < len(accounts); {
+		end := start + 1
+		for end < len(accounts) && accounts[end].Priority == accounts[start].Priority {
+			end++
 		}
-		return recentAccountReliability(ctx, accounts[i].ID) > recentAccountReliability(ctx, accounts[j].ID)
-	})
-}
-
-func filterByRecentReliability(ctx context.Context, accounts []accountWithLoad) []accountWithLoad {
-	best := -1.0
-	var selected []accountWithLoad
-	for _, account := range accounts {
-		score := recentAccountReliability(ctx, account.account.ID)
-		if score > best {
-			best = score
-			selected = selected[:0]
+		hasQuality := false
+		for _, account := range accounts[start:end] {
+			sample := stats[account.ID]
+			hasQuality = hasQuality || (account.Type == AccountTypeAPIKey && sample.Successes+sample.Failures > 0)
 		}
-		if score == best {
-			selected = append(selected, account)
+		if !hasQuality {
+			start = end
+			continue
 		}
+		applied = true
+		candidates := make([]openAIAccountCandidateScore, 0, end-start)
+		for i, account := range accounts[start:end] {
+			score := float64(end-start-i) / float64(end-start)
+			if account.Type == AccountTypeAPIKey {
+				sample := stats[account.ID]
+				score += 0.8 * (sample.Reliability(time.Now()) - 0.9)
+				if sample.TTFTCount > 0 {
+					ttft := float64(sample.TTFTSumMs) / float64(sample.TTFTCount)
+					score += 0.5 * (1/(1+ttft/1000) - 0.5)
+				}
+			}
+			candidates = append(candidates, openAIAccountCandidateScore{account: account, score: score})
+		}
+		for i, candidate := range buildOpenAIWeightedSelectionOrder(candidates, OpenAIAccountScheduleRequest{}) {
+			accounts[start+i] = candidate.account
+		}
+		start = end
 	}
-	return selected
+	return applied
+}
+
+func orderLoadedAccountsByRecentQuality(ctx context.Context, accounts []accountWithLoad) bool {
+	ordered := make([]*Account, len(accounts))
+	byID := make(map[int64]accountWithLoad, len(accounts))
+	for i, candidate := range accounts {
+		ordered[i] = candidate.account
+		byID[candidate.account.ID] = candidate
+	}
+	if !sortByRecentQuality(ctx, ordered) {
+		return false
+	}
+	for i, account := range ordered {
+		accounts[i] = byID[account.ID]
+	}
+	return true
 }
 
 func accountAttemptFailure(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, errPluginRuntimeUnavailable) {
 		return false
 	}
 	var failure *UpstreamFailoverError
@@ -142,10 +169,16 @@ func recordAccountAttempt(c *gin.Context, cache GatewayCache, account *Account, 
 	if !ok || account == nil || c == nil || c.Request.Context().Err() != nil || GetOpsCyberPolicy(c) != nil {
 		return
 	}
+	if errors.Is(err, errPluginRuntimeUnavailable) {
+		return
+	}
 	streamErr, exists := GetOpsStreamError(c)
 	// Ops keeps historical WS failures; only the current turn describes this attempt.
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS && streamErr.Turn != c.GetInt(OpsStreamTurnKey) {
 		exists = false
+	}
+	if exists && lastOpsUpstreamErrorIsPluginUnavailable(streamErr.UpstreamErrors) {
+		return
 	}
 	if exists && streamErr.IntendedStatus >= 400 {
 		if streamErr.IntendedStatus < 500 && streamErr.IntendedStatus != 429 {

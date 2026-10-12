@@ -182,9 +182,18 @@ func (s *OpenAIOperationsService) Pool(ctx context.Context, groupID int64) (*Ope
 	now := time.Now()
 	out := &OpenAIAccountPoolState{ObservedAt: now, Total: len(accounts), Accounts: make([]OpenAIAccountOperationalState, 0, len(accounts))}
 	ids := make([]int64, 0, len(accounts))
+	var scheduler *defaultOpenAIAccountScheduler
+	if s.gateway != nil {
+		scheduler, _ = s.gateway.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	}
 	for i := range accounts {
 		a := &accounts[i]
 		state := accountOperationalState(a, now)
+		if scheduler != nil && a.Type != AccountTypeAPIKey {
+			cfg := s.gateway.openAIStickyEscapeConfig()
+			cfg.preserveCacheAffinity = a.IsOpenAIOAuthLike()
+			state.StickyEscapeReason, _, _, _ = scheduler.shouldEscapeStickyAccount(a.ID, cfg)
+		}
 		if state.Schedulable {
 			out.Schedulable++
 		}
@@ -242,6 +251,9 @@ func (s *OpenAIOperationsService) Stop() {
 }
 
 func classifyOpenAIRecovery(message string) string {
+	if isTerminalOpenAIAuthFailure(message) {
+		return "permanent"
+	}
 	value := strings.ToLower(message)
 	for _, permanent := range []string{"account_deactivated", "invalid_grant", "refresh_token_revoked", "refresh token revoked", "token has been revoked"} {
 		if strings.Contains(value, permanent) {
@@ -252,6 +264,21 @@ func classifyOpenAIRecovery(message string) string {
 		return "rate_limit"
 	}
 	return "recoverable"
+}
+
+func classifyOpenAIRefreshRecovery(message string) string {
+	classification := classifyOpenAIRecovery(message)
+	if classification != "recoverable" {
+		return classification
+	}
+	// Only expiry reported by the refresh endpoint is terminal. A client
+	// configuration error may recover after repair without new credentials.
+	for _, word := range openAIAuthErrorWords(message) {
+		if word == "token_expired" {
+			return "permanent"
+		}
+	}
+	return classification
 }
 
 func (s *OpenAIOperationsService) runRecovery(ctx context.Context, cfg OpenAIRecoverySettings) error {
@@ -300,7 +327,7 @@ func (s *OpenAIOperationsService) runRecovery(ctx context.Context, cfg OpenAIRec
 			stop()
 			switch {
 			case refreshErr != nil:
-				record.Classification = classifyOpenAIRecovery(refreshErr.Error())
+				record.Classification = classifyOpenAIRefreshRecovery(refreshErr.Error())
 				record.Permanent = record.Classification == "permanent"
 				record.ConsecutiveFailures++
 				record.Outcome = "failed"

@@ -73,8 +73,10 @@ func TestRecentAccountOrderingPreservesConfiguredPriority(t *testing.T) {
 		2: {Successes: 50},
 	})
 	accounts := []*Account{{ID: 1, Priority: 2}, {ID: 2, Priority: 2}, {ID: 3, Priority: 0}}
-	sortByRecentReliability(ctx, accounts)
-	require.Equal(t, []int64{3, 2, 1}, []int64{accounts[0].ID, accounts[1].ID, accounts[2].ID})
+	sortAccountsByPriorityAndLastUsed(accounts, false)
+	sortByRecentQuality(ctx, accounts)
+	require.EqualValues(t, 3, accounts[0].ID)
+	require.ElementsMatch(t, []int64{1, 2}, []int64{accounts[1].ID, accounts[2].ID})
 }
 
 func TestRecentAccountCacheIgnoresBillingSubstitution(t *testing.T) {
@@ -123,4 +125,17 @@ func TestRecentWSStatsDoNotReusePriorTurnFailure(t *testing.T) {
 			require.Len(t, GetOpsStreamErrors(c), 1, "historical failures must remain available to ops logging")
 		})
 	}
+}
+
+func TestRecentStatsExcludeSharedPluginFailureWithSSESnapshot(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	cache := &recentStatsTestCache{}
+	svc := &OpenAIGatewayService{cache: cache}
+	c.Set(OpsUpstreamErrorsKey, []*OpsUpstreamErrorEvent{{Kind: OpsUpstreamErrorKindPluginUnavailable}})
+	MarkOpsStreamFailure(c, "upstream_error", "", "plugin unavailable", 502)
+	svc.ObserveAccountAttempt(c, &Account{ID: 1}, nil, fmt.Errorf("forward: %w", errPluginRuntimeUnavailable))
+	require.Empty(t, cache.observations)
+	svc.ObserveAccountAttempt(c, &Account{ID: 1}, &OpenAIForwardResult{UpstreamTerminalEvent: "response.failed"}, nil)
+	require.Empty(t, cache.observations)
 }

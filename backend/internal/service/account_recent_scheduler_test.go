@@ -37,19 +37,28 @@ func TestRecentAccountStatsDriveNewSelectionAndFailover(t *testing.T) {
 			cfg.Gateway.OpenAIWS.LBTopK = 1
 			cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 10
 			svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cache: cache, cfg: cfg, rateLimitService: newOpenAIAdvancedSchedulerRateLimitService(advanced), concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
-			ctx := WithAPIKeyRouteAdmission(context.Background())
-			selected, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
-			require.NoError(t, err)
-			require.EqualValues(t, 2, selected.Account.ID)
-			if selected.ReleaseFunc != nil {
-				selected.ReleaseFunc()
+			counts := map[int64]int{}
+			for range 120 {
+				ctx := WithAPIKeyRouteAdmission(context.Background())
+				selected, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+				require.NoError(t, err)
+				counts[selected.Account.ID]++
+				if selected.ReleaseFunc != nil {
+					selected.ReleaseFunc()
+				}
+				failed := selected.Account.ID
+				FailAPIKeyRouteAccount(ctx, failed)
+				selected, _, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+				require.NoError(t, err)
+				require.NotEqual(t, failed, selected.Account.ID)
+				if selected.ReleaseFunc != nil {
+					selected.ReleaseFunc()
+				}
 			}
-			FailAPIKeyRouteAccount(ctx, 2)
-			selected, _, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
-			require.NoError(t, err)
-			require.EqualValues(t, 3, selected.Account.ID)
-			if selected.ReleaseFunc != nil {
-				selected.ReleaseFunc()
+			if advanced == "true" {
+				require.Equal(t, 120, counts[2], "explicit top-K=1 retains the configured scorer behavior")
+			} else {
+				require.Len(t, counts, 3, "quality must not hard-filter weaker eligible accounts")
 			}
 		})
 	}
@@ -58,7 +67,7 @@ func TestRecentAccountStatsDriveNewSelectionAndFailover(t *testing.T) {
 func TestConversationAffinityIgnoresOtherConversationsFailures(t *testing.T) {
 	for _, advanced := range []string{"false", "true"} {
 		for _, smart := range []bool{false, true} {
-			for _, kind := range []string{AccountTypeOAuth, AccountTypeAPIKey} {
+			for _, kind := range []string{AccountTypeAPIKey} {
 				t.Run(fmt.Sprintf("%s/smart=%v/%s", advanced, smart, kind), func(t *testing.T) {
 					resetOpenAIAdvancedSchedulerSettingCacheForTest()
 					groupID := int64(20)
@@ -86,7 +95,9 @@ func TestConversationAffinityIgnoresOtherConversationsFailures(t *testing.T) {
 						return selected.Account.ID
 					}
 					require.EqualValues(t, 1, selectAccount("healthy", nil))
-					require.EqualValues(t, 2, selectAccount("", nil), "new conversations still use quality")
+					if advanced == "true" {
+						require.EqualValues(t, 2, selectAccount("", nil), "configured top-K=1 chooses the higher quality candidate")
+					}
 					require.EqualValues(t, 2, selectAccount("failing", map[int64]struct{}{1: {}}))
 					require.EqualValues(t, 2, selectAccount("failing", nil), "recovered conversation retains its new account")
 					require.EqualValues(t, 1, selectAccount("healthy", nil), "another conversation must retain its original account")
@@ -116,58 +127,61 @@ func TestConversationBusyAccountPolicy(t *testing.T) {
 				if selected.ReleaseFunc != nil {
 					defer selected.ReleaseFunc()
 				}
-				if kind == AccountTypeOAuth {
+				if kind == AccountTypeOAuth && advanced == "false" {
 					require.EqualValues(t, 1, selected.Account.ID)
 					require.NotNil(t, selected.WaitPlan)
 					require.Equal(t, 45*time.Second, selected.WaitPlan.Timeout)
 				} else {
 					require.EqualValues(t, 2, selected.Account.ID)
 					require.Nil(t, selected.WaitPlan)
-					require.EqualValues(t, 2, cache.sessionBindings["openai:conversation"])
+					if kind == AccountTypeOAuth {
+						require.EqualValues(t, 1, cache.sessionBindings["openai:conversation"], "reference escape preserves the old binding")
+					} else {
+						require.EqualValues(t, 2, cache.sessionBindings["openai:conversation"])
+					}
 				}
 			})
 		}
 	}
 }
 
-func TestConversationBusyAccountPolicyGenericScheduler(t *testing.T) {
-	for _, batch := range []bool{false, true} {
-		for _, kind := range []string{AccountTypeOAuth, AccountTypeAPIKey} {
-			for _, freeBackup := range []bool{false, true} {
-				t.Run(fmt.Sprintf("batch=%v/%s/free=%v", batch, kind, freeBackup), func(t *testing.T) {
-					accounts := []Account{
-						{ID: 1, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
-						{ID: 2, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
-					}
-					repo := &mockAccountRepoForPlatform{accounts: accounts, accountsByID: map[int64]*Account{1: &accounts[0], 2: &accounts[1]}}
-					cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"conversation": 1}}
-					cfg := testConfig()
-					cfg.Gateway.Scheduling.LoadBatchEnabled = batch
-					cfg.Gateway.Scheduling.StickySessionMaxWaiting = 2
-					cfg.Gateway.Scheduling.StickySessionWaitTimeout = 45 * time.Second
-					backupLoad := 100
-					if freeBackup {
-						backupLoad = 0
-					}
-					svc := &GatewayService{accountRepo: repo, cache: cache, cfg: cfg, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquireResults: map[int64]bool{1: false, 2: freeBackup}, loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, LoadRate: 100}, 2: {AccountID: 2, LoadRate: backupLoad}}})}
-					selected, err := svc.SelectAccountWithLoadAwareness(context.Background(), nil, "conversation", "", nil, "", 0)
-					require.NoError(t, err)
-					if selected.ReleaseFunc != nil {
-						defer selected.ReleaseFunc()
-					}
-					if kind == AccountTypeAPIKey && freeBackup {
-						require.EqualValues(t, 2, selected.Account.ID)
-						require.Nil(t, selected.WaitPlan)
-						require.EqualValues(t, 2, cache.sessionBindings["conversation"])
-					} else {
-						require.NotNil(t, selected.WaitPlan)
-						if kind == AccountTypeOAuth {
-							require.EqualValues(t, 1, selected.Account.ID)
-							require.Equal(t, 45*time.Second, selected.WaitPlan.Timeout)
-						}
-					}
-				})
-			}
+func TestRecentQualityPreservesOAuthScoresAndMixedPoolCandidates(t *testing.T) {
+	accounts := []*Account{{ID: 1, Type: AccountTypeOAuth}, {ID: 2, Type: AccountTypeAPIKey}, {ID: 3, Type: AccountTypeAPIKey}}
+	stats := newOpenAIAccountRuntimeStats()
+	ttft := 100
+	stats.report(1, false, &ttft)
+	cache := &recentSchedulerCache{stats: map[int64]AccountRecentStats{1: {Successes: 1000, TTFTCount: 1, TTFTSumMs: 9000}, 2: {Successes: 99, Failures: 1}, 3: {Successes: 98, Failures: 2}}}
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cache: cache, cfg: &config.Config{}}, stats: stats}
+	plan := scheduler.buildOpenAIAccountLoadPlan(context.Background(), OpenAIAccountScheduleRequest{}, accounts, nil)
+	require.Len(t, plan.allCandidates, 3)
+	for _, candidate := range plan.allCandidates {
+		if candidate.account.ID == 1 {
+			require.InDelta(t, 0.2, candidate.errorRate, 0.0001)
+			require.Equal(t, float64(100), candidate.ttft)
 		}
+		if candidate.account.ID == 2 {
+			require.InDelta(t, 1-cache.stats[2].Reliability(time.Now()), candidate.errorRate, 0.0001)
+		}
+	}
+	ctx := context.WithValue(context.Background(), recentAccountStatsKey{}, cache.stats)
+	oauthOnly := []*Account{{ID: 1, Type: AccountTypeOAuth}, {ID: 4, Type: AccountTypeOAuth}}
+	require.False(t, sortByRecentQuality(ctx, oauthOnly))
+	require.EqualValues(t, 1, oauthOnly[0].ID)
+	counts := map[int64]int{}
+	for range 300 {
+		ordered := append([]*Account(nil), accounts...)
+		require.True(t, sortByRecentQuality(ctx, ordered))
+		counts[ordered[0].ID]++
+	}
+	require.Len(t, counts, 3, "mixed pools retain both account types and near-equal API keys")
+}
+
+func TestRecentQualityLeavesUnscoredPriorityTierInOriginalOrder(t *testing.T) {
+	ctx := context.WithValue(context.Background(), recentAccountStatsKey{}, map[int64]AccountRecentStats{3: {Successes: 100}})
+	for range 30 {
+		accounts := []*Account{{ID: 1, Type: AccountTypeOAuth, Priority: 0}, {ID: 2, Type: AccountTypeOAuth, Priority: 0}, {ID: 3, Type: AccountTypeAPIKey, Priority: 1}}
+		sortByRecentQuality(ctx, accounts)
+		require.EqualValues(t, 1, accounts[0].ID, "a lower-priority API key must not change the OAuth-only tier")
+		require.EqualValues(t, 2, accounts[1].ID)
 	}
 }

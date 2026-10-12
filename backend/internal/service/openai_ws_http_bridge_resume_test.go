@@ -122,7 +122,7 @@ func TestOpenAIWSHTTPBridgeLaterTurn429RetriesCurrentTurnOnReplacementAccount(t 
 				openAIWSTurnStateHeader: []string{"old-account-state"},
 			},
 			Body: io.NopCloser(strings.NewReader(
-				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_first\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first-ok\"}]},{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"inspect\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_first\",\"output\":[{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"opaque\",\"summary\":[]},{\"id\":\"rs_reference\",\"type\":\"reasoning\"},{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first-ok\"}]},{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"inspect\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
 			)),
 		},
 		{
@@ -232,7 +232,9 @@ func TestOpenAIWSHTTPBridgeLaterTurn429RetriesCurrentTurnOnReplacementAccount(t 
 		require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(retryPayload, "model").String())
 		input := gjson.GetBytes(retryPayload, "input")
 		require.True(t, input.IsArray())
-		require.Len(t, input.Array(), 4)
+		require.Len(t, input.Array(), 5)
+		require.Equal(t, "opaque", input.Get("1.encrypted_content").String())
+		require.NotContains(t, input.Raw, "rs_reference")
 		require.Contains(t, input.Raw, "first")
 		require.Contains(t, input.Raw, "first-ok")
 		require.Contains(t, input.Raw, "second")
@@ -252,6 +254,15 @@ func TestOpenAIWSHTTPBridgeLaterTurn429RetriesCurrentTurnOnReplacementAccount(t 
 	}
 	require.Len(t, upstream.bodies, 3)
 	require.Contains(t, string(upstream.bodies[0]), "first")
+	for _, body := range upstream.bodies[1:] {
+		require.False(t, gjson.GetBytes(body, "previous_response_id").Exists())
+		require.Len(t, gjson.GetBytes(body, "input").Array(), 5)
+		require.Equal(t, "opaque", gjson.GetBytes(body, "input.1.encrypted_content").String())
+		require.Equal(t, "assistant", gjson.GetBytes(body, "input.2.role").String())
+		require.Equal(t, "call_1", gjson.GetBytes(body, "input.3.call_id").String())
+		require.Equal(t, "call_1", gjson.GetBytes(body, "input.4.call_id").String())
+		require.NotContains(t, string(body), "rs_reference")
+	}
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", "client-session"), gjson.GetBytes(upstream.bodies[1], "client_metadata.session_id").String())
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "thread", "client-thread"), gjson.GetBytes(upstream.bodies[1], "client_metadata.thread_id").String())
 	require.NotContains(t, string(upstream.bodies[2]), "previous_response_id")

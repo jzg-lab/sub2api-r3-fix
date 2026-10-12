@@ -22,14 +22,17 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
-	pluginConfigMaxBytes  = 4 * 1024 * 1024
-	pluginUIAssetMaxBytes = 32 * 1024 * 1024
-	pluginReconcilePeriod = time.Second
-	pluginHealthTimeout   = 5 * time.Second
-	pluginUITokenPrefix   = "sub2api:plugin-ui:v1:"
+	pluginConfigMaxBytes   = 4 * 1024 * 1024
+	pluginUIAssetMaxBytes  = 32 * 1024 * 1024
+	pluginReconcilePeriod  = time.Second
+	pluginHealthTimeout    = 5 * time.Second
+	pluginHealthDrainGrace = 2 * time.Minute
+	pluginUITokenPrefix    = "sub2api:plugin-ui:v1:"
 )
 
 type pluginRoute struct {
@@ -327,12 +330,31 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 		healthCtx, cancel := context.WithTimeout(ctx, pluginHealthTimeout)
 		healthErr := current.runtime.checkHealth(healthCtx)
 		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if healthErr != nil {
+			runtime := current.runtime
+			if !runtime.client.Exited() && (errors.Is(healthErr, context.DeadlineExceeded) || status.Code(healthErr) == codes.DeadlineExceeded) {
+				runtime.healthUnavailable.Store(true)
+				if runtime.healthFailureSince.IsZero() {
+					runtime.healthFailureSince = time.Now()
+					slog.Warn("plugin_health_quarantined", "plugin_id", current.pluginID, "in_flight", runtime.inFlight.Load(), "grace_seconds", pluginHealthDrainGrace.Seconds())
+				}
+				// Reject new work, but let existing streams finish or recover on
+				// the same process. A stuck process still has a bounded lifetime.
+				if runtime.inFlight.Load() > 0 && time.Since(runtime.healthFailureSince) < pluginHealthDrainGrace {
+					return healthErr
+				}
+				slog.Warn("plugin_health_retired", "plugin_id", current.pluginID, "in_flight", runtime.inFlight.Load(), "grace_expired", time.Since(runtime.healthFailureSince) >= pluginHealthDrainGrace)
+			}
 			if stateErr := m.markRuntimeUnavailable(current, healthErr.Error()); stateErr != nil {
 				return errors.Join(healthErr, stateErr)
 			}
 			return healthErr
 		}
+		current.runtime.healthFailureSince = time.Time{}
+		current.runtime.healthUnavailable.Store(false)
 		if enabled.State == PluginStateError || (enabled.State == PluginStateStarting && m.startingStateExpired(enabled)) {
 			return m.repo.MarkRuntimeHealthy(ctx, enabled.ID, enabled.BinarySHA256, enabled.ConfigEncrypted)
 		}
@@ -1151,17 +1173,20 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 		return nil, false, nil
 	}
 	if route.runtime == nil {
-		return nil, true, fmt.Errorf("OpenAI OAuth 插件不可用: %s", route.unavailable)
+		return nil, true, fmt.Errorf("%w: %s", errPluginRuntimeUnavailable, route.unavailable)
 	}
 	if route.runtime.client.Exited() {
-		runtimeErr := errors.New("OpenAI OAuth 插件进程已退出")
+		runtimeErr := fmt.Errorf("%w: 插件进程已退出", errPluginRuntimeUnavailable)
 		if stateErr := m.markRuntimeUnavailable(route, runtimeErr.Error()); stateErr != nil {
 			return nil, true, errors.Join(runtimeErr, stateErr)
 		}
 		return nil, true, runtimeErr
 	}
 	if !route.runtime.beginRequest() {
-		return nil, true, errors.New("OpenAI OAuth 插件正在停止")
+		if route.runtime.healthUnavailable.Load() {
+			return nil, true, fmt.Errorf("%w: 健康检查超时，暂不接收新请求", errPluginRuntimeUnavailable)
+		}
+		return nil, true, fmt.Errorf("%w: 插件正在停止", errPluginRuntimeUnavailable)
 	}
 	policy := pluginv1.ProbeRateLimitPolicy{}
 	if m.rateLimitService != nil {
@@ -1201,7 +1226,7 @@ func (m *PluginManager) markRuntimeUnavailable(failedRoute *pluginRoute, message
 		return nil
 	}
 	if failedRoute.runtime != nil {
-		failedRoute.runtime.kill()
+		failedRoute.runtime.draining.Store(true)
 	}
 	delete(m.runtimes, failedRoute.pluginID)
 	m.route.Store(&pluginRoute{
@@ -1210,6 +1235,9 @@ func (m *PluginManager) markRuntimeUnavailable(failedRoute *pluginRoute, message
 		unavailable:    message,
 	})
 	m.mu.Unlock()
+	if failedRoute.runtime != nil {
+		failedRoute.runtime.kill()
+	}
 	return nil
 }
 

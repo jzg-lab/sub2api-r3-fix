@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/evidence"
 	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
@@ -25,6 +26,9 @@ type hostFixture struct {
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv("SUB2API_TESTHOST_FIXTURE"); mode != "" {
+		if _, err := evidence.Open(os.Getenv("SUB2API_PLUGIN_STATE_DIR")); err != nil {
+			os.Exit(3)
+		}
 		if err := os.WriteFile(os.Getenv("SUB2API_TESTHOST_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 			os.Exit(2)
 		}
@@ -32,6 +36,26 @@ func TestMain(m *testing.M) {
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func TestRunRequiresDurableStateForRealForward(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"-plugin", executable, "-forward", "-token", "fixture"})
+	if err == nil || !strings.Contains(err.Error(), "-state-dir") {
+		t.Fatalf("real forward accepted disposable state: %v", err)
+	}
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"-plugin", executable, "-state-dir", link})
+	if err == nil || !strings.Contains(err.Error(), "private and absolute") {
+		t.Fatalf("testhost accepted symlinked evidence: %v", err)
+	}
 }
 
 func (f *hostFixture) GetInfo(context.Context, *pluginv1.GetInfoRequest) (*pluginv1.GetInfoResponse, error) {

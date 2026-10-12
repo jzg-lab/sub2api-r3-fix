@@ -1599,6 +1599,9 @@ func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
 	if isOpenAITransientProcessingError(http.StatusBadRequest, message, payload) {
 		return true
 	}
+	if openAIStreamExplicitServerFailure(payload, message) {
+		return true
+	}
 	combined := strings.ToLower(strings.TrimSpace(message + " " +
 		gjson.GetBytes(payload, "error.message").String() + " " +
 		gjson.GetBytes(payload, "response.error.message").String()))
@@ -1670,12 +1673,18 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	kind string,
 	payload []byte,
 	message string,
+	observations ...*OpenAIStreamFailureObservation,
 ) string {
 	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
 	if message == "" {
 		message = "OpenAI upstream response failed"
 	}
 	statusCode := openAIStreamFailureStatus(payload, message)
+	observation := newOpenAIStreamFailureObservation(payload, message, nil)
+	if len(observations) > 0 && observations[0] != nil {
+		observation = observations[0]
+		statusCode = observation.SemanticStatus
+	}
 	detail := ""
 	if len(payload) > 0 && s != nil && s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
@@ -1694,6 +1703,7 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 			Kind:               kind,
 			Message:            message,
 			Detail:             detail,
+			StreamFailure:      observation,
 		}
 		if account != nil {
 			event.Platform = account.Platform
@@ -1883,6 +1893,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	stage := newDefaultOpenAIFirstOutputStage()
 	defer stage.Close()
 	// Only comments are emitted until a meaningful event is ready to commit.
+	var pendingFailureObservation *OpenAIStreamFailureObservation
+	defer func() {
+		if sawFailedEvent && pendingFailureObservation != nil {
+			s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID,
+				"http_error", nil, failedMessage, pendingFailureObservation)
+		}
+	}()
 	stopKeepalive := func() {}
 	if s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
 		stopKeepalive = startOpenAISSEKeepalive(c,
@@ -1998,6 +2015,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
+				(eventType == "response.completed" || eventType == "response.done") {
+				sawBareError = false
+				sawFailedEvent = false
+				responseFailedPending = false
+				suppressCurrentEvent = false
+				bareErrorPayload = nil
+				bareErrorAccountSideEffectsPending = false
+				pendingFailureObservation = nil
+				failedMessage = ""
+			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}
@@ -2063,11 +2091,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						}
 					}
 					if shouldFailover {
+						pendingFailureObservation = nil
 						return resultWithUsage(),
 							s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
 					}
 					if !cyberHit && !sawBareError {
 						if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
+							pendingFailureObservation = nil
 							// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
 							// antigravity 先例），否则透传命中的 failed 在监控中不可见。
 							s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "http_error", dataBytes, failedMessage)
@@ -2085,6 +2115,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 				forceFlushFailedEvent = true
 				sawFailedEvent = true
+				pendingFailureObservation = newOpenAIStreamFailureObservation(dataBytes, failedMessage, &outputStarted, eventType)
 			}
 			if trimmedData == "[DONE]" {
 				sawDone = true

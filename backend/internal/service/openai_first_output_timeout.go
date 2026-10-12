@@ -243,6 +243,26 @@ func (s *OpenAIGatewayService) openAIFirstOutputTimeout(reasoningEffort string) 
 	return time.Duration(seconds) * time.Second
 }
 
+func (s *OpenAIGatewayService) openAIFirstOutputTimeoutForAccount(account *Account, reasoningEffort string) time.Duration {
+	if account == nil || account.Type == AccountTypeAPIKey {
+		return s.openAIFirstOutputTimeout(reasoningEffort)
+	}
+	if s == nil || s.cfg == nil {
+		return 0
+	}
+	seconds := s.cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds
+	if seconds <= 0 {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(reasoningEffort)) {
+	case "high", "xhigh", "max":
+		if override := s.cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds; override > 0 {
+			seconds = override
+		}
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	ctx context.Context,
 	c *gin.Context,

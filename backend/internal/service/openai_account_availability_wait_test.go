@@ -250,11 +250,12 @@ func TestWaitForOpenAITransientAvailabilityRejectsWindowBeyondBudget(t *testing.
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
-func TestSmartRoutesSkipAvailabilityWaitButPinnedRoutesKeepIt(t *testing.T) {
+func TestSmartRoutesSkipAPIKeyAvailabilityWaitButPinnedRoutesKeepIt(t *testing.T) {
 	for _, canFailover := range []bool{true, false} {
 		t.Run(fmt.Sprint(canFailover), func(t *testing.T) {
 			resetAt := time.Now().Add(40 * time.Millisecond)
 			account := openAIAvailabilityWaitAccount(99)
+			account.Type = AccountTypeAPIKey
 			account.RateLimitResetAt = &resetAt
 			repo := &openAIAvailabilityWaitRepoStub{mockAccountRepoForGemini: mockAccountRepoForGemini{accounts: []Account{account}, accountsByID: map[int64]*Account{99: &account}}, candidates: []Account{account}}
 			svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{RunMode: config.RunModeSimple}}
@@ -272,4 +273,19 @@ func TestSmartRoutesSkipAvailabilityWaitButPinnedRoutesKeepIt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSmartRoutesOAuthKeepsReferenceAvailabilityWait(t *testing.T) {
+	resetAt := time.Now().Add(30 * time.Millisecond)
+	account := openAIAvailabilityWaitAccount(99)
+	account.Type = AccountTypeOAuth
+	account.RateLimitResetAt = &resetAt
+	repo := &openAIAvailabilityWaitRepoStub{mockAccountRepoForGemini: mockAccountRepoForGemini{accounts: []Account{account}, accountsByID: map[int64]*Account{99: &account}}, candidates: []Account{account}}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: &config.Config{RunMode: config.RunModeSimple}}
+	ctx, cancel := context.WithTimeout(WithAPIKeyRouteAdmission(context.Background()), time.Second)
+	defer cancel()
+	selected, _, err := svc.SelectAccountWithScheduler(ctx, nil, "", "", "gpt-5.6-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.False(t, time.Now().Before(resetAt))
 }

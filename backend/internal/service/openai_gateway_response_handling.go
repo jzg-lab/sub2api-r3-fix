@@ -55,7 +55,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	firstOutputTimeout := time.Duration(0)
 	if account != nil && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
+		firstOutputTimeout = s.openAIFirstOutputTimeoutForAccount(account, reasoningEffort)
 	}
 	guardFirstOutput := firstOutputTimeout > 0
 	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI
@@ -256,6 +256,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	codexFailureTerminal := account != nil && account.IsOpenAIOAuthLike()
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamEarlyErr error
+	var pendingFailureObservation *OpenAIStreamFailureObservation
+	defer func() {
+		if sawFailedEvent && streamEarlyErr == nil && pendingFailureObservation != nil {
+			s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID,
+				"http_error", nil, failedMessage, pendingFailureObservation)
+		}
+	}()
 	terminalFailurePending := false
 	failureDelivered := false
 	suppressCurrentEvent := false
@@ -491,6 +498,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = false
 				bareErrorPayload = nil
 				bareErrorAccountSideEffectsPending = false
+				pendingFailureObservation = nil
 				failedMessage = ""
 			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
@@ -597,6 +605,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				}
 				forceFlushFailedEvent = true
 				sawFailedEvent = true
+				pendingFailureObservation = newOpenAIStreamFailureObservation(dataBytes, failedMessage, &outputStarted, eventType)
 				terminalFailurePending = !codexFailureTerminal || eventType == "response.failed"
 			}
 			if normalizedData, normalized := normalizeCompletedImageGenerationStatus(dataBytes); normalized {

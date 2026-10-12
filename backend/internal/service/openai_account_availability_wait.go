@@ -153,6 +153,9 @@ func (s *OpenAIGatewayService) nextOpenAITransientAvailability(
 				s.needsUpstreamChannelRestrictionCheck(candidateCtx, currentGroupID)
 			for i := range accounts {
 				account := &accounts[i]
+				if !s.apiKeyRoutePluginAvailable(ctx, account) || (HasAPIKeyRouteAdmission(ctx) && account.Type == AccountTypeAPIKey) {
+					continue
+				}
 				if !s.isOpenAIPersistentAvailabilityCandidate(
 					candidateCtx,
 					account,

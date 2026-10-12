@@ -499,13 +499,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, service.PlatformGemini, true)
 						return
 					}
-					if nextSmartRoute(c, failoverErr, account) {
-						smartRouteAttemptFrom(c).forceCacheBilling = needForceCacheBilling(hasBoundSession, failoverErr, false)
-						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
-						return
-					}
-					action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+					action := fs.HandleSmartRouteFailoverError(c.Request.Context(), c, h.gatewayService, account, failoverErr)
 					switch action {
+					case FailoverNextRoute:
+						return
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:
@@ -1021,13 +1018,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
 					}
-					if nextSmartRoute(c, failoverErr, account) {
-						smartRouteAttemptFrom(c).forceCacheBilling = needForceCacheBilling(hasBoundSession, failoverErr, false)
-						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
-						return
-					}
-					action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+					action := fs.HandleSmartRouteFailoverError(c.Request.Context(), c, h.gatewayService, account, failoverErr)
 					switch action {
+					case FailoverNextRoute:
+						return
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:

@@ -28,6 +28,8 @@ const (
 	FailoverExhausted
 	// FailoverCanceled context 已取消（调用方应直接 return）
 	FailoverCanceled
+	// FailoverNextRoute hands selection back to the shared package router.
+	FailoverNextRoute
 )
 
 const (

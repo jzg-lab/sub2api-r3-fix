@@ -73,8 +73,9 @@ func TestOpenAIResponsesTTFTStartsAtCompletedImage(t *testing.T) {
 
 func TestOpenAINativeMetadataDoesNotDisarmFirstOutputTimeout(t *testing.T) {
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		MaxLineSize:                     defaultMaxLineSize,
-		OpenAIFirstOutputTimeoutSeconds: 1,
+		MaxLineSize:                          defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      1,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
 	}}}
 	reader, writer := io.Pipe()
 	writerDone := make(chan struct{})
@@ -130,8 +131,9 @@ func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay 
 		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{openAITTFTMode: OpenAITTFTModeSemantic, expiresAt: time.Now().Add(time.Minute).UnixNano()})
 	})
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		MaxLineSize:                     defaultMaxLineSize,
-		OpenAIFirstOutputTimeoutSeconds: timeoutSeconds,
+		MaxLineSize:                          defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      timeoutSeconds,
+		OpenAIOAuthFirstOutputTimeoutSeconds: timeoutSeconds,
 	}}}
 	reader, writer := io.Pipe()
 	writerDone := make(chan struct{})

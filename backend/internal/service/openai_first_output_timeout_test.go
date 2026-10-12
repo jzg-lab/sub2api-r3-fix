@@ -55,8 +55,9 @@ func TestOpenAIForwardFirstOutputTimeoutIncludesResponseHeaderWait(t *testing.T)
 	upstream := &blockingOpenAIResponseHeaderUpstream{canceled: make(chan struct{})}
 	svc := &OpenAIGatewayService{
 		cfg: &config.Config{Gateway: config.GatewayConfig{
-			OpenAIFirstOutputTimeoutSeconds: 1,
-			MaxLineSize:                     defaultMaxLineSize,
+			OpenAIFirstOutputTimeoutSeconds:      1,
+			OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+			MaxLineSize:                          defaultMaxLineSize,
 		}},
 		httpUpstream: upstream,
 	}
@@ -91,8 +92,9 @@ func TestOpenAIForwardFirstOutputTimeoutIncludesResponseHeaderWait(t *testing.T)
 
 func TestOpenAINativeFirstOutputTimeoutDisabledPreservesSynchronousStream(t *testing.T) {
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 0,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      0,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 0,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}}
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_disabled"}}`,
@@ -113,8 +115,9 @@ func TestOpenAINativeFirstOutputTimeoutDisabledPreservesSynchronousStream(t *tes
 
 func TestOpenAINativeFirstOutputTimeoutIgnoresPreambleAndCleansReader(t *testing.T) {
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 1,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      1,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}}
 	pr, pw := io.Pipe()
 	writerDone := make(chan struct{})
@@ -155,6 +158,7 @@ func TestOpenAINativeFirstOutputTimeoutIgnoresPreambleAndCleansReader(t *testing
 func TestOpenAIFirstOutputTimeoutForReasoningEffort(t *testing.T) {
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
 		OpenAIFirstOutputTimeoutSeconds:           120,
+		OpenAIOAuthFirstOutputTimeoutSeconds:      120,
 		OpenAIHighEffortFirstOutputTimeoutSeconds: 300,
 	}}}
 
@@ -302,8 +306,9 @@ func TestOpenAIFirstOutputStageUnlinkFailurePermanentlyFallsBackToMemoryAndRetri
 
 func TestOpenAINativeFirstOutputTimeoutDisarmsAfterSemanticOutput(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 1,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      1,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	pr, pw := io.Pipe()
@@ -354,9 +359,10 @@ func TestOpenAINativeFirstOutputTimeoutDoesNotLeakLargePreambleEvent(t *testing.
 func assertOpenAINativeLargeOpenEventTimesOutWithoutLeak(t *testing.T, line string) {
 	t.Helper()
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 1,
-		StreamKeepaliveInterval:         1,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      1,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+		StreamKeepaliveInterval:              1,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	pr, pw := io.Pipe()
@@ -414,8 +420,9 @@ func TestOpenAINativeFirstOutputEOFDispatchesTerminalEventWithoutBlankLine(t *te
 		})
 	})
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 1,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      1,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	payload := `data: {"type":"response.completed","response":{"id":"resp_eof","usage":{"input_tokens":3,"output_tokens":2}}}`
@@ -449,8 +456,9 @@ func TestOpenAINativeFirstOutputEOFDispatchesTerminalEventWithoutBlankLine(t *te
 
 func TestOpenAINativeFirstOutputStageOverflowFailsOverWithoutAttemptBytes(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 30,
-		MaxLineSize:                     2 * 1024 * 1024,
+		OpenAIFirstOutputTimeoutSeconds:      30,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 30,
+		MaxLineSize:                          2 * 1024 * 1024,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	const lineSize = 1024*1024 - 256
@@ -484,8 +492,9 @@ func TestOpenAINativeFirstOutputStageOverflowFailsOverWithoutAttemptBytes(t *tes
 
 func TestOpenAINativeFirstOutputScannerRejectsOversizedLineWithoutLeak(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 30,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      30,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 30,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	oversizedLine := "data: " + strings.Repeat("x", openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance+1024)
@@ -516,8 +525,9 @@ func TestOpenAINativeFirstOutputScannerRejectsOversizedLineWithoutLeak(t *testin
 
 func TestOpenAINativeFirstOutputScannerAllowsLargeEventAfterSemanticBoundary(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 30,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      30,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 30,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{cfg: cfg, responseHeaderFilter: compileResponseHeaderFilter(cfg)}
 	largeDelta := strings.Repeat("i", openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance+1024)
@@ -580,9 +590,10 @@ func TestOpenAINativeFirstOutputTimeoutDisabledKeepsPreamblePrivateAcrossKeepali
 
 func TestOpenAINativeFirstOutputFailoverKeepsAttemptHeadersPrivateAfterKeepaliveCommit(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAIFirstOutputTimeoutSeconds: 2,
-		StreamKeepaliveInterval:         1,
-		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds:      2,
+		OpenAIOAuthFirstOutputTimeoutSeconds: 2,
+		StreamKeepaliveInterval:              1,
+		MaxLineSize:                          defaultMaxLineSize,
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:                  cfg,
@@ -652,4 +663,18 @@ func TestOpenAINativeFirstOutputFailoverKeepsAttemptHeadersPrivateAfterKeepalive
 
 func (u *blockingOpenAIResponseHeaderUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
+func TestOpenAIFirstOutputTimeoutSeparatesAccountTypes(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 180, OpenAIHighEffortFirstOutputTimeoutSeconds: 600}}}
+	oauth := &Account{Type: AccountTypeOAuth}
+	apiKey := &Account{Type: AccountTypeAPIKey}
+	require.Zero(t, svc.openAIFirstOutputTimeoutForAccount(oauth, "high"))
+	require.Equal(t, 180*time.Second, svc.openAIFirstOutputTimeoutForAccount(apiKey, ""))
+	require.Equal(t, 600*time.Second, svc.openAIFirstOutputTimeoutForAccount(apiKey, "high"))
+	svc.cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds = 30
+	svc.cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds = 90
+	require.Equal(t, 30*time.Second, svc.openAIFirstOutputTimeoutForAccount(oauth, ""))
+	require.Equal(t, 90*time.Second, svc.openAIFirstOutputTimeoutForAccount(oauth, "high"))
+	require.Equal(t, 600*time.Second, svc.openAIFirstOutputTimeoutForAccount(apiKey, "high"))
 }

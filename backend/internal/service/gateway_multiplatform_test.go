@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -3514,4 +3515,46 @@ func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
 	require.Nil(t, gotGroup)
 	require.Nil(t, gotID)
 	require.Contains(t, err.Error(), "fallback group cycle")
+}
+
+func TestConversationBusyAccountPolicyGenericScheduler(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		for _, kind := range []string{AccountTypeOAuth, AccountTypeAPIKey} {
+			for _, freeBackup := range []bool{false, true} {
+				t.Run(fmt.Sprintf("batch=%v/%s/free=%v", batch, kind, freeBackup), func(t *testing.T) {
+					accounts := []Account{
+						{ID: 1, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
+						{ID: 2, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
+					}
+					repo := &mockAccountRepoForPlatform{accounts: accounts, accountsByID: map[int64]*Account{1: &accounts[0], 2: &accounts[1]}}
+					cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"conversation": 1}}
+					cfg := testConfig()
+					cfg.Gateway.Scheduling.LoadBatchEnabled = batch
+					cfg.Gateway.Scheduling.StickySessionMaxWaiting = 2
+					cfg.Gateway.Scheduling.StickySessionWaitTimeout = 45 * time.Second
+					backupLoad := 100
+					if freeBackup {
+						backupLoad = 0
+					}
+					svc := &GatewayService{accountRepo: repo, cache: cache, cfg: cfg, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquireResults: map[int64]bool{1: false, 2: freeBackup}, loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, LoadRate: 100}, 2: {AccountID: 2, LoadRate: backupLoad}}})}
+					selected, err := svc.SelectAccountWithLoadAwareness(context.Background(), nil, "conversation", "", nil, "", 0)
+					require.NoError(t, err)
+					if selected.ReleaseFunc != nil {
+						defer selected.ReleaseFunc()
+					}
+					if kind == AccountTypeAPIKey && freeBackup {
+						require.EqualValues(t, 2, selected.Account.ID)
+						require.Nil(t, selected.WaitPlan)
+						require.EqualValues(t, 2, cache.sessionBindings["conversation"])
+					} else {
+						require.NotNil(t, selected.WaitPlan)
+						if kind == AccountTypeOAuth {
+							require.EqualValues(t, 1, selected.Account.ID)
+							require.Equal(t, 45*time.Second, selected.WaitPlan.Timeout)
+						}
+					}
+				})
+			}
+		}
+	}
 }

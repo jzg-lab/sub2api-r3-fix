@@ -14,7 +14,7 @@ const defaults = {
   adaptive_probe_scheduling: false, probe_burst_until_passes: 6,
 };
 
-async function setup({ config = defaults, error, load = true, testFailure } = {}) {
+async function setup({ config = defaults, error, load = true, testFailure, evidence } = {}) {
   const elements = new Map();
   const messages = [];
   const windowListeners = new Map();
@@ -22,7 +22,7 @@ async function setup({ config = defaults, error, load = true, testFailure } = {}
   let timerID = 0;
   const getElement = id => {
     if (!elements.has(id)) elements.set(id, {
-      value: '', checked: false, textContent: '', className: '', innerHTML: '',
+      value: '', checked: false, disabled: ['save', 'test'].includes(id), textContent: '', className: '', innerHTML: '',
       addEventListener(type, handler) { this[type] = handler; },
     });
     return elements.get(id);
@@ -32,7 +32,7 @@ async function setup({ config = defaults, error, load = true, testFailure } = {}
     messages.push(JSON.parse(JSON.stringify(message)));
     if (message.type === 'config.load' && load) reply(message, { ok: true, config });
     if (message.type === 'plugin.status') reply(message, { ok: true, result: {
-      status_json: JSON.stringify({ enabled: true, prober: { enabled: false, model: '', probes: 0 } }),
+      status_json: JSON.stringify({ evidence, enabled: true, prober: { enabled: false, model: '', probes: 0 } }),
     } });
     if (message.type === 'config.save') {
       if (error) reply(message, { ok: false, error });
@@ -121,7 +121,7 @@ test('never saves an unloaded configuration', async () => {
   ui.getElement('save').click();
   await ui.settle();
   assert.equal(ui.messages.some(message => message.type === 'config.save'), false);
-  assert.match(ui.getElement('msg').textContent, /配置尚未加载/);
+  assert.equal(ui.getElement('save').disabled, true);
 });
 
 test('resize sends the height at the top level', async () => {
@@ -152,4 +152,22 @@ test('does not replay a previous one-shot cookie drop while saving the switch', 
   ui.getElement('save').click();
   await ui.settle();
   assert.equal(ui.messages.find(message => message.type === 'config.save').config.drop_account_ids, undefined);
+});
+
+
+test('separates unknown reconciliation, probe and business evidence and escapes operation IDs', async () => {
+  const ui = await setup({ evidence: { available: false, accounts: [
+    { account_id: 42, probe_passed: 3, business_dispatched: 4, business_succeeded: 2,
+      operation: { phase: 'unknown', id: '<img src=x onerror=alert(1)>' } },
+    { account_id: 43, operation: { phase: 'unknown', reconciled: true, id: 'confirmed' } },
+  ] } });
+  const status = ui.getElement('status').innerHTML;
+  assert.match(status, /unknown · 待人工对账/);
+  assert.match(status, /unknown · 已对账/);
+  assert.match(status, /探测通过（非业务）/);
+  assert.match(status, /业务已派发/);
+  assert.match(status, /业务完整成功/);
+  assert.match(status, /统计可能不完整/);
+  assert.match(status, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(status, /<img/);
 });

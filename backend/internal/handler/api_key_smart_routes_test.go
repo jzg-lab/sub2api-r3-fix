@@ -61,49 +61,62 @@ func (r *smartRouteCache) RememberAPIKeyRouteSession(_ context.Context, key int6
 }
 
 func TestSmartRouteSamePackageAccountRecoveryAndSessionPreference(t *testing.T) {
-	h, key, cache := smartRoutingFixture(t)
-	var groups []int64
-	primaryAvailable := true
-	run := h.WithSmartRoutes(func(c *gin.Context) {
-		routed, _ := middleware2.GetAPIKeyFromContext(c)
-		groups = append(groups, *routed.GroupID)
-		if *routed.GroupID == 1 {
-			excluded := service.APIKeyRouteExcludedAccounts(c.Request.Context(), nil)
-			if _, failed := excluded[10]; !failed {
-				require.True(t, nextSmartRoute(c, &service.UpstreamFailoverError{StatusCode: 502}, &service.Account{ID: 10}))
-				return
+	for _, source := range []string{"header", "prompt_cache_key"} {
+		t.Run(source, func(t *testing.T) {
+			setSession := func(c *gin.Context, session string) {
+				if source == "header" {
+					c.Request.Header.Set("Session_id", session)
+					return
+				}
+				body := fmt.Sprintf(`{"model":"gpt-test","prompt_cache_key":%q}`, session)
+				c.Request.Body = io.NopCloser(strings.NewReader(body))
+				c.Request.ContentLength = int64(len(body))
 			}
-			if !primaryAvailable {
-				require.True(t, skipUnavailableSmartRoute(c, service.ErrNoAvailableAccounts))
-				return
-			}
-		}
-		c.JSON(200, gin.H{"ok": true})
-	}, nil, nil)
-	c, rec := smartRoutingContext(key, `{"model":"gpt-test"}`)
-	run(c)
-	require.Equal(t, 200, rec.Code)
-	require.Equal(t, []int64{1, 1}, groups)
-	require.Empty(t, cache.failed, "one failed account must not demote a healthy package")
-	primaryAvailable = false
-	groups = nil
-	c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
-	c.Request.Header.Set("Session_id", "conversation-one")
-	run(c)
-	require.Equal(t, 200, rec.Code)
-	require.Equal(t, []int64{1, 1, 2}, groups)
-	cache.failed = make(map[string]map[int64]bool) // Failure cooldown expired, but session preference remains.
-	groups = nil
-	c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
-	c.Request.Header.Set("Session_id", "conversation-one")
-	run(c)
-	require.Equal(t, []int64{2}, groups)
-	groups = nil
-	primaryAvailable = true
-	c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
-	c.Request.Header.Set("Session_id", "conversation-two")
-	run(c)
-	require.Equal(t, []int64{1, 1}, groups)
+			h, key, cache := smartRoutingFixture(t)
+			var groups []int64
+			primaryAvailable := true
+			run := h.WithSmartRoutes(func(c *gin.Context) {
+				routed, _ := middleware2.GetAPIKeyFromContext(c)
+				groups = append(groups, *routed.GroupID)
+				if *routed.GroupID == 1 {
+					excluded := service.APIKeyRouteExcludedAccounts(c.Request.Context(), nil)
+					if _, failed := excluded[10]; !failed {
+						require.True(t, nextSmartRoute(c, &service.UpstreamFailoverError{StatusCode: 502}, &service.Account{ID: 10}))
+						return
+					}
+					if !primaryAvailable {
+						require.True(t, skipUnavailableSmartRoute(c, service.ErrNoAvailableAccounts))
+						return
+					}
+				}
+				c.JSON(200, gin.H{"ok": true})
+			}, nil, nil)
+			c, rec := smartRoutingContext(key, `{"model":"gpt-test"}`)
+			run(c)
+			require.Equal(t, 200, rec.Code)
+			require.Equal(t, []int64{1, 1}, groups)
+			require.Empty(t, cache.failed, "one failed account must not demote a healthy package")
+			primaryAvailable = false
+			groups = nil
+			c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
+			setSession(c, "conversation-one")
+			run(c)
+			require.Equal(t, 200, rec.Code)
+			require.Equal(t, []int64{1, 1, 2}, groups)
+			cache.failed = make(map[string]map[int64]bool) // Failure cooldown expired, but session preference remains.
+			groups = nil
+			c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
+			setSession(c, "conversation-one")
+			run(c)
+			require.Equal(t, []int64{2}, groups)
+			groups = nil
+			primaryAvailable = true
+			c, rec = smartRoutingContext(key, `{"model":"gpt-test"}`)
+			setSession(c, "conversation-two")
+			run(c)
+			require.Equal(t, []int64{1, 1}, groups)
+		})
+	}
 }
 
 func (r *smartRouteCache) FailedAPIKeyRouteGroups(_ context.Context, _ int64, scope string, _ []int64) (map[int64]bool, error) {
@@ -721,10 +734,13 @@ func TestSmartRouteKeepsHeartbeatAccountingAcrossAttempts(t *testing.T) {
 func TestSmartRouteFailureBudgetsAcrossPackages(t *testing.T) {
 	for _, endpoint := range []string{"responses", "messages", "chat/completions"} {
 		for _, stream := range []bool{false, true} {
-			for _, failure := range []string{"capacity", "oauth_429", "bad_gateway"} {
+			for _, failure := range []string{"capacity", "oauth_429", "bad_gateway", "bad_gateway_budget"} {
 				t.Run(fmt.Sprintf("%s/stream=%v/failure=%s", endpoint, stream, failure), func(t *testing.T) {
-					h, key, _ := smartRoutingFixture(t)
+					h, key, cache := smartRoutingFixture(t)
 					h.maxAccountSwitches = 10
+					if failure == "bad_gateway_budget" {
+						h.maxAccountSwitches = 1
+					}
 					for _, id := range key.CandidateGroupIDs() {
 						candidate, err := h.apiKeyService.APIKeyForRoute(context.Background(), key, id)
 						require.NoError(t, err)
@@ -765,10 +781,13 @@ func TestSmartRouteFailureBudgetsAcrossPackages(t *testing.T) {
 					hits, _, _ := upstream.snapshot()
 					require.Equal(t, status, rec.Code, rec.Body.String())
 					if failure == "capacity" {
-						require.Equal(t, ids[:3], hits, "capacity limit must not reset when switching packages")
+						require.Equal(t, []int64{10, 10, 11}, hits, "reference capacity recovery allows one same-account retry within three total attempts")
 						if endpoint != "messages" {
 							require.Contains(t, rec.Body.String(), "server_is_overloaded")
 						}
+					} else if failure == "bad_gateway_budget" {
+						require.Equal(t, ids[:2], hits)
+						require.True(t, cache.failed[smartRouteScope(c.Request.URL.Path, "gpt-5.2")][1], "terminal budget exhaustion must preserve the package failure preference")
 					} else if failure == "oauth_429" {
 						require.Equal(t, ids[:3], hits, "OAuth 429 limit must not reset when switching packages")
 					} else {
@@ -858,5 +877,230 @@ func TestSmartRouteFailuresAreConversationScoped(t *testing.T) {
 		run(c)
 		require.Equal(t, 200, rec.Code)
 		require.Equal(t, tc.want, groups, tc.session)
+	}
+}
+
+func TestSmartRouteSessionUsesOpenAIPromptCacheKey(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	for _, body := range []string{`{"prompt_cache_key":"conversation-a"}`, `{"type":"response.create","response":{"prompt_cache_key":"conversation-a"}}`} {
+		require.Equal(t, "conversation-a", smartRouteSession(c, []byte(body)))
+	}
+	c.Request.Header.Set("session_id", "header-session")
+	require.Equal(t, "header-session", smartRouteSession(c, []byte(`{"prompt_cache_key":"body-session"}`)))
+}
+
+type smartRouteRecoveringUpstream struct{ smartRouteHTTPUpstream }
+
+func (u *smartRouteRecoveringUpstream) Do(req *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
+	if len(u.calls) == 0 {
+		u.calls = append(u.calls, id)
+		return &http.Response{StatusCode: 503, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded."}}`)), Request: req}, nil
+	}
+	u.succeedID = id
+	return u.smartRouteHTTPUpstream.Do(req, proxy, id, concurrency)
+}
+func (u *smartRouteRecoveringUpstream) DoWithTLS(req *http.Request, proxy string, id int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxy, id, concurrency)
+}
+
+func TestSmartRouteOAuthFinishesSameAccountRecovery(t *testing.T) {
+	for _, endpoint := range []string{"responses", "messages", "chat/completions"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, stream), func(t *testing.T) {
+				h, key, cache := smartRoutingFixture(t)
+				key.Group.AllowMessagesDispatch = true
+				repo := smartRouteAccounts{openAIImagesFailoverAccountRepo{accounts: []service.Account{
+					{ID: 10, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"access_token": "test-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}},
+					{ID: 20, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "backup", "base_url": "https://backup.invalid"}},
+				}}}
+				upstream := &smartRouteRecoveringUpstream{}
+				billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
+				t.Cleanup(billing.Stop)
+				gateway := service.NewOpenAIGatewayService(repo, nil, nil, nil, nil, nil, nil, h.cfg, nil, nil, service.NewBillingService(h.cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+				openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, h.apiKeyService, nil, nil, nil, nil, h.cfg)
+				next := openAI.Responses
+				if endpoint == "messages" {
+					next = openAI.Messages
+				}
+				if endpoint == "chat/completions" {
+					next = openAI.ChatCompletions
+				}
+				c, rec := smartRoutingContext(key, fmt.Sprintf(`{"model":"gpt-5.1","stream":%t,"input":"hello","max_tokens":100,"prompt_cache_key":"same-account-recovery","messages":[{"role":"user","content":"hello"}]}`, stream))
+				c.Request.URL.Path = "/v1/" + endpoint
+				h.WithSmartRoutes(next, nil, openAI)(c)
+				require.Equal(t, 200, rec.Code, rec.Body.String())
+				require.Contains(t, rec.Body.String(), "OK")
+				require.Equal(t, []int64{10, 10}, upstream.calls, "OAuth must finish the reference same-account retry before yielding")
+				require.Empty(t, cache.failed)
+				require.EqualValues(t, 1, cache.sessions[fmt.Sprintf("9/%s/same-account-recovery", smartRouteScope(c.Request.URL.Path, "gpt-5.1"))])
+			})
+		}
+	}
+}
+
+func TestSmartRouteGenericRecoverySharesBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kind  string
+		limit int
+		want  []FailoverAction
+	}{
+		{"oauth_recovers_before_route", service.AccountTypeOAuth, 5, []FailoverAction{FailoverContinue, FailoverNextRoute}},
+		{"oauth_total_budget", service.AccountTypeOAuth, 2, []FailoverAction{FailoverContinue, FailoverExhausted}},
+		{"api_key_yields_early", service.AccountTypeAPIKey, 5, []FailoverAction{FailoverNextRoute}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, key, _ := smartRoutingFixture(t)
+			c, _ := smartRoutingContext(key, `{}`)
+			c.Request = c.Request.WithContext(service.WithAPIKeyRouteAdmission(c.Request.Context()))
+			attempt := &smartRouteAttempt{budget: &smartRouteRetryBudget{limit: tc.limit}}
+			c.Set(smartRouteAttemptKey, attempt)
+			fs := NewFailoverState(4, true)
+			account := &service.Account{ID: 10, Platform: service.PlatformAnthropic, Type: tc.kind}
+			err := &service.UpstreamFailoverError{StatusCode: 503, RetryableOnSameAccount: true, SameAccountRetryMax: 1, SameAccountRetryDelay: time.Nanosecond}
+			for i, want := range tc.want {
+				observeSmartRouteFailure(c, err, account.ID)
+				require.Equal(t, want, fs.HandleSmartRouteFailoverError(c.Request.Context(), c, nil, account, err))
+				require.Equal(t, i+1, attempt.budget.attempts)
+				if want == FailoverContinue {
+					require.Empty(t, service.APIKeyRouteExcludedAccounts(c.Request.Context(), nil))
+					require.False(t, attempt.retry)
+				}
+				if want == FailoverNextRoute {
+					require.Contains(t, service.APIKeyRouteExcludedAccounts(c.Request.Context(), nil), account.ID)
+					require.True(t, attempt.forceCacheBilling)
+				}
+			}
+		})
+	}
+}
+
+type smartRouteWSRetryUpstream struct {
+	smartRouteHTTPUpstream
+	persistent bool
+}
+
+func (u *smartRouteWSRetryUpstream) Do(req *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
+	if u.persistent || len(u.calls) == 0 {
+		u.calls = append(u.calls, id)
+		return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": []string{"application/json"}, "Retry-After": []string{"1"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for account, please retry later"}}`)), Request: req}, nil
+	}
+	u.succeedID = id
+	return u.smartRouteHTTPUpstream.Do(req, proxy, id, concurrency)
+}
+func (u *smartRouteWSRetryUpstream) DoWithTLS(req *http.Request, proxy string, id int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxy, id, concurrency)
+}
+
+func TestSmartRouteWebSocketOAuthSameAccountRetryBudget(t *testing.T) {
+	for _, persistent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistent=%v", persistent), func(t *testing.T) {
+			h, key, _ := smartRoutingFixture(t)
+			cfg := *h.cfg
+			cfg.Gateway.OpenAIWS.Enabled = true
+			cfg.Gateway.OpenAIWS.OAuthEnabled = true
+			cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+			cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+			cfg.Gateway.OpenAIWS.IngressModeDefault = service.OpenAIWSIngressModeHTTPBridge
+			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+			accounts := smartRouteAccounts{openAIImagesFailoverAccountRepo{accounts: []service.Account{
+				{ID: 10, Concurrency: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"access_token": "test", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}, Extra: map[string]any{"openai_oauth_responses_websockets_v2_mode": service.OpenAIWSIngressModeHTTPBridge}},
+			}}}
+			upstream := &smartRouteWSRetryUpstream{persistent: persistent}
+			billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
+			t.Cleanup(billing.Stop)
+			gateway := service.NewOpenAIGatewayService(accounts, nil, nil, nil, nil, nil, nil, &cfg, nil, nil, service.NewBillingService(&cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+			openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(&concurrencyCacheMock{
+				acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
+				acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
+			}), billing, h.apiKeyService, nil, nil, nil, nil, &cfg)
+			openAI.maxAccountSwitches = 1
+			done := make(chan struct{})
+			r := gin.New()
+			r.GET("/v1/responses", func(c *gin.Context) {
+				defer close(done)
+				c.Set(string(middleware2.ContextKeyAPIKey), key)
+				c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: key.UserID})
+				openAI.ResponsesWebSocket(c)
+			})
+			server := httptest.NewServer(r)
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+			require.NoError(t, err)
+			defer conn.CloseNow()
+			require.NoError(t, conn.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","input":"hello"}`)))
+			completed := false
+			for {
+				_, body, readErr := conn.Read(ctx)
+				if readErr != nil {
+					require.NotErrorIs(t, readErr, context.DeadlineExceeded, "retry budget must close an exhausted request")
+					break
+				}
+				if gjson.GetBytes(body, "type").String() == "response.completed" {
+					completed = true
+					break
+				}
+			}
+			conn.CloseNow()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("handler did not stop")
+			}
+			require.Equal(t, !persistent, completed)
+			require.Equal(t, []int64{10, 10}, upstream.calls, "same-account retry must be available but consume the shared budget")
+		})
+	}
+}
+
+type smartRouteUnavailablePluginRepo struct{ service.PluginRepository }
+
+func (smartRouteUnavailablePluginRepo) List(context.Context) ([]*service.PluginInstallation, error) {
+	return nil, errors.New("local fixture cannot read plugin binding")
+}
+
+func TestSmartRoutePluginUnavailableUsesIndependentPath(t *testing.T) {
+	cfg := &config.Config{Plugins: config.PluginConfig{DataDir: t.TempDir()}}
+	manager := service.NewPluginManager(smartRouteUnavailablePluginRepo{}, nil, cfg, service.PluginHostInfo{})
+	require.NoError(t, manager.Start(context.Background()))
+	t.Cleanup(manager.Stop)
+	for _, endpoint := range []string{"responses", "messages", "chat/completions"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, stream), func(t *testing.T) {
+				h, key, cache := smartRoutingFixture(t)
+				key.Group.AllowMessagesDispatch = true
+				repo := smartRouteAccounts{openAIImagesFailoverAccountRepo{accounts: []service.Account{
+					{ID: 10, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"access_token": "fixture", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}},
+					{ID: 11, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"access_token": "fixture", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}},
+					{ID: 20, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "fixture", "base_url": "https://fixture.invalid"}},
+				}}}
+				upstream := &smartRouteHTTPUpstream{succeedID: 20}
+				billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
+				t.Cleanup(billing.Stop)
+				gateway := service.NewOpenAIGatewayService(repo, nil, nil, nil, nil, nil, nil, h.cfg, nil, nil, service.NewBillingService(h.cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+				gateway.SetPluginManager(manager)
+				openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, h.apiKeyService, nil, nil, nil, nil, h.cfg)
+				next := openAI.Responses
+				if endpoint == "messages" {
+					next = openAI.Messages
+				}
+				if endpoint == "chat/completions" {
+					next = openAI.ChatCompletions
+				}
+				c, rec := smartRoutingContext(key, fmt.Sprintf(`{"model":"gpt-5.1","stream":%t,"input":"hello","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`, stream))
+				c.Request.URL.Path = "/v1/" + endpoint
+				h.WithSmartRoutes(next, nil, openAI)(c)
+				require.Equal(t, 200, rec.Code, rec.Body.String())
+				require.Contains(t, rec.Body.String(), "OK")
+				require.Equal(t, []int64{20}, upstream.calls)
+				require.Equal(t, 1, smartRouteAttemptFrom(c).budget.attempts, "all accounts bound to the unavailable plugin must be skipped together")
+				require.Empty(t, service.APIKeyRouteExcludedAccounts(c.Request.Context(), nil), "plugin failure must not blacklist an account")
+				require.Empty(t, cache.failed)
+			})
+		}
 	}
 }

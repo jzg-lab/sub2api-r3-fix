@@ -303,12 +303,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					h.handleResponsesFailoverExhausted(c, failoverErr, true)
 					return
 				}
-				if nextSmartRoute(c, failoverErr, account) {
-					applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
-					return
-				}
-				action := fs.HandleFailoverError(requestCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				action := fs.HandleSmartRouteFailoverError(requestCtx, c, h.gatewayService, account, failoverErr)
 				switch action {
+				case FailoverNextRoute:
+					return
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:

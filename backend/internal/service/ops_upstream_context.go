@@ -18,6 +18,9 @@ const (
 	OpsUpstreamErrorsKey       = "ops_upstream_errors"
 	OpsUpstreamModelKey        = "ops_upstream_model"
 
+	// Only the typed local runtime sentinel may produce this event kind.
+	OpsUpstreamErrorKindPluginUnavailable = "plugin_unavailable"
+
 	// Optional stage latencies (milliseconds) for troubleshooting and alerting.
 	OpsAuthLatencyMsKey      = "ops_auth_latency_ms"
 	OpsRoutingLatencyMsKey   = "ops_routing_latency_ms"
@@ -376,7 +379,7 @@ type OpsUpstreamErrorEvent struct {
 	// Best-effort upstream response capture (sanitized+trimmed).
 	UpstreamResponseBody string `json:"upstream_response_body,omitempty"`
 
-	// Kind: http_error | request_error | retry_exhausted | failover
+	// Kind: http_error | request_error | retry_exhausted | failover | plugin_unavailable
 	Kind string `json:"kind,omitempty"`
 	// Stage/Scope/Reason distinguish credential acquisition from inference
 	// without overloading upstream_status_code with a synthetic HTTP status.
@@ -386,6 +389,8 @@ type OpsUpstreamErrorEvent struct {
 
 	Message string `json:"message,omitempty"`
 	Detail  string `json:"detail,omitempty"`
+
+	StreamFailure *OpenAIStreamFailureObservation `json:"stream_failure,omitempty"`
 
 	// SkipMonitoring is request-local rule state. It is intentionally excluded
 	// from persisted attempt JSON. The logger consults it only when this event is
@@ -496,4 +501,13 @@ func safeUpstreamURL(rawURL string) string {
 		rawURL = rawURL[:idx]
 	}
 	return rawURL
+}
+
+func lastOpsUpstreamErrorIsPluginUnavailable(events []*OpsUpstreamErrorEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if event := events[i]; event != nil {
+			return event.Kind == OpsUpstreamErrorKindPluginUnavailable && event.UpstreamStatusCode == 0
+		}
+	}
+	return false
 }

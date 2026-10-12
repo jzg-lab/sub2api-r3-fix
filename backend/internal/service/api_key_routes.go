@@ -215,12 +215,13 @@ func (s *APIKeyService) MarkAPIKeyRouteFailed(ctx context.Context, key *APIKey, 
 
 // All attempts of one client request share the global RPM admission.
 type APIKeyRouteAdmission struct {
-	mu             sync.Mutex
-	once           sync.Once
-	err            error
-	groupRPM       map[int64]error
-	failedAccounts map[int64]struct{}
-	canFailover    bool
+	mu                sync.Mutex
+	once              sync.Once
+	err               error
+	groupRPM          map[int64]error
+	failedAccounts    map[int64]struct{}
+	canFailover       bool
+	pluginUnavailable bool
 }
 type apiKeyRouteAdmissionKey struct{}
 
@@ -336,4 +337,27 @@ func SmartRouteWebSocketDialFailure(err error) *UpstreamFailoverError {
 		return nil
 	}
 	return newOpenAIUpstreamFailoverError(status, dial.ResponseHeaders, dial.ResponseBody, "", false)
+}
+
+// Only this typed failure proves rejection before plugin dispatch; ambiguous transport failures stay terminal.
+func NoteAPIKeyRoutePluginUnavailable(ctx context.Context, err error) bool {
+	state, ok := ctx.Value(apiKeyRouteAdmissionKey{}).(*APIKeyRouteAdmission)
+	if !ok || !state.canFailover || !errors.Is(err, errPluginRuntimeUnavailable) {
+		return false
+	}
+	state.mu.Lock()
+	state.pluginUnavailable = true
+	state.mu.Unlock()
+	return true
+}
+
+func (s *OpenAIGatewayService) apiKeyRoutePluginAvailable(ctx context.Context, account *Account) bool {
+	state, ok := ctx.Value(apiKeyRouteAdmissionKey{}).(*APIKeyRouteAdmission)
+	if !ok {
+		return true
+	}
+	state.mu.Lock()
+	unavailable := state.pluginUnavailable
+	state.mu.Unlock()
+	return !unavailable || !s.pluginManager.ShouldRouteOpenAIOAuth(account)
 }

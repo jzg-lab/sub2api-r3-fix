@@ -1220,6 +1220,14 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		return nil, "", infraerrors.BadRequest("SPARK_SHADOW_NO_REFRESH",
 			"cannot refresh spark shadow account; its credentials are managed by the parent account")
 	}
+	if service.IsOpenAIBrowserOAuthAccount(account) {
+		updated, err := h.openaiOAuthService.RefreshStoredAccount(ctx, account, true)
+		if err != nil {
+			return nil, "", err
+		}
+		h.adminService.EnsureOpenAIPrivacy(ctx, updated)
+		return updated, "", nil
+	}
 
 	var newCredentials map[string]any
 

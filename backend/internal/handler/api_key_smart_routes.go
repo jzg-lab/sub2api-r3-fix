@@ -19,12 +19,24 @@ import (
 
 const smartRouteAttemptKey = "smart_route_attempt"
 
+type smartRouteRetryBudget struct {
+	accountSwitches     int
+	attempts, limit     int
+	capacity            openAICapacityRetryBudget
+	firstOutputSwitches int
+	oauth429            service.OpenAIOAuth429FailoverState
+	openAI              *service.OpenAIGatewayService
+	exhausted           bool
+}
+
 type smartRouteAttempt struct {
+	budget            *smartRouteRetryBudget
+	budgetChecked     bool
+	pluginUnavailable bool
 	retry             bool
 	upstream          *service.UpstreamFailoverError
 	err               error
 	failedAccountID   int64
-	failedAccount     *service.Account
 	forceCacheBilling bool
 }
 
@@ -36,6 +48,9 @@ func smartRouteAttemptFrom(c *gin.Context) *smartRouteAttempt {
 
 // Even when output prevents replay, the next client request should avoid this route.
 func observeSmartRouteFailure(c *gin.Context, err *service.UpstreamFailoverError, accountIDs ...int64) {
+	if attempt := smartRouteAttemptFrom(c); attempt != nil {
+		attempt.budgetChecked = false
+	}
 	if attempt := smartRouteAttemptFrom(c); attempt != nil && rememberSmartRouteFailure(err) && c.Request.Context().Err() == nil {
 		attempt.upstream = err
 		if len(accountIDs) > 0 {
@@ -49,17 +64,75 @@ func rememberSmartRouteFailure(err *service.UpstreamFailoverError) bool {
 		(err.StatusCode >= 500 || err.StatusCode == 429 || err.StatusCode == 401 || err.StatusCode == 403 || err.IsCredentialFailure() || err.IsProxyChainFailure())
 }
 
+// Each failed upstream attempt, including an allowed same-account retry, shares these limits.
+func smartRouteFailoverExhausted(c *gin.Context, err *service.UpstreamFailoverError) bool {
+	attempt := smartRouteAttemptFrom(c)
+	if attempt == nil || attempt.budget == nil {
+		return false
+	}
+	budget := attempt.budget
+	if attempt.budgetChecked {
+		return budget.exhausted
+	}
+	attempt.budgetChecked = true
+	budget.attempts++
+	budget.exhausted = budget.capacity.exhausted(err) || openAIFirstOutputFailoverExhausted(err, &budget.firstOutputSwitches) || budget.attempts >= budget.limit
+	return budget.exhausted
+}
+
 // Called only after the forwarder's output-commit and cancellation checks.
 func nextSmartRoute(c *gin.Context, err *service.UpstreamFailoverError, account *service.Account) bool {
 	attempt := smartRouteAttemptFrom(c)
 	if attempt == nil || err == nil || service.IsResponseCommitted(c) || !err.ShouldRetryNextAccount() || c.Request.Context().Err() != nil {
 		return false
 	}
+	smartRouteFailoverExhausted(c, err)
+	if budget := attempt.budget; budget != nil && !budget.exhausted && budget.openAI != nil && account != nil {
+		budget.accountSwitches++
+		budget.exhausted = budget.openAI.ShouldStopOpenAIOAuth429Failover(account, err.StatusCode, budget.accountSwitches, &budget.oauth429)
+	}
 	attempt.retry, attempt.upstream = true, err
 	if account != nil {
-		attempt.failedAccount, attempt.failedAccountID = account, account.ID
+		attempt.failedAccountID = account.ID
 		service.FailAPIKeyRouteAccount(c.Request.Context(), account.ID)
 	}
+	return true
+}
+
+// Reuse the inner recovery loop before yielding an OAuth account to the package router.
+func (s *FailoverState) HandleSmartRouteFailoverError(ctx context.Context, c *gin.Context, gateway TempUnscheduler, account *service.Account, err *service.UpstreamFailoverError) FailoverAction {
+	attempt := smartRouteAttemptFrom(c)
+	if attempt == nil {
+		return s.HandleFailoverError(ctx, gateway, account.ID, account.Platform, account.GetPoolModeRetryCount(), err)
+	}
+	if ctx.Err() != nil {
+		return FailoverCanceled
+	}
+	s.LastFailoverErr = err
+	if smartRouteFailoverExhausted(c, err) {
+		return FailoverExhausted
+	}
+	if account.Type == service.AccountTypeAPIKey && nextSmartRoute(c, err, account) {
+		attempt.forceCacheBilling = needForceCacheBilling(s.hasBoundSession, err, false)
+		applyRetryExhaustedDisposition(ctx, gateway, account.ID, err)
+		return FailoverNextRoute
+	}
+	action := s.HandleFailoverError(ctx, gateway, account.ID, account.Platform, account.GetPoolModeRetryCount(), err)
+	if _, failed := s.FailedAccountIDs[account.ID]; failed && action != FailoverCanceled && nextSmartRoute(c, err, account) {
+		attempt.forceCacheBilling = s.ForceCacheBilling
+		return FailoverNextRoute
+	}
+	return action
+}
+
+func nextSmartRouteAfterPluginFailure(c *gin.Context, err error) bool {
+	attempt := smartRouteAttemptFrom(c)
+	if attempt == nil || service.IsResponseCommitted(c) || c.Request.Context().Err() != nil || !service.NoteAPIKeyRoutePluginUnavailable(c.Request.Context(), err) {
+		return false
+	}
+	attempt.retry, attempt.pluginUnavailable = true, true
+	attempt.err = err
+	attempt.budget.attempts++
 	return true
 }
 
@@ -175,10 +248,10 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 		base.Request = c.Request.WithContext(service.WithAPIKeyRouteAdmission(c.Request.Context(), !pinned))
 		var lastErr error
 		var lastUpstream *service.UpstreamFailoverError
-		forwards := 0
-		var capacityRetryBudget openAICapacityRetryBudget
-		var oauth429FailoverState service.OpenAIOAuth429FailoverState
-		firstOutputTimeoutSwitchCount := 0
+		budget := &smartRouteRetryBudget{limit: h.maxAccountSwitches + 1}
+		if openAI != nil {
+			budget.openAI = openAI.gatewayService
+		}
 		failedGroups := make(map[int64]bool)
 		forceCacheBilling := false
 		for routeIndex := 0; routeIndex < len(ids); {
@@ -225,7 +298,7 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 			routed.RouteGroupIDs = nil
 			attempt.Set(string(middleware2.ContextKeyAPIKey), routed)
 			attempt.Set(string(middleware2.ContextKeySubscription), sub)
-			state := &smartRouteAttempt{}
+			state := &smartRouteAttempt{budget: budget}
 			if !pinned {
 				attempt.Set(smartRouteAttemptKey, state)
 			}
@@ -256,24 +329,27 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 				h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 			}
 			if !state.retry {
-				if state.upstream != nil && state.failedAccountID == 0 {
+				if rememberSmartRouteFailure(state.upstream) && (state.failedAccountID == 0 || budget.exhausted) {
 					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 				}
-				if state.upstream == nil && c.Writer.Status() < 400 && c.Request.Context().Err() == nil {
+				if c.Writer.Status() < 400 && c.Request.Context().Err() == nil {
 					if streamErr, found := service.GetOpsStreamError(attempt); !found || !streamErr.CountTowardsSLA {
 						h.apiKeyService.RememberAPIKeyRouteSession(base.Request.Context(), routed, scope, session)
 					}
 				}
 				return
 			}
+			if state.pluginUnavailable {
+				lastErr = state.err
+				if budget.attempts >= budget.limit {
+					break
+				}
+				routeIndex--
+				continue
+			}
 			if state.upstream != nil {
 				lastUpstream = state.upstream
-				forwards++
-				// Handler re-entry must not reset the existing request-wide failure limits.
-				if capacityRetryBudget.exhausted(state.upstream) ||
-					openAIFirstOutputFailoverExhausted(state.upstream, &firstOutputTimeoutSwitchCount) ||
-					forwards >= h.maxAccountSwitches+1 ||
-					(openAI != nil && state.failedAccount != nil && openAI.gatewayService.ShouldStopOpenAIOAuth429Failover(state.failedAccount, state.upstream.StatusCode, forwards, &oauth429FailoverState)) {
+				if budget.exhausted {
 					if failedGroups[id] {
 						h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)
 					}
@@ -323,6 +399,9 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 }
 
 func smartRouteSession(c *gin.Context, body []byte) string {
+	if session := service.ExtractOpenAIRequestSessionID(c, body); session != "" {
+		return session
+	}
 	if session := service.ExtractClientSessionID(c); session != "" {
 		return session
 	}

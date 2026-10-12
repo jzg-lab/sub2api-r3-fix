@@ -128,9 +128,8 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 //  2. for durable faults (expired/rejected proxy creds, dead proxy, DNS/routing)
 //     temporarily unschedules the account (DB + in-memory) and logs a stable
 //     warn event that alert rules can key on;
-//  3. returns an error that is *UpstreamFailoverError (so the handler fails over
-//     to a healthy account) for all non-canceled errors, or a plain error for
-//     context.Canceled (client gone — no failover, no eviction).
+//  3. allows failover only when safe; canceled requests, shared plugin outages
+//     and plugin requests already sent upstream do not cycle accounts.
 //
 // It deliberately does NOT write to the response: the handler owns the response
 // (failover, or a protocol-correct error once failover is exhausted).
@@ -143,6 +142,14 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	}
 
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
+	kind := "request_error"
+	if errors.Is(err, errPluginRuntimeUnavailable) {
+		kind = OpsUpstreamErrorKindPluginUnavailable
+		if c != nil {
+			c.Set(OpsUpstreamStatusCodeKey, 0)
+			c.Set(OpsUpstreamErrorDetailKey, "")
+		}
+	}
 	setOpsUpstreamError(c, 0, safeErr, "")
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:           account.Platform,
@@ -150,13 +157,18 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		AccountName:        account.Name,
 		UpstreamStatusCode: 0,
 		Passthrough:        passthrough,
-		Kind:               "request_error",
+		Kind:               kind,
 		Message:            safeErr,
 	})
 
 	// Client disconnected: do NOT fail over to another account and do NOT evict
 	// this one — the upstream never had a chance to exhibit a fault.
 	if errors.Is(err, context.Canceled) || (errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return err
+	}
+	// Every bound account shares this local runtime. Cycling accounts cannot
+	// repair it, and must not turn a plugin outage into account eviction.
+	if errors.Is(err, errPluginRuntimeUnavailable) {
 		return err
 	}
 

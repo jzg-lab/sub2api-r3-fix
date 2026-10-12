@@ -1654,7 +1654,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 
 	captureConn := &openAIWSCaptureConn{
 		events: [][]byte{
-			[]byte(`{"type":"response.completed","response":{"id":"resp_preflight_rewrite_1","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_preflight_rewrite_1","model":"gpt-5.1","output":[{"type":"reasoning","id":"rs_replay","encrypted_content":"opaque","summary":[]},{"type":"message","id":"msg_replay","role":"assistant","content":[{"type":"output_text","text":"hello back"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}`),
 			[]byte(`{"type":"response.completed","response":{"id":"resp_preflight_rewrite_2","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
 		},
 	}
@@ -1765,9 +1765,11 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	require.Len(t, captureConn.writes, 2)
 	secondWrite := requestToJSONString(captureConn.writes[1])
 	require.False(t, gjson.Get(secondWrite, "previous_response_id").Exists(), "严格增量不成立时应移除 previous_response_id，改为 full create")
-	require.Equal(t, 2, len(gjson.Get(secondWrite, "input").Array()), "严格降级为 full create 时应重放完整 input 上下文")
+	require.Equal(t, 4, len(gjson.Get(secondWrite, "input").Array()), "严格降级为 full create 时应重放完整 input 上下文")
 	require.Equal(t, "hello", gjson.Get(secondWrite, "input.0.text").String())
-	require.Equal(t, "world", gjson.Get(secondWrite, "input.1.text").String())
+	require.Equal(t, "opaque", gjson.Get(secondWrite, "input.1.encrypted_content").String())
+	require.Equal(t, "hello back", gjson.Get(secondWrite, "input.2.content.0.text").String())
+	require.Equal(t, "world", gjson.Get(secondWrite, "input.3.text").String())
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPrevResponseStrictDropBeforePreflightPingFailReconnects(t *testing.T) {

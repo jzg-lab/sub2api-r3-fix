@@ -990,7 +990,8 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		if isNonRetryableRefreshError(err) {
 			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
-			if !isGrokOAuth {
+			isOpenAIOAuth := IsOpenAIBrowserOAuthAccount(account)
+			if !isGrokOAuth && !isOpenAIOAuth {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
 			s.clearAntigravityForceTokenRefresh(ctx, account, "non_retryable")
@@ -1015,6 +1016,17 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						return errRefreshSkipped
 					}
 				}
+			} else if isOpenAIOAuth {
+				persistentlyBlocked, setErr = applyOpenAIAuthState(ctx, s.accountRepo, account, OpenAIAuthStateUpdate{ErrorMessage: &errorMsg})
+				if setErr != nil {
+					return &providerCycleContainmentRefreshError{
+						err: fmt.Errorf("failed to conditionally persist OpenAI OAuth refresh failure: %w", setErr),
+					}
+				}
+				if !persistentlyBlocked {
+					slog.Info("token_refresh.openai_error_status_skipped_stale_credentials", "account_id", account.ID)
+					return errRefreshSkipped
+				}
 			} else {
 				setErr = s.accountRepo.SetError(ctx, account.ID, errorMsg)
 				persistentlyBlocked = setErr == nil
@@ -1029,11 +1041,11 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						err: fmt.Errorf("failed to conditionally persist Grok OAuth refresh failure: %w", setErr),
 					}
 				}
-			} else if isGrokOAuth && persistentlyBlocked {
+			} else if (isGrokOAuth || isOpenAIOAuth) && persistentlyBlocked {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
 			cacheInvalidationFailed := false
-			if account.Type == AccountTypeOAuth && (!isGrokOAuth || persistentlyBlocked) {
+			if account.Type == AccountTypeOAuth && (!(isGrokOAuth || isOpenAIOAuth) || persistentlyBlocked) {
 				if s.cacheInvalidator == nil {
 					cacheInvalidationFailed = true
 				} else if invalidateErr := s.cacheInvalidator.InvalidateToken(ctx, account); invalidateErr != nil {
@@ -1124,6 +1136,23 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 				"until", until.Format(time.RFC3339),
 			)
 		}
+		return lastErr
+	}
+
+	if IsOpenAIBrowserOAuthAccount(account) {
+		applied, setErr := applyOpenAIAuthState(ctx, s.accountRepo, account, OpenAIAuthStateUpdate{
+			CooldownUntil: &until, CooldownReason: reason,
+		})
+		if setErr != nil {
+			return &providerCycleContainmentRefreshError{
+				err: fmt.Errorf("failed to conditionally persist OpenAI OAuth refresh cooldown: %w", setErr),
+			}
+		}
+		if !applied {
+			slog.Info("token_refresh.openai_cooldown_skipped_stale_credentials", "account_id", account.ID)
+			return errRefreshSkipped
+		}
+		s.notifyAccountSchedulingBlocked(account, until, "token_refresh_retry_exhausted")
 		return lastErr
 	}
 
@@ -1424,6 +1453,9 @@ func isSharedProviderRefreshError(err error) bool {
 func isNonRetryableRefreshError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isTerminalOpenAIAuthFailure(err.Error()) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	nonRetryable := []string{

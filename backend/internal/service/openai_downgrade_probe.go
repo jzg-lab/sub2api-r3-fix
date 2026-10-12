@@ -20,6 +20,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -2151,7 +2152,7 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 					return nil, routeErr
 				}
 				if r.pluginRoundTrip != nil && GetOpenAIRescueLaneMarker(current) != nil {
-					response, handled, err := r.pluginRoundTrip(request.Context(), request, route, current)
+					response, handled, err := r.pluginRoundTrip(pluginv1.WithProbeTraffic(request.Context()), request, route, current)
 					if handled {
 						return response, err
 					}

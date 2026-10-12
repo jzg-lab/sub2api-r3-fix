@@ -2937,6 +2937,77 @@ func TestReportOpenAIAccountScheduleResult_SuccessClearsModelTransientState(t *t
 	require.False(t, svc.openaiModelTransient.isBlocked(21636, "gpt-5.5", now.Add(2*time.Millisecond)))
 }
 
+func TestReportOpenAIAccountScheduleResult_PluginUnavailablePreservesScores(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	svc := &OpenAIGatewayService{
+		rateLimitService: newOpenAIAdvancedSchedulerRateLimitService("true"),
+	}
+	scheduler := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	account := &Account{ID: 1287, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	ttft := 200
+	scheduler.ReportResult(account.ID, false, &ttft)
+	beforeError, beforeTTFT, beforeHasTTFT := scheduler.stats.snapshot(account.ID)
+	require.Positive(t, beforeError)
+
+	localErr := fmt.Errorf("forward: %w: health timeout", errPluginRuntimeUnavailable)
+	for range 10 {
+		require.False(t, svc.ReportOpenAIAccountScheduleResult(account, "gpt-test", false, intPtrForTest(9000), localErr))
+	}
+	afterError, afterTTFT, afterHasTTFT := scheduler.stats.snapshot(account.ID)
+	require.Equal(t, beforeError, afterError)
+	require.Equal(t, beforeTTFT, afterTTFT)
+	require.Equal(t, beforeHasTTFT, afterHasTTFT)
+
+	// Text is not typed evidence. Real account failures still affect scoring.
+	svc.ReportOpenAIAccountScheduleResult(account, "gpt-test", false, nil, errors.New(localErr.Error()))
+	afterError, _, _ = scheduler.stats.snapshot(account.ID)
+	require.Greater(t, afterError, beforeError)
+	svc.ReportOpenAIAccountScheduleResult(account, "gpt-test", true, &ttft)
+	recoveredError, _, _ := scheduler.stats.snapshot(account.ID)
+	require.Less(t, recoveredError, afterError)
+}
+
+func TestDefaultOpenAIAccountScheduler_ShouldEscapeStickyAccount_ThresholdBoundary(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	accountID := int64(21501)
+	ttft := 15000
+	stats.report(accountID, true, &ttft)
+	stats.report(accountID, false, nil)
+	stats.report(accountID, true, nil)
+	scheduler := &defaultOpenAIAccountScheduler{stats: stats}
+
+	reason, errorRate, observedTTFT, shouldEscape := scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+		enabled:   true,
+		ttftMs:    15000,
+		errorRate: 0.5,
+	})
+	require.False(t, shouldEscape)
+	require.Empty(t, reason)
+	require.InDelta(t, 0.16, errorRate, 1e-9)
+	require.InDelta(t, 15000, observedTTFT, 1e-9)
+
+	for i := 0; i < 4; i++ {
+		stats.report(accountID, false, nil)
+	}
+	reason, errorRate, _, shouldEscape = scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+		enabled:   true,
+		ttftMs:    15000,
+		errorRate: 1,
+	})
+	require.False(t, shouldEscape)
+	require.Empty(t, reason)
+	reason, errorRate, observedTTFT, shouldEscape = scheduler.shouldEscapeStickyAccount(accountID, openAIStickyEscapeConfig{
+		enabled:   true,
+		ttftMs:    15000,
+		errorRate: errorRate,
+	})
+	require.False(t, shouldEscape)
+	require.Empty(t, reason)
+	require.InDelta(t, 0.655936, errorRate, 1e-9)
+	require.InDelta(t, 15000, observedTTFT, 1e-9)
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionSticky_ForceHTTP(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(1010)

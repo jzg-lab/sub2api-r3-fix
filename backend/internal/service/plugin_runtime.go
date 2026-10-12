@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -21,6 +22,8 @@ import (
 	hcplugin "github.com/hashicorp/go-plugin"
 )
 
+var errPluginRuntimeUnavailable = errors.New("OpenAI OAuth 插件不可用")
+
 type pluginRuntime struct {
 	installation           *PluginInstallation
 	client                 *hcplugin.Client
@@ -32,6 +35,9 @@ type pluginRuntime struct {
 	pausedAccountIDsSource func(context.Context) ([]int64, error)
 	pausedAccountIDs       []int64
 	probeBaseConfig        []byte
+	healthUnavailable      atomic.Bool
+	// Only the serialized reconciler owns this timestamp.
+	healthFailureSince time.Time
 }
 
 func startPluginRuntime(ctx context.Context, installation *PluginInstallation, startTimeout time.Duration, socketDir string) (*pluginRuntime, error) {
@@ -43,6 +49,14 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		return nil, errors.New("插件二进制哈希无效")
 	}
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), installation.BinaryPath)
+	if installation.PluginKey == "lyunlong.codex.lb-cookie-pin" {
+		dir, err := pluginEvidenceDir(socketDir, installation.PluginKey)
+		if err != nil {
+			return nil, fmt.Errorf("prepare plugin evidence: %w", err)
+		}
+		cmd.Env = []string{"SUB2API_PLUGIN_STATE_DIR=" + dir}
+	}
+	observations := &pluginEvidenceLog{logger: slog.Default()}
 	client := hcplugin.NewClient(&hcplugin.ClientConfig{
 		HandshakeConfig:  pluginv1.HandshakeConfig,
 		Plugins:          pluginv1.ClientPluginMap(),
@@ -55,7 +69,8 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		},
 		Logger:           hclog.NewNullLogger(),
 		SyncStdout:       io.Discard,
-		SyncStderr:       io.Discard,
+		SyncStderr:       &pluginEvidenceLog{logger: slog.Default()},
+		Stderr:           observations,
 		UnixSocketConfig: &hcplugin.UnixSocketConfig{TempDir: socketDir},
 		SkipHostEnv:      true,
 	})
@@ -92,13 +107,9 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		runtime.kill()
 		return nil, errors.New("插件运行时信息与已校验清单不一致")
 	}
-	health, err := api.Health(infoCtx, &pluginv1.HealthRequest{})
-	if err != nil || !health.Healthy {
+	if err := runtime.checkHealth(infoCtx); err != nil {
 		runtime.kill()
-		if err != nil {
-			return nil, fmt.Errorf("插件健康检查失败: %w", err)
-		}
-		return nil, fmt.Errorf("插件不健康: %s", health.Message)
+		return nil, err
 	}
 	return runtime, nil
 }
@@ -177,7 +188,7 @@ func (r *pluginRuntime) checkHealth(ctx context.Context) error {
 	if r == nil || r.api == nil || r.client == nil || r.client.Exited() {
 		return errors.New("插件进程已退出")
 	}
-	health, err := r.api.Health(ctx, &pluginv1.HealthRequest{})
+	health, err := r.api.Health(pluginv1.WithLivenessHealth(ctx), &pluginv1.HealthRequest{})
 	if err != nil {
 		return fmt.Errorf("插件健康检查失败: %w", err)
 	}
@@ -192,11 +203,11 @@ func (r *pluginRuntime) checkHealth(ctx context.Context) error {
 }
 
 func (r *pluginRuntime) beginRequest() bool {
-	if r == nil || r.draining.Load() {
+	if r == nil || r.draining.Load() || r.healthUnavailable.Load() {
 		return false
 	}
 	r.inFlight.Add(1)
-	if r.draining.Load() {
+	if r.draining.Load() || r.healthUnavailable.Load() {
 		r.finishRequest()
 		return false
 	}

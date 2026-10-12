@@ -508,7 +508,7 @@ func TestOpenAIResponseFlush_BareErrorTimeoutSynthesizesFailed(t *testing.T) {
 		},
 		{
 			name: "first output timeout",
-			cfg:  config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1},
+			cfg:  config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1, OpenAIOAuthFirstOutputTimeoutSeconds: 1},
 		},
 	}
 

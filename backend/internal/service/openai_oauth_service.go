@@ -21,6 +21,7 @@ type OpenAIOAuthService struct {
 	oauthClient                  OpenAIOAuthClient
 	tlsProfiles                  *TLSFingerprintProfileService
 	privacyClientFactory         PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	refreshAPI                   *OAuthRefreshAPI
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service

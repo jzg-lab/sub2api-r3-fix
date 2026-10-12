@@ -186,6 +186,9 @@ func isRecoverableOpenAIUnauthorized(body []byte) bool {
 	switch strings.ToLower(extractUpstreamErrorCode(body)) {
 	case "token_expired", "access_token_expired", "invalid_token", "invalid_api_key":
 		message := strings.ToLower(extractUpstreamErrorMessage(body))
+		if isTerminalOpenAIAuthFailure(message) {
+			return false
+		}
 		for _, permanent := range []string{"revoked", "invalidated", "deactivated", "disabled", "suspended", "banned", "workspace", "organization", "verification", "challenge"} {
 			if strings.Contains(message, permanent) {
 				return false

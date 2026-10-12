@@ -315,12 +315,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					h.handleCCFailoverExhausted(c, failoverErr, true)
 					return
 				}
-				if nextSmartRoute(c, failoverErr, account) {
-					applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
-					return
-				}
-				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				action := fs.HandleSmartRouteFailoverError(c.Request.Context(), c, h.gatewayService, account, failoverErr)
 				switch action {
+				case FailoverNextRoute:
+					return
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:

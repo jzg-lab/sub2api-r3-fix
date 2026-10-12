@@ -1457,6 +1457,17 @@ func (s *CRSSyncService) refreshOAuthToken(ctx context.Context, account *Account
 		if s.openaiOAuthService == nil {
 			return nil
 		}
+		if IsOpenAIBrowserOAuthAccount(account) {
+			updated, refreshErr := s.openaiOAuthService.RefreshStoredAccount(ctx, account, false)
+			if refreshErr != nil {
+				slog.Warn("crs_openai_coordinated_refresh_failed", "account_id", account.ID)
+			} else {
+				*account = *updated
+			}
+			// The coordinator persisted under its lease. Rewriting these
+			// credentials here would reopen the race after lease release.
+			return nil
+		}
 		tokenInfo, refreshErr := s.openaiOAuthService.RefreshAccountToken(ctx, account)
 		if refreshErr != nil {
 			err = refreshErr

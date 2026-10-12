@@ -959,11 +959,14 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
-	// OpenAIFirstOutputTimeoutSeconds: OpenAI 文本上游首个有效输出超时（含响应头等待）（秒），0表示禁用。
+	// OpenAIFirstOutputTimeoutSeconds: API Key 文本上游首个有效输出超时（含响应头等待）（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
 	// 0 表示回退到 OpenAIFirstOutputTimeoutSeconds。
 	OpenAIHighEffortFirstOutputTimeoutSeconds int `mapstructure:"openai_high_effort_first_output_timeout_seconds"`
+	// OAuth retains the reference defaults independently of API-key output protection.
+	OpenAIOAuthFirstOutputTimeoutSeconds           int `mapstructure:"openai_oauth_first_output_timeout_seconds"`
+	OpenAIOAuthHighEffortFirstOutputTimeoutSeconds int `mapstructure:"openai_oauth_high_effort_first_output_timeout_seconds"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
@@ -1367,14 +1370,13 @@ func (w GatewayOpenAIWSSchedulerScoreWeights) IsValid() bool {
 		!math.IsNaN(w.TotalWeightSum()) && !math.IsInf(w.TotalWeightSum(), 0)
 }
 
-// GatewayOpenAISchedulerConfig retains legacy fields for config compatibility.
-// Deprecated: account-wide scores no longer displace healthy conversation affinity.
+// GatewayOpenAISchedulerConfig controls the reference OAuth sticky escape policy.
 type GatewayOpenAISchedulerConfig struct {
-	// StickyEscapeEnabled is retained for legacy configuration.
+	// StickyEscapeEnabled applies to OAuth accounts; API keys retain healthy conversation affinity.
 	StickyEscapeEnabled bool `mapstructure:"sticky_escape_enabled"`
-	// StickyEscapeTTFTMs is retained for legacy configuration.
+	// StickyEscapeTTFTMs applies to OAuth accounts; API keys retain healthy conversation affinity.
 	StickyEscapeTTFTMs int `mapstructure:"sticky_escape_ttft_ms"`
-	// StickyEscapeErrorRate is retained for legacy configuration.
+	// StickyEscapeErrorRate applies to OAuth accounts; API keys retain healthy conversation affinity.
 	StickyEscapeErrorRate float64 `mapstructure:"sticky_escape_error_rate"`
 }
 
@@ -2375,6 +2377,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
+	viper.SetDefault("gateway.openai_oauth_first_output_timeout_seconds", 0)
+	viper.SetDefault("gateway.openai_oauth_high_effort_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 180)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 600)
 	// Upstream bodies may contain provider-echoed user data or credentials.
@@ -3314,6 +3318,14 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 1800 ||
 		(c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 30) {
 		return fmt.Errorf("gateway.openai_high_effort_first_output_timeout_seconds must be 0 or between 30-1800 seconds")
+	}
+	if c.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds > 600 ||
+		(c.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds < 30) {
+		return fmt.Errorf("gateway.openai_oauth_first_output_timeout_seconds must be 0 or between 30-600 seconds")
+	}
+	if c.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds > 1800 ||
+		(c.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds < 30) {
+		return fmt.Errorf("gateway.openai_oauth_high_effort_first_output_timeout_seconds must be 0 or between 30-1800 seconds")
 	}
 	if c.Gateway.Live.MaxSessionDurationSeconds <= 0 {
 		c.Gateway.Live.MaxSessionDurationSeconds = 3600

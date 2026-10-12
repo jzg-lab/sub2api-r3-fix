@@ -413,24 +413,30 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultOpenAIFirstOutputTimeoutsDisabled(t *testing.T) {
+func TestLoadDefaultOpenAIFirstOutputTimeoutsByAccountType(t *testing.T) {
 	resetViperWithJWTSecret(t)
 
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 180, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
 	require.Equal(t, 600, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
+	require.Zero(t, cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds)
+	require.Zero(t, cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds)
 }
 
 func TestLoadOpenAIFirstOutputTimeoutsFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_OPENAI_FIRST_OUTPUT_TIMEOUT_SECONDS", "90")
 	t.Setenv("GATEWAY_OPENAI_HIGH_EFFORT_FIRST_OUTPUT_TIMEOUT_SECONDS", "240")
+	t.Setenv("GATEWAY_OPENAI_OAUTH_FIRST_OUTPUT_TIMEOUT_SECONDS", "120")
+	t.Setenv("GATEWAY_OPENAI_OAUTH_HIGH_EFFORT_FIRST_OUTPUT_TIMEOUT_SECONDS", "360")
 
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 90, cfg.Gateway.OpenAIFirstOutputTimeoutSeconds)
 	require.Equal(t, 240, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
+	require.Equal(t, 120, cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds)
+	require.Equal(t, 360, cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds)
 }
 
 func TestValidateOpenAIFirstOutputTimeoutMinimum(t *testing.T) {
@@ -2617,5 +2623,29 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.ImageStreamDataIntervalTimeout <= cfg.Gateway.StreamDataIntervalTimeout {
 		t.Fatalf("image stream timeout = %d, want greater than ordinary stream timeout %d", cfg.Gateway.ImageStreamDataIntervalTimeout, cfg.Gateway.StreamDataIntervalTimeout)
+	}
+}
+
+func TestValidateOpenAIOAuthFirstOutputTimeoutBounds(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	for _, value := range []int{-1, 1, 29, 0, 30, 600, 601, 1800, 1801} {
+		cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds = value
+		cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds = 0
+		err = cfg.Validate()
+		if value == 0 || value >= 30 && value <= 600 {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, "gateway.openai_oauth_first_output_timeout_seconds")
+		}
+		cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds = 0
+		cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds = value
+		err = cfg.Validate()
+		if value == 0 || value >= 30 && value <= 1800 {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, "gateway.openai_oauth_high_effort_first_output_timeout_seconds")
+		}
 	}
 }

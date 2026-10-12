@@ -38,6 +38,45 @@ func newOpenAITransportErrTestContext() (*gin.Context, *httptest.ResponseRecorde
 	return c, rec
 }
 
+func TestHandleOpenAIUpstreamTransportError_PluginUnavailableDoesNotCycleAccounts(t *testing.T) {
+	for _, reason := range []string{"health timeout", "connection refused", "plugin draining", "rpc error: code = DeadlineExceeded desc = context deadline exceeded"} {
+		t.Run(reason, func(t *testing.T) {
+			repo := &openaiTransportAccountRepoStub{}
+			svc := &OpenAIGatewayService{accountRepo: repo}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			c, rec := newOpenAITransportErrTestContext()
+			c.Set(OpsUpstreamStatusCodeKey, http.StatusBadGateway)
+			c.Set(OpsUpstreamErrorDetailKey, "prior attempt detail")
+			sourceErr := fmt.Errorf("%w: %s", errPluginRuntimeUnavailable, reason)
+			retErr := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, sourceErr, false)
+			require.ErrorIs(t, retErr, errPluginRuntimeUnavailable)
+			var failover *UpstreamFailoverError
+			require.False(t, errors.As(retErr, &failover))
+			require.Empty(t, repo.tempUnschedCalls)
+			require.Equal(t, 0, c.GetInt(OpsUpstreamStatusCodeKey))
+			require.Empty(t, c.GetString(OpsUpstreamErrorDetailKey))
+			events := c.MustGet(OpsUpstreamErrorsKey).([]*OpsUpstreamErrorEvent)
+			require.Len(t, events, 1)
+			require.Equal(t, OpsUpstreamErrorKindPluginUnavailable, events[0].Kind)
+			require.Zero(t, events[0].UpstreamStatusCode)
+			require.False(t, c.Writer.Written())
+			require.Empty(t, rec.Body.String())
+		})
+	}
+}
+
+func TestHandleOpenAIUpstreamTransportError_PluginTextIsNotLocalEvidence(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	c, _ := newOpenAITransportErrTestContext()
+	sourceErr := errors.New(errPluginRuntimeUnavailable.Error() + ": health timeout")
+	retErr := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, sourceErr, false)
+	var failover *UpstreamFailoverError
+	require.ErrorAs(t, retErr, &failover)
+	events := c.MustGet(OpsUpstreamErrorsKey).([]*OpsUpstreamErrorEvent)
+	require.Equal(t, "request_error", events[0].Kind)
+}
+
 type failingOpenAIHTTPUpstream struct {
 	err   error
 	calls int
@@ -297,4 +336,38 @@ func TestHandleOpenAIAccountUpstreamError_RecordsOllamaActivityOnly(t *testing.T
 
 func (u *failingOpenAIHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
+func TestSmartRoutePluginFailureOnlyAdmitsIndependentCandidates(t *testing.T) {
+	manager := &PluginManager{}
+	manager.route.Store(&pluginRoute{rolloutPercent: 100, unavailable: "local fixture"})
+	oauth := Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1}
+	apiKey := Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1}
+	ctx := WithAPIKeyRouteAdmission(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	require.NoError(t, err)
+	response, handled, unavailable := manager.RoundTripOpenAIOAuth(ctx, req, "", &oauth)
+	require.Nil(t, response)
+	require.True(t, handled)
+	require.ErrorIs(t, unavailable, errPluginRuntimeUnavailable)
+	require.True(t, NoteAPIKeyRoutePluginUnavailable(ctx, unavailable))
+	require.Empty(t, APIKeyRouteExcludedAccounts(ctx, nil), "a shared outage must not become an account failure")
+	for _, advanced := range []string{"false", "true"} {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		svc := &OpenAIGatewayService{pluginManager: manager, accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{oauth, apiKey}}, cfg: &config.Config{RunMode: config.RunModeSimple}, rateLimitService: newOpenAIAdvancedSchedulerRateLimitService(advanced), concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+		selection, _, err := svc.SelectAccountWithScheduler(ctx, nil, "", "", "gpt-test", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		response, handled, err = manager.RoundTripOpenAIOAuth(ctx, req, "", selection.Account)
+		require.False(t, handled, "the selected API key must actually bypass this OAuth-only plugin binding")
+		require.Nil(t, response)
+		require.NoError(t, err)
+	}
+	for _, unsafe := range []error{&PluginTransportError{Code: "PLUGIN_RPC_FAILED", RequestSent: true}, errors.New(unavailable.Error()), context.Canceled} {
+		require.False(t, NoteAPIKeyRoutePluginUnavailable(WithAPIKeyRouteAdmission(context.Background()), unsafe))
+	}
+	require.False(t, NoteAPIKeyRoutePluginUnavailable(WithAPIKeyRouteAdmission(context.Background(), false), unavailable), "a pinned continuation cannot move")
 }

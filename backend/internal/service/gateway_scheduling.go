@@ -475,9 +475,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					if a.account.Priority != b.account.Priority {
 						return a.account.Priority < b.account.Priority
 					}
-					if ar, br := recentAccountReliability(ctx, a.account.ID), recentAccountReliability(ctx, b.account.ID); ar != br {
-						return ar > br
-					}
 					if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
 						return a.loadInfo.LoadRate < b.loadInfo.LoadRate
 					}
@@ -493,13 +490,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 				})
 				shuffleWithinSortGroups(routingAvailable)
-				sort.SliceStable(routingAvailable, func(i, j int) bool {
-					a, b := routingAvailable[i].account, routingAvailable[j].account
-					if a.Priority != b.Priority {
-						return a.Priority < b.Priority
-					}
-					return recentAccountReliability(ctx, a.ID) > recentAccountReliability(ctx, b.ID)
-				})
+				orderLoadedAccountsByRecentQuality(ctx, routingAvailable)
 
 				// 4. 尝试获取槽位
 				for _, item := range routingAvailable {
@@ -747,15 +738,30 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		for len(available) > 0 {
 			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
-			candidates = filterByRecentReliability(ctx, candidates)
 			// 2. （可选）use-it-or-lose-it：优先选用会话窗口最早重置的账号
 			if cfg.PreferSoonestReset {
 				candidates = filterBySoonestReset(candidates)
 			}
 			// 3. 取负载率最低的集合
-			candidates = filterByMinLoadRate(candidates)
-			// 4. LRU 选择最久未用的账号
-			selected := selectByLRU(candidates, preferOAuth)
+			sort.SliceStable(candidates, func(i, j int) bool {
+				if candidates[i].loadInfo.LoadRate != candidates[j].loadInfo.LoadRate {
+					return candidates[i].loadInfo.LoadRate < candidates[j].loadInfo.LoadRate
+				}
+				if candidates[i].loadInfo.WaitingCount != candidates[j].loadInfo.WaitingCount {
+					return candidates[i].loadInfo.WaitingCount < candidates[j].loadInfo.WaitingCount
+				}
+				a, b := candidates[i].account, candidates[j].account
+				if a.LastUsedAt == nil || b.LastUsedAt == nil {
+					return a.LastUsedAt == nil && b.LastUsedAt != nil
+				}
+				return a.LastUsedAt.Before(*b.LastUsedAt)
+			})
+			var selected *accountWithLoad
+			if orderLoadedAccountsByRecentQuality(ctx, candidates) {
+				selected = &candidates[0]
+			} else {
+				selected = selectByLRU(filterByMinLoadRate(candidates), preferOAuth)
+			}
 			if selected == nil {
 				break
 			}
@@ -787,7 +793,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	// ============ Layer 3: 兜底排队 ============
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
-	sortByRecentReliability(ctx, candidates)
+	sortByRecentQuality(ctx, candidates)
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
@@ -806,7 +812,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
 	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
-	sortByRecentReliability(ctx, ordered)
+	sortByRecentQuality(ctx, ordered)
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
@@ -1920,6 +1926,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 
 		var selected *Account
+		var qualityCandidates []*Account
 		for i := range accounts {
 			acc := &accounts[i]
 			if _, ok := routingSet[acc.ID]; !ok {
@@ -1957,13 +1964,14 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
+			qualityCandidates = append(qualityCandidates, acc)
 			if selected == nil {
 				selected = acc
 				continue
 			}
-			if acc.Priority < selected.Priority || (acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) > recentAccountReliability(ctx, selected.ID)) {
+			if acc.Priority < selected.Priority {
 				selected = acc
-			} else if acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) == recentAccountReliability(ctx, selected.ID) {
+			} else if acc.Priority == selected.Priority {
 				switch {
 				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
 					selected = acc
@@ -1981,6 +1989,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			}
 		}
 
+		sortAccountsByPriorityAndLastUsed(qualityCandidates, preferOAuth)
+		if sortByRecentQuality(ctx, qualityCandidates) {
+			selected = qualityCandidates[0]
+		}
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
 				if err := s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, selected.ID); err != nil {
@@ -2038,6 +2050,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	// 因为粘性会话优先保持连接一致性，且 upstream 计费基准极少使用。
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var selected *Account
+	var qualityCandidates []*Account
 	for i := range accounts {
 		acc := &accounts[i]
 		if _, excluded := excludedIDs[acc.ID]; excluded {
@@ -2075,13 +2088,14 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
+		qualityCandidates = append(qualityCandidates, acc)
 		if selected == nil {
 			selected = acc
 			continue
 		}
-		if acc.Priority < selected.Priority || (acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) > recentAccountReliability(ctx, selected.ID)) {
+		if acc.Priority < selected.Priority {
 			selected = acc
-		} else if acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) == recentAccountReliability(ctx, selected.ID) {
+		} else if acc.Priority == selected.Priority {
 			switch {
 			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
 				selected = acc
@@ -2099,6 +2113,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 	}
 
+	sortAccountsByPriorityAndLastUsed(qualityCandidates, preferOAuth)
+	if sortByRecentQuality(ctx, qualityCandidates) {
+		selected = qualityCandidates[0]
+	}
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
 		if requestedModel != "" {
@@ -2184,6 +2202,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 
 		var selected *Account
+		var qualityCandidates []*Account
 		for i := range accounts {
 			acc := &accounts[i]
 			if _, ok := routingSet[acc.ID]; !ok {
@@ -2225,13 +2244,14 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
+			qualityCandidates = append(qualityCandidates, acc)
 			if selected == nil {
 				selected = acc
 				continue
 			}
-			if acc.Priority < selected.Priority || (acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) > recentAccountReliability(ctx, selected.ID)) {
+			if acc.Priority < selected.Priority {
 				selected = acc
-			} else if acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) == recentAccountReliability(ctx, selected.ID) {
+			} else if acc.Priority == selected.Priority {
 				switch {
 				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
 					selected = acc
@@ -2249,6 +2269,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			}
 		}
 
+		sortAccountsByPriorityAndLastUsed(qualityCandidates, preferOAuth)
+		if sortByRecentQuality(ctx, qualityCandidates) {
+			selected = qualityCandidates[0]
+		}
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
 				if err := s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, selected.ID); err != nil {
@@ -2303,6 +2327,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	// needsUpstreamCheck 仅在主选择循环中使用；粘性会话命中时跳过此检查。
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var selected *Account
+	var qualityCandidates []*Account
 	for i := range accounts {
 		acc := &accounts[i]
 		if _, excluded := excludedIDs[acc.ID]; excluded {
@@ -2344,13 +2369,14 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
+		qualityCandidates = append(qualityCandidates, acc)
 		if selected == nil {
 			selected = acc
 			continue
 		}
-		if acc.Priority < selected.Priority || (acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) > recentAccountReliability(ctx, selected.ID)) {
+		if acc.Priority < selected.Priority {
 			selected = acc
-		} else if acc.Priority == selected.Priority && recentAccountReliability(ctx, acc.ID) == recentAccountReliability(ctx, selected.ID) {
+		} else if acc.Priority == selected.Priority {
 			switch {
 			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
 				selected = acc
@@ -2368,6 +2394,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 	}
 
+	sortAccountsByPriorityAndLastUsed(qualityCandidates, preferOAuth)
+	if sortByRecentQuality(ctx, qualityCandidates) {
+		selected = qualityCandidates[0]
+	}
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)
 		if requestedModel != "" {

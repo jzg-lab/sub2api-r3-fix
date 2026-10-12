@@ -745,6 +745,9 @@ func rescueSeedAuthRejected(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	if isTerminalOpenAIAuthFailure(msg) {
+		return true
+	}
 	for _, pattern := range [...]string{
 		"API returned 401",
 		"API returned 403",

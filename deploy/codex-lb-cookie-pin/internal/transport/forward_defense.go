@@ -43,4 +43,5 @@ func (s *Server) extendProbeCooldownLocked(accountID int64, deadline time.Time) 
 	}
 	state.RetryNotBefore = maxTime(state.RetryNotBefore, deadline)
 	state.NextProbeAt = maxTime(state.NextProbeAt, state.RetryNotBefore)
+	s.saveProtectionLocked(state)
 }

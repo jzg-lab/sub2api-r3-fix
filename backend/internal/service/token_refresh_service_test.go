@@ -29,6 +29,7 @@ type tokenRefreshAccountRepo struct {
 	updateErr                    error
 	cancelOnUpdate               context.CancelFunc
 	conditionalErrorCalls        int
+	openAIConditionalErrorCalls  int
 	conditionalTempCalls         int
 	conditionalSuccessCalls      int
 	conditionalErrorErr          error
@@ -104,6 +105,24 @@ func (r *tokenRefreshAccountRepo) SetError(ctx context.Context, id int64, errorM
 	r.setErrorCalls++
 	r.lastErrorMessage = errorMsg
 	return r.setErrorErr
+}
+
+func (r *tokenRefreshAccountRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	r.openAIConditionalErrorCalls++
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if r.setErrorErr != nil {
+		return false, r.setErrorErr
+	}
+	account := r.accountsByID[before.ID]
+	if !matchesAuthFailureTestAccount(account, before) || change.ErrorMessage == nil {
+		return false, nil
+	}
+	account.Status = StatusError
+	account.ErrorMessage = *change.ErrorMessage
+	r.lastErrorMessage = *change.ErrorMessage
+	return true, nil
 }
 
 func (r *tokenRefreshAccountRepo) ClearTempUnschedulable(ctx context.Context, id int64) error {
@@ -858,7 +877,7 @@ func TestTokenRefreshService_RefreshWithRetry_ClearsTempUnschedulable(t *testing
 	require.Equal(t, 1, tempCache.deleteCalls) // Redis 缓存也应清除
 }
 
-// TestTokenRefreshService_RefreshWithRetry_NonRetryableErrorAllPlatforms 测试所有平台不可重试错误都 SetError
+// Permanent failures block the attempted account; OpenAI requires credential CAS.
 func TestTokenRefreshService_RefreshWithRetry_NonRetryableErrorAllPlatforms(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -882,17 +901,26 @@ func TestTokenRefreshService_RefreshWithRetry_NonRetryableErrorAllPlatforms(t *t
 			}
 			service := NewTokenRefreshService(repo, nil, nil, nil, nil, invalidator, nil, cfg, nil)
 			account := &Account{
-				ID:       16,
-				Platform: tt.platform,
-				Type:     AccountTypeOAuth,
+				ID:          16,
+				Platform:    tt.platform,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Credentials: map[string]any{},
 			}
+			repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 			refresher := &tokenRefresherStub{
 				err: errors.New("invalid_grant: token revoked"),
 			}
 
 			err := service.refreshWithRetry(context.Background(), account, refresher, refresher, time.Hour)
 			require.Error(t, err)
-			require.Equal(t, 1, repo.setErrorCalls) // 所有平台不可重试错误都应 SetError
+			if tt.platform == PlatformOpenAI {
+				require.Equal(t, 1, repo.openAIConditionalErrorCalls)
+				require.Zero(t, repo.setErrorCalls)
+				require.Equal(t, StatusError, repo.accountsByID[account.ID].Status)
+			} else {
+				require.Equal(t, 1, repo.setErrorCalls)
+			}
 		})
 	}
 }
@@ -907,10 +935,13 @@ func TestTokenRefreshService_RefreshWithRetry_NoRefreshTokenDoesNotTempUnschedul
 	}
 	service := NewTokenRefreshService(repo, nil, nil, nil, nil, nil, nil, cfg, nil)
 	account := &Account{
-		ID:       18,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
+		ID:          18,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Credentials: map[string]any{},
 	}
+	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	refresher := &tokenRefresherStub{
 		err: errors.New("no refresh token available"),
 	}
@@ -919,7 +950,9 @@ func TestTokenRefreshService_RefreshWithRetry_NoRefreshTokenDoesNotTempUnschedul
 	require.Error(t, err)
 	require.Equal(t, 0, repo.updateCalls)
 	require.Equal(t, 0, repo.setTempUnschedCalls, "missing refresh token should not mark the account temp unschedulable")
-	require.Equal(t, 1, repo.setErrorCalls, "missing refresh token should be treated as a non-retryable credential state")
+	require.Equal(t, 1, repo.openAIConditionalErrorCalls, "missing refresh token should conditionally block only the attempted credential state")
+	require.Zero(t, repo.setErrorCalls)
+	require.Equal(t, StatusError, repo.accountsByID[account.ID].Status)
 }
 
 // TestIsNonRetryableRefreshError 测试不可重试错误判断

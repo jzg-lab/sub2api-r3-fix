@@ -993,7 +993,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	firstOutputTimeout := time.Duration(0)
 	if reqStream && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
+		firstOutputTimeout = s.openAIFirstOutputTimeoutForAccount(account, reasoningEffortValue)
 	}
 
 	httpInvalidEncryptedContentRetryTried := false
@@ -1003,7 +1003,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-		if reqStream {
+		if reqStream && account.Type == AccountTypeAPIKey {
 			upstreamCtx, releaseUpstreamCtx = detachUpstreamContextWithDrain(ctx, openAIUsageDrainTimeout)
 		}
 		var headerGuard *openAIFirstOutputHeaderGuard

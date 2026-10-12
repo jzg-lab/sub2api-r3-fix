@@ -13,7 +13,7 @@
   }
   h1 { font-size: 16px; margin: 0 0 4px; }
   .sub { color: #888; font-size: 12px; margin-bottom: 16px; }
-  fieldset { border: 1px solid #ddd; border-radius: 8px; margin: 0 0 14px; padding: 10px 14px; }
+  fieldset { min-inline-size: 0; border: 1px solid #ddd; border-radius: 8px; margin: 0 0 14px; padding: 10px 14px; }
   legend { font-weight: 600; font-size: 13px; padding: 0 6px; }
   .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   .row label { min-width: 150px; font-size: 13px; }
@@ -44,6 +44,17 @@
   .ans { color: #888; font-size: 11.5px; }
   .counters { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: #666; margin-top: 8px; }
   .counters b { color: inherit; }
+  .evidence-table { overflow-x: auto; }
+  .evidence-table table { min-width: 620px; }
+  .evidence-table td { overflow-wrap: anywhere; max-width: 240px; }
+  @media (max-width: 600px) {
+    .row { flex-wrap: wrap; }
+    .row .hint { flex-basis: 100%; }
+    .row input[type=text], .row input[type=number], .row select { min-width: 0; width: 100%; }
+    .btns { flex-wrap: wrap; }
+    #status > table { table-layout: fixed; }
+    #status td { overflow-wrap: anywhere; }
+  }
   :root[data-theme="dark"] .badge.fresh, @media (prefers-color-scheme: dark) { }
 </style>
 </head>
@@ -270,6 +281,30 @@
           "<span>质量重摇 <b>" + (p.quality_rerolls || 0) + "</b></span>" +
           "<span>疑似账号级 <b>" + (p.suspect_account_levels || 0) + "</b></span></div>";
       }
+    }
+    if (s.evidence) {
+      var evidence = s.evidence;
+      html += "<h2 style='font-size:14px;margin:16px 0 6px'>持久证据</h2>";
+      if (!evidence.available) {
+        html += "<div class='msg err' role='alert'>证据存储曾异常，统计可能不完整；不能据此确认探测或业务成功</div>";
+      }
+      var erows = (evidence.accounts || []).map(function (a) {
+        var op = a.operation || {};
+        var pending = op.phase === "unknown" && !op.reconciled;
+        var status = pending ? "unknown · 待人工对账" : (op.reconciled ? "unknown · 已对账" : op.phase || "无操作");
+        var badge = op.phase === "ok" ? "pass" : (op.phase === "failed" ? "fail" : "error");
+        var event = a.last_event || {};
+        var cohort = op.cohort || {};
+        return "<tr><td>" + esc(a.account_id) + "</td><td>" + esc(a.probe_passed || 0) +
+          "</td><td>" + esc(a.business_dispatched || 0) + "</td><td>" + esc(a.business_succeeded || 0) +
+          "</td><td>" + esc(a.backoff_step || 0) + "</td><td>" +
+          "<span class='badge " + badge + "'>" + esc(status) + "</span>" +
+          (op.id ? "<details><summary>操作记录</summary><code>" + esc(op.id) + "</code><br>" +
+            esc(cohort.model || event.model || "") + " / " + esc(cohort.effort_form || event.effort_form || "") +
+            "</details>" : "") + "</td></tr>";
+      }).join("");
+      html += "<div class='evidence-table'><table><tr><th>账号</th><th>探测通过（非业务）</th>" +
+        "<th>业务已派发</th><th>业务完整成功</th><th>退避档位</th><th>操作终态</th></tr>" + erows + "</table></div>";
     }
     $("status").innerHTML = html;
     resize();

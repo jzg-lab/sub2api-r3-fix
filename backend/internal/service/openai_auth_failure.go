@@ -45,9 +45,10 @@ func setAccountTestAuthError(ctx context.Context, repo AccountRepository, accoun
 }
 
 func (s *RateLimitService) handleOpenAIOAuthUnauthorized(ctx context.Context, account *Account, body []byte, upstreamMessage string) bool {
-	code := extractUpstreamErrorCode(body)
+	code := strings.ToLower(strings.TrimSpace(extractUpstreamErrorCode(body)))
 	missingRefresh := strings.TrimSpace(account.GetOpenAIRefreshToken()) == ""
-	permanent := code == "token_invalidated" || code == "token_revoked" ||
+	terminalMessage := isTerminalOpenAIAuthFailure(upstreamMessage)
+	permanent := isTerminalOpenAIAuthCode(code) || terminalMessage ||
 		gjson.GetBytes(body, "detail").String() == "Unauthorized" ||
 		missingRefresh
 	message := "Authentication failed (401): invalid or expired credentials"
@@ -60,6 +61,10 @@ func (s *RateLimitService) handleOpenAIOAuthUnauthorized(ctx context.Context, ac
 		if upstreamMessage != "" {
 			message = "Token revoked (401): " + upstreamMessage
 		}
+	case isTerminalOpenAIAuthCode(code):
+		message = "OAuth authorization required (401): " + code
+	case terminalMessage:
+		message = "OAuth authorization required (401): session rejected"
 	case gjson.GetBytes(body, "detail").String() == "Unauthorized":
 		message = "Unauthorized (401): account authentication failed permanently"
 		if upstreamMessage != "" {
@@ -93,6 +98,9 @@ func (s *RateLimitService) handleOpenAIOAuthUnauthorized(ctx context.Context, ac
 		slog.Debug("openai_401_stale_result_ignored", "account_id", account.ID)
 		return false
 	}
+	slog.Info("openai_401_classified", "account_id", account.ID,
+		"upstream_error_code", openAIAuthDiagnosticCode(code),
+		"authorization_required", permanent, "refresh_available", !missingRefresh)
 	if s.tokenCacheInvalidator != nil {
 		if err := s.tokenCacheInvalidator.InvalidateToken(ctx, account); err != nil {
 			slog.Warn("oauth_401_invalidate_cache_failed", "account_id", account.ID)
@@ -100,6 +108,56 @@ func (s *RateLimitService) handleOpenAIOAuthUnauthorized(ctx context.Context, ac
 	}
 	s.notifyAccountSchedulingBlocked(account, until, "oauth_401")
 	return true
+}
+
+func isTerminalOpenAIAuthCode(code string) bool {
+	switch code {
+	case "token_invalidated", "token_revoked", "refresh_token_reused",
+		"refresh_token_invalidated", "refresh_token_revoked", "refresh_token_expired",
+		"invalid_refresh_token", "invalid_grant", "app_session_terminated":
+		return true
+	default:
+		return false
+	}
+}
+
+// Match both structured upstream codes and our persisted 401 reason. Otherwise
+// the recovery worker can reopen a session the request path already quarantined.
+// Access-token expiry alone is intentionally not terminal.
+func isTerminalOpenAIAuthFailure(message string) bool {
+	value := strings.ToLower(strings.TrimSpace(message))
+	if strings.HasPrefix(value, "token revoked (401):") ||
+		strings.HasPrefix(value, "oauth authorization required (401):") {
+		return true
+	}
+	for _, word := range openAIAuthErrorWords(value) {
+		if isTerminalOpenAIAuthCode(word) {
+			return true
+		}
+	}
+	return strings.Contains(value, "token has been revoked") ||
+		strings.Contains(value, "token has been invalidated") ||
+		strings.Contains(value, "refresh token has already been used")
+}
+
+func openAIAuthErrorWords(message string) []string {
+	return strings.FieldsFunc(strings.ToLower(message), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
+	})
+}
+
+// Error codes are upstream-controlled. Emit only recognized values, not an
+// arbitrary code or body that could contain credential material.
+func openAIAuthDiagnosticCode(code string) string {
+	if isTerminalOpenAIAuthCode(code) {
+		return code
+	}
+	switch code {
+	case "token_expired", "access_token_expired", "invalid_token", "invalid_api_key":
+		return code
+	default:
+		return "unclassified"
+	}
 }
 
 type openAIResponseAccountKey struct{}

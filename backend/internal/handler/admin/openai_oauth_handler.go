@@ -379,7 +379,17 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 		return
 	}
 
-	// Use OpenAI OAuth service to refresh token
+	if service.IsOpenAIBrowserOAuthAccount(account) {
+		updatedAccount, refreshErr := h.openaiOAuthService.RefreshStoredAccount(c.Request.Context(), account, true)
+		if refreshErr != nil {
+			response.ErrorFrom(c, refreshErr)
+			return
+		}
+		response.Success(c, dto.AccountFromService(updatedAccount))
+		return
+	}
+
+	// Non-browser OAuth credentials retain their existing platform-specific path.
 	tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(c.Request.Context(), account)
 	if err != nil {
 		response.ErrorFrom(c, err)

@@ -346,12 +346,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
-					if nextSmartRoute(c, failoverErr, account) {
-						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+					if !failoverErr.ShouldRetryNextAccount() || smartRouteFailoverExhausted(c, failoverErr) || (smartRouteAttemptFrom(c) == nil && capacityRetryBudget.exhausted(failoverErr)) || (smartRouteAttemptFrom(c) == nil && openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount)) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) || openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+					if account.Type == service.AccountTypeAPIKey && nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 						return
 					}
 					// Pool mode: retry on the same account
@@ -375,6 +375,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							continue
 						}
 					}
+					if nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+						return
+					}
 					applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
@@ -395,6 +399,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						zap.Int("max_switches", maxAccountSwitches),
 					)
 					continue
+				}
+				if nextSmartRouteAfterPluginFailure(c, err) {
+					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)

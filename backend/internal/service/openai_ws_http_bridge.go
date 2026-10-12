@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -257,89 +258,131 @@ func prepareOpenAIWSHTTPBridgeBody(account *Account, payload []byte) ([]byte, er
 }
 
 type openAIWSToolCallReplayCollector struct {
-	items    []json.RawMessage
-	seen     map[string]struct{}
-	allItems []json.RawMessage
-	allSeen  map[string]struct{}
+	items []openAIWSReplayOutputItem
+	seen  map[string]int
+}
+
+type openAIWSReplayOutputItem struct {
+	raw         json.RawMessage
+	outputIndex int64
+	terminal    bool
 }
 
 func (c *openAIWSToolCallReplayCollector) AddEvent(eventType string, message []byte) {
 	switch strings.TrimSpace(eventType) {
 	case "response.output_item.done":
-		item := gjson.GetBytes(message, "item")
-		c.addAllItem(item)
-		c.addItem(item)
+		index := int64(-1)
+		value := gjson.GetBytes(message, "output_index")
+		if value.Type == gjson.Number && value.Int() >= 0 && value.Float() == float64(value.Int()) {
+			index = value.Int()
+		}
+		c.addItem(gjson.GetBytes(message, "item"), index, false)
 	case "response.completed", "response.done":
 		output := gjson.GetBytes(message, "response.output")
 		if !output.IsArray() {
 			return
 		}
-		for _, item := range output.Array() {
-			c.addAllItem(item)
-			c.addItem(item)
+		for index, item := range output.Array() {
+			c.addItem(item, int64(index), true)
 		}
 	}
 }
 
 func (c *openAIWSToolCallReplayCollector) Items() []json.RawMessage {
-	return cloneOpenAIWSRawMessages(c.items)
+	// Both bridge continuation and native WS recovery may remove the server
+	// reference. Tool-only replay would then silently discard assistant context.
+	ordered := append([]openAIWSReplayOutputItem(nil), c.items...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].outputIndex < 0 {
+			return false
+		}
+		return ordered[j].outputIndex < 0 || ordered[i].outputIndex < ordered[j].outputIndex
+	})
+	var items []json.RawMessage
+	for _, item := range ordered {
+		if gjson.GetBytes(item.raw, "type").String() == "reasoning" && !openAIWSReplayHasEncryptedContent(item.raw) {
+			continue
+		}
+		items = append(items, append(json.RawMessage(nil), item.raw...))
+	}
+	return items
 }
 
 func (c *openAIWSToolCallReplayCollector) AllItems() []json.RawMessage {
-	return cloneOpenAIWSRawMessages(c.allItems)
+	return c.Items()
 }
 
-func (c *openAIWSToolCallReplayCollector) addAllItem(item gjson.Result) {
-	if !item.Exists() || item.Type != gjson.JSON {
+func openAIWSReplayHasEncryptedContent(raw []byte) bool {
+	value := gjson.GetBytes(raw, "encrypted_content")
+	return value.Type == gjson.String && strings.TrimSpace(value.String()) != ""
+}
+
+func (c *openAIWSToolCallReplayCollector) addItem(item gjson.Result, outputIndex int64, terminal bool) {
+	if !item.IsObject() {
 		return
 	}
 	raw := strings.TrimSpace(item.Raw)
-	if raw == "" || !strings.HasPrefix(raw, "{") || strings.TrimSpace(item.Get("type").String()) == "" {
+	typ := strings.TrimSpace(item.Get("type").String())
+	if typ == "" {
 		return
 	}
-	key := strings.TrimSpace(item.Get("id").String())
-	if key == "" {
-		key = strings.TrimSpace(item.Get("call_id").String())
+	keys := make([]string, 0, 3)
+	if id := strings.TrimSpace(item.Get("id").String()); id != "" {
+		keys = append(keys, typ+":id:"+id)
 	}
-	if key == "" {
-		key = raw
+	if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+		keys = append(keys, typ+":call:"+callID)
 	}
-	if c.allSeen == nil {
-		c.allSeen = make(map[string]struct{})
+	if outputIndex >= 0 {
+		keys = append(keys, fmt.Sprintf("%s:index:%d", typ, outputIndex))
 	}
-	if _, ok := c.allSeen[key]; ok {
-		return
-	}
-	c.allSeen[key] = struct{}{}
-	c.allItems = append(c.allItems, json.RawMessage(raw))
-}
-
-func (c *openAIWSToolCallReplayCollector) addItem(item gjson.Result) {
-	if !item.Exists() || item.Type != gjson.JSON {
-		return
-	}
-	raw := strings.TrimSpace(item.Raw)
-	if raw == "" || !strings.HasPrefix(raw, "{") {
-		return
-	}
-	if !isCodexToolCallContextItemType(item.Get("type").String()) {
-		return
-	}
-	key := strings.TrimSpace(item.Get("id").String())
-	if key == "" {
-		key = strings.TrimSpace(item.Get("call_id").String())
-	}
-	if key == "" {
-		key = raw
+	if len(keys) == 0 {
+		keys = append(keys, "raw:"+raw)
 	}
 	if c.seen == nil {
-		c.seen = make(map[string]struct{})
+		c.seen = make(map[string]int)
 	}
-	if _, ok := c.seen[key]; ok {
+	for _, key := range keys {
+		slot, ok := c.seen[key]
+		if !ok {
+			continue
+		}
+		previous := &c.items[slot]
+		conflict := false
+		for _, field := range []string{"id", "call_id"} {
+			oldID := strings.TrimSpace(gjson.GetBytes(previous.raw, field).String())
+			newID := strings.TrimSpace(item.Get(field).String())
+			if oldID != "" && newID != "" && oldID != newID {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			continue
+		}
+		if previous.terminal && !terminal {
+			return
+		}
+		// Completion can enrich an earlier ID-only reasoning item. A sparse
+		// duplicate must not erase already received encrypted continuation data.
+		if typ != "reasoning" || openAIWSReplayHasEncryptedContent([]byte(raw)) || !openAIWSReplayHasEncryptedContent(previous.raw) {
+			previous.raw = json.RawMessage(raw)
+		}
+		if outputIndex >= 0 {
+			previous.outputIndex = outputIndex
+		}
+		previous.terminal = terminal
+		for _, alias := range keys {
+			c.seen[alias] = slot
+		}
 		return
 	}
-	c.seen[key] = struct{}{}
-	c.items = append(c.items, json.RawMessage(raw))
+	for _, key := range keys {
+		c.seen[key] = len(c.items)
+	}
+	c.items = append(c.items, openAIWSReplayOutputItem{
+		raw: json.RawMessage(raw), outputIndex: outputIndex, terminal: terminal,
+	})
 }
 
 func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {

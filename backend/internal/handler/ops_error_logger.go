@@ -1236,7 +1236,7 @@ func OpsErrorLoggerMiddleware(ops *service.OpsService) gin.HandlerFunc {
 		}
 		applyOpsLatencyFieldsFromContext(c, entry)
 		applyOpsUpstreamFieldsFromContext(c, entry)
-		if parsed.StreamFailure {
+		if parsed.StreamFailure && !lastOpsErrorIsPluginUnavailable(entry.UpstreamErrors) {
 			if message := strings.TrimSpace(parsed.Message); message != "" {
 				entry.UpstreamErrorMessage = &message
 			}
@@ -1328,7 +1328,12 @@ func logOpsRecoveredUpstream(c *gin.Context, ops *service.OpsService, finalStatu
 	entry.IsCountTokens = isCountTokensRequest(c)
 	entry.CreatedAt = time.Now()
 	entry.ErrorMessage = "Recovered upstream error"
-	if lastStage == string(service.GatewayFailureStageAccountAuth) {
+	if lastOpsErrorIsPluginUnavailable(entry.UpstreamErrors) {
+		entry.ErrorPhase = "internal"
+		entry.ErrorSource = "gateway"
+		entry.ErrorOwner = "platform"
+		entry.ErrorMessage = "Recovered local plugin failure"
+	} else if lastStage == string(service.GatewayFailureStageAccountAuth) {
 		entry.ErrorPhase = string(service.GatewayFailureStageAccountAuth)
 		entry.ErrorMessage = "Recovered account authentication failure"
 	} else if lastStatus > 0 {
@@ -1586,7 +1591,13 @@ func applyOpsStreamErrorSnapshot(entry *service.OpsInsertErrorLogInput, streamEr
 			break
 		}
 	}
-	if lastStage == string(service.GatewayFailureStageAccountAuth) {
+	if lastOpsErrorIsPluginUnavailable(streamErr.UpstreamErrors) {
+		entry.ErrorPhase = "internal"
+		entry.ErrorOwner = "platform"
+		entry.ErrorSource = "gateway"
+		entry.IsBusinessLimited = false
+		applyOpsUpstreamErrorEvents(entry, streamErr.UpstreamErrors)
+	} else if lastStage == string(service.GatewayFailureStageAccountAuth) {
 		entry.ErrorPhase = string(service.GatewayFailureStageAccountAuth)
 		entry.ErrorOwner = "provider"
 		entry.ErrorSource = "gateway"
@@ -2185,6 +2196,13 @@ func classifyOpsSeverity(errType string, status int) string {
 }
 
 func classifyOpsErrorLog(c *gin.Context, errType, message, code string, status int) (phase string, isBusinessLimited bool, errorOwner string, errorSource string) {
+	if c != nil {
+		if value, ok := c.Get(service.OpsUpstreamErrorsKey); ok {
+			if events, ok := value.([]*service.OpsUpstreamErrorEvent); ok && lastOpsErrorIsPluginUnavailable(events) {
+				return "internal", false, "platform", "gateway"
+			}
+		}
+	}
 	phase = classifyOpsPhase(errType, message, code)
 	routingCapacityLimited := isOpsRoutingCapacityLimited(c)
 	clientBusinessLimited := service.HasOpsClientBusinessLimited(c)
@@ -2333,6 +2351,15 @@ func hasOpsAccountAuthFailure(c *gin.Context) bool {
 					return events[i].Stage == string(service.GatewayFailureStageAccountAuth)
 				}
 			}
+		}
+	}
+	return false
+}
+
+func lastOpsErrorIsPluginUnavailable(events []*service.OpsUpstreamErrorEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if event := events[i]; event != nil {
+			return event.Kind == service.OpsUpstreamErrorKindPluginUnavailable && event.UpstreamStatusCode == 0
 		}
 	}
 	return false

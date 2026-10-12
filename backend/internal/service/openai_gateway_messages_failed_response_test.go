@@ -151,30 +151,39 @@ func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputFailsOver(t *testing.T
 	require.Empty(t, rec.Body.String(), "failover path must not commit downstream output")
 }
 
-func TestForwardAsAnthropic_StreamingGenericBareErrorBeforeOutputIsNotHiddenByFailover(t *testing.T) {
+func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputClassification(t *testing.T) {
+	for _, errorType := range []string{"server_error", "unclassified_error"} {
+		t.Run(errorType, func(t *testing.T) {
 
-	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
-	c.Request.Header.Set("Content-Type", "application/json")
+			body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
 
-	ssePayload := "event: error\n" +
-		`data: {"type":"error","error":{"type":"server_error","code":"upstream_error","message":"mixed tools failed"}}` + "\n\n" +
-		"data: [DONE]\n\n"
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(ssePayload)),
-	}}
-	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+			ssePayload := "event: error\n" +
+				`data: {"type":"error","error":{"type":"` + errorType + `","code":"upstream_error","message":"mixed tools failed"}}` + "\n\n" +
+				"data: [DONE]\n\n"
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(ssePayload)),
+			}}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
 
-	_, err := svc.ForwardAsAnthropic(context.Background(), c, rawChatCompletionsTestAccount(), body, "", "")
+			_, err := svc.ForwardAsAnthropic(context.Background(), c, rawChatCompletionsTestAccount(), body, "", "")
 
-	require.Error(t, err)
-	var failoverErr *UpstreamFailoverError
-	require.False(t, errors.As(err, &failoverErr))
-	require.Contains(t, rec.Body.String(), "mixed tools failed")
+			require.Error(t, err)
+			var failoverErr *UpstreamFailoverError
+			if errorType == "server_error" {
+				require.ErrorAs(t, err, &failoverErr)
+				require.Empty(t, rec.Body.String(), "explicit pre-output server failures remain replayable")
+			} else {
+				require.False(t, errors.As(err, &failoverErr))
+				require.Contains(t, rec.Body.String(), "mixed tools failed")
+			}
+		})
+	}
 }
 
 func TestForwardAsAnthropic_BufferedResponseFailed_Failover(t *testing.T) {

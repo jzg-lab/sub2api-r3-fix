@@ -865,16 +865,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
-					if nextSmartRoute(c, failoverErr, account) {
+					if !failoverErr.ShouldRetryNextAccount() || smartRouteFailoverExhausted(c, failoverErr) || (smartRouteAttemptFrom(c) == nil && capacityRetryBudget.exhausted(failoverErr)) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
+					if smartRouteAttemptFrom(c) == nil && openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
+					if account.Type == service.AccountTypeAPIKey && nextSmartRoute(c, failoverErr, account) {
 						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
-						return
-					}
-					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
-						return
-					}
-					if openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
 					// 池模式：同账号重试
@@ -897,6 +897,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							}
 							continue
 						}
+					}
+					if nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+						return
 					}
 					applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -929,6 +933,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 					reqLog.Warn("openai.upstream_failover_switching", failoverSwitchFields...)
 					continue
+				}
+				if nextSmartRouteAfterPluginFailure(c, err) {
+					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
@@ -1560,12 +1567,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
-					if nextSmartRoute(c, failoverErr, account) {
-						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+					if !failoverErr.ShouldRetryNextAccount() || smartRouteFailoverExhausted(c, failoverErr) || (smartRouteAttemptFrom(c) == nil && capacityRetryBudget.exhausted(failoverErr)) || (smartRouteAttemptFrom(c) == nil && openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount)) {
+						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) || openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
-						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
+					if account.Type == service.AccountTypeAPIKey && nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 						return
 					}
 					// 池模式：同账号重试
@@ -1588,6 +1595,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							}
 							continue
 						}
+					}
+					if nextSmartRoute(c, failoverErr, account) {
+						applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+						return
 					}
 					applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -1618,6 +1629,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					// 断开排水期间上游已计量的 usage 必须入账（此前直接 return 丢弃，
 					// payg 上游照常计费而平台漏记）。
 					submitMessagesUsage(result)
+					return
+				}
+				if nextSmartRouteAfterPluginFailure(c, err) {
 					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), false, nil, err)
@@ -2696,13 +2710,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		return true
 	}
 
+	sameAccountRetries := 0
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
-		if (wsRouteKey.HasSmartRoutes() && !wsRoutePinned && !wsRouteCommitted.Load()) || account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.SameAccountRetryDeadline.IsZero() {
+		if account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.SameAccountRetryDeadline.IsZero() {
 			return false
 		}
 		retryLimit := effectiveSameAccountRetryLimit(failoverErr, account)
 		if !sameAccountRetryAllowed(failoverErr, sameAccountRetryCount[account.ID], retryLimit) {
 			return false
+		}
+		if wsRouteKey.HasSmartRoutes() && !wsRouteCommitted.Load() {
+			if switchCount+sameAccountRetries >= maxAccountSwitches {
+				return false
+			}
+			sameAccountRetries++
 		}
 		sameAccountRetryCount[account.ID]++
 		retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
@@ -2737,7 +2758,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		if switchCount >= maxAccountSwitches {
+		if switchCount+sameAccountRetries >= maxAccountSwitches {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
 		}

@@ -167,20 +167,21 @@ func TestAdvancedSchedulerCapsRejectedCostOverflowAcquires(t *testing.T) {
 	require.Equal(t, openAIAccountSelectionProbeLimit, cache.totalAcquires())
 }
 
-func TestOpenAICostOverflowExpandedOnlyWhenCostAddsCandidates(t *testing.T) {
+func TestOpenAISelectionOverflowExpandedOnlyBeyondTierTopK(t *testing.T) {
 	candidates := []openAIAccountCandidateScore{
 		{account: &Account{ID: 1, Extra: map[string]any{"openai_compact_supported": true}}},
 		{account: &Account{ID: 2}},
 	}
 	plan := openAIAccountLoadPlan{candidates: candidates, topK: 1, includeOverflowFallback: true}
-	require.True(t, openAICostOverflowExpanded(OpenAIAccountScheduleRequest{}, plan))
-	require.False(t, openAICostOverflowExpanded(OpenAIAccountScheduleRequest{RequireCompact: true}, plan),
+	require.True(t, openAISelectionOverflowExpanded(OpenAIAccountScheduleRequest{}, plan))
+	require.False(t, openAISelectionOverflowExpanded(OpenAIAccountScheduleRequest{RequireCompact: true}, plan),
 		"one candidate per compact tier does not expand either tier's top-k")
 	plan.topK = len(candidates)
-	require.False(t, openAICostOverflowExpanded(OpenAIAccountScheduleRequest{}, plan))
+	require.False(t, openAISelectionOverflowExpanded(OpenAIAccountScheduleRequest{}, plan))
 	plan.includeOverflowFallback = false
 	plan.topK = 1
-	require.False(t, openAICostOverflowExpanded(OpenAIAccountScheduleRequest{}, plan))
+	require.True(t, openAISelectionOverflowExpanded(OpenAIAccountScheduleRequest{}, plan),
+		"deferred ordinary overflow shares the same request budget")
 }
 
 func TestAdvancedSchedulerKnownFullOverflowStillFindsAvailableAccount(t *testing.T) {
@@ -761,7 +762,7 @@ func TestOpenAIFreshUpstreamBillingRateUsesFreshCachedSuccessOnly(t *testing.T) 
 	}
 }
 
-func TestBuildOpenAISelectionOrderIncludesOverflowOnlyForCostScheduling(t *testing.T) {
+func TestBuildOpenAISelectionOrderKeepsTopKBeforeOverflow(t *testing.T) {
 	scheduler := &defaultOpenAIAccountScheduler{}
 	candidates := []openAIAccountCandidateScore{
 		{account: &Account{ID: 1}, loadInfo: &AccountLoadInfo{}, score: 3},
@@ -775,15 +776,15 @@ func TestBuildOpenAISelectionOrderIncludesOverflowOnlyForCostScheduling(t *testi
 	})
 	require.Len(t, legacy, 1)
 
-	costAware := scheduler.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
+	expanded := scheduler.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{
 		candidates:              candidates,
 		topK:                    1,
 		includeOverflowFallback: true,
 	})
 	require.Equal(t, []int64{1, 2, 3}, []int64{
-		costAware[0].account.ID,
-		costAware[1].account.ID,
-		costAware[2].account.ID,
+		expanded[0].account.ID,
+		expanded[1].account.ID,
+		expanded[2].account.ID,
 	})
 }
 

@@ -17,6 +17,13 @@ import (
 
 // Stage only the prefix so all text adapters share one deadline without changing their wire conversion.
 func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.Context, req *http.Request, proxy string, account *Account, body []byte, start time.Time, clientStream bool) (*http.Response, error) {
+	// OAuth adapters keep the reference transport/drain behavior; native Responses owns its configured first-output timer.
+	if account.Type != AccountTypeAPIKey {
+		upstreamStart := time.Now()
+		response, err := s.doOpenAIUpstream(ctx, req, proxy, account)
+		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		return response, err
+	}
 	upstream, release := withUpstreamDrain(ctx, req.Context(), openAIUsageDrainTimeout)
 	model := gjson.GetBytes(body, "model").String()
 	effort := ""
@@ -25,7 +32,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 	}
 	timeout := time.Duration(0)
 	if account.Platform == PlatformOpenAI && !IsImageGenerationIntent(req.URL.Path, model, body) {
-		timeout = s.openAIFirstOutputTimeout(effort)
+		timeout = s.openAIFirstOutputTimeoutForAccount(account, effort)
 	}
 	var headerGuard *openAIFirstOutputHeaderGuard
 	if timeout > 0 {

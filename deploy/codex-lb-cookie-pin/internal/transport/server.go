@@ -17,21 +17,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	hcplugin "github.com/hashicorp/go-plugin"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/cookiestore"
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/evidence"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/pluginconfig"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/prober"
 	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
-	"golang.org/x/net/http2"
 )
 
 const (
 	// PluginID 与 manifest.json 的 id 必须一致。
 	PluginID = "lyunlong.codex.lb-cookie-pin"
 	// PluginVersion 与 manifest.json 的 version 必须一致。
-	PluginVersion = "0.3.12"
+	PluginVersion = "0.3.14"
 	// A 518n-2 usage pattern is an observation, not proof of model quality.
 	// Correct answers with this pattern neither reroll nor certify recovery.
 	truncationFingerprintModulus = 518
@@ -55,6 +56,7 @@ type probeTemplate struct {
 	CreatedAt          time.Time
 	Generation         uint64
 	IdentityGeneration uint64 // Stable across business failures, not credential/route changes.
+	Confirmed          bool   // A complete successful business forward admitted this generation.
 	CookieVersion      uint64 // Per-attempt snapshot; only written on the cycle's copy.
 	RateLimitPolicy    pluginv1.ProbeRateLimitPolicy
 }
@@ -62,8 +64,10 @@ type probeTemplate struct {
 // Server 实现 TransportPlugin 服务。
 type Server struct {
 	pluginv1.UnimplementedTransportPluginServer
-	Store  *cookiestore.Store
-	Client *http.Client
+	Store          *cookiestore.Store
+	Client         *http.Client
+	evidence       *evidence.Store
+	evidenceFailed atomic.Bool
 
 	mu          sync.Mutex
 	broker      *hcplugin.GRPCBroker
@@ -89,6 +93,15 @@ type Server struct {
 
 // New 构建服务端与共享 HTTP 客户端。
 func New(store *cookiestore.Store) *Server {
+	return NewWithEvidence(store, evidence.NewMemory())
+}
+
+// Production supplies a successfully opened durable store. New is retained
+// for isolated embedded/test hosts and never selected by the process entrypoint.
+func NewWithEvidence(store *cookiestore.Store, journal *evidence.Store) *Server {
+	// Let net/http initialize HTTP/2 separately for each clone. Explicit
+	// ConfigureTransport installs TLSNextProto closures that clones would
+	// share, including the HTTP/2 pool, across different proxy routes.
 	baseTransport := &http.Transport{
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
@@ -97,9 +110,9 @@ func New(store *cookiestore.Store) *Server {
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   8,
 	}
-	_ = http2.ConfigureTransport(baseTransport)
 	server := &Server{
-		Store: store,
+		Store:    store,
+		evidence: journal,
 		Client: &http.Client{
 			Transport: baseTransport,
 			Timeout:   0,
@@ -151,7 +164,15 @@ func (s *Server) GetInfo(context.Context, *pluginv1.GetInfoRequest) (*pluginv1.G
 	}, nil
 }
 
-func (s *Server) Health(context.Context, *pluginv1.HealthRequest) (*pluginv1.HealthResponse, error) {
+func (s *Server) Health(ctx context.Context, _ *pluginv1.HealthRequest) (*pluginv1.HealthResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Status collection takes probe/journal locks and may wait for disk I/O.
+	// Its latency must not cause the host to kill healthy business streams.
+	if pluginv1.IsLivenessHealth(ctx) {
+		return &pluginv1.HealthResponse{Healthy: true, Message: "lb cookie pin ready"}, nil
+	}
 	cfg := s.Store.Config()
 	now := time.Now()
 	return &pluginv1.HealthResponse{
@@ -392,6 +413,8 @@ func (s *Server) stashTemplateLocked(start *pluginv1.ForwardRequestStart, body [
 			s.invalidateProbeLocked(accountID)
 			next.Generation = s.templates[accountID].Generation
 			next.IdentityGeneration = s.templates[accountID].IdentityGeneration
+		} else {
+			next.Confirmed = previous.Confirmed
 		}
 	} else {
 		s.nextTemplateGeneration++
@@ -437,17 +460,24 @@ func (s *Server) forwardTemplateCurrent(accountID int64, tmpl *probeTemplate) bo
 	return live != nil && live.IdentityGeneration == tmpl.IdentityGeneration
 }
 
-// Credential rotation invalidates quality evidence, not an upstream cooldown.
-// Retain only the deadline so a new template cannot resume probes prematurely.
+// Credential rotation invalidates passing evidence, never account protection.
 func (s *Server) resetProbeStateLocked(accountID int64, now time.Time) {
-	if previous := s.states[accountID]; previous != nil && previous.RetryNotBefore.After(now) {
-		state := prober.NewState(accountID)
+	state := prober.NewState(accountID)
+	if previous := s.states[accountID]; previous != nil {
 		state.RetryNotBefore = previous.RetryNotBefore
-		state.NextProbeAt = previous.RetryNotBefore
-		s.states[accountID] = state
-		return
+		state.BackoffUntil = previous.BackoffUntil
+		state.ConsecFails = previous.ConsecFails
+		s.saveProtectionLocked(previous)
 	}
-	delete(s.states, accountID)
+	s.restoreProtectionLocked(accountID, state)
+	state.NextProbeAt = maxTime(state.RetryNotBefore, state.BackoffUntil)
+	// Durable protection survives retirement; an idle in-memory state does not
+	// admit an unconfirmed template or skip the first-capture settling delay.
+	if state.NextProbeAt.After(now) {
+		s.states[accountID] = state
+	} else {
+		delete(s.states, accountID)
+	}
 }
 
 // extractModel 从业务请求体提取 model 字段（Responses API JSON）。探针开启
@@ -489,7 +519,7 @@ func templateRetired(tmpl *probeTemplate, state *prober.State, now time.Time, ho
 	if now.Sub(createdAt) > templateMaxAge {
 		return true
 	}
-	if state == nil && now.Sub(tmpl.SeenAt) > horizon {
+	if (!tmpl.Confirmed || state == nil) && now.Sub(tmpl.SeenAt) > horizon {
 		return true // 无业务流量且从没探过：弃模板
 	}
 	return false
@@ -553,7 +583,7 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 	cfg := s.Store.Config()
 	horizon := 2 * time.Duration(cfg.ProbeIntervalSeconds) * time.Second
 	for accountID, state := range s.states {
-		if s.templates[accountID] == nil && !state.RetryNotBefore.After(now) {
+		if s.templates[accountID] == nil && !maxTime(state.RetryNotBefore, state.BackoffUntil).After(now) {
 			delete(s.states, accountID)
 		}
 	}
@@ -568,13 +598,16 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 			s.resetProbeStateLocked(accountID, now)
 			continue
 		}
-		if !cfg.Enabled || !cfg.QualityProbeEnabled || !scopeMatch(cfg.InjectScope, tmpl.URL) || tmpl.Model == "" {
+		if !tmpl.Confirmed || !cfg.Enabled || !cfg.QualityProbeEnabled || !scopeMatch(cfg.InjectScope, tmpl.URL) || tmpl.Model == "" {
 			continue
 		}
 		if state == nil {
 			state = prober.NewState(accountID)
 			state.NextProbeAt = now.Add(postCaptureProbeDelay)
 			s.states[accountID] = state
+		}
+		if !s.restoreProtectionLocked(accountID, state) {
+			continue
 		}
 		if info := s.Store.SignInfo(accountID, now); info.HasSign {
 			pullForFreshSign(state, info.CapturedAt, now)
@@ -642,6 +675,9 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 		question := prober.QuestionFor(state.Probes)
 		s.probeMu.Unlock()
 		verdict, answer, reasoningTokens := s.sendProbe(ctx, accountID, tmpl, question, cfg)
+		if strings.HasPrefix(answer, "blocked:") {
+			return
+		}
 		s.probeMu.Lock()
 		if s.probePaused(accountID) || strings.HasPrefix(answer, "stale:") ||
 			(!s.probeTemplateCurrent(accountID, tmpl) &&
@@ -661,6 +697,7 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 				"hits", nextState.TruncationWindowHits, "samples", nextState.TruncationWindowSamples)
 		}
 		*state = nextState
+		s.saveProtectionLocked(state)
 		state.LastReasoningTokens = reasoningTokens
 		// v0.3.6：探针自捕的签不喂新签即探。探针响应（含 5xx/读错的响应头）
 		// 同样走 Capture 回捕 Set-Cookie——若这些时刻推进「有新签」判定，
@@ -686,6 +723,16 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 			}
 		}
 		observation := newProbeObservation(tmpl, state, decision, now)
+		retryAt := now.Add(2 * time.Second)
+		if decision.ProbeAgainNow {
+			if !s.restoreProtectionLocked(accountID, state) {
+				s.probeMu.Unlock()
+				observation.log(slog.Default())
+				return
+			}
+			retryAt = maxTime(retryAt, maxTime(state.RetryNotBefore, state.BackoffUntil))
+			state.NextProbeAt = retryAt
+		}
 		s.probeMu.Unlock()
 		observation.log(slog.Default())
 		if !decision.ProbeAgainNow {
@@ -694,7 +741,7 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Second): // 丢罐落定再复探
+		case <-time.After(time.Until(retryAt)):
 		}
 	}
 }
@@ -704,14 +751,14 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 // 报文逐条反推）：input 必须是消息数组、store 必须 false、stream 必须
 // true（后端强制 SSE）——恰好也是 codex CLI 的原生形态，指纹同形。响应的
 // Set-Cookie 走同一被动捕获路径——探针本身就能把重摇后的新签重新钉住。
-// 5xx/传输错误重试（最多 3 次尝试），429/Retry-After 延后调度；全败记 VerdictError（冷会话首发 503
-// 是常态，不是质量信号）。任何路径都不记 Authorization/Cookie 到日志或答案摘要。
+// 每次操作只外呼一次；模糊结果持久化为 unknown，等待人工对账。
+// 明确失败保留账号退避与 Retry-After，不记 Authorization/Cookie 到日志或答案摘要。
 // v0.3.4：①401/403 当场丢模板（模板 Authorization 已死，留着只会无限空转——
 // 1227 实证；下一笔真实 Forward 自动用新鲜 token 重stash）；②判过钉推理门槛
 // （答对但 reasoning_tokens 低于 probe_min_reasoning_tokens 不计连过）。
 // v0.3.10：低 rt 单信号及不明确的最终答案只作中性观察。v0.3.8：答对但命中 518n-2 指纹只记中性观察，
 // 不计质量失败、不触发重摇，也不计入连续通过证据。
-func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemplate, q prober.Question, cfg pluginconfig.Config) (prober.Verdict, string, int) {
+func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemplate, q prober.Question, cfg pluginconfig.Config) (verdict prober.Verdict, answer string, reasoning int) {
 	model := cfg.ProbeModel
 	if model == "" {
 		model = tmpl.Model
@@ -750,8 +797,29 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 	if err != nil {
 		return prober.VerdictError, "skip:build", 0
 	}
-	lastFailure := "transport"
-	for attempt := 0; attempt < 3; attempt++ {
+	c := cohort(model, cfg.ProbeReasoningEffort, tmpl.ProxyURL)
+	op, err := s.evidence.Begin(accountID, c, time.Now())
+	if err != nil {
+		if errors.Is(err, evidence.ErrBackoff) {
+			return prober.VerdictError, "blocked:backoff", 0
+		}
+		if errors.Is(err, evidence.ErrBlocked) {
+			return prober.VerdictError, "blocked:unknown", 0
+		}
+		s.evidenceError(err)
+		return prober.VerdictError, "blocked:persistence", 0
+	}
+	result := "failed"
+	var retryUntil time.Time
+	defer func() {
+		if err := s.evidence.Finish(accountID, op, c, result, time.Now(), retryUntil); err != nil {
+			s.evidenceError(err)
+			verdict, answer, reasoning = prober.VerdictError, "blocked:persistence", 0
+		} else if result == "unknown" {
+			slog.Warn("plugin_probe_unknown", "account_id", accountID, "operation_id", op)
+		}
+	}()
+	{
 		if err := ctx.Err(); err != nil {
 			return prober.VerdictError, "cancel", 0
 		}
@@ -763,6 +831,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		}
 		request.Host = tmpl.Host
 		request.Header = probeHeaders(tmpl.Headers)
+		request.GetBody = nil // Never let the transport rewind an ambiguous POST.
 		now := time.Now()
 		s.probeMu.Lock()
 		if !s.probeTemplateCurrent(accountID, tmpl) {
@@ -780,19 +849,25 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			cancel()
 			return prober.VerdictError, "proxy:invalid", 0
 		}
+		attemptStarted := time.Now()
+		request, failureTrace := traceUpstreamRequest(request)
+		// Commit intent before handing bytes to the HTTP transport. Even a
+		// process crash between this write and Do cannot cause silent replay.
+		if err := s.evidence.Dispatch(accountID, op, c, attemptStarted); err != nil {
+			s.evidenceError(err)
+			cancel()
+			return prober.VerdictError, "blocked:persistence", 0
+		}
+		result = "unknown"
 		response, err := client.Do(request)
 		if err != nil {
+			logUpstreamFailure(slog.Default(), accountID, "probe_connect", tmpl.ProxyURL, attemptStarted, err, attemptCtx.Err(), failureTrace)
 			cancel()
-			lastFailure = "transport"
-			if attempt == 2 {
-				break
+			if failureTrace.definitelyNotConnected(err) {
+				result = "failed"
+				return prober.VerdictError, "failed:connect", 0
 			}
-			select {
-			case <-ctx.Done():
-				return prober.VerdictError, "cancel", 0
-			case <-time.After(2 * time.Second):
-			}
-			continue
+			return prober.VerdictError, "unknown:transport", 0
 		}
 		observedAt := time.Now()
 		s.probeMu.Lock()
@@ -824,18 +899,31 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			stopRead := time.AfterFunc(3*time.Second, cancel)
 			raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxProbeErrorBody+1))
 			stopRead.Stop()
+			if readErr != nil {
+				logUpstreamFailure(slog.Default(), accountID, "probe_body", tmpl.ProxyURL, attemptStarted, readErr, attemptCtx.Err(), failureTrace)
+			}
 			response.Body.Close()
 			cancel()
 			failure := classifyProbeHTTPError(code, raw, readErr)
+			if readErr == nil && len(raw) <= maxProbeErrorBody {
+				result = "failed"
+				s.observeAdmission(accountID, c, admissionCategory(raw))
+			}
 			slog.Warn("quality_probe_http_error", "account_id", accountID,
 				"http_status", code, "kind", failure.Kind, "parameter", failure.Parameter,
 				"body_fingerprint", failure.Fingerprint, "body_truncated", len(raw) > maxProbeErrorBody,
 				"body_read_failed", readErr != nil)
-			lastFailure = failure.Summary()
+			lastFailure := failure.Summary()
 			deadline := probeRetryDeadlineWithPolicy(code, response.Header, observedAt, tmpl.RateLimitPolicy)
+			if seconds, ok := retrySeconds(response.Header.Get("Retry-After")); ok {
+				deadline = maxTime(deadline, retryResetAfter(seconds, observedAt))
+			} else if until, err := http.ParseTime(response.Header.Get("Retry-After")); err == nil {
+				deadline = maxTime(deadline, until)
+			}
 			if code == http.StatusTooManyRequests && readErr == nil {
 				deadline = maxTime(deadline, probeQuotaBodyDeadline(raw, observedAt))
 			}
+			retryUntil = deadline
 			if !deadline.IsZero() {
 				s.probeMu.Lock()
 				if !s.probeTemplateCurrent(accountID, tmpl) {
@@ -844,20 +932,10 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				}
 				if state := s.states[accountID]; state != nil {
 					state.RetryNotBefore = maxTime(state.RetryNotBefore, deadline)
+					s.saveProtectionLocked(state)
 				}
 				s.probeMu.Unlock()
 				return prober.VerdictError, lastFailure, 0
-			}
-			if code >= 500 {
-				if attempt == 2 {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return prober.VerdictError, "cancel", 0
-				case <-time.After(2 * time.Second):
-				}
-				continue
 			}
 			if code == http.StatusUnauthorized || code == http.StatusForbidden {
 				// 模板凭据被拒（v0.3.4，1227 实证）：模板里的 Authorization
@@ -878,17 +956,24 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		}
 		const maxProbeResponse = 2 << 20
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxProbeResponse+1))
+		if readErr != nil {
+			logUpstreamFailure(slog.Default(), accountID, "probe_body", tmpl.ProxyURL, attemptStarted, readErr, attemptCtx.Err(), failureTrace)
+		}
 		response.Body.Close()
 		cancel()
 		if readErr != nil {
-			return prober.VerdictError, "read", 0
+			return prober.VerdictError, "unknown:read", 0
 		}
 		if len(raw) > maxProbeResponse {
-			return prober.VerdictError, "read:too-large", 0
+			return prober.VerdictError, "unknown:read-too-large", 0
 		}
-		if !probeCompleted(raw) {
-			return prober.VerdictError, "parse:not-completed", 0
+		observer := responseObserver{sse: true}
+		observer.write(raw)
+		s.observeAdmission(accountID, c, observer.category)
+		if !observer.finish() {
+			return prober.VerdictError, result + ":not-completed", 0
 		}
+		result = "failed"
 		answer := extractAnswerFromSSE(raw)
 		if answer == "" {
 			return prober.VerdictError, "parse:no-text", 0
@@ -910,40 +995,19 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				// A token threshold is not proof of an incorrect answer.
 				return prober.VerdictError, "low-rt:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
 			}
+			result = "pass"
 			return prober.VerdictPass, answer, reasoningTokens
 		}
 		return prober.VerdictFail, answer, reasoningTokens
 	}
-	return prober.VerdictError, "retry-exhausted:" + lastFailure, 0
 }
 
 // Only a valid completed terminal can certify a probe; deltas and incomplete
 // answers may contain the expected prefix even when generation was aborted.
 func probeCompleted(raw []byte) bool {
-	completed := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
-		if !ok || strings.TrimSpace(payload) == "[DONE]" {
-			continue
-		}
-		var event struct {
-			Type     string `json:"type"`
-			Response *struct {
-				Status string `json:"status"`
-			} `json:"response"`
-		}
-		if json.Unmarshal([]byte(payload), &event) != nil {
-			return false
-		}
-		switch event.Type {
-		case "response.completed":
-			completed = event.Response != nil &&
-				(event.Response.Status == "" || event.Response.Status == "completed")
-		case "error", "response.failed", "response.incomplete":
-			return false
-		}
-	}
-	return completed
+	observer := responseObserver{sse: true}
+	observer.write(raw)
+	return observer.finish()
 }
 
 // extractAnswerFromSSE 从 SSE 流里提取答案文本：优先 response.completed 事件
@@ -964,34 +1028,24 @@ func extractAnswerFromSSE(raw []byte) string {
 	}
 	completedSeen := false
 	var deltas strings.Builder
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		payload, ok := strings.CutPrefix(line, "data:")
-		if !ok {
-			continue
-		}
-		payload = strings.TrimSpace(payload)
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
+	forEachResponseSSE(raw, func(eventType string, payload []byte) {
 		var event struct {
-			Type     string          `json:"type"`
 			Delta    string          `json:"delta"`
 			Response json.RawMessage `json:"response"`
 		}
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			continue
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return
 		}
-		switch event.Type {
+		switch eventType {
 		case "response.output_text.delta":
 			deltas.WriteString(event.Delta)
-		case "response.completed", "response.incomplete":
+		case "response.completed", "response.done", "response.incomplete":
 			// event.Response 已是内层 response 对象，直接解进 Output 层。
 			if err := json.Unmarshal(event.Response, &completed.Response); err == nil {
 				completedSeen = true
 			}
 		}
-	}
+	})
 	if completedSeen {
 		var text strings.Builder
 		for _, item := range completed.Response.Output {
@@ -1015,24 +1069,15 @@ func extractAnswerFromSSE(raw []byte) string {
 // 第二个返回值 false = 流里没有带有效计数的 usage。
 func extractUsageFromSSE(raw []byte) (int, bool) {
 	best, seen := 0, false
-	for _, line := range strings.Split(string(raw), "\n") {
-		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
-		if !ok {
-			continue
-		}
-		payload = strings.TrimSpace(payload)
-		if payload == "" || payload == "[DONE]" {
-			continue
+	forEachResponseSSE(raw, func(eventType string, payload []byte) {
+		if eventType != "response.completed" && eventType != "response.done" {
+			return
 		}
 		var event struct {
-			Type     string          `json:"type"`
 			Response json.RawMessage `json:"response"`
 		}
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			continue
-		}
-		if event.Type != "response.completed" {
-			continue
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return
 		}
 		var inner struct {
 			Usage *struct {
@@ -1044,7 +1089,7 @@ func extractUsageFromSSE(raw []byte) (int, bool) {
 		}
 		best, seen = 0, false
 		if err := json.Unmarshal(event.Response, &inner); err != nil || inner.Usage == nil {
-			continue
+			return
 		}
 		switch {
 		case inner.Usage.OutputTokensDetails != nil && inner.Usage.OutputTokensDetails.ReasoningTokens != nil:
@@ -1052,7 +1097,7 @@ func extractUsageFromSSE(raw []byte) (int, bool) {
 		case inner.Usage.ReasoningTokens != nil:
 			best, seen = *inner.Usage.ReasoningTokens, true
 		}
-	}
+	})
 	return best, seen && best >= 0
 }
 
@@ -1155,6 +1200,13 @@ func (s *Server) mergeStatusJSON(now time.Time, jarStatus cookiestore.Status, cf
 		_ = json.Unmarshal(raw, &merged)
 	}
 	merged["prober"] = s.snapshotProber(now, cfg)
+	states, evidenceErr := s.evidence.Snapshot()
+	s.evidenceError(evidenceErr)
+	merged["evidence"] = map[string]any{
+		"available": evidenceErr == nil && !s.evidenceFailed.Load(),
+		"accounts":  states,
+		"semantics": "probe_passed is not business_succeeded; business_succeeded requires a complete Responses terminal and transport delivery",
+	}
 	out, err := json.Marshal(merged)
 	if err != nil {
 		return nil
@@ -1210,17 +1262,102 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	}
 	s.probeMu.Unlock()
 
+	// Headers alone are not a completed forward. Fence failed first attempts so
+	// an older concurrent success cannot admit their replacement generation.
+	completed := false
+	businessSucceeded := false
+	businessDispatched := false
+	businessFailed := false
+	businessCohort := bodyCohort(body, start.GetProxyUrl())
+	hostProbe := pluginv1.IsProbeTraffic(stream.Context())
+	business := !hostProbe && responsesRequest(start.GetMethod(), start.GetUrl())
+	hostOperation, hostResult := "", "failed"
+	var hostRetryUntil time.Time
+	defer func() {
+		if hostOperation != "" {
+			s.evidenceError(s.evidence.Finish(start.GetAccountId(), hostOperation, businessCohort,
+				hostResult, time.Now(), hostRetryUntil))
+			if hostResult == "unknown" {
+				slog.Warn("plugin_probe_unknown", "account_id", start.GetAccountId(), "operation_id", hostOperation)
+			}
+		} else if businessDispatched {
+			result := "unknown"
+			if businessSucceeded {
+				result = "succeeded"
+			} else if businessFailed {
+				result = "failed"
+			}
+			s.evidenceError(s.evidence.Business(start.GetAccountId(), businessCohort, result, time.Now()))
+		}
+		if tmpl == nil {
+			return
+		}
+		s.probeMu.Lock()
+		if configGeneration == s.configGeneration && s.probeTemplateCurrent(start.GetAccountId(), tmpl) {
+			live := s.templates[start.GetAccountId()]
+			if completed {
+				next := *live
+				next.Confirmed = true
+				s.templates[start.GetAccountId()] = &next
+			} else if !live.Confirmed {
+				s.invalidateProbeResultsLocked(start.GetAccountId())
+			}
+		}
+		s.probeMu.Unlock()
+		if completed {
+			s.wakeProbeLoop()
+		}
+	}()
+
 	client, err := s.clientFor(start.GetProxyUrl())
 	if err != nil {
 		return stream.Send(errorFrame("PLUGIN_PROXY", "无效代理配置，拒绝直连回退", false))
 	}
+	if hostProbe {
+		hostOperation, err = s.evidence.Begin(start.GetAccountId(), businessCohort, time.Now())
+		if err != nil {
+			if !errors.Is(err, evidence.ErrBlocked) && !errors.Is(err, evidence.ErrBackoff) {
+				s.evidenceError(err)
+			}
+			return stream.Send(errorFrame("PLUGIN_PROBE_BLOCKED", "探针受持久退避或待对账操作保护", false))
+		}
+		request.GetBody = nil
+		if err := s.evidence.Dispatch(start.GetAccountId(), hostOperation, businessCohort, time.Now()); err != nil {
+			s.evidenceError(err)
+			return stream.Send(errorFrame("PLUGIN_PROBE_BLOCKED", "探针派发状态不可用", false))
+		}
+		hostResult = "unknown"
+	}
+	requestStarted := time.Now()
+	request, failureTrace := traceUpstreamRequest(request)
+	if start.GetAccountId() > 0 && business {
+		s.evidenceError(s.evidence.Business(start.GetAccountId(), businessCohort, "dispatched", requestStarted))
+		businessDispatched = true
+	}
 	response, err := client.Do(request)
 	if err != nil {
-		return stream.Send(errorFrame("UPSTREAM", "上游连接失败", true))
+		if hostProbe && failureTrace.definitelyNotConnected(err) {
+			hostResult = "failed"
+		}
+		suffix := logUpstreamFailure(slog.Default(), start.GetAccountId(), "forward_connect", start.GetProxyUrl(), requestStarted, err, stream.Context().Err(), failureTrace)
+		return stream.Send(errorFrame("UPSTREAM", "上游连接失败"+suffix, true))
 	}
 	defer response.Body.Close()
+	observer := responseObserver{sse: strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")}
+	defer func() {
+		s.observeAdmission(start.GetAccountId(), businessCohort, observer.category)
+	}()
 
 	after := time.Now()
+	if hostProbe {
+		hostRetryUntil = probeRetryDeadlineWithPolicy(response.StatusCode, response.Header, after,
+			pluginv1.ReadProbeRateLimitPolicy(stream.Context()))
+		if seconds, ok := retrySeconds(response.Header.Get("Retry-After")); ok {
+			hostRetryUntil = maxTime(hostRetryUntil, retryResetAfter(seconds, after))
+		} else if until, parseErr := http.ParseTime(response.Header.Get("Retry-After")); parseErr == nil {
+			hostRetryUntil = maxTime(hostRetryUntil, until)
+		}
+	}
 	var cooldownTemplate *probeTemplate
 	s.Store.ObserveResponse()
 	if inScope {
@@ -1258,8 +1395,9 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	for {
 		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
+			observer.write(buffer[:n])
 			received += int64(n)
-			if cooldownTemplate != nil && !bodyTooLarge {
+			if (cooldownTemplate != nil || hostProbe && response.StatusCode == http.StatusTooManyRequests) && !bodyTooLarge {
 				if len(quotaBody)+n > maxProbeErrorBody {
 					quotaBody = nil
 					bodyTooLarge = true
@@ -1276,8 +1414,12 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 			break
 		}
 		if readErr != nil {
-			return stream.Send(errorFrame("UPSTREAM_BODY", "读取上游响应失败", true))
+			suffix := logUpstreamFailure(slog.Default(), start.GetAccountId(), "forward_body", start.GetProxyUrl(), requestStarted, readErr, stream.Context().Err(), failureTrace)
+			return stream.Send(errorFrame("UPSTREAM_BODY", "读取上游响应失败"+suffix, true))
 		}
+	}
+	if hostProbe && response.StatusCode == http.StatusTooManyRequests {
+		hostRetryUntil = maxTime(hostRetryUntil, probeQuotaBodyDeadline(quotaBody, after))
 	}
 	if cooldownTemplate != nil {
 		deadline := probeQuotaBodyDeadline(quotaBody, after)
@@ -1289,10 +1431,28 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 			s.probeMu.Unlock()
 		}
 	}
-	return stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_End{End: &pluginv1.ForwardResponseEnd{
+	err = stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_End{End: &pluginv1.ForwardResponseEnd{
 		BytesReceived: received,
 		DurationMs:    time.Since(started).Milliseconds(),
 	}}})
+	completed = err == nil && stream.Context().Err() == nil &&
+		response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
+	businessSucceeded = completed && observer.finish()
+	businessFailed = err == nil && stream.Context().Err() == nil &&
+		response.StatusCode >= http.StatusMultipleChoices
+	if hostProbe {
+		if businessSucceeded {
+			hostResult = "observed"
+		} else if businessFailed {
+			hostResult = "failed"
+		}
+	} else if !business && start.GetAccountId() > 0 {
+		s.evidenceError(s.evidence.Business(start.GetAccountId(), businessCohort, "observed", time.Now()))
+	}
+	if !observer.sse && !completed {
+		observer.parse()
+	}
+	return err
 }
 
 // scopeMatch 判断该 URL 是否在注入范围内。

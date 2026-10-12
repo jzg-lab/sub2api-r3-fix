@@ -184,7 +184,7 @@ func probeTestConfig() pluginconfig.Config {
 	return cfg
 }
 
-// stashFrom 构造业务请求帧并捕获模板（模拟 Forward 的捕获路径）。
+// stashFrom seeds a template from an already completed successful business request.
 func stashFrom(s *Server, accountID int64, url string, now time.Time) {
 	start := &pluginv1.ForwardRequestStart{
 		Method:    http.MethodPost,
@@ -198,6 +198,11 @@ func stashFrom(s *Server, accountID int64, url string, now time.Time) {
 		},
 	}
 	s.stashTemplate(start, []byte(`{"model":"gpt-6-astra","input":"业务请求"}`), now)
+	s.probeMu.Lock()
+	if template := s.templates[accountID]; template != nil {
+		template.Confirmed = true
+	}
+	s.probeMu.Unlock()
 }
 
 // TestProbePassPath 满血剧本：一答即中，请求与业务流量同形
@@ -288,8 +293,8 @@ func TestProbeFailRerollBackoff(t *testing.T) {
 	}
 }
 
-// TestProbeRetryOn503 冷会话剧本：首发 503 重试即愈，不记质量失败。
-func TestProbeRetryOn503(t *testing.T) {
+// A complete 503 is a failed operation, not permission for an inline replay.
+func TestProbe503RetainsAccountBackoffWithoutInlineRetry(t *testing.T) {
 	up := newFakeUpstream(t, "503-first")
 	store := cookiestore.New()
 	cfg := probeTestConfig()
@@ -303,11 +308,15 @@ func TestProbeRetryOn503(t *testing.T) {
 	state := prober.NewState(9)
 	srv.runProbeCycle(context.Background(), 9, &tmpl, state, cfg)
 
-	if state.LastVerdict != prober.VerdictPass {
-		t.Fatalf("503 重试后应判 pass，得 %s", state.LastVerdict)
+	if state.LastVerdict != prober.VerdictError {
+		t.Fatalf("503 must not become a probe pass: %s", state.LastVerdict)
 	}
-	if up.requests != 2 {
-		t.Fatalf("应 503 一次+重试一次，请求数 %d", up.requests)
+	if up.requests != 1 {
+		t.Fatalf("503 must make one request: %d", up.requests)
+	}
+	saved, err := srv.evidence.Read(9)
+	if err != nil || saved.Step != 1 || !saved.NotBefore.After(now) {
+		t.Fatalf("503 lost durable protection: %+v %v", saved, err)
 	}
 	if state.Fails != 0 || state.ConsecFails != 0 {
 		t.Errorf("503 不应记质量失败: %+v", state)
@@ -391,10 +400,13 @@ func TestExtractModelAndSSE(t *testing.T) {
 		t.Errorf("completed 优先: %q", got)
 	}
 	// completed 缺失时用 delta 兜底。
-	deltas := `data: {"type":"response.output_text.delta","delta":"4"}` + "\n" +
+	deltas := `data: {"type":"response.output_text.delta","delta":"4"}` + "\n\n" +
 		`data: {"type":"response.output_text.delta","delta":"34"}` + "\n\n"
 	if got := extractAnswerFromSSE([]byte(deltas)); got != "434" {
 		t.Errorf("delta 兜底: %q", got)
+	}
+	if got := extractAnswerFromSSE([]byte(strings.Replace(deltas, "\n\n", "\n", 1))); got != "" {
+		t.Errorf("malformed combined event must not produce an answer: %q", got)
 	}
 	if extractAnswerFromSSE([]byte("data: [DONE]")) != "" {
 		t.Error("无文本事件应为空")
@@ -487,7 +499,7 @@ func TestTemplateRetiredDualTrack(t *testing.T) {
 	now := time.Now()
 	horizon := 10 * time.Minute
 	fresh := &probeTemplate{SeenAt: now.Add(-time.Minute)}
-	stale := &probeTemplate{SeenAt: now.Add(-time.Hour)}
+	stale := &probeTemplate{SeenAt: now.Add(-time.Hour), Confirmed: true}
 	ancient := &probeTemplate{SeenAt: now.Add(-25 * time.Hour)}
 	if templateRetired(fresh, nil, now, horizon) {
 		t.Fatal("horizon 内新鲜模板不应退役")
