@@ -55,7 +55,7 @@ export interface MonitorHealth {
   error_rate: HealthState
   ttft: HealthState
   cache?: HealthState
-  /** 0–100 blended score when samples are sufficient. */
+  /** 0–100 blended score when requests exist. */
   score?: number | null
   error_rate_score?: number | null
   ttft_score?: number | null

@@ -39,11 +39,12 @@ describe('channel cards with public, redacted metrics', () => {
 
   it('aligns sparse history to the selected range, including interior and trailing gaps', async () => {
     const starts = monitorBucketStarts(coverage)
+    const warningHealth: MonitorHealth = { ...health, overall: 'warning', error_rate: 'warning', score: 60 }
     expect(starts).toHaveLength(3)
     const wrapper = mount(ChannelStatusCard, {
       props: {
-        row: { platform: 'openai', group_id: 7, group_name: 'Example', health, metrics,
-          buckets: [{ bucket_start: starts[1], health, metrics }] },
+        row: { platform: 'openai', group_id: 7, group_name: 'Example', health: warningHealth, metrics,
+          buckets: [{ bucket_start: starts[1], health: warningHealth, metrics }] },
         starts, multiplier: 0, countdown: 60,
       },
 
@@ -52,10 +53,11 @@ describe('channel cards with public, redacted metrics', () => {
     expect(bars).toHaveLength(3)
     expect(bars[0].find('span').classes()).toContain('health-unknown')
     expect(bars[0].find('span').attributes('data-state')).toBe('unknown')
-    expect(bars[1].find('span').attributes('data-state')).toBe('healthy')
-    expect(bars[1].find('span').classes()).toContain('health-score10')
+    expect(bars[1].find('span').attributes('data-state')).toBe('warning')
+    expect(bars[1].find('span').classes()).toContain('health-score6')
     expect(bars[2].find('span').classes()).toContain('health-unknown')
     expect(wrapper.text()).toContain('Rate 0x')
+    expect(wrapper.text()).not.toContain('channelMonitorV2.cards.insufficient')
     await bars[1].trigger('focus')
     expect(wrapper.get('[role="tooltip"]').text()).toContain('98.0%')
     await bars[1].trigger('keydown', { key: 'Escape' })

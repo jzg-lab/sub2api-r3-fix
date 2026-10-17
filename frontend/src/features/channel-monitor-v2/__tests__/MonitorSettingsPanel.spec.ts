@@ -43,7 +43,8 @@ function config(): MonitorConfig {
     group_ids: [42],
     ignored_error_categories: [],
     health_thresholds: {
-      minimum_sample: 70, warning_error_rate: 0.1, critical_error_rate: 0.3,
+      minimum_sample: 70,
+      warning_error_rate: 0.1, critical_error_rate: 0.3,
       target_ttft_ms: 1500, warning_ttft_ms: 2000, critical_ttft_ms: 5000,
       warning_cache_rate: 0.7, critical_cache_rate: 0.4,
       error_weight: 0.5, ttft_weight: 0.3, cache_weight: 0.2,
@@ -75,6 +76,12 @@ beforeEach(() => {
 })
 
 describe('MonitorSettingsPanel platform configuration', () => {
+  it('does not expose a request-count threshold setting', async () => {
+    const wrapper = await panel()
+    expect(wrapper.text()).not.toContain('minimumSample')
+    wrapper.unmount()
+  })
+
   it('adds a missing provider and saves its models without changing existing settings', async () => {
     const original = config()
     const wrapper = await panel(original)

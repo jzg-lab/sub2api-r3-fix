@@ -123,19 +123,18 @@ type ChannelMonitorV2Health struct {
 	ErrorRate string `json:"error_rate"`
 	TTFT      string `json:"ttft"`
 	Cache     string `json:"cache"`
-	// Score is 0–100 when samples are sufficient; omitted/null when unknown.
+	// Score is 0–100 when requests exist; omitted/null when there are no requests.
 	// Overall blends error-rate, TTFT p50, and cache rate (weights in Thresholds).
 	Score          *float64                         `json:"score,omitempty"`
 	ErrorRateScore *float64                         `json:"error_rate_score,omitempty"`
 	TTFTScore      *float64                         `json:"ttft_score,omitempty"`
 	CacheScore     *float64                         `json:"cache_score,omitempty"`
-	MinimumSample  int64                            `json:"minimum_sample"`
+	MinimumSample  int64                            `json:"minimum_sample"` // Retained for API compatibility; it no longer gates scoring.
 	Thresholds     ChannelMonitorV2HealthThresholds `json:"thresholds"`
 }
 
 type ChannelMonitorV2HealthThresholds struct {
-	// MinimumSample is required before scoring request/latency/cache signals.
-	MinimumSample int64 `json:"minimum_sample"`
+	MinimumSample int64 `json:"minimum_sample"` // Retained for config compatibility; it no longer gates scoring.
 	// WarningErrorRate / CriticalErrorRate map to discrete bands for legacy UI.
 	WarningErrorRate  float64 `json:"warning_error_rate"`
 	CriticalErrorRate float64 `json:"critical_error_rate"`
@@ -800,9 +799,6 @@ func NormalizeChannelMonitorV2HealthThresholds(in ChannelMonitorV2HealthThreshol
 	if in.MinimumSample <= 0 {
 		in.MinimumSample = def.MinimumSample
 	}
-	if in.MinimumSample < 1 {
-		in.MinimumSample = 1
-	}
 	if in.MinimumSample > 10000 {
 		in.MinimumSample = 10000
 	}
@@ -948,25 +944,22 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
 		MinimumSample: thresholds.MinimumSample, Thresholds: thresholds,
 	}
-	if metrics.RequestCount < result.MinimumSample {
+	if metrics.RequestCount <= 0 {
 		return result
 	}
 
 	type scored struct {
 		score  float64
 		weight float64
-		band   string
 	}
 	parts := make([]scored, 0, 3)
 
-	if metrics.RequestCount >= result.MinimumSample {
-		s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
-		result.ErrorRateScore = &s
-		result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
-		parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight, band: result.ErrorRate})
-	}
+	s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
+	result.ErrorRateScore = &s
+	result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
+	parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight})
 	// Prefer p50 for TTFT scoring; fall back to p95 only if p50 is missing.
-	if metrics.TTFT.SampleCount >= result.MinimumSample {
+	if metrics.TTFT.SampleCount > 0 {
 		var ttftMs *int64
 		if metrics.TTFT.P50Ms != nil {
 			ttftMs = metrics.TTFT.P50Ms
@@ -977,11 +970,11 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 			s := ttftP50Score(float64(*ttftMs), float64(thresholds.TargetTTFTMs), float64(thresholds.CriticalTTFTMs))
 			result.TTFTScore = &s
 			result.TTFT = healthBand(float64(*ttftMs), float64(thresholds.WarningTTFTMs), float64(thresholds.CriticalTTFTMs))
-			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight, band: result.TTFT})
+			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight})
 		}
 	}
 	// Cache: need a meaningful denominator; higher rate is better.
-	if metrics.CacheRateDenominator >= result.MinimumSample {
+	if metrics.CacheRateDenominator > 0 {
 		s := cacheRateScore(metrics.CacheRate)
 		if thresholds.WarningCacheRate <= 0 && thresholds.CriticalCacheRate <= 0 {
 			// A zero/zero cache threshold means "do not penalize cache misses".
@@ -990,23 +983,26 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		result.CacheScore = &s
 		// Invert for healthBand (lower is worse): use (1 - rate) against warning/critical floors.
 		result.Cache = cacheRateBand(metrics.CacheRate, thresholds.WarningCacheRate, thresholds.CriticalCacheRate)
-		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight, band: result.Cache})
+		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight})
 	}
 
-	if len(parts) == 0 {
-		return result
-	}
 	var weightSum, scoreSum float64
 	for _, p := range parts {
 		weightSum += p.weight
 		scoreSum += p.weight * p.score
 	}
-	if weightSum <= 0 {
-		return result
+	if weightSum > 0 {
+		scoreSum /= weightSum
+	} else {
+		// A request still needs a health state when configured weights exclude its available signals.
+		scoreSum = 0
+		for _, p := range parts {
+			scoreSum += p.score
+		}
+		scoreSum /= float64(len(parts))
 	}
-	overall := scoreSum / weightSum
-	result.Score = &overall
-	result.Overall = scoreBand(overall)
+	result.Score = &scoreSum
+	result.Overall = scoreBand(scoreSum)
 	return result
 }
 

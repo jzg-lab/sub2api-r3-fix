@@ -45,9 +45,6 @@ function detail(index: number) {
           <span v-if="multiplier != null" class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-600 dark:bg-slate-700 dark:text-gray-300">
             {{ t('channelMonitorV2.cards.multiplier', { value: multiplier }) }}
           </span>
-          <span v-if="row.health.overall === 'unknown'" class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500 dark:bg-dark-700 dark:text-gray-300">
-            {{ t('channelMonitorV2.cards.insufficient') }}
-          </span>
         </div>
       </div>
     </header>
