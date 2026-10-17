@@ -71,7 +71,7 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 	}
 
-	responsesRequest, err := apicompat.ChatCompletionsToResponses(&request)
+	responsesRequest, err := chatCompletionsToResponses(settingServiceConfig(s.settingService), &request)
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
@@ -212,7 +212,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request body")
 	}
 
-	mappedModel := s.getMappedModel(account, request.originalModel)
+	mappedModel := s.getMappedModelForThinkingLevel(account, request.originalModel, geminiThinkingLevelFromClaudeThinking(claudeRequest.Thinking))
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		message := fmt.Sprintf("model %s not in whitelist", request.originalModel)

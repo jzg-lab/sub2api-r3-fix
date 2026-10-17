@@ -51,6 +51,14 @@ const (
 	// ensureForwardErrorResponse 检查此 key，为 true 时跳过兜底写入，避免在已完成的 JSON 后追加 SSE。
 	ResponseCommittedKey = "response_committed"
 
+	// OpsLocalErrorTypeKey / OpsLocalErrorCodeKey 记录网关以 Google 错误格式回写的错误类型与错误码：
+	// Google 错误体没有 type 字段，ops_error_logger 据此按与 Claude / OpenAI 格式错误相同的口径分类。
+	OpsLocalErrorTypeKey = "ops_local_error_type"
+	OpsLocalErrorCodeKey = "ops_local_error_code"
+	// OpsRequestScopedErrorKey 标记失败由请求内容决定（如引用的显式缓存不存在）：只按错误类型分类，
+	// 上游错误上下文保留为明细但不参与归因。
+	OpsRequestScopedErrorKey = "ops_request_scoped_error"
+
 	OpsClientBusinessLimitedKey                           = "ops_client_business_limited"
 	OpsClientBusinessLimitedReasonKey                     = "ops_client_business_limited_reason"
 	OpsClientBusinessLimitedReasonIPRestriction           = "api_key_ip_restriction"
@@ -411,6 +419,42 @@ const (
 	opsProxyNameUnknown = "unknown"
 )
 
+// MarkOpsRequestScopedError records an error whose classification is determined
+// by the request itself rather than by a failed upstream attempt.
+func MarkOpsRequestScopedError(c *gin.Context, errType string) {
+	if c == nil {
+		return
+	}
+	SetOpsLocalErrorType(c, errType, "")
+	c.Set(OpsRequestScopedErrorKey, true)
+}
+
+func IsOpsRequestScopedError(c *gin.Context) bool {
+	return c != nil && c.GetBool(OpsRequestScopedErrorKey)
+}
+
+// SetOpsLocalErrorType records a local response error type/code and clears a
+// prior request-scoped marker before a new classification is applied.
+func SetOpsLocalErrorType(c *gin.Context, errType, code string) {
+	if c == nil {
+		return
+	}
+	c.Set(OpsLocalErrorTypeKey, strings.TrimSpace(errType))
+	c.Set(OpsLocalErrorCodeKey, strings.TrimSpace(code))
+	c.Set(OpsRequestScopedErrorKey, false)
+}
+
+func OpsLocalErrorType(c *gin.Context) (errType, code string) {
+	if c == nil {
+		return "", ""
+	}
+	errType = c.GetString(OpsLocalErrorTypeKey)
+	if errType == "" {
+		return "", ""
+	}
+	return errType, c.GetString(OpsLocalErrorCodeKey)
+}
+
 func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	if c == nil {
 		return
@@ -447,27 +491,34 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	checkSkipMonitoringForUpstreamEvent(c, &evCopy)
 }
 
-// The event is assembled at the failure site. Forwarding code builds managed
-// proxy routes from Proxy, so that event-time object is authoritative.
-func opsUpstreamProxyID(account *Account) *int64 {
-	if account == nil || account.ProxyID == nil || account.Proxy == nil || account.Proxy.ID <= 0 {
-		return nil
+// opsUpstreamProxyAttribution derives both fields from the same event-time
+// account state so an ID and name can never disagree.
+func opsUpstreamProxyAttribution(account *Account) (*int64, string) {
+	if account == nil {
+		return nil, opsProxyNameUnknown
+	}
+	if account.ProxyID == nil || account.Proxy == nil {
+		return nil, opsProxyNameDirect
+	}
+	if account.Proxy.ID <= 0 {
+		return nil, opsProxyNameUnknown
 	}
 	proxyID := account.Proxy.ID
-	return &proxyID
+	name := strings.TrimSpace(account.Proxy.Name)
+	if name == "" {
+		name = "proxy"
+	}
+	return &proxyID, name
+}
+
+func opsUpstreamProxyID(account *Account) *int64 {
+	proxyID, _ := opsUpstreamProxyAttribution(account)
+	return proxyID
 }
 
 func opsUpstreamProxyName(account *Account) string {
-	if account == nil {
-		return opsProxyNameUnknown
-	}
-	if account.ProxyID == nil || account.Proxy == nil {
-		return opsProxyNameDirect
-	}
-	if name := strings.TrimSpace(account.Proxy.Name); name != "" {
-		return name
-	}
-	return "proxy"
+	_, name := opsUpstreamProxyAttribution(account)
+	return name
 }
 
 func setUnknownOpsUpstreamProxy(ev *OpsUpstreamErrorEvent) {

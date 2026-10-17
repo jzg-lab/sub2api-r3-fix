@@ -5,7 +5,9 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -45,6 +47,55 @@ func (s *GroupRepoSuite) SetupTest() {
 
 func TestGroupRepoSuite(t *testing.T) {
 	suite.Run(t, new(GroupRepoSuite))
+}
+
+func TestModerationConfigWriteRejectsGroupDeletedAfterValidation(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := newGroupRepositoryWithSQL(client, integrationDB)
+	settings := &settingRepository{client: client}
+	group := &service.Group{Name: "moderation-concurrent-delete", Platform: service.PlatformAnthropic, RateMultiplier: 1, Status: service.StatusActive, SubscriptionType: service.SubscriptionTypeStandard}
+	require.NoError(t, repo.Create(ctx, group))
+	t.Cleanup(func() { _, _ = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id=$1", group.ID) })
+	key := service.SettingKeyContentModerationConfig
+	previous, previousErr := settings.GetValue(ctx, key)
+	t.Cleanup(func() {
+		if previousErr == nil {
+			_ = settings.Set(ctx, key, previous)
+		} else {
+			_ = settings.Delete(ctx, key)
+		}
+	})
+	require.NoError(t, settings.Set(ctx, key, `{"all_groups":false,"group_ids":[]}`))
+
+	// Hold the deleter's group lock while the config writer starts with an ID
+	// that was valid before deletion. It must recheck after this transaction commits.
+	tx, err := integrationDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	var id int64
+	require.NoError(t, tx.QueryRowContext(ctx, "SELECT id FROM groups WHERE id=$1 FOR UPDATE", group.ID).Scan(&id))
+	finished := make(chan error, 1)
+	go func() {
+		finished <- settings.SetContentModerationConfig(ctx, `{"all_groups":false,"group_ids":[`+fmt.Sprint(group.ID)+`]}`, []int64{group.ID})
+	}()
+	select {
+	case err := <-finished:
+		t.Fatalf("config write passed a locked group before deletion: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE groups SET deleted_at=NOW() WHERE id=$1", group.ID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, service.ErrGroupNotFound)
+	case <-time.After(5 * time.Second):
+		t.Fatal("config write did not finish after deletion")
+	}
+	stored, err := settings.GetValue(ctx, key)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"all_groups":false,"group_ids":[]}`, stored)
 }
 
 // --- Create / GetByID / Update / Delete ---
@@ -197,6 +248,48 @@ func (s *GroupRepoSuite) TestUpdate() {
 	got, err := s.repo.GetByID(s.ctx, group.ID)
 	s.Require().NoError(err, "GetByID after update")
 	s.Require().Equal("updated", got.Name)
+}
+
+func (s *GroupRepoSuite) TestI18n_RoundTrip() {
+	group := &service.Group{
+		Name:             "i18n-roundtrip",
+		Platform:         service.PlatformAnthropic,
+		RateMultiplier:   1.0,
+		Status:           service.StatusActive,
+		SubscriptionType: service.SubscriptionTypeStandard,
+		I18n: service.GroupI18n{
+			"en": {Name: "Standard", Description: "Pro + Max pool"},
+		},
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, group))
+
+	got, err := s.repo.GetByID(s.ctx, group.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(group.I18n, got.I18n)
+
+	got.I18n = service.GroupI18n{"zh": {Description: "号池"}}
+	s.Require().NoError(s.repo.Update(s.ctx, got))
+	got, err = s.repo.GetByID(s.ctx, group.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.GroupI18n{"zh": {Description: "号池"}}, got.I18n)
+
+	// 未携带译文的写入落库为空对象，而不是 JSON null。
+	got.I18n = nil
+	s.Require().NoError(s.repo.Update(s.ctx, got))
+	var stored string
+	s.Require().NoError(scanSingleRow(s.ctx, s.tx, "SELECT i18n::text FROM groups WHERE id = $1", []any{group.ID}, &stored))
+	s.Require().Equal("{}", stored)
+
+	plain := &service.Group{
+		Name:             "i18n-default",
+		Platform:         service.PlatformAnthropic,
+		RateMultiplier:   1.0,
+		Status:           service.StatusActive,
+		SubscriptionType: service.SubscriptionTypeStandard,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, plain))
+	s.Require().NoError(scanSingleRow(s.ctx, s.tx, "SELECT i18n::text FROM groups WHERE id = $1", []any{plain.ID}, &stored))
+	s.Require().Equal("{}", stored)
 }
 
 func (s *GroupRepoSuite) TestGetByID_PreservesMessagesDispatchModelConfig() {

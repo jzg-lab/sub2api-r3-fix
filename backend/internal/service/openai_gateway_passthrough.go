@@ -217,6 +217,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if account != nil && account.IsOpenAI() {
 		responsesLite := isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) || isOpenAIResponsesLiteWebSocketPayload(body)
 		normalizedBody, normalized, normalizeErr := normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{
+			Config:        s.cfg,
 			ResponsesLite: responsesLite,
 			Compact:       isOpenAIResponsesCompactPath(c),
 		})
@@ -1904,6 +1905,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	responseFailedPending := false
 	var bareErrorPayload []byte
 	bareErrorAccountSideEffectsPending := false
+	// Passthrough leaves upstream events untouched; the tracker only learns the
+	// upstream created_at so a synthesized response.failed matches the stream.
+	var createdAtTracker responsesCreatedAtStamper
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	stage := newDefaultOpenAIFirstOutputStage()
 	defer stage.Close()
@@ -1955,7 +1959,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if clientDisconnected || !writePendingLines() {
 			return
 		}
-		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
+		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, createdAtTracker.Value(), bareErrorPayload, failedMessage)); err != nil {
 			clientDisconnected = true
 			return
 		}
@@ -2000,7 +2004,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, rawEventType)
-			if needModelReplace && strings.Contains(data, mappedModel) {
+			createdAtTracker.Observe(dataBytes, rawEventType)
+			if needModelReplace && strings.Contains(data, `"model"`) {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 				if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {
 					dataBytes = []byte(replacedData)

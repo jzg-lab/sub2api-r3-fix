@@ -324,6 +324,10 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	if input.RateMultiplier <= 0 {
 		return nil, errors.New("rate_multiplier must be > 0")
 	}
+	i18n, err := normalizeGroupI18n(input.I18n)
+	if err != nil {
+		return nil, err
+	}
 
 	platform := NormalizeGroupPlatform(input.Platform)
 	// 固定账号 manifest 配置：账号绑定发生在创建之后，创建时无法校验成员关系，
@@ -495,6 +499,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	group := &Group{
 		Name:                            input.Name,
 		Description:                     input.Description,
+		I18n:                            i18n,
 		Platform:                        platform,
 		RateMultiplier:                  input.RateMultiplier,
 		IsExclusive:                     input.IsExclusive,
@@ -696,6 +701,13 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.Description != nil {
 		group.Description = *input.Description
+	}
+	if input.I18n != nil {
+		i18n, err := normalizeGroupI18n(*input.I18n)
+		if err != nil {
+			return nil, err
+		}
+		group.I18n = i18n
 	}
 	if input.Platform != "" {
 		group.Platform = input.Platform

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -689,13 +690,27 @@ func appendOpenAIResponsesRequestPathSuffix(baseURL, suffix string) string {
 }
 
 func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string) []byte {
-	// 使用 gjson/sjson 精确替换 model 字段，避免全量 JSON 反序列化
-	if m := gjson.GetBytes(body, "model"); m.Exists() && m.Str == fromModel {
+	if strings.TrimSpace(fromModel) == "" || strings.TrimSpace(toModel) == "" || fromModel == toModel {
+		return body
+	}
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	// The upstream may return an alias or provider-qualified name rather than
+	// the mapped request model. Public responses should retain the requested name.
+	if m := gjson.GetBytes(body, "model"); m.Type == gjson.String && m.Str != toModel {
 		newBody, err := sjson.SetBytes(body, "model", toModel)
 		if err != nil {
 			return body
 		}
-		return newBody
+		body = newBody
+	}
+	if m := gjson.GetBytes(body, "response.model"); m.Type == gjson.String && m.Str != toModel {
+		newBody, err := sjson.SetBytes(body, "response.model", toModel)
+		if err != nil {
+			return body
+		}
+		body = newBody
 	}
 	return body
 }
@@ -1112,7 +1127,12 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Ac
 	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{ResponsesLite: responsesLite})
 }
 
+func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(cfg *config.Config, body []byte, account *Account, responsesLite bool) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite})
+}
+
 type openAIResponsesCompatibilityOptions struct {
+	Config        *config.Config
 	ResponsesLite bool
 	// Compact marks the /responses/compact wire shape, which is left as-is
 	// by request-shape compatibility rewrites such as web_search history.
@@ -1128,7 +1148,7 @@ func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *
 	changed := false
 	if account.IsOpenAIOAuthLike() {
 		var err error
-		normalized, changed, err = normalizeOpenAIResponsesLegacyIngress(body)
+		normalized, changed, err = normalizeOpenAIResponsesLegacyIngressWithConfig(opts.Config, body)
 		if err != nil {
 			return body, false, err
 		}

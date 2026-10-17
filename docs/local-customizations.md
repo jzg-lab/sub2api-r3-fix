@@ -6,6 +6,16 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
 r17bm 适配已于 2026-10-12 合入主分支并推送，尚未部署，不能据此推定线上行为已改变。
 
+## 官方 v0.2.17 本地适配
+
+本地分支 `codex/integrate-official-v0.2.17` 按用户指定的官方 release 固定提交
+`060d0160417782cd962a0c7f460f6cd4565d4916` 进行选择性移植。该源码与本项目没有共同祖先，
+因此按行为适配而非整树合并。已采用 GPT-5.5 OAuth / SetupToken 退役、待定退款继续冻结额度、
+账号筛选平铺布局、Gemini 3.6 Flash 限时优惠、GPT-6.1 Sol OAuth / SetupToken 长上下文免附加费、
+Vertex 共享容量不足单请求退避和 Antigravity Hub UA；已确认的本地账号路由、调度、冷却、身份绑定及 Cookie Pin
+规则继续保留。Gemini 3.6 Flash 优惠在配置时区的 2027-01-01 起恢复标准价，涵盖目录价、回退价和显式缓存存储价；
+非官方自定义 token 单价及自定义缓存存储单价保持不变。新增迁移 261–264；历史迁移文件未改。提交与验证状态见[版本记录](upstream-sync-state.md)。
+
 ## 官方 v0.2.15 本地适配
 
 2026-10-12，`codex/integrate-official-v0.2.15` 按固定官方提交
