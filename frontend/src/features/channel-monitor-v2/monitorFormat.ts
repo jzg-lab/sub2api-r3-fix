@@ -134,6 +134,60 @@ export function healthStateClass(state: string | undefined): string {
   return `health-${state || 'unknown'}`
 }
 
+function monitorHasRequests(metrics: MonitorMetric, health: MonitorHealth): boolean {
+  return metrics.request_count > 0 || health.error_rate !== 'unknown'
+}
+
+function monitorHasCache(metrics: MonitorMetric, health: MonitorHealth): boolean {
+  return metrics.cache_rate_denominator > 0 || (health.cache != null && health.cache !== 'unknown')
+}
+
+export function monitorAvailabilityState(metrics: MonitorMetric, health: MonitorHealth): MonitorHealth['error_rate'] {
+  if (!monitorHasRequests(metrics, health)) return 'unknown'
+  if (health.error_rate !== 'unknown') return health.error_rate
+  if (!Number.isFinite(metrics.error_rate)) return 'warning'
+
+  const warning = health.thresholds?.warning_error_rate ?? 0.05
+  const critical = health.thresholds?.critical_error_rate ?? 0.2
+  return metrics.error_rate >= critical ? 'critical' : metrics.error_rate >= warning ? 'warning' : 'healthy'
+}
+
+function clampMonitorScore(score: number): number {
+  return Math.max(0, Math.min(100, score))
+}
+
+function monitorTTFTScore(metrics: MonitorMetric, health: MonitorHealth): number | null {
+  if (health.ttft_score == null && metrics.ttft.sample_count <= 0 && health.ttft === 'unknown') return null
+  if (health.ttft_score != null && Number.isFinite(health.ttft_score)) {
+    return clampMonitorScore(health.ttft_score)
+  }
+  const p50 = metrics.ttft.p50_ms
+  const latency = p50 != null && Number.isFinite(p50) ? p50 : metrics.ttft.p95_ms
+  if (latency == null || !Number.isFinite(latency)) return null
+
+  const target = health.thresholds?.target_ttft_ms ?? 3000
+  let critical = health.thresholds?.critical_ttft_ms ?? 10000
+  if (critical <= target) critical = target * 2.4
+  if (latency <= target) return 100
+  if (latency >= critical) return 0
+  return clampMonitorScore(100 * (1 - (latency - target) / (critical - target)))
+}
+
+/** Height score for the card timeline: cache 70%, first-token latency 30%. */
+export function monitorPerformanceScore(metrics: MonitorMetric, health: MonitorHealth): number | null {
+  if (!monitorHasRequests(metrics, health)) return null
+  const scores: Array<[number, number]> = []
+  if (monitorHasCache(metrics, health) && Number.isFinite(metrics.cache_rate)) {
+    scores.push([clampMonitorScore(metrics.cache_rate * 100), 0.7])
+  }
+  const ttft = monitorTTFTScore(metrics, health)
+  if (ttft != null) scores.push([ttft, 0.3])
+  if (!scores.length) return null
+
+  const weight = scores.reduce((sum, [, value]) => sum + value, 0)
+  return scores.reduce((sum, [score, value]) => sum + score * value, 0) / weight
+}
+
 /** Privacy-safe latency summary: avg + p50 + p90 (no absolute sample counts). */
 export function formatLatencyPrivacy(
   p50: number | null | undefined,
@@ -174,8 +228,8 @@ export function monitorErrorCategoryLabel(category: string): string {
 
 /** Public metrics redact counts. Health states retain whether samples are usable. */
 export function monitorCardMetrics(metrics: MonitorMetric, health: MonitorHealth) {
-  const hasRequests = metrics.request_count > 0 || health.error_rate !== 'unknown'
-  const hasCache = metrics.cache_rate_denominator > 0 || (health.cache != null && health.cache !== 'unknown')
+  const hasRequests = monitorHasRequests(metrics, health)
+  const hasCache = monitorHasCache(metrics, health)
   return {
     availability: hasRequests && Number.isFinite(metrics.error_rate)
       ? formatMonitorPercent(1 - metrics.error_rate) : '—',

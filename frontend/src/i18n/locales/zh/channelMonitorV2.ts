@@ -7,6 +7,8 @@ export default {
       description: '查看各平台与分组的运行状态',
       rangeSummary: '所选区间 {range} 汇总',
       availability: '可用率', multiplier: '用户倍率 {value}x',
+      availabilityColorLegend: '颜色：可用率',
+      performanceHeightLegend: '高度：缓存 70% · 首 Token 延迟 30%（越高越好）',
       history: '状态时间线', refreshIn: '{seconds}s 后刷新',
       noDataAt: '{time} · 暂无数据', stale: '数据有延迟，请留意更新时间',
       filtered: '已应用详细分析中的筛选条件',

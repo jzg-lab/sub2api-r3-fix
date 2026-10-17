@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { MonitorMatrixRow } from '@/api/channelMonitorV2'
-import { healthScoreClass, monitorCardMetrics } from '@/features/channel-monitor-v2/monitorFormat'
+import { healthStateClass, monitorAvailabilityState, monitorCardMetrics, monitorPerformanceScore } from '@/features/channel-monitor-v2/monitorFormat'
 import { useChannelMonitorFormat } from '@/composables/useChannelMonitorFormat'
 import ProviderIcon from './ProviderIcon.vue'
 
@@ -18,7 +18,16 @@ const metrics = computed(() => monitorCardMetrics(props.row.metrics, props.row.h
 const active = ref<number | null>(null)
 const slots = computed(() => {
   const byTime = new Map(props.row.buckets.map(bucket => [Date.parse(bucket.bucket_start), bucket]))
-  return props.starts.map(start => ({ start, bucket: byTime.get(Date.parse(start)) }))
+  return props.starts.map(start => {
+    const bucket = byTime.get(Date.parse(start))
+    const availability = bucket ? monitorAvailabilityState(bucket.metrics, bucket.health) : 'unknown'
+    const score = bucket ? monitorPerformanceScore(bucket.metrics, bucket.health) : null
+    return {
+      start, bucket, availability,
+      performance: availability === 'unknown' ? 'empty' : score == null ? 'unknown' : 'known',
+      height: availability === 'unknown' ? 15 : score == null ? 50 : 15 + score * 0.85,
+    }
+  })
 })
 function time(value: string) {
   return new Intl.DateTimeFormat(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
@@ -30,6 +39,7 @@ function detail(index: number) {
   const m = monitorCardMetrics(slot.bucket.metrics, slot.bucket.health)
   return `${time(slot.start)} · ${t('channelMonitorV2.cards.availability')} ${m.availability} · ${t('channelMonitorV2.metrics.cacheRate')} ${m.cache} · ${t('channelMonitorV2.metrics.ttftP50')} ${m.ttft}`
 }
+
 </script>
 
 <template>
@@ -71,6 +81,15 @@ function detail(index: number) {
         <span>{{ t('channelMonitorV2.cards.historyCount', { count: starts.length }) }}</span>
         <span>{{ t('channelMonitorV2.cards.refreshIn', { seconds: countdown }) }}</span>
       </div>
+      <div class="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[9px] text-gray-500 dark:text-gray-400">
+        <span class="inline-flex items-center gap-1">
+          <i class="h-1.5 w-1.5 rounded-full health-healthy" />
+          <i class="h-1.5 w-1.5 rounded-full health-warning" />
+          <i class="h-1.5 w-1.5 rounded-full health-critical" />
+          {{ t('channelMonitorV2.cards.availabilityColorLegend') }}
+        </span>
+        <span>{{ t('channelMonitorV2.cards.performanceHeightLegend') }}</span>
+      </div>
       <div class="flex h-5 items-end gap-[3px]" @mouseleave="active = null">
         <button
           v-for="(slot, index) in slots" :key="slot.start" type="button"
@@ -79,7 +98,13 @@ function detail(index: number) {
           @mouseenter="active = index" @focus="active = index" @blur="active = null" @click="active = index"
           @keydown.esc="active = null"
         >
-          <span :data-state="slot.bucket?.health.overall || 'unknown'" class="block w-full rounded-[1px] transition-transform group-hover:-translate-y-0.5 group-focus-visible:-translate-y-0.5" :class="slot.bucket ? healthScoreClass(slot.bucket.health, 'overall', slot.bucket.metrics.request_count) : 'health-unknown'" />
+          <span
+            :data-state="slot.availability"
+            :data-performance="slot.performance"
+            class="block w-full rounded-[1px] transition-transform group-hover:-translate-y-0.5 group-focus-visible:-translate-y-0.5"
+            :class="healthStateClass(slot.availability)"
+            :style="{ height: `${slot.height}%` }"
+          />
         </button>
       </div>
       <div v-if="active != null" role="tooltip" class="pointer-events-none absolute bottom-full left-0 z-30 mb-2 w-full rounded-lg border border-gray-200 bg-white p-3 text-xs leading-relaxed text-gray-700 shadow-lg dark:border-dark-600 dark:bg-dark-800 dark:text-gray-200">
@@ -111,18 +136,10 @@ function detail(index: number) {
 .card-metrics { margin: 20px 0 24px; }
 .card-metrics > div { min-width: 0; padding: 8px 6px; }
 .card-metrics dd { overflow-wrap: anywhere; }
-.status-slot > span { height: var(--slot-height, 100%); }
-.health-score10, .health-score9, .health-healthy { background: #2acb95; }
-.health-score8 { background: #60d4aa; }
-.health-score7 { background: #9ee5be; }
-.health-score6 { background: #fef08a; }
-.health-score5 { background: #fcd34d; }
-.health-score4, .health-warning { background: #fbbf24; }
-.health-score3 { background: #fb923c; }
-.health-score2, .health-score1, .health-score0, .health-critical { background: #f87171; }
+.health-healthy { color: #2acb95; background: #2acb95; }
+.health-warning { color: #fbbf24; background: #fbbf24; }
+.health-critical { color: #f87171; background: #f87171; }
 .health-unknown { background: #cbd5e1; }
 .dark .health-unknown { background: #58636c; }
-.status-slot > [data-state='warning'] { --slot-height: 65%; }
-.status-slot > [data-state='critical'] { --slot-height: 35%; }
-.status-slot > [data-state='unknown'] { --slot-height: 15%; }
+.status-slot > span[data-performance='unknown'] { background: transparent; outline: 1px dashed currentColor; outline-offset: -1px; }
 </style>

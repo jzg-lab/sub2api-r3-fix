@@ -7,6 +7,8 @@ export default {
       description: 'Service status by platform and group',
       rangeSummary: 'Summary for {range}',
       availability: 'Availability', multiplier: 'Your rate {value}x',
+      availabilityColorLegend: 'Color: availability',
+      performanceHeightLegend: 'Height: cache 70% · first-token latency 30% (higher is better)',
       history: 'Status timeline', refreshIn: 'Refresh in {seconds}s',
       noDataAt: '{time} · No data', stale: 'Data is delayed. Check the update time.',
       filtered: 'Filters from detailed analysis are active',

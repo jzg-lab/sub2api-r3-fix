@@ -12,6 +12,8 @@ import {
   formatMonitorTokensPerSecond,
   healthScoreClass,
   healthStateClass,
+  monitorAvailabilityState,
+  monitorPerformanceScore,
   scoreToBand,
   tokensPerSecondFromTpm,
 } from '../monitorFormat'
@@ -109,6 +111,42 @@ describe('monitorFormat accuracy', () => {
   it('maps health states for status dots', () => {
     expect(healthStateClass('healthy')).toBe('health-healthy')
     expect(healthStateClass(undefined)).toBe('health-unknown')
+  })
+
+  it('uses availability thresholds for timeline color whenever requests exist', () => {
+    const health: MonitorHealth = {
+      overall: 'healthy', error_rate: 'unknown', ttft: 'unknown', minimum_sample: 0,
+      thresholds: {
+        warning_error_rate: 0.05, critical_error_rate: 0.2, target_ttft_ms: 3000,
+        warning_ttft_ms: 3000, critical_ttft_ms: 10000, error_weight: 0.6, ttft_weight: 0.2,
+      },
+    }
+    const metrics = { ...({ error_rate: 0.049, request_count: 1 } as MonitorMetric) }
+    expect(monitorAvailabilityState(metrics, health)).toBe('healthy')
+    expect(monitorAvailabilityState({ ...metrics, error_rate: 0.05 }, health)).toBe('warning')
+    expect(monitorAvailabilityState({ ...metrics, error_rate: 0.2 }, health)).toBe('critical')
+    expect(monitorAvailabilityState({ ...metrics, request_count: 0 }, health)).toBe('unknown')
+  })
+
+  it('weights cache 70% and TTFT 30% for timeline height', () => {
+    const health: MonitorHealth = {
+      overall: 'healthy', error_rate: 'healthy', ttft: 'healthy', cache: 'healthy',
+      score: 100, ttft_score: 100, minimum_sample: 0,
+    }
+    const metrics = {
+      request_count: 1, cache_rate_denominator: 1, cache_rate: 0.5,
+      ttft: { p50_ms: 3000 },
+    } as MonitorMetric
+    expect(monitorPerformanceScore(metrics, health)).toBe(65)
+    expect(monitorPerformanceScore({ ...metrics, cache_rate_denominator: 0 }, { ...health, cache: 'unknown' })).toBe(100)
+    expect(monitorPerformanceScore({ ...metrics, ttft: { p50_ms: null } }, { ...health, ttft_score: null, cache: 'healthy' })).toBe(50)
+    expect(monitorPerformanceScore({ ...metrics, cache_rate_denominator: 0, ttft: { p50_ms: null } }, { ...health, cache: 'unknown', ttft_score: null })).toBeNull()
+    expect(monitorPerformanceScore({ ...metrics, request_count: 0 }, { ...health, error_rate: 'unknown', cache: 'unknown', ttft_score: null })).toBeNull()
+    expect(monitorPerformanceScore({ ...metrics, ttft: { p50_ms: 500, sample_count: 0 } }, { ...health, ttft: 'unknown', ttft_score: null })).toBe(50)
+    expect(monitorPerformanceScore({ ...metrics, cache_rate_denominator: 0, ttft: { p50_ms: 6500, p95_ms: 8000 } }, {
+      ...health, cache: 'unknown', ttft_score: null,
+      thresholds: { warning_error_rate: 0.05, critical_error_rate: 0.2, target_ttft_ms: 3000, warning_ttft_ms: 3000, critical_ttft_ms: 10000, error_weight: 0.6, ttft_weight: 0.2 },
+    })).toBeCloseTo(50)
   })
 
   it('formats privacy-safe latency lines with avg/p50/p90', () => {

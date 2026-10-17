@@ -39,7 +39,7 @@ describe('channel cards with public, redacted metrics', () => {
 
   it('aligns sparse history to the selected range, including interior and trailing gaps', async () => {
     const starts = monitorBucketStarts(coverage)
-    const warningHealth: MonitorHealth = { ...health, overall: 'warning', error_rate: 'warning', score: 60 }
+    const warningHealth: MonitorHealth = { ...health, overall: 'healthy', error_rate: 'warning', score: 95 }
     expect(starts).toHaveLength(3)
     const wrapper = mount(ChannelStatusCard, {
       props: {
@@ -54,7 +54,10 @@ describe('channel cards with public, redacted metrics', () => {
     expect(bars[0].find('span').classes()).toContain('health-unknown')
     expect(bars[0].find('span').attributes('data-state')).toBe('unknown')
     expect(bars[1].find('span').attributes('data-state')).toBe('warning')
-    expect(bars[1].find('span').classes()).toContain('health-score6')
+    expect(bars[1].find('span').classes()).toContain('health-warning')
+    expect(bars[1].find('span').attributes('style')).toContain('height: 70.25%')
+    expect(wrapper.text()).toContain('channelMonitorV2.cards.availabilityColorLegend')
+    expect(wrapper.text()).toContain('channelMonitorV2.cards.performanceHeightLegend')
     expect(bars[2].find('span').classes()).toContain('health-unknown')
     expect(wrapper.text()).toContain('Rate 0x')
     expect(wrapper.text()).not.toContain('channelMonitorV2.cards.insufficient')
@@ -62,6 +65,37 @@ describe('channel cards with public, redacted metrics', () => {
     expect(wrapper.get('[role="tooltip"]').text()).toContain('98.0%')
     await bars[1].trigger('keydown', { key: 'Escape' })
     expect(wrapper.find('[role="tooltip"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps availability color when requests exist but performance metrics are missing', () => {
+    const starts = monitorBucketStarts(coverage)
+    const wrapper = mount(ChannelStatusCard, {
+      props: {
+        row: {
+          platform: 'openai', group_id: 7, group_name: 'Example',
+          health: { ...health, error_rate: 'healthy', ttft: 'unknown', cache: 'unknown', ttft_score: null },
+          metrics: {
+            ...metrics, request_count: 0, cache_rate_denominator: 0,
+            ttft: { ...metrics.ttft, sample_count: 0, p50_ms: null, p95_ms: null },
+          },
+          buckets: [{
+            bucket_start: starts[0],
+            health: { ...health, error_rate: 'healthy', ttft: 'unknown', cache: 'unknown', ttft_score: null },
+            metrics: {
+              ...metrics, request_count: 0, cache_rate_denominator: 0,
+              ttft: { ...metrics.ttft, sample_count: 0, p50_ms: null, p95_ms: null },
+            },
+          }],
+        },
+        starts: [starts[0]], countdown: 60,
+      },
+    })
+
+    const bar = wrapper.get('.status-slot span')
+    expect(bar.classes()).toContain('health-healthy')
+    expect(bar.attributes('data-performance')).toBe('unknown')
+    expect(bar.attributes('style')).toContain('height: 50%')
     wrapper.unmount()
   })
 
