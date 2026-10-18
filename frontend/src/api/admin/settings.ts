@@ -19,6 +19,17 @@ export interface DefaultSubscriptionSetting {
   validity_days: number;
 }
 
+export interface AntiBypassPolicy {
+  window_seconds: number;
+  replay_window_seconds: number;
+  rpm_limit: number;
+  max_concurrent: number;
+  max_distinct_keys: number;
+  max_distinct_ips: number;
+  max_distinct_fingerprints: number;
+  max_client_request_attempts: number;
+}
+
 // ── 平台限额类型 ──────────────────────────────────────────────────
 /** 可设置默认限额的平台：平台清单中的全部具体平台（与后端 AllowedQuotaPlatforms 同源）。 */
 export type PlatformType = AccountPlatform
@@ -660,6 +671,7 @@ export interface SystemSettings {
   payment_enabled: boolean;
   risk_control_enabled: boolean;
   anti_bypass_enabled: boolean;
+  anti_bypass_policy?: AntiBypassPolicy;
 
   // Cyber session block
   cyber_policy_user_allowlist: string;
@@ -980,6 +992,7 @@ export interface UpdateSettingsRequest {
   payment_enabled?: boolean;
   risk_control_enabled?: boolean;
   anti_bypass_enabled?: boolean;
+  anti_bypass_policy?: AntiBypassPolicy;
 
   // Cyber session block
   cyber_policy_user_allowlist?: string;

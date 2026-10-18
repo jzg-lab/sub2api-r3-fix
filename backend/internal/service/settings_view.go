@@ -169,6 +169,7 @@ type SystemSettings struct {
 	DefaultBalance               float64
 	RiskControlEnabled           bool
 	AntiBypassEnabled            bool
+	AntiBypassPolicy             *AntiBypassPolicy
 	CyberSessionBlockEnabled     bool
 	CyberPolicyUserAllowlist     string
 	CyberSessionBlockTTLSeconds  int

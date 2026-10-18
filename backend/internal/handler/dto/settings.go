@@ -330,8 +330,9 @@ type SystemSettings struct {
 	PluginManagementEnabled bool   `json:"plugin_management_enabled"`
 
 	// 风控中心功能开关
-	RiskControlEnabled bool `json:"risk_control_enabled"`
-	AntiBypassEnabled  bool `json:"anti_bypass_enabled"`
+	RiskControlEnabled bool                      `json:"risk_control_enabled"`
+	AntiBypassEnabled  bool                      `json:"anti_bypass_enabled"`
+	AntiBypassPolicy   *service.AntiBypassPolicy `json:"anti_bypass_policy"`
 
 	// cyber 会话屏蔽开关 + TTL
 	CyberSessionBlockEnabled    bool   `json:"cyber_session_block_enabled"`

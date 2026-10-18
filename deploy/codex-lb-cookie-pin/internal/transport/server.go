@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -26,13 +27,14 @@ import (
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/pluginconfig"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/prober"
 	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
+	"google.golang.org/grpc"
 )
 
 const (
 	// PluginID 与 manifest.json 的 id 必须一致。
 	PluginID = "lyunlong.codex.lb-cookie-pin"
 	// PluginVersion 与 manifest.json 的 version 必须一致。
-	PluginVersion = "0.3.14"
+	PluginVersion = "0.3.20"
 	// A 518n-2 usage pattern is an observation, not proof of model quality.
 	// Correct answers with this pattern neither reroll nor certify recovery.
 	truncationFingerprintModulus = 518
@@ -51,6 +53,7 @@ type probeTemplate struct {
 	Headers            http.Header // 深拷贝（含 Authorization）；Cookie 头剔除、探针时现合并
 	OriginalCookie     string      // 业务请求原始 Cookie 头（罐内 Cookie 按需合并其上）
 	ProxyURL           string
+	AccountConcurrency int32
 	Model              string
 	SeenAt             time.Time
 	CreatedAt          time.Time
@@ -59,6 +62,7 @@ type probeTemplate struct {
 	Confirmed          bool   // A complete successful business forward admitted this generation.
 	CookieVersion      uint64 // Per-attempt snapshot; only written on the cycle's copy.
 	RateLimitPolicy    pluginv1.ProbeRateLimitPolicy
+	HostHTTP           pluginv1.HostHTTPBinding
 }
 
 // Server 实现 TransportPlugin 服务。
@@ -69,11 +73,15 @@ type Server struct {
 	evidence       *evidence.Store
 	evidenceFailed atomic.Bool
 
-	mu          sync.Mutex
-	broker      *hcplugin.GRPCBroker
-	host        pluginv1.HostServiceClient
-	persistStop context.CancelFunc
-	persistDone chan struct{}
+	mu               sync.Mutex
+	broker           *hcplugin.GRPCBroker
+	host             pluginv1.HostServiceClient
+	persistStop      context.CancelFunc
+	persistDone      chan struct{}
+	hostHTTPRequired bool
+	hostHTTP         pluginv1.TransportPluginClient
+	hostHTTPID       uint32
+	hostHTTPConn     *grpc.ClientConn
 
 	probeMu                sync.Mutex
 	templates              map[int64]*probeTemplate
@@ -84,11 +92,17 @@ type Server struct {
 	nextTemplateGeneration uint64
 	configGeneration       uint64
 	clientMu               sync.Mutex
-	proxyClients           map[string]*http.Client
+	proxyClients           map[transportKey]*transportClient
 	// probeRunning v0.3.6 在飞守卫：accountID → context.CancelFunc。同账号同时至多一轮
 	// 探针——新签即探把排期拉近后 tick 会在上一轮复探链未走完时再次派发，
 	// 叠发并发轮（双倍出针+状态竞争）。
-	probeRunning sync.Map
+	probeRunning       sync.Map
+	hostPolicyRequired bool
+	hostPolicyIssued   int64
+	hostPolicyExpires  time.Time
+	hostPolicies       map[int64]pluginv1.ProbeAccountPolicy
+	probeBudget        map[int64]string
+	businessByBucket   map[string]int
 }
 
 // New 构建服务端与共享 HTTP 客户端。
@@ -99,16 +113,21 @@ func New(store *cookiestore.Store) *Server {
 // Production supplies a successfully opened durable store. New is retained
 // for isolated embedded/test hosts and never selected by the process entrypoint.
 func NewWithEvidence(store *cookiestore.Store, journal *evidence.Store) *Server {
-	// Let net/http initialize HTTP/2 separately for each clone. Explicit
-	// ConfigureTransport installs TLSNextProto closures that clones would
-	// share, including the HTTP/2 pool, across different proxy routes.
+	// Configure HTTP/2 declaratively, not with shared TLSNextProto closures.
+	// Every account/route clone must own its connection pool.
 	baseTransport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   8,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: 15 * time.Second,
+			PingTimeout:     15 * time.Second,
+		},
 	}
 	server := &Server{
 		Store:    store,
@@ -120,10 +139,12 @@ func NewWithEvidence(store *cookiestore.Store, journal *evidence.Store) *Server 
 				return http.ErrUseLastResponse
 			},
 		},
-		persistDone: make(chan struct{}),
-		templates:   map[int64]*probeTemplate{},
-		states:      map[int64]*prober.State{},
-		probeWake:   make(chan struct{}, 1),
+		persistDone:      make(chan struct{}),
+		templates:        map[int64]*probeTemplate{},
+		states:           map[int64]*prober.State{},
+		probeWake:        make(chan struct{}, 1),
+		probeBudget:      make(map[int64]string),
+		businessByBucket: make(map[string]int),
 	}
 	// v0.3.1（2026-10-02 生产实证）：官方宿主的 TransportPlugin 方法集只有
 	// GetInfo/Health/ValidateConfig/ApplyConfig/TestConfig/Forward，没有
@@ -160,7 +181,7 @@ func (s *Server) GetInfo(context.Context, *pluginv1.GetInfoRequest) (*pluginv1.G
 		PluginVersion:       PluginVersion,
 		ProtocolVersion:     pluginv1.ProtocolVersion,
 		TransportApiVersion: pluginv1.TransportAPIVersion,
-		Capabilities:        []string{"openai.oauth.outbound_transport.v1"},
+		Capabilities:        []string{"openai.oauth.outbound_transport.v1", pluginv1.HostHTTPCapability},
 	}, nil
 }
 
@@ -168,11 +189,20 @@ func (s *Server) Health(ctx context.Context, _ *pluginv1.HealthRequest) (*plugin
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if id := pluginv1.ReadHostHTTPBroker(ctx); id != 0 {
+		if err := s.connectHostHTTP(id); err != nil {
+			return &pluginv1.HealthResponse{Healthy: false, Message: errHostHTTPUnavailable.Error()}, nil
+		}
+	}
 	// Status collection takes probe/journal locks and may wait for disk I/O.
 	// Its latency must not cause the host to kill healthy business streams.
 	if pluginv1.IsLivenessHealth(ctx) {
 		return &pluginv1.HealthResponse{Healthy: true, Message: "lb cookie pin ready"}, nil
 	}
+	if !s.hostHTTPReady() {
+		return &pluginv1.HealthResponse{Healthy: false, Message: errHostHTTPUnavailable.Error()}, nil
+	}
+	s.applyHostProbePolicy(ctx, time.Now())
 	cfg := s.Store.Config()
 	now := time.Now()
 	return &pluginv1.HealthResponse{
@@ -388,14 +418,15 @@ func (s *Server) stashTemplateLocked(start *pluginv1.ForwardRequestStart, body [
 	}
 	accountID := start.GetAccountId()
 	next := &probeTemplate{
-		Method:         http.MethodPost,
-		URL:            probeEndpoint(start.GetUrl()),
-		Host:           start.GetHost(),
-		Headers:        headers,
-		OriginalCookie: originalCookie,
-		ProxyURL:       start.GetProxyUrl(),
-		SeenAt:         now,
-		CreatedAt:      now,
+		Method:             http.MethodPost,
+		URL:                probeEndpoint(start.GetUrl()),
+		Host:               start.GetHost(),
+		Headers:            headers,
+		OriginalCookie:     originalCookie,
+		ProxyURL:           start.GetProxyUrl(),
+		AccountConcurrency: start.GetAccountConcurrency(),
+		SeenAt:             now,
+		CreatedAt:          now,
 	}
 	cfg := s.Store.Config()
 	if cfg.QualityProbeEnabled {
@@ -601,6 +632,12 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 		if !tmpl.Confirmed || !cfg.Enabled || !cfg.QualityProbeEnabled || !scopeMatch(cfg.InjectScope, tmpl.URL) || tmpl.Model == "" {
 			continue
 		}
+		if !s.hostProbeAllowedLocked(accountID, tmpl, now) {
+			if cancel, running := s.probeRunning.Load(accountID); running {
+				cancel.(context.CancelFunc)()
+			}
+			continue
+		}
 		if state == nil {
 			state = prober.NewState(accountID)
 			state.NextProbeAt = now.Add(postCaptureProbeDelay)
@@ -624,8 +661,12 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 			nextScan = min(nextScan, dueAt.Sub(now))
 			continue
 		}
+		if !s.reserveProbeBudgetLocked(accountID, tmpl.ProxyURL) {
+			continue
+		}
 		cycleCtx, cancel := context.WithCancel(ctx)
 		if _, busy := s.probeRunning.LoadOrStore(accountID, cancel); busy {
+			delete(s.probeBudget, accountID)
 			cancel()
 			continue
 		}
@@ -645,9 +686,17 @@ func (s *Server) scanProbeTemplates(ctx context.Context, now time.Time) time.Dur
 func (s *Server) runProbeCycle(ctx context.Context, accountID int64, tmpl *probeTemplate, state *prober.State, cfg pluginconfig.Config) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if _, busy := s.probeRunning.LoadOrStore(accountID, cancel); busy {
+	s.probeMu.Lock()
+	if !s.hostProbeAllowedLocked(accountID, tmpl, time.Now()) || !s.reserveProbeBudgetLocked(accountID, tmpl.ProxyURL) {
+		s.probeMu.Unlock()
 		return
 	}
+	if _, busy := s.probeRunning.LoadOrStore(accountID, cancel); busy {
+		delete(s.probeBudget, accountID)
+		s.probeMu.Unlock()
+		return
+	}
+	s.probeMu.Unlock()
 	s.runReservedProbeCycle(ctx, cancel, accountID, tmpl, state, cfg)
 }
 
@@ -657,7 +706,7 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 	defer func() {
 		cancel()
 		s.probeRunning.Delete(accountID)
-		s.wakeProbeLoop()
+		s.releaseProbeBudget(accountID)
 	}()
 	s.probeMu.Lock()
 	snapshot := *tmpl
@@ -668,7 +717,9 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 			return
 		}
 		s.probeMu.Lock()
-		if !s.probeTemplateCurrent(accountID, tmpl) {
+		if !s.probeTemplateCurrent(accountID, tmpl) ||
+			!s.hostProbeAllowedLocked(accountID, tmpl, time.Now()) ||
+			s.businessByBucket[probeBucket(tmpl.ProxyURL)] > 0 {
 			s.probeMu.Unlock()
 			return
 		}
@@ -680,6 +731,7 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 		}
 		s.probeMu.Lock()
 		if s.probePaused(accountID) || strings.HasPrefix(answer, "stale:") ||
+			!s.hostProbeAllowedLocked(accountID, tmpl, time.Now()) ||
 			(!s.probeTemplateCurrent(accountID, tmpl) &&
 				!(s.templates[accountID] == nil && strings.HasSuffix(answer, "+tmpl-dropped"))) {
 			s.probeMu.Unlock()
@@ -766,6 +818,12 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 	if model == "" {
 		return prober.VerdictError, "skip:no-model", 0
 	}
+	s.probeMu.Lock()
+	allowed := s.hostProbeAllowedLocked(accountID, tmpl, time.Now())
+	s.probeMu.Unlock()
+	if !allowed {
+		return prober.VerdictError, "blocked:host-policy", 0
+	}
 	payload := map[string]any{
 		"model": model,
 		// Required by Codex OAuth independently of reasoning effort.
@@ -823,7 +881,14 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		if err := ctx.Err(); err != nil {
 			return prober.VerdictError, "cancel", 0
 		}
-		attemptCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		deadline := time.Now().Add(120 * time.Second)
+		s.probeMu.Lock()
+		if !s.hostProbeAllowedLocked(accountID, tmpl, time.Now()) {
+			s.probeMu.Unlock()
+			return prober.VerdictError, "blocked:host-policy", 0
+		}
+		s.probeMu.Unlock()
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
 		request, err := http.NewRequestWithContext(attemptCtx, tmpl.Method, tmpl.URL, bytes.NewReader(body))
 		if err != nil {
 			cancel()
@@ -834,7 +899,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		request.GetBody = nil // Never let the transport rewind an ambiguous POST.
 		now := time.Now()
 		s.probeMu.Lock()
-		if !s.probeTemplateCurrent(accountID, tmpl) {
+		if !s.probeTemplateCurrent(accountID, tmpl) || !s.hostProbeAllowedLocked(accountID, tmpl, now) {
 			s.probeMu.Unlock()
 			cancel()
 			return prober.VerdictError, "stale:template", 0
@@ -844,7 +909,9 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		request.Header.Set("Cookie", cookie)
 		s.probeMu.Unlock()
 
-		client, err := s.clientFor(tmpl.ProxyURL)
+		binding := tmpl.HostHTTP
+		binding.IsProbe = true
+		client, err := s.outboundClient(binding, tmpl.ProxyURL, accountID, tmpl.AccountConcurrency)
 		if err != nil {
 			cancel()
 			return prober.VerdictError, "proxy:invalid", 0
@@ -863,7 +930,7 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		if err != nil {
 			logUpstreamFailure(slog.Default(), accountID, "probe_connect", tmpl.ProxyURL, attemptStarted, err, attemptCtx.Err(), failureTrace)
 			cancel()
-			if failureTrace.definitelyNotConnected(err) {
+			if failureTrace.definitelyNotConnected(err) || hostHTTPNotSent(err) {
 				result = "failed"
 				return prober.VerdictError, "failed:connect", 0
 			}
@@ -871,24 +938,11 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		}
 		observedAt := time.Now()
 		s.probeMu.Lock()
-		if !s.probeTemplateCurrent(accountID, tmpl) {
+		if !s.probeTemplateCurrent(accountID, tmpl) || !s.hostProbeAllowedLocked(accountID, tmpl, observedAt) {
 			s.probeMu.Unlock()
 			response.Body.Close()
 			cancel()
 			return prober.VerdictError, "stale:template", 0
-		}
-		// Authentication errors are not evidence of a healthy replacement cookie.
-		if response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden &&
-			response.StatusCode != http.StatusTooManyRequests && response.StatusCode != http.StatusServiceUnavailable {
-			var current bool
-			tmpl.CookieVersion, current = s.Store.CaptureIfCurrent(accountID,
-				response.Header.Values("Set-Cookie"), time.Now(), tmpl.CookieVersion)
-			if !current {
-				s.probeMu.Unlock()
-				response.Body.Close()
-				cancel()
-				return prober.VerdictError, "stale:cookie", 0
-			}
 		}
 		s.probeMu.Unlock()
 		if response.StatusCode != 200 {
@@ -915,15 +969,23 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				"body_read_failed", readErr != nil)
 			lastFailure := failure.Summary()
 			deadline := probeRetryDeadlineWithPolicy(code, response.Header, observedAt, tmpl.RateLimitPolicy)
-			if seconds, ok := retrySeconds(response.Header.Get("Retry-After")); ok {
-				deadline = maxTime(deadline, retryResetAfter(seconds, observedAt))
-			} else if until, err := http.ParseTime(response.Header.Get("Retry-After")); err == nil {
-				deadline = maxTime(deadline, until)
-			}
+			deadline = maxTime(deadline, retryAfterDeadline(response.Header, observedAt))
 			if code == http.StatusTooManyRequests && readErr == nil {
 				deadline = maxTime(deadline, probeQuotaBodyDeadline(raw, observedAt))
 			}
 			retryUntil = deadline
+			if code == http.StatusUnauthorized || code == http.StatusForbidden {
+				// Retry-After may delay recovery, but never keeps rejected
+				// credentials eligible for another autonomous probe.
+				s.probeMu.Lock()
+				if !s.probeTemplateCurrent(accountID, tmpl) {
+					s.probeMu.Unlock()
+					return prober.VerdictError, "stale:template", 0
+				}
+				s.observeForwardFailureLocked(accountID, tmpl, code, response.Header, observedAt)
+				s.probeMu.Unlock()
+				return prober.VerdictError, "http:" + strconv.Itoa(code) + "+tmpl-dropped", 0
+			}
 			if !deadline.IsZero() {
 				s.probeMu.Lock()
 				if !s.probeTemplateCurrent(accountID, tmpl) {
@@ -937,25 +999,10 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				s.probeMu.Unlock()
 				return prober.VerdictError, lastFailure, 0
 			}
-			if code == http.StatusUnauthorized || code == http.StatusForbidden {
-				// 模板凭据被拒（v0.3.4，1227 实证）：模板里的 Authorization
-				// 已死，重试只会再吃 401——当场丢模板。下一笔真实 Forward
-				// （救治号 = 宿主资格针每 ~5 分钟一针）自动用新鲜 token 重
-				// stash。Cookie 罐不动：401/403 是凭据级不是签级。
-				s.probeMu.Lock()
-				if !s.probeTemplateCurrent(accountID, tmpl) {
-					s.probeMu.Unlock()
-					return prober.VerdictError, "stale:template", 0
-				}
-				delete(s.templates, accountID)
-				s.resetProbeStateLocked(accountID, time.Now())
-				s.probeMu.Unlock()
-				return prober.VerdictError, "http:" + strconv.Itoa(code) + "+tmpl-dropped", 0
-			}
 			return prober.VerdictError, lastFailure, 0
 		}
 		const maxProbeResponse = 2 << 20
-		raw, readErr := io.ReadAll(io.LimitReader(response.Body, maxProbeResponse+1))
+		raw, observer, readErr := readProbeSSE(response.Body, maxProbeResponse)
 		if readErr != nil {
 			logUpstreamFailure(slog.Default(), accountID, "probe_body", tmpl.ProxyURL, attemptStarted, readErr, attemptCtx.Err(), failureTrace)
 		}
@@ -967,11 +1014,42 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 		if len(raw) > maxProbeResponse {
 			return prober.VerdictError, "unknown:read-too-large", 0
 		}
-		observer := responseObserver{sse: true}
-		observer.write(raw)
 		s.observeAdmission(accountID, c, observer.category)
 		if !observer.finish() {
+			if observer.knownFailure() {
+				result = "failed"
+				status := observer.failureStatus()
+				retryUntil = probeRetryDeadlineWithPolicy(status, response.Header, observedAt, tmpl.RateLimitPolicy)
+				retryUntil = maxTime(retryUntil, observer.failureRetryDeadline())
+				s.probeMu.Lock()
+				if s.probeTemplateCurrent(accountID, tmpl) {
+					s.observeForwardFailureLocked(accountID, tmpl, status, response.Header, observedAt)
+					if status == http.StatusTooManyRequests {
+						s.extendProbeCooldownLocked(accountID, retryUntil)
+					}
+				}
+				s.probeMu.Unlock()
+			}
 			return prober.VerdictError, result + ":not-completed", 0
+		}
+		s.probeMu.Lock()
+		current := s.probeTemplateCurrent(accountID, tmpl) &&
+			s.hostProbeAllowedLocked(accountID, tmpl, time.Now())
+		cookieCurrent := false
+		if current {
+			// Headers from an incomplete or rejected stream cannot replace
+			// the pinned cookie, even when the HTTP status was 200.
+			tmpl.CookieVersion, cookieCurrent = s.Store.CaptureIfCurrent(accountID,
+				response.Header.Values("Set-Cookie"), observedAt, tmpl.CookieVersion)
+		}
+		s.probeMu.Unlock()
+		if !current {
+			result = "observed"
+			return prober.VerdictError, "stale:host-policy", 0
+		}
+		if !cookieCurrent {
+			result = "observed"
+			return prober.VerdictError, "stale:cookie", 0
 		}
 		result = "failed"
 		answer := extractAnswerFromSSE(raw)
@@ -1132,7 +1210,7 @@ type probeStatus struct {
 type accountProbeView struct {
 	prober.State
 	InBackoff              bool                   `json:"in_backoff"`
-	SignCapturedAt         time.Time              `json:"sign_captured_at"`
+	SignCapturedAt         *time.Time             `json:"sign_captured_at"`
 	EstimatedRemainingSecs int64                  `json:"estimated_remaining_seconds"`
 	EstimateBasis          string                 `json:"estimate_basis"`
 	SignLifetimeStats      *cookiestore.SignStats `json:"sign_lifetime_stats,omitempty"`
@@ -1162,7 +1240,8 @@ func (s *Server) snapshotProber(now time.Time, cfg pluginconfig.Config) probeSta
 		view.NextProbeAt = maxTime(view.NextProbeAt, maxTime(state.BackoffUntil, state.RetryNotBefore))
 		info := s.Store.SignInfo(state.AccountID, now)
 		if info.HasSign {
-			view.SignCapturedAt = info.CapturedAt
+			view.SignCapturedAt = &info.CapturedAt
+			view.EstimatedRemainingSecs = -2
 			switch {
 			case info.Stats.Samples >= prober.MinAdaptiveSamples:
 				remaining := int64(info.Stats.P80) - int64(now.Sub(info.CapturedAt).Seconds())
@@ -1234,19 +1313,54 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	}
 	request.Host = start.GetHost()
 	request.Header = headersFromPlugin(start.GetHeaders())
+	binding, _ := pluginv1.ReadHostHTTPBinding(stream.Context())
+	client, err := s.outboundClient(binding, start.GetProxyUrl(), start.GetAccountId(), start.GetAccountConcurrency())
+	if err != nil {
+		if errors.Is(err, errHostHTTPUnavailable) {
+			return stream.Send(errorFrame("PLUGIN_HOST_TRANSPORT", "宿主传输绑定不可用，拒绝独立出站回退", false))
+		}
+		return stream.Send(errorFrame("PLUGIN_PROXY", "代理配置不可用，拒绝直连回退", false))
+	}
 
 	now := time.Now()
+	hostProbe := pluginv1.IsProbeTraffic(stream.Context())
 	s.probeMu.Lock()
+	if hostProbe {
+		if !s.reserveProbeBudgetLocked(start.GetAccountId(), start.GetProxyUrl()) {
+			s.probeMu.Unlock()
+			return stream.Send(errorFrame("PLUGIN_PROBE_BUSY", "后台探针预算已占用，业务流量优先", false))
+		}
+		defer s.releaseProbeBudget(start.GetAccountId())
+	} else {
+		bucket := probeBucket(start.GetProxyUrl())
+		s.businessByBucket[bucket]++
+		defer s.finishBusinessBucket(bucket)
+	}
 	cfg := s.Store.Config()
 	configGeneration := s.configGeneration
 	inScope := cfg.Enabled && !s.probePaused(start.GetAccountId()) && scopeMatch(cfg.InjectScope, start.GetUrl())
 	var tmpl *probeTemplate
 	var cookieVersion uint64
 	if inScope {
+		previous := s.templates[start.GetAccountId()]
 		tmpl = s.stashTemplateLocked(start, body, now)
 		if tmpl != nil {
 			// Do not mutate snapshots retained by concurrent forwards/probes.
 			next := *tmpl
+			// A changed host transport invalidates probe results, not cookies
+			// belonging to the unchanged account/proxy identity.
+			if previous != nil && sameProbeIdentity(previous, tmpl) &&
+				(previous.HostHTTP.BrokerID != binding.BrokerID || previous.HostHTTP.Probe != binding.Probe) {
+				s.nextTemplateGeneration++
+				next.Generation = s.nextTemplateGeneration
+				next.IdentityGeneration = next.Generation
+				next.Confirmed = false
+				s.resetProbeStateLocked(start.GetAccountId(), now)
+				if cancel, ok := s.probeRunning.Load(start.GetAccountId()); ok {
+					cancel.(context.CancelFunc)()
+				}
+			}
+			next.HostHTTP = binding
 			next.RateLimitPolicy = pluginv1.ReadProbeRateLimitPolicy(stream.Context())
 			s.templates[start.GetAccountId()] = &next
 			tmpl = &next
@@ -1268,9 +1382,11 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	businessSucceeded := false
 	businessDispatched := false
 	businessFailed := false
+	var observer responseObserver
+	settlementStage := "dispatch"
 	businessCohort := bodyCohort(body, start.GetProxyUrl())
-	hostProbe := pluginv1.IsProbeTraffic(stream.Context())
-	business := !hostProbe && responsesRequest(start.GetMethod(), start.GetUrl())
+	responseRequest := responsesRequest(start.GetMethod(), start.GetUrl())
+	business := !hostProbe && responseRequest
 	hostOperation, hostResult := "", "failed"
 	var hostRetryUntil time.Time
 	defer func() {
@@ -1287,7 +1403,22 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 			} else if businessFailed {
 				result = "failed"
 			}
-			s.evidenceError(s.evidence.Business(start.GetAccountId(), businessCohort, result, time.Now()))
+			settlementErr := s.evidence.Business(start.GetAccountId(), businessCohort, result, time.Now())
+			s.evidenceError(settlementErr)
+			if settlementErr == nil && businessSucceeded {
+				kind := "responses_json"
+				if observer.compact {
+					kind = "responses_compact"
+				} else if observer.sse {
+					kind = "responses_stream"
+				}
+				slog.Info("plugin_business_succeeded", "account_id", start.GetAccountId(), "response_kind", kind)
+			}
+			if result == "unknown" {
+				slog.Warn("plugin_business_unknown", "account_id", start.GetAccountId(),
+					"stage", settlementStage, "reason", observer.incompleteReason(),
+					"sse", observer.sse, "sse_inferred", observer.inferredSSE)
+			}
 		}
 		if tmpl == nil {
 			return
@@ -1309,10 +1440,6 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		}
 	}()
 
-	client, err := s.clientFor(start.GetProxyUrl())
-	if err != nil {
-		return stream.Send(errorFrame("PLUGIN_PROXY", "无效代理配置，拒绝直连回退", false))
-	}
 	if hostProbe {
 		hostOperation, err = s.evidence.Begin(start.GetAccountId(), businessCohort, time.Now())
 		if err != nil {
@@ -1336,27 +1463,53 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		if hostProbe && failureTrace.definitelyNotConnected(err) {
+		notSent := hostHTTPNotSent(err)
+		if hostProbe && (failureTrace.definitelyNotConnected(err) || notSent) {
 			hostResult = "failed"
 		}
+		if notSent {
+			businessFailed = true
+			return stream.Send(errorFrame("PLUGIN_HOST_TRANSPORT", "宿主传输绑定拒绝派发，未发送至上游", false))
+		}
 		suffix := logUpstreamFailure(slog.Default(), start.GetAccountId(), "forward_connect", start.GetProxyUrl(), requestStarted, err, stream.Context().Err(), failureTrace)
-		return stream.Send(errorFrame("UPSTREAM", "上游连接失败"+suffix, true))
+		return stream.Send(errorFrame("UPSTREAM", "上游连接失败"+suffix, !notSent))
 	}
 	defer response.Body.Close()
-	observer := responseObserver{sse: strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")}
+	settlementStage = "headers"
+	observer = responseObserver{
+		sse:     strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream"),
+		compact: compactRequest(start.GetMethod(), start.GetUrl()),
+	}
+	observer.sniffSSE = responseRequest && !observer.sse && !observer.compact
 	defer func() {
 		s.observeAdmission(start.GetAccountId(), businessCohort, observer.category)
+		if observer.knownFailure() {
+			businessFailed = true
+			if hostOperation != "" {
+				hostResult = "failed"
+			}
+			status := observer.failureStatus()
+			deadline := maxTime(observer.failureRetryDeadline(), probeRetryDeadlineWithPolicy(status,
+				response.Header, time.Now(), pluginv1.ReadProbeRateLimitPolicy(stream.Context())))
+			hostRetryUntil = maxTime(hostRetryUntil, deadline)
+			if inScope {
+				s.probeMu.Lock()
+				if configGeneration == s.configGeneration && (tmpl == nil || s.forwardTemplateCurrent(start.GetAccountId(), tmpl)) {
+					s.observeForwardFailureLocked(start.GetAccountId(), tmpl, status, response.Header, time.Now())
+					if tmpl != nil && status == http.StatusTooManyRequests {
+						s.extendProbeCooldownLocked(start.GetAccountId(), deadline)
+					}
+				}
+				s.probeMu.Unlock()
+			}
+		}
 	}()
 
 	after := time.Now()
 	if hostProbe {
 		hostRetryUntil = probeRetryDeadlineWithPolicy(response.StatusCode, response.Header, after,
 			pluginv1.ReadProbeRateLimitPolicy(stream.Context()))
-		if seconds, ok := retrySeconds(response.Header.Get("Retry-After")); ok {
-			hostRetryUntil = maxTime(hostRetryUntil, retryResetAfter(seconds, after))
-		} else if until, parseErr := http.ParseTime(response.Header.Get("Retry-After")); parseErr == nil {
-			hostRetryUntil = maxTime(hostRetryUntil, until)
-		}
+		hostRetryUntil = maxTime(hostRetryUntil, retryAfterDeadline(response.Header, after))
 	}
 	var cooldownTemplate *probeTemplate
 	s.Store.ObserveResponse()
@@ -1364,7 +1517,7 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		s.probeMu.Lock()
 		if !s.probePaused(start.GetAccountId()) && configGeneration == s.configGeneration && (tmpl == nil || s.forwardTemplateCurrent(start.GetAccountId(), tmpl)) {
 			if !s.observeForwardFailureLocked(start.GetAccountId(), tmpl, response.StatusCode, response.Header, after) {
-				if tmpl == nil || s.probeTemplateCurrent(start.GetAccountId(), tmpl) {
+				if !responseRequest && (tmpl == nil || s.probeTemplateCurrent(start.GetAccountId(), tmpl)) {
 					s.Store.ObserveIfCurrent(start.GetAccountId(), response.Header.Values("Set-Cookie"), after,
 						cookieVersion, cfg.RerollOnFasterModel && response.Header.Get("Faster-Model") != "")
 				}
@@ -1388,6 +1541,7 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		return err
 	}
 	buffer := make([]byte, 32*1024)
+	settlementStage = "body"
 	var quotaBody []byte
 	bodyTooLarge := false
 	var received int64
@@ -1410,6 +1564,11 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 				return err
 			}
 		}
+		// A delivered Responses terminal settles the stream even if its
+		// transport remains open or reports an error after those bytes.
+		if responseRequest && observer.settledSSE() {
+			break
+		}
 		if readErr == io.EOF {
 			break
 		}
@@ -1431,15 +1590,26 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 			s.probeMu.Unlock()
 		}
 	}
+	settlementStage = "end"
 	err = stream.Send(&pluginv1.ForwardResponse{Frame: &pluginv1.ForwardResponse_End{End: &pluginv1.ForwardResponseEnd{
 		BytesReceived: received,
 		DurationMs:    time.Since(started).Milliseconds(),
 	}}})
-	completed = err == nil && stream.Context().Err() == nil &&
-		response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
-	businessSucceeded = completed && observer.finish()
-	businessFailed = err == nil && stream.Context().Err() == nil &&
-		response.StatusCode >= http.StatusMultipleChoices
+	delivered := err == nil && stream.Context().Err() == nil
+	successfulHTTP := response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
+	responseCompleted := observer.finish()
+	completed = delivered && successfulHTTP &&
+		(!responseRequest || responseCompleted)
+	if inScope && responseRequest && completed {
+		s.probeMu.Lock()
+		if configGeneration == s.configGeneration && (tmpl == nil || s.probeTemplateCurrent(start.GetAccountId(), tmpl)) {
+			s.Store.ObserveIfCurrent(start.GetAccountId(), response.Header.Values("Set-Cookie"), after,
+				cookieVersion, cfg.RerollOnFasterModel && response.Header.Get("Faster-Model") != "")
+		}
+		s.probeMu.Unlock()
+	}
+	businessSucceeded = delivered && successfulHTTP && responseCompleted
+	businessFailed = response.StatusCode >= http.StatusMultipleChoices || observer.knownFailure()
 	if hostProbe {
 		if businessSucceeded {
 			hostResult = "observed"
@@ -1448,9 +1618,6 @@ func (s *Server) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		}
 	} else if !business && start.GetAccountId() > 0 {
 		s.evidenceError(s.evidence.Business(start.GetAccountId(), businessCohort, "observed", time.Now()))
-	}
-	if !observer.sse && !completed {
-		observer.parse()
 	}
 	return err
 }
@@ -1473,21 +1640,34 @@ func scopeMatch(scope, rawURL string) bool {
 	return strings.HasPrefix(parsed.Path, "/backend-api/codex")
 }
 
-// A proxy-specific transport owns a reusable pool. Invalid routing fails closed.
-func (s *Server) clientFor(proxyRaw string) (*http.Client, error) {
+type transportKey struct {
+	proxyURL    string
+	accountID   int64
+	concurrency int32
+}
+
+type transportClient struct {
+	*http.Client
+	lastUsed time.Time
+}
+
+// Direct and proxied accounts use the same isolated, bounded pool policy.
+// An invalid route never falls back to direct.
+func (s *Server) clientFor(proxyRaw string, accountID int64, concurrency int32) (*http.Client, error) {
 	proxyRaw = strings.TrimSpace(proxyRaw)
-	if proxyRaw == "" {
-		return s.Client, nil
-	}
-	parsed, err := url.Parse(proxyRaw)
-	if err != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		(parsed.Path != "" && parsed.Path != "/") {
-		return nil, errors.New("invalid proxy configuration")
-	}
-	switch parsed.Scheme {
-	case "http", "https", "socks5", "socks5h":
-	default:
-		return nil, errors.New("unsupported proxy scheme")
+	var parsed *url.URL
+	if proxyRaw != "" {
+		var err error
+		parsed, err = url.Parse(proxyRaw)
+		if err != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			(parsed.Path != "" && parsed.Path != "/") {
+			return nil, errors.New("invalid proxy configuration")
+		}
+		switch parsed.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return nil, errors.New("unsupported proxy scheme")
+		}
 	}
 	base, ok := s.Client.Transport.(*http.Transport)
 	if !ok {
@@ -1495,24 +1675,37 @@ func (s *Server) clientFor(proxyRaw string) (*http.Client, error) {
 	}
 	s.clientMu.Lock()
 	defer s.clientMu.Unlock()
-	if client := s.proxyClients[proxyRaw]; client != nil {
-		return client, nil
+	key := transportKey{proxyURL: proxyRaw, accountID: accountID, concurrency: concurrency}
+	if client := s.proxyClients[key]; client != nil {
+		client.lastUsed = time.Now()
+		return client.Client, nil
 	}
 	if s.proxyClients == nil {
-		s.proxyClients = make(map[string]*http.Client)
+		s.proxyClients = make(map[transportKey]*transportClient)
 	}
 	const maxProxyClients = 32
 	if len(s.proxyClients) >= maxProxyClients {
-		for key, client := range s.proxyClients {
-			client.CloseIdleConnections()
-			delete(s.proxyClients, key)
-			break
+		var oldestKey transportKey
+		var oldest *transportClient
+		for candidate, client := range s.proxyClients {
+			if oldest == nil || client.lastUsed.Before(oldest.lastUsed) {
+				oldestKey, oldest = candidate, client
+			}
 		}
+		oldest.CloseIdleConnections()
+		delete(s.proxyClients, oldestKey)
 	}
 	transport := base.Clone()
-	transport.Proxy = http.ProxyURL(parsed)
+	transport.Proxy = nil
+	if parsed != nil {
+		transport.Proxy = http.ProxyURL(parsed)
+	}
+	if concurrency > 0 {
+		transport.MaxConnsPerHost = int(concurrency)
+		transport.MaxIdleConnsPerHost = min(int(concurrency), base.MaxIdleConnsPerHost)
+	}
 	client := &http.Client{Transport: transport, Timeout: 0, CheckRedirect: s.Client.CheckRedirect}
-	s.proxyClients[proxyRaw] = client
+	s.proxyClients[key] = &transportClient{Client: client, lastUsed: time.Now()}
 	return client, nil
 }
 

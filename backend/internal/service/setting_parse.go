@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/antibypass"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -836,6 +837,8 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	// 风控中心功能（默认关闭，严格 true 才启用）
 	result.RiskControlEnabled = settings[SettingKeyRiskControlEnabled] == "true"
 	result.AntiBypassEnabled = settings[SettingKeyAntiBypassEnabled] == "true"
+	antiBypassPolicy, _ := antibypass.ParsePolicy(settings[SettingKeyAntiBypassPolicy])
+	result.AntiBypassPolicy = &antiBypassPolicy
 
 	// cyber 会话屏蔽（默认关闭，TTL 默认 3600s）
 	result.CyberSessionBlockEnabled = settings[SettingKeyCyberSessionBlockEnabled] == "true"

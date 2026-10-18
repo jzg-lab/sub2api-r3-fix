@@ -68,6 +68,7 @@ type OpenAIAuthBrowserLauncher struct {
 	sessionStore            OpenAIOAuthSessionStore
 	proxyRepo               ProxyRepository
 	validateReauthorization func(context.Context, *OpenAIOAuthSession, bool) error
+	prepareLogin            func(context.Context, *OpenAIOAuthSession, *OpenAIAuthBrowserLogin) error
 	now                     func() time.Time
 	newCommand              func(context.Context, string, ...string) *exec.Cmd
 	timeout                 time.Duration
@@ -221,6 +222,7 @@ type OpenAIAuthBrowserLogin struct {
 	Password      string `json:"password"`
 	TOTPSecret    string `json:"totp_secret"`
 	UseStoredTOTP bool   `json:"use_stored_totp,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
 }
 
 func validAuthBrowserLogin(login *OpenAIAuthBrowserLogin) bool {
@@ -381,6 +383,9 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 	if login != nil && session.ReauthorizationAccountID == 0 {
 		return nil, ErrOpenAIAuthBrowserInvalidRequest
 	}
+	if session.ReauthorizationFreshLogin && login == nil {
+		return nil, ErrOpenAIAuthBrowserInvalidRequest
+	}
 
 	ingress, proxyName, proxyURL := "direct", "Direct", ""
 	if session.ProxyID != 0 {
@@ -415,6 +420,15 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 		copy := *login
 		login = &copy
 		defer func() { login.Password, login.TOTPSecret = "", "" }()
+		login.WorkspaceID = ""
+		if session.ReauthorizationFreshLogin {
+			if l.prepareLogin == nil {
+				return nil, ErrOpenAIAuthBrowserSessionInvalid
+			}
+			if err := l.prepareLogin(ctx, session, login); err != nil {
+				return nil, err
+			}
+		}
 		if login.UseStoredTOTP {
 			if login.TOTPSecret != "" || l.accountTOTP == nil {
 				return nil, ErrOpenAIAuthBrowserInvalidRequest
@@ -553,6 +567,17 @@ func (l *OpenAIAuthBrowserLauncher) launch(ctx context.Context, sessionID string
 func (l *OpenAIAuthBrowserLauncher) SetOAuthService(s *OpenAIOAuthService) {
 	if l != nil && s != nil {
 		l.validateReauthorization = s.validateReauthorizationSession
+		l.prepareLogin = func(ctx context.Context, session *OpenAIOAuthSession, login *OpenAIAuthBrowserLogin) error {
+			account, err := s.lookupReauthorizationAccount(ctx, session.ReauthorizationAccountID)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(strings.TrimSpace(account.GetCredential("email")), strings.TrimSpace(login.Email)) {
+				return ErrOpenAIOAuthIdentityChanged
+			}
+			login.WorkspaceID = strings.TrimSpace(account.GetCredential("chatgpt_account_id"))
+			return nil
+		}
 	}
 }
 

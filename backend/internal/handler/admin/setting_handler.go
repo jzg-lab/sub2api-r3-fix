@@ -265,6 +265,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		DefaultBalance:                                         settings.DefaultBalance,
 		RiskControlEnabled:                                     settings.RiskControlEnabled,
 		AntiBypassEnabled:                                      settings.AntiBypassEnabled,
+		AntiBypassPolicy:                                       settings.AntiBypassPolicy,
 		CyberSessionBlockEnabled:                               settings.CyberSessionBlockEnabled,
 		CyberPolicyUserAllowlist:                               settings.CyberPolicyUserAllowlist,
 		CyberSessionBlockTTLSeconds:                            settings.CyberSessionBlockTTLSeconds,

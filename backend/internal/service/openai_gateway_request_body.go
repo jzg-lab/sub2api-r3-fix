@@ -1272,6 +1272,14 @@ func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *
 			changed = true
 		}
 	}
+	if account.IsOpenAIOAuthLike() && !opts.Compact {
+		next, webSearchChanged, err := ensureOpenAIOAuthWebSearchToolForHistoryBody(normalized, responsesLite)
+		if err != nil {
+			return body, false, err
+		}
+		normalized = next
+		changed = changed || webSearchChanged
+	}
 	// Keep this last: earlier compatibility passes may filter or rebuild input.
 	// Remote compaction v2 requires one trigger as the final input item.
 	if triggerBody, triggerChanged, err := NormalizeCompactionTriggerInputOrder(normalized); err != nil {

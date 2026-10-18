@@ -167,9 +167,63 @@ func TestCodexMachineWindowPseudonym(t *testing.T) {
 	assert.Equal(t, p+":0", codexMachineWindowPseudonym(key, testCodexMachineV7+":0"))
 	assert.Equal(t, p+":17", codexMachineWindowPseudonym(key, testCodexMachineV7+":17"))
 	assert.Equal(t, p, codexMachineWindowPseudonym(key, testCodexMachineV7), "整体是 UUID 时直接假名化")
-	assert.Equal(t, "not-a-uuid:0", codexMachineWindowPseudonym(key, "not-a-uuid:0"), "前段非 UUID 原样")
-	assert.Equal(t, "window-a", codexMachineWindowPseudonym(key, "window-a"), "非 UUID 原样")
 	assert.Equal(t, "", codexMachineWindowPseudonym(key, ""))
+}
+
+func TestCodexMachineWindowPseudonym_OpaqueValuesCannotLeakEnvironment(t *testing.T) {
+	values := []string{
+		"customer-host-window",
+		"customer-host:0",
+		testCodexMachineV7 + ":customer-host",
+		testCodexMachineV7 + ":/customer/private",
+		testCodexMachineV7 + ":",
+		testCodexMachineV7 + ":-1",
+		testCodexMachineV7 + ":+1",
+		testCodexMachineV7 + ":1:2",
+		testCodexMachineV7 + ":18446744073709551616",
+	}
+	for _, raw := range values {
+		t.Run(raw, func(t *testing.T) {
+			ids := newTestMachineIDs(t, 5103, testCodexFingerprintSeed)
+			out := ids.machineWindowPseudonym(raw)
+			_, err := uuid.Parse(out)
+			require.NoError(t, err, "unknown window formats must become opaque IDs")
+			assert.NotEqual(t, raw, out)
+			assert.NotContains(t, out, "customer")
+			assert.Equal(t, out, ids.machineWindowPseudonym(raw), "replay is stable")
+			assert.Equal(t, out, ids.machineWindowPseudonym(out), "staged WS passes are idempotent")
+			other := newTestMachineIDs(t, 5104, testCodexMachineSeedB)
+			assert.NotEqual(t, out, other.machineWindowPseudonym(raw))
+			account := newTestMachineAccount(t, 5103, testCodexFingerprintSeed)
+			clientA := resolveCodexFingerprintIDsWithAPIKey(account, "", codexFingerprintMachine, 101)
+			clientB := resolveCodexFingerprintIDsWithAPIKey(account, "", codexFingerprintMachine, 102)
+			assert.NotEqual(t, clientA.machineWindowPseudonym(raw), clientB.machineWindowPseudonym(raw))
+		})
+	}
+	key := []byte(testCodexFingerprintSeed)
+	assert.Equal(t, codexMachinePseudonym(key, testCodexMachineV7)+":18446744073709551615",
+		codexMachineWindowPseudonym(key, testCodexMachineV7+":18446744073709551615"))
+}
+
+func TestCodexMachineClientMetadata_IdentityAliasesAreScoped(t *testing.T) {
+	ids := newTestMachineIDs(t, 5105, testCodexFingerprintSeed)
+	fields := map[string]any{
+		"installation_id": "customer-device", "x-codex-installation-id": "customer-device",
+		"session_id": testCodexMachineV7, "session-id": testCodexMachineV7,
+		"thread_id": testCodexMachineV7, "thread-id": testCodexMachineV7,
+		"window_id": "customer-window", "x-codex-window-id": "customer-window",
+		"x-client-request-id": "customer-request",
+	}
+	require.True(t, applyCodexMachineClientMetadata(fields, ids))
+	assert.Equal(t, ids.installationID, fields["installation_id"])
+	assert.Equal(t, fields["installation_id"], fields["x-codex-installation-id"])
+	assert.Equal(t, fields["session_id"], fields["session-id"])
+	assert.Equal(t, fields["thread_id"], fields["thread-id"])
+	assert.Equal(t, fields["window_id"], fields["x-codex-window-id"])
+	for key, value := range fields {
+		assert.NotContains(t, value, "customer", key)
+	}
+	assert.False(t, applyCodexMachineClientMetadata(fields, ids), "second pass must not remap identities")
 }
 
 func TestCodexMachineSandboxTagFromUA(t *testing.T) {

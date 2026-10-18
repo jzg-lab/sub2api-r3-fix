@@ -82,7 +82,7 @@ func assertMachineThirdPartyOutbound(t *testing.T, req *http.Request, body []byt
 
 // HTTP 两条链路：非 Codex 下游（下划线 session_id + body pck，无 client_metadata）。
 func TestCodexMachineChain_HTTP_ThirdParty_KeepsUnderscoreSessionNoConversation(t *testing.T) {
-	seedKey := []byte(testCodexFingerprintSeed)
+	seedKey := []byte(codexClientSessionSeed(testCodexFingerprintSeed, testMachineThirdPartyAPIKeyID))
 	pckP := codexMachinePseudonym(seedKey, "opencode-key")
 
 	t.Run("non_passthrough", func(t *testing.T) {
@@ -115,7 +115,7 @@ func TestCodexMachineChain_HTTP_ThirdParty_KeepsUnderscoreSessionNoConversation(
 // Hermes 形态：下划线 session_id + x-client-request-id（= pck），无 session-id / thread-id。
 // x-client-request-id 是"存在则改"的头：假名化但不新增其他头。
 func TestCodexMachineChain_HTTP_ThirdParty_HermesShape_ClientRequestIDPseudonymized(t *testing.T) {
-	seedKey := []byte(testCodexFingerprintSeed)
+	seedKey := []byte(codexClientSessionSeed(testCodexFingerprintSeed, testMachineThirdPartyAPIKeyID))
 	pckP := codexMachinePseudonym(seedKey, "opencode-key")
 	for _, passthrough := range []bool{false, true} {
 		name := "non_passthrough"
@@ -151,7 +151,7 @@ func TestCodexMachineChain_HTTP_ThirdParty_HermesShape_ClientRequestIDPseudonymi
 // OpenCode 形态：只有连字符 session-id（无 thread-id / turn metadata / client_metadata）。
 // 视为携带 Codex 会话身份：session-id 假名化、下划线 session_id 删除、其余不补。
 func TestCodexMachineChain_HTTP_ThirdParty_OpenCodeShape_HyphenSessionOnly(t *testing.T) {
-	seedKey := []byte(testCodexFingerprintSeed)
+	seedKey := []byte(codexClientSessionSeed(testCodexFingerprintSeed, testMachineThirdPartyAPIKeyID))
 	pckP := codexMachinePseudonym(seedKey, "opencode-key")
 	for _, passthrough := range []bool{false, true} {
 		name := "non_passthrough"
@@ -232,7 +232,7 @@ func TestCodexMachineChain_Bridges_ThirdPartyShape(t *testing.T) {
 	account := newMachineChainAccount(t, 6551, testCodexFingerprintSeed, false, "")
 	// 桥 post-build 的 session_id 源头逻辑不变（openai_gateway_chat_completions.go / openai_gateway_messages.go）
 	wantSession := generateSessionUUID(isolateOpenAIUpstreamSessionID(testMachineThirdPartyAPIKeyID, account, "cache-key-123"))
-	pckP := codexMachinePseudonym([]byte(testCodexFingerprintSeed), "cache-key-123")
+	pckP := codexMachinePseudonym([]byte(codexClientSessionSeed(testCodexFingerprintSeed, testMachineThirdPartyAPIKeyID)), "cache-key-123")
 
 	t.Run("chat_completions", func(t *testing.T) {
 		const body = `{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`
@@ -347,7 +347,7 @@ func TestCodexMachineChain_HTTP_DeviceIDDoesNotAddInstallation(t *testing.T) {
 				} else {
 					require.True(t, cm.IsObject())
 					assert.False(t, cm.Get("x-codex-installation-id").Exists(), "有 device_id 也不得补 installation 键")
-					assert.Equal(t, codexMachinePseudonym([]byte(testCodexFingerprintSeed), testMachineChainRoot), cm.Get("session_id").String())
+					assert.Equal(t, codexMachinePseudonym([]byte(codexClientSessionSeed(testCodexFingerprintSeed, testMachineThirdPartyAPIKeyID)), testMachineChainRoot), cm.Get("session_id").String())
 				}
 				assert.NotContains(t, string(upstream.lastBody), deviceID)
 				assert.Empty(t, upstream.lastReq.Header.Get("x-codex-installation-id"))

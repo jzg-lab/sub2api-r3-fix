@@ -193,6 +193,20 @@ func TestPluginRequestSentErrorDoesNotFailOver(t *testing.T) {
 	require.False(t, errors.As(result, &failover))
 }
 
+func TestPluginHostTransportRejectionDoesNotCycleAccounts(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	account := &Account{ID: 7, Name: "oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	transportErr := &PluginTransportError{Code: "PLUGIN_HOST_TRANSPORT", Message: "host binding unavailable", RequestSent: false}
+	require.ErrorIs(t, transportErr, errPluginRuntimeUnavailable)
+	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, transportErr, true)
+	require.Same(t, transportErr, result)
+	var failover *UpstreamFailoverError
+	require.False(t, errors.As(result, &failover), "shared host transport failure is not an account fault")
+	require.NotErrorIs(t, &PluginTransportError{Code: "UPSTREAM", RequestSent: false}, errPluginRuntimeUnavailable)
+}
+
 func TestPluginRPCAmbiguityPreventsReplayAfterMetadataDelivery(t *testing.T) {
 	err := normalizePluginRPCError(context.Background(), "接收插件响应头", errors.New("连接已断开"), true)
 	var transportErr *PluginTransportError

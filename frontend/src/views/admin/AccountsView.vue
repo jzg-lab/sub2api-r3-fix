@@ -137,6 +137,10 @@
                         <Icon name="chart" size="sm" />
                         <span class="flex-1 text-left">{{ t('admin.openaiOperations.title') }}</span>
                       </button>
+                      <button class="account-tools-menu-item" @click="showEnvironmentAudit = true; showAccountToolsDropdown = false">
+                        <Icon name="shield" size="sm" />
+                        <span class="flex-1 text-left">{{ t('admin.accounts.environmentAudit.title') }}</span>
+                      </button>
 
                       <div class="my-2 border-t border-gray-100 dark:border-dark-700"></div>
                       <div class="px-2 py-2">
@@ -308,12 +312,18 @@
             </AccountCapacityCell>
           </template>
           <template #cell-status="{ row }">
-            <div class="flex items-center gap-1.5">
+            <div class="flex flex-wrap items-center gap-1.5">
               <AccountStatusIndicator
                 :account="row"
                 :usage="usageBatchByAccountId[String(row.id)] ?? null"
                 @show-temp-unsched="handleShowTempUnsched"
               />
+              <button
+                v-if="canReloginAccount(row)"
+                type="button"
+                class="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:underline dark:text-primary-400 whitespace-nowrap"
+                @click.stop="handleReAuth(row)"
+              ><Icon name="login" size="sm" />重新登录</button>
             </div>
           </template>
           <template #cell-schedulable="{ row }">
@@ -596,6 +606,7 @@
     <ErrorPassthroughRulesModal :show="showErrorPassthrough" @close="showErrorPassthrough = false" />
     <TLSFingerprintProfilesModal :show="showTLSFingerprintProfiles" @close="showTLSFingerprintProfiles = false" />
     <OpenAIOperationsModal :show="showOpenAIOperations" :groups="groups" :proxies="proxies" @close="showOpenAIOperations = false" />
+    <AccountEnvironmentAuditModal :show="showEnvironmentAudit" @close="showEnvironmentAudit = false" />
     <TotpStepUpDialog :controller="accountExportStepUp" />
   </AppLayout>
 </template>
@@ -646,9 +657,11 @@ import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import OpenAIOperationsModal from '@/components/admin/OpenAIOperationsModal.vue'
+import AccountEnvironmentAuditModal from '@/components/admin/AccountEnvironmentAuditModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
+import { parseRescueSignInfo, signRemainingSeconds, type RescueSignInfo } from '@/utils/rescueSign'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorCode, extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
@@ -725,6 +738,7 @@ const showStats = ref(false)
 const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
 const showOpenAIOperations = ref(false)
+const showEnvironmentAudit = ref(false)
 const edAcc = ref<Account | null>(null)
 const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
@@ -1104,52 +1118,16 @@ const probingAcc = ref<Account | null>(null)
 // task 4.5：签余量读秒——桥 status_json prober.accounts 的签捕获/余量估计
 // （原文透传，前端解析）。健康批量刷新时重建 = 桥校准节奏；芯片秒针走
 // nowTick。无签（插件尚未捕获）不在表 → 不显芯片。
-interface RescueSignInfo {
-  capturedAt: number
-  estRemainingSec: number | null
-  basis: string
-}
 const rescueSignByAccount = ref<Record<number, RescueSignInfo>>({})
-// 秒针：仅在有救治中号且桥给了签数据时走钟（watch 启停，空转零成本）。
+// Run the clock whenever a visible account has a captured sign.
 const nowTick = ref(Date.now())
 let rescueClockTimer: ReturnType<typeof setInterval> | null = null
-
-const parseRescueSignInfo = (bridge: OpenAIPluginBridge | null | undefined): Record<number, RescueSignInfo> => {
-  const out: Record<number, RescueSignInfo> = {}
-  if (!bridge?.status_json) return out
-  try {
-    const parsed = JSON.parse(bridge.status_json) as {
-      prober?: {
-        accounts?: Array<{
-          account_id?: number
-          sign_captured_at?: string
-          estimated_remaining_seconds?: number | null
-          estimate_basis?: string
-        }>
-      }
-    }
-    for (const acc of parsed.prober?.accounts ?? []) {
-      if (!acc || typeof acc.account_id !== 'number' || !acc.sign_captured_at) continue
-      const capturedAt = Date.parse(acc.sign_captured_at)
-      if (!Number.isFinite(capturedAt)) continue
-      out[acc.account_id] = {
-        capturedAt,
-        estRemainingSec:
-          typeof acc.estimated_remaining_seconds === 'number' ? acc.estimated_remaining_seconds : null,
-        basis: acc.estimate_basis || 'none'
-      }
-    }
-  } catch {
-    // 坏 JSON → 按无签数据渲染（芯片缺席，不炸健康格）。
-  }
-  return out
-}
 
 // 只依赖健康表与签表（accounts 解构在本块之后，勿引用——TDZ）。
 const anyRescueSignChipVisible = computed(() => {
   const signs = rescueSignByAccount.value
   for (const health of Object.values(accountHealthById.value)) {
-    if (health.rescue && signs[health.account_id]) return true
+    if (signs[health.account_id]) return true
   }
   return false
 })
@@ -1158,6 +1136,7 @@ watch(
   anyRescueSignChipVisible,
   (visible) => {
     if (visible && rescueClockTimer === null) {
+      nowTick.value = Date.now()
       rescueClockTimer = setInterval(() => {
         nowTick.value = Date.now()
       }, 1000)
@@ -1186,12 +1165,9 @@ const rescueSignChip = (accountId: number): { age: string; remain: string | null
   const now = nowTick.value
   const age = fmtSignClock((now - info.capturedAt) / 1000)
   let remain: string | null = null
-  if (info.estRemainingSec != null) {
-    const anchor = pluginBridge.value?.checked_at ? Date.parse(pluginBridge.value.checked_at) : now
-    const elapsed = Number.isFinite(anchor) ? (now - anchor) / 1000 : 0
-    remain = fmtSignClock(info.estRemainingSec - elapsed)
-  }
-  return { age, remain, approx: info.basis !== 'measured' }
+  const remaining = signRemainingSeconds(info, pluginBridge.value?.checked_at, now)
+  if (remaining != null) remain = fmtSignClock(remaining)
+  return { age, remain, approx: true }
 }
 
 const rescueSignText = (accountId: number): string => {
@@ -2031,7 +2007,8 @@ const isAnyModalOpen = computed(() => {
     showSchedulePanel.value ||
     showErrorPassthrough.value ||
     showTLSFingerprintProfiles.value ||
-    showOpenAIOperations.value
+    showOpenAIOperations.value ||
+    showEnvironmentAudit.value
   )
 })
 
@@ -2131,7 +2108,7 @@ const refreshAccountsIncrementally = async () => {
     }
     upstreamBillingNow.value = Date.now()
 
-    await refreshTodayStatsBatch()
+    await Promise.all([refreshTodayStatsBatch(), refreshAccountHealthBatch()])
   } catch (error) {
     console.error('Auto refresh failed:', error)
   } finally {
@@ -2346,6 +2323,14 @@ function getOpenAIAuthMode(row: any): string | undefined {
   if (!row || row.platform !== 'openai' || row.type !== 'oauth') return undefined
   const authMode = row.credentials?.auth_mode
   return typeof authMode === 'string' && authMode.trim() ? authMode : undefined
+}
+
+function canReloginAccount(row: Account): boolean {
+  if (row.status !== 'error' || row.platform !== 'openai' || row.type !== 'oauth' || row.parent_account_id) return false
+  const mode = String(row.credentials?.auth_mode ?? '').trim().toLowerCase()
+  const legacyMode = String(row.credentials?.openai_auth_mode ?? '').trim().toLowerCase()
+  return !['personalaccesstoken', 'personal_access_token', 'agentidentity'].includes(mode) &&
+    !['personalaccesstoken', 'personal_access_token'].includes(legacyMode)
 }
 
 // =============================================================================

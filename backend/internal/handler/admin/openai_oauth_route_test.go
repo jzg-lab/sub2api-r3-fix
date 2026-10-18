@@ -107,6 +107,8 @@ func TestOpenAIOAuthGenerateRejectsMalformedReauthorizationInsteadOfCreating(t *
 		status int
 	}{
 		{"invalid account type", `{"proxy_id":7,"account_id":"invalid"}`, http.StatusBadRequest},
+		{"fresh login requires account", `{"proxy_id":7,"fresh_login":true}`, http.StatusBadRequest},
+		{"fresh login mode must be boolean", `{"proxy_id":7,"fresh_login":"true"}`, http.StatusBadRequest},
 		{"missing account", `{"proxy_id":7,"expected_updated_at":"2026-10-03T01:02:03Z"}`, http.StatusBadRequest},
 		{"lookup unavailable", `{"proxy_id":7,"account_id":42,"expected_updated_at":"2026-10-03T01:02:03Z"}`, http.StatusServiceUnavailable},
 		{"nonexistent account", `{"proxy_id":7,"account_id":0}`, http.StatusNotFound},

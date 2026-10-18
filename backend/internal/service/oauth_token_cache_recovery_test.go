@@ -128,13 +128,18 @@ func TestCachedOAuthAccessTokenRequiresPersistedIdentity(t *testing.T) {
 		{"different-proxy", func(r *oauthCacheRecoveryRepo) { id := int64(99); r.account.ProxyID = &id }, false, true},
 		{"missing-proxy", func(r *oauthCacheRecoveryRepo) { r.account.ProxyID = nil }, false, true},
 		{"older-version", func(r *oauthCacheRecoveryRepo) { r.account.Credentials["_token_version"] = int64(1) }, false, false},
+		{"missing-expiry", func(r *oauthCacheRecoveryRepo) { delete(r.account.Credentials, "expires_at") }, false, false},
+		{"expired", func(r *oauthCacheRecoveryRepo) {
+			r.account.Credentials["expires_at"] = time.Now().Add(-time.Minute).Format(time.RFC3339)
+		}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			proxyID := int64(15)
 			account := &Account{ID: 51, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ProxyID: &proxyID,
 				Credentials: map[string]any{"access_token": "snapshot", "_token_version": int64(2)}}
 			latest := *account
-			latest.Credentials = map[string]any{"access_token": "cached", "_token_version": int64(3), "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}
+			latest.Credentials = map[string]any{"access_token": "cached", "_token_version": int64(3)}
+			latest.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 			repo := &oauthCacheRecoveryRepo{account: &latest}
 			tc.change(repo)
 			cache := newOpenAITokenCacheStub()

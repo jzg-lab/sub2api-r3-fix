@@ -31,11 +31,11 @@ func (s *wsBoundPackageLookup) APIKeyForRoute(_ context.Context, _ *service.APIK
 func TestWSTurnBillingKeepsBoundBackupPackage(t *testing.T) {
 	primaryID, backupID := int64(1), int64(2)
 	conn := &service.APIKey{ID: 7, Key: "key", GroupID: &backupID,
-		Group: &service.Group{ID: backupID, Platform: service.PlatformOpenAI, RateMultiplier: 2}}
+		Group: &service.Group{ID: backupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 2}}
 	lookup := &wsBoundPackageLookup{
 		primary: &service.APIKey{ID: 7, GroupID: &primaryID, RouteGroupIDs: []int64{primaryID, backupID}},
 		bound: &service.APIKey{ID: 7, GroupID: &backupID,
-			Group: &service.Group{ID: backupID, Platform: service.PlatformOpenAI, RateMultiplier: 3}},
+			Group: &service.Group{ID: backupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 3}},
 	}
 	got := refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn)
 	require.Equal(t, backupID, lookup.requestedID)
@@ -237,7 +237,7 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 		Key:     "sk-conn",
 		GroupID: &groupID,
 		User:    &service.User{ID: 9},
-		Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
+		Group:   &service.Group{ID: groupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
 	}
 	latestWith := func(mutate func(k *service.APIKey)) *service.APIKey {
 		gid := groupID
@@ -246,7 +246,7 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 			Key:     "sk-conn",
 			GroupID: &gid,
 			User:    &service.User{ID: 9, Balance: 123},
-			Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
+			Group:   &service.Group{ID: groupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
 		}
 		if mutate != nil {
 			mutate(k)
@@ -320,11 +320,11 @@ func TestOpenAIWSTurnBillingAPIKeysKeepPreviousTurnUntilItIsRecorded(t *testing.
 	turn3 := &service.APIKey{ID: 3}
 	var keys openAIWSTurnBillingAPIKeys
 	require.Same(t, conn, keys.forTurn(1, conn), "a turn without BeforeTurn bills with the connection snapshot")
-	keys.set(2, turn2)
-	keys.set(3, turn3) // turn 3 starts before turn 2's usage is submitted
+	keys.begin(context.Background(), nil, 2, turn2)
+	keys.begin(context.Background(), nil, 3, turn3) // turn 3 starts before turn 2's usage is submitted
 	require.Same(t, turn2, keys.forTurn(2, conn))
 	require.Same(t, turn3, keys.forTurn(3, conn))
-	keys.set(4, conn)
+	keys.begin(context.Background(), nil, 4, conn)
 	require.Same(t, conn, keys.forTurn(2, conn), "only the current and previous turn are kept")
 	require.Len(t, keys.keys, 2)
 }

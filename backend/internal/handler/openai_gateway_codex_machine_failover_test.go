@@ -7,10 +7,12 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,19 +30,22 @@ import (
 
 // --- Codex OAuth machine 模式：真实 handler failover 循环下的 I2（无残留）用例 ---
 // 走 h.Responses → SelectAccountWithSchedulerForCapability → Forward 的真实选号/切换循环：
-// 首选 machine 账号上游 5xx 触发 failover，切到 off 账号后出站头与 body 必须是真实值，
-// 不得残留上一账号的假名（service 层 TestCodexMachineChain_Failover_I2_NoResidualIDs 是手工
+// 首选 machine 账号上游 5xx 触发 failover，切到 off 账号后仍必须保持账号隔离，
+// 不得透传客户端身份或残留上一账号的假名（service 层 TestCodexMachineChain_Failover_I2_NoResidualIDs 是手工
 // stage，此处补真实循环）。
 
 const (
-	machineFailoverRoot = "01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a" // UUIDv7
-	machineFailoverSeed = "11111111-1111-4111-8111-111111111111"
+	machineFailoverRoot     = "01912e2a-6f3c-7d1e-9c4a-0f1e2d3c4b5a" // UUIDv7
+	machineFailoverSeed     = "11111111-1111-4111-8111-111111111111"
+	machineFailoverAPIKeyID = int64(912)
 )
 
 // machineFailoverPseudonym 与 service.codexMachinePseudonym 同算法（UUIDv7 保留前 6 字节），
 // 用于在 handler 包内计算期望假名。
-func machineFailoverPseudonym(seed, id string) string {
-	mac := hmac.New(sha256.New, []byte(seed))
+func machineFailoverPseudonym(seed, id string, apiKeyID int64) string {
+	sessionMAC := hmac.New(sha256.New, []byte(seed))
+	sessionMAC.Write([]byte("sub2api:codex-client-session:v1:" + strconv.FormatInt(apiKeyID, 10)))
+	mac := hmac.New(sha256.New, []byte(hex.EncodeToString(sessionMAC.Sum(nil))))
 	mac.Write([]byte("sub2api:codex-machine:v1:" + id))
 	sum := mac.Sum(nil)
 	parsed := uuid.MustParse(id)
@@ -160,7 +165,7 @@ func newCodexMachineFailoverHandler(t *testing.T) (*machineFailoverUpstream, *gi
 	}
 	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(cache), billingCache, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
 	apiKey := &service.APIKey{
-		ID: 912, GroupID: &groupID,
+		ID: machineFailoverAPIKeyID, GroupID: &groupID,
 		User:  &service.User{ID: 913, Status: service.StatusActive},
 		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive},
 	}
@@ -241,7 +246,7 @@ func TestResponsesFailover_CodexMachineToOff_NoResidualIDs(t *testing.T) {
 	require.Equal(t, []int64{811, 812}, hits, "machine 账号 5xx 后必须切到 off 账号")
 
 	// attempt 1（machine）：头 + body 全假名，无真实值
-	p := machineFailoverPseudonym(machineFailoverSeed, root)
+	p := machineFailoverPseudonym(machineFailoverSeed, root, machineFailoverAPIKeyID)
 	h1, b1 := headers[0], string(bodies[0])
 	require.Equal(t, p, h1.Get("session-id"))
 	require.Equal(t, p, h1.Get("thread-id"))

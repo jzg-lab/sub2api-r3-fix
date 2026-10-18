@@ -1,10 +1,15 @@
 package service
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/tidwall/gjson"
 )
+
+func openAIUsageHasWork(usage *OpenAIUsage) bool {
+	return usage != nil && (openAIUsageHasTokens(usage) || usage.ReasoningTokens > 0)
+}
 
 // Metadata is retained even when upstream body logging is disabled. No text,
 // response output, identifiers, headers or arbitrary provider values are copied.
@@ -19,6 +24,23 @@ type OpenAIStreamFailureObservation struct {
 	UsagePresent          bool   `json:"usage_present"`
 	InputTokens           *int64 `json:"input_tokens,omitempty"`
 	OutputTokens          *int64 `json:"output_tokens,omitempty"`
+}
+
+func stopOpenAIReplayAfterUsage(failure *UpstreamFailoverError, usage *OpenAIUsage) *UpstreamFailoverError {
+	if failure != nil && openAIUsageHasWork(usage) {
+		// No downstream output does not imply that the upstream did no work.
+		// Keep its failure/health classification, but do not pay for a replay.
+		failure.NextAccountAction = NextAccountStop
+		failure.RetryableOnSameAccount = false
+	}
+	return failure
+}
+
+func stopOpenAIStreamReplayAfterUsage(err error, usage *OpenAIUsage) {
+	var failure *UpstreamFailoverError
+	if errors.As(err, &failure) {
+		stopOpenAIReplayAfterUsage(failure, usage)
+	}
 }
 
 func openAIStreamFailureSymbol(value string) string {

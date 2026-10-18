@@ -367,6 +367,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 	accounts := admin.Group("/accounts")
 	{
 		accounts.GET("", h.Admin.Account.List)
+		accounts.GET("/environment-audit", h.Admin.Account.EnvironmentAudit)
 		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
 		accounts.PUT("/upstream-billing-probe/settings", h.Admin.Account.UpdateUpstreamBillingProbeSettings)

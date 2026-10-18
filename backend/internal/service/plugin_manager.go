@@ -51,6 +51,9 @@ type PluginManager struct {
 	installer              *PluginPackageInstaller
 	pausedAccountIDsSource func(context.Context) ([]int64, error)
 	rateLimitService       *RateLimitService
+	probeControls          OpenAIProbeBatchControlStore
+	httpUpstream           HTTPUpstream
+	tlsProfiles            *TLSFingerprintProfileService
 	kvStore                PluginKVStore
 	accountDirectory       PluginAccountDirectory
 	accountHealth          OpenAIProbeHealthLister
@@ -948,7 +951,8 @@ func (m *PluginManager) probeStatus(ctx context.Context, id int64) (*PluginStatu
 		m.cacheStatus(status)
 		return status, nil
 	}
-	healthCtx, cancel := context.WithTimeout(ctx, pluginStatusTimeout)
+	policyCtx := m.probePolicyContext(ctx, runtime)
+	healthCtx, cancel := context.WithTimeout(policyCtx, pluginStatusTimeout)
 	defer cancel()
 	health, err := runtime.api.Health(healthCtx, &pluginv1.HealthRequest{})
 	if err != nil || health == nil {
@@ -1283,24 +1287,28 @@ func (m *PluginManager) newRuntime(ctx context.Context, installation *PluginInst
 	}
 	timeout := time.Duration(m.cfg.Plugins.StartTimeoutSeconds) * time.Second
 	runtime, err := startPluginRuntime(ctx, installation, timeout, socketDir, m.buildHostServices(installation))
-	if err == nil && installation.PluginKey == rescueCookiePinPluginID {
+	if err != nil {
+		return nil, err
+	}
+	if installation.PluginKey == rescueCookiePinPluginID {
 		runtime.pausedAccountIDsSource = m.pausedAccountIDsSource
 	}
-	return runtime, err
+	if err := m.startHostHTTP(runtime); err != nil {
+		runtime.kill()
+		return nil, err
+	}
+	return runtime, nil
 }
 
-// SetAccountDirectory 注入账号目录实现（敏感能力）。仅在启动装配阶段调用一次，
-// 早于 Start，因此运行期读取无需额外同步。
+// SetAccountDirectory injects the sensitive account directory during startup.
 func (m *PluginManager) SetAccountDirectory(directory PluginAccountDirectory) {
 	m.mu.Lock()
 	m.accountDirectory = directory
 	m.mu.Unlock()
 }
 
-// buildHostServices 为单个插件构造绑定其 pluginKey 的宿主服务端点。返回 nil（未配置
-// 键值存储或缺少 pluginKey）时，startPluginRuntime 不会向插件暴露任何宿主服务。
-// 账号目录（会向插件交付账号凭据与全量元数据）只对「清单声明的能力授予了账号范围」的
-// 插件开放，且严格限定在该范围内，从而把暴露面收敛到本就要处理这些账号的插件。
+// buildHostServices scopes the legacy KV/account bridge to the plugin and its
+// active rollout. HostHTTP is registered separately and keeps its own checks.
 func (m *PluginManager) buildHostServices(installation *PluginInstallation) pluginv1.HostServiceServer {
 	if m.kvStore == nil || installation == nil || strings.TrimSpace(installation.PluginKey) == "" {
 		return nil
@@ -1339,24 +1347,16 @@ func (m *PluginManager) buildHostServices(installation *PluginInstallation) plug
 	return newPluginHostServiceServer(installation.PluginKey, m.kvStore, directory, scope)
 }
 
-// pluginCapabilityAccountScopeGrants 把「能力 id」映射到它授予的账号范围条目。这是
-// 唯一放宽账号可见性的通用入口：为需要账号访问的新能力扩权只需在此加一行，无需新增
-// RPC 或按插件定制目录实现。授予的范围以能力 id 为准并被固定，清单无法通过声明不同的
-// platform/account_type 来扩大它。
 var pluginCapabilityAccountScopeGrants = map[string]pluginAccountScopeEntry{
 	PluginCapabilityOpenAIOAuthOutbound: {Platform: PlatformOpenAI, AccountType: AccountTypeOAuth},
 }
 
-// pluginAccountScopeFromManifest 从（安装期已校验的）清单声明能力推导出账号可见范围
-// （各能力授予范围的并集）。
 func pluginAccountScopeFromManifest(manifest PluginManifest) PluginAccountScope {
 	entries := make([]pluginAccountScopeEntry, 0, len(manifest.Capabilities))
 	for _, capability := range manifest.Capabilities {
-		grant, ok := pluginCapabilityAccountScopeGrants[capability.ID]
-		if !ok {
-			continue
+		if grant, ok := pluginCapabilityAccountScopeGrants[capability.ID]; ok {
+			entries = append(entries, grant)
 		}
-		entries = append(entries, grant)
 	}
 	return newPluginAccountScope(entries...)
 }

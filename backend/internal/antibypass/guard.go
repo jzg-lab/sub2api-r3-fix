@@ -53,8 +53,8 @@ const (
 )
 
 // Config contains the safety budgets for the guard. The feature's only
-// production switch is the system setting anti_bypass_enabled; these bounded
-// defaults are intentionally not coupled to billing settings.
+// production switch is anti_bypass_enabled; the administrator's admission
+// policy remains separate from billing and upstream account quotas.
 type Config struct {
 	Window                   time.Duration
 	RateWindow               time.Duration

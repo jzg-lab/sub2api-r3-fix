@@ -202,8 +202,8 @@ func TestProbeRealTrafficMismatchSignalSkipsTrafficDeferralAndRecordsEvent(t *te
 	probeRan = false
 	require.NoError(t, runner.processStateAtomic(context.Background(), state, now))
 	require.False(t, probeRan, "deferral must resume once the signal is absorbed")
-	require.LessOrEqual(t, state.NextProbeAt.Sub(now), 67*time.Minute+time.Second)
-	require.GreaterOrEqual(t, state.NextProbeAt.Sub(now), 22*time.Minute-time.Second)
+	require.Less(t, state.NextProbeAt.Sub(now), openAIDowngradeTrafficDeferral*3/2)
+	require.GreaterOrEqual(t, state.NextProbeAt.Sub(now), openAIDowngradeTrafficDeferral/2)
 }
 
 // TestProbeTurnStateDegradedAloneCircuitsImmediately：纯单针杀

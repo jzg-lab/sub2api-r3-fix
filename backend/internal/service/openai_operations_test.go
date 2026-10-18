@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -84,6 +85,8 @@ func recoveryFixture() (*OpenAIOperationsService, *operationsTestRepository, *re
 		Type: AccountTypeOAuth, Status: StatusError, ErrorMessage: "token expired",
 		Credentials: map[string]any{"refresh_token": "local-fixture"}}}
 	executor := &refreshAPIExecutorStub{credentials: map[string]any{"refresh_token": "local-rotated-fixture"}}
+	accounts.account.Credentials["expires_at"] = time.Now().Add(-time.Minute).Unix()
+	executor.needsRefresh = true
 	svc := &OpenAIOperationsService{repo: repo, accounts: accounts, refresh: NewOAuthRefreshAPI(accounts, nil), executor: executor}
 	return svc, repo, accounts, executor
 }
@@ -126,6 +129,36 @@ func TestOpenAIOperationsRecoveryStates(t *testing.T) {
 				require.Equal(t, tc.calls, executor.refreshCalls)
 				require.Len(t, repo.completed, 1)
 			}
+		})
+	}
+}
+
+func TestOpenAIOperationsRecoveryRequiresKnownExpiry(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unknown=%t", unknown), func(t *testing.T) {
+			svc, repo, accounts, executor := recoveryFixture()
+			expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
+			accounts.account.Credentials["expires_at"] = expiresAt.Unix()
+			if unknown {
+				delete(accounts.account.Credentials, "expires_at")
+			}
+			cfg := DefaultOpenAIOperationsSettings().Recovery
+			cfg.Enabled = true
+			require.NoError(t, svc.runRecovery(t.Context(), cfg))
+			require.Zero(t, executor.refreshCalls)
+			require.Equal(t, StatusError, accounts.account.Status)
+			if unknown {
+				require.Equal(t, "expiry_unconfirmed", repo.record.Classification)
+			} else {
+				require.Equal(t, "token_unexpired", repo.record.Classification)
+				require.True(t, repo.record.NextAttemptAt.Equal(expiresAt))
+			}
+			// The shared lock path also checks the fresh row, independently of
+			// the worker's precheck and executor's wish to refresh.
+			result, err := svc.refresh.RecoverOpenAIError(t.Context(), accounts.account, executor)
+			require.NoError(t, err)
+			require.False(t, result.Refreshed)
+			require.Zero(t, executor.refreshCalls)
 		})
 	}
 }

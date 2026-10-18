@@ -199,7 +199,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			if c != nil && c.Request != nil {
 				clientHeaders = c.Request.Header
 			}
-			fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+			fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
 			// machine：按本链路终态出站 UA（与 buildUpstreamRequestOpenAIPassthrough 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
 			stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
 			if fpIDs != nil {
@@ -1784,6 +1784,9 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 		classificationHeaders = openAIWSSemantic429Headers(account, canonicalModel, headers)
 	}
 	failoverErr := s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, headers, classificationHeaders, payload, message, shouldDisable, retryableOnSameAccount)
+	if usage, ok := extractOpenAIUsageFromJSONBytes(payload); ok {
+		stopOpenAIReplayAfterUsage(failoverErr, &usage)
+	}
 	if failoverErr.IsCredentialFailure() || failoverErr.RequestScopedTransient {
 		return failoverErr
 	}
@@ -1861,7 +1864,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	startTime time.Time,
 	originalModel string,
 	mappedModel string,
-) (*openaiStreamingResultPassthrough, error) {
+) (streamResult *openaiStreamingResultPassthrough, streamErr error) {
+	defer func() {
+		if streamResult != nil {
+			stopOpenAIStreamReplayAfterUsage(streamErr, streamResult.usage)
+		}
+	}()
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -2087,7 +2095,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted && !cyberHit {
-					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
+					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage, usage); compactErr != nil {
 						return resultWithUsage(), compactErr
 					}
 				}
@@ -2322,7 +2330,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	// Some upstreams (e.g. other sub2api instances) may return SSE even when
 	// stream=false was requested. Without this conversion the client would
 	// receive raw SSE text or a terminal event with empty output.
-	if isEventStreamResponse(resp.Header) {
+	if isEventStreamResponse(resp.Header) || bodyHasSSEFraming(body) {
 		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
 	}
 
@@ -2376,26 +2384,30 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // rewrite model fields back to the original requested model.
 func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
-	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
-	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
+	completion, integrityErr := inspectOpenAIResponsesSSECompletion(bodyText)
+	if integrityErr != nil {
+		return nil, s.writeOpenAINonStreamingProtocolError(resp, c, integrityErr.Error())
+	}
+	usage := s.parseSSEUsageFromBody(bodyText)
+	terminalType, terminalPayload := completion.eventType, completion.payload
+	if terminalType == "response.failed" || terminalType == "error" {
 		msg := extractOpenAISSEErrorMessage(terminalPayload)
 		if msg == "" {
 			msg = "Upstream compact response failed"
 		}
-		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
+		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg, usage); compactErr != nil {
 			return nil, compactErr
 		}
 		if failoverErr := s.nonStreamingTerminalFailureFailover(c, resp, account, true, terminalType, terminalPayload, msg, mappedModel); failoverErr != nil {
-			return nil, failoverErr
+			return nil, stopOpenAIReplayAfterUsage(failoverErr, usage)
 		}
 		return nil, s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 	}
-	finalResponse, ok := extractCodexFinalResponse(bodyText)
+	finalResponse, ok := completion.response, len(completion.response) > 0
 
-	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
 		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
-			*usage = parsedUsage
+			replaceOpenAITerminalUsage(usage, parsedUsage)
 		}
 		// When the terminal event has an empty output array, reconstruct
 		// output from accumulated delta events so the client gets full content.
@@ -2431,12 +2443,11 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 
 	contentType := "application/json; charset=utf-8"
 	if !ok {
-		contentType = resp.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "text/event-stream"
-		}
+		contentType = "text/event-stream"
 	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
+		c.Writer.Header().Set("Content-Type", contentType)
+		c.Writer.Header().Del("Content-Length")
 		c.Data(resp.StatusCode, contentType, body)
 	}
 

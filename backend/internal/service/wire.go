@@ -370,6 +370,7 @@ func ProvideAccountUsageService(
 func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config,
 	hostInfo PluginHostInfo, rateLimitService *RateLimitService, accountRepo AccountRepository,
 	kvStore PluginKVStore, gateway *OpenAIGatewayService, probeStore OpenAIDowngradeProbeStore,
+	httpUpstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService,
 ) *PluginManager {
 	manager := NewPluginManager(repo, encryptor, cfg, hostInfo)
 	manager.kvStore = kvStore
@@ -379,6 +380,9 @@ func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg 
 	if source, ok := accountRepo.(OpenAIRescueTerminatedAccountLister); ok {
 		manager.SetRescueTerminatedAccountSource(source.ListOpenAIRescueTerminatedAccountIDs)
 	}
+	manager.probeControls, _ = probeStore.(OpenAIProbeBatchControlStore)
+	manager.httpUpstream = httpUpstream
+	manager.tlsProfiles = tlsProfiles
 	return manager
 }
 

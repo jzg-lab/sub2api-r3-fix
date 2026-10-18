@@ -101,6 +101,7 @@ type OpenAIProbeHealthSnapshot struct {
 	ManualPaused     bool
 	RescueTerminated bool
 	RateLimitedAt    *time.Time
+	RateLimitResetAt *time.Time
 	Qualification    bool
 	LastProbe        *OpenAIProbeLastEvidence
 	// RescueMarker 救治区成员标记（r17ax Phase 3.4：仓库从
@@ -125,13 +126,22 @@ type OpenAIProbeHealthLister interface {
 // normal-健康 vs 待复核的分界 = 最近一针降智布尔（r15e 截断+答对=中性）。
 // 静置中（enforcement）相位A 无数据源，恒不触发；相位B 分型落地后接入。
 func LabelOpenAIAccountHealth(s OpenAIProbeHealthSnapshot) (label, color string, clickable bool, reason string) {
+	return labelOpenAIAccountHealthAt(s, time.Now())
+}
+
+func (s OpenAIProbeHealthSnapshot) rateLimitedAt(now time.Time) bool {
+	// The event timestamp is history; scheduling only blocks until reset.
+	return s.RateLimitResetAt != nil && now.Before(*s.RateLimitResetAt)
+}
+
+func labelOpenAIAccountHealthAt(s OpenAIProbeHealthSnapshot, now time.Time) (label, color string, clickable bool, reason string) {
 	if s.RescueTerminated {
 		return OpenAIHealthLabelPaused, OpenAIHealthColorGray, false, "rescue_terminated"
 	}
 	if s.ManualPaused {
 		return OpenAIHealthLabelPaused, OpenAIHealthColorGray, false, "manual_paused"
 	}
-	if s.RateLimitedAt != nil && !s.RateLimitedAt.IsZero() {
+	if s.rateLimitedAt(now) {
 		// 限流中：额度耗尽打票救不了，不进打票线（用户裁定）。
 		return OpenAIHealthLabelRateLimited, OpenAIHealthColorGray, false, "rate_limited"
 	}
@@ -446,7 +456,7 @@ func (r *OpenAIDowngradeProbeRunner) IsStopped() bool {
 }
 
 // ListOpenAIAccountHealth 批量健康快照（列表页一次查齐，避免 N+1）。
-// 数据源：probe_states + controls(manual_paused) + accounts(rate_limited_at,
+// 数据源：probe_states + controls(manual_paused) + accounts(rate_limit_reset_at,
 // extra.qualification) + 最近一针 probe_results（含 turn_state_len）。
 // 响应信封附全局 plugin_bridge 区块（救治区标签数据源；桥源未注入/无启用
 // 插件/桥读失败时缺席，账号列表不受影响）。
@@ -482,10 +492,13 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 	out := make([]OpenAIAccountHealth, 0, len(snapshots))
 	for i := range snapshots {
 		s := snapshots[i]
-		label, color, clickable, reason := LabelOpenAIAccountHealth(s)
+		label, color, clickable, reason := labelOpenAIAccountHealthAt(s, now)
 		var rescue *OpenAIAccountRescueHealth
-		// Keep rescue progress visible. Manual pause still blocks automatic
-		// qualification; the badge action explicitly asks an administrator to lift it.
+		// 救治区标签覆盖（r17bb 修正）：rate_limited 是额度事实，仍优先于
+		// 救治标签；manual_paused 不再遮蔽——r17ba 后入区即关调度，区里
+		// 暂停是「防调用保险丝」而非独立状态，遮住救治中/已复活会让操作员
+		// 看不到救治进度（1217 试点：满血号停在灰 paused 上不可点）。暂停
+		// 以 reason 后缀注记 + ManualPaused 字段双通道保留。
 		if s.RescueMarker != nil && !s.RescueTerminated && label != OpenAIHealthLabelRateLimited {
 			var bridgeAccount *OpenAIPluginBridgeAccount
 			if prober != nil {
@@ -511,7 +524,7 @@ func (r *OpenAIDowngradeProbeRunner) ListOpenAIAccountHealth(ctx context.Context
 			ProbeMode:     s.ProbeMode,
 			Schedulable:   s.Schedulable,
 			ManualPaused:  s.ManualPaused,
-			RateLimited:   s.RateLimitedAt != nil && !s.RateLimitedAt.IsZero(),
+			RateLimited:   s.rateLimitedAt(now),
 			Qualification: s.Qualification,
 			Label:         label,
 			LabelColor:    color,

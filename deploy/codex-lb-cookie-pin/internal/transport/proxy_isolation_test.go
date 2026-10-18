@@ -185,7 +185,7 @@ func TestProxyClientHTTP2RouteIsolation(t *testing.T) {
 			}
 			check := func(proxy, want string) {
 				t.Helper()
-				client, err := srv.clientFor(proxy)
+				client, err := srv.clientFor(proxy, 42, 4)
 				if err != nil {
 					t.Error(err)
 					return
@@ -240,7 +240,7 @@ func TestProxyClientHTTP2RouteIsolation(t *testing.T) {
 				}(i)
 			}
 			requests.Wait()
-			srv.proxyClients[a].CloseIdleConnections()
+			srv.proxyClients[transportKey{proxyURL: a, accountID: 42, concurrency: 4}].CloseIdleConnections()
 			check(b, "B")
 			check(a, "A")
 			if tc.h2 && (aConnections.Load() != 2 || bConnections.Load() != 1) {

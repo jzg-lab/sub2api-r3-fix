@@ -251,7 +251,7 @@ func (r OpenAIDowngradeProbeResult) IsQualificationPass() bool {
 // （rt1000-2000 带 52/296 答错；1187 rt4142 答错为全库唯一高 rt 孤例），而
 // 降智执法的形态学是低 rt（131:11）+ 356 票——执法削推理预算，不污染推理
 // 质量。嫌疑针不单针杀：清连胜 + 快复检（分钟级），两连错才熔断；铁证形态
-// （356 票/低 rt/截断指纹答对）的单针杀纪律不变（见 Apply 分层）。
+// （356 票/非满血答错）的单针杀纪律不变（见 Apply 分层）。
 func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
 	return r.TransportOK &&
 		!r.AnswerInconclusive &&
@@ -260,6 +260,15 @@ func (r OpenAIDowngradeProbeResult) IsSuspectMiss() bool {
 		!isOpenAIDowngradeTurnStateLenDegraded(r.TurnStateLen) &&
 		r.ReasoningTokens != nil &&
 		*r.ReasoningTokens >= OpenAIDowngradeRecoveryReasoningMinimum
+}
+
+func (r OpenAIDowngradeProbeResult) evidenceClass() string {
+	switch {
+	case r.IsSuspectMiss():
+		return "suspect_miss"
+	default:
+		return "hard"
+	}
 }
 
 func (r OpenAIDowngradeProbeResult) IsRecovered() bool {
@@ -1240,7 +1249,9 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 			return err
 		}
 		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
-			OpenAIDowngradeEventReplaceRequired, map[string]any{"reason": "qualification_failed"}); err != nil {
+			OpenAIDowngradeEventReplaceRequired, map[string]any{
+				"reason": "qualification_failed", "evidence_class": result.evidenceClass(),
+			}); err != nil {
 			return err
 		}
 		return r.store.SaveOpenAIDowngradeState(ctx, state)
@@ -1258,7 +1269,9 @@ func (r *OpenAIDowngradeProbeRunner) processState(
 			return err
 		}
 		if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
-			OpenAIDowngradeEventCircuitOpen, map[string]any{"reason": "downgrade_probe"}); err != nil {
+			OpenAIDowngradeEventCircuitOpen, map[string]any{
+				"reason": "downgrade_probe", "evidence_class": result.evidenceClass(),
+			}); err != nil {
 			return err
 		}
 		// Keep the account fully isolated for the cooling period. The next
@@ -1394,7 +1407,7 @@ func (r *OpenAIDowngradeProbeRunner) startSolFallback(
 	state.LastProbeAt = &now
 	state.UpdatedAt = now
 	if result.IsDegraded() {
-		return r.finishReplacement(ctx, state, now)
+		return r.finishReplacement(ctx, state, result, now)
 	}
 	if !result.IsRecovered() {
 		state.NextProbeAt = now.Add(r.spread(openAIDowngradeProbeProxyMinInterval))
@@ -1473,7 +1486,7 @@ func (r *OpenAIDowngradeProbeRunner) processSolFallback(
 		} else if result.IsDegraded() {
 			// A sol failure means the account is not safe for either model
 			// track. Do not keep serving while waiting for another probe.
-			return r.finishReplacement(ctx, state, now)
+			return r.finishReplacement(ctx, state, result, now)
 		}
 	}
 	// Due selection uses NextProbeAt, not AstraNextProbeAt. Advance both tracks
@@ -1518,6 +1531,7 @@ func (r *OpenAIDowngradeProbeRunner) finishRescue(
 func (r *OpenAIDowngradeProbeRunner) finishReplacement(
 	ctx context.Context,
 	state *OpenAIDowngradeProbeState,
+	result OpenAIDowngradeProbeResult,
 	now time.Time,
 ) error {
 	if err := r.setSolFallbackMode(ctx, state.AccountID, false); err != nil {
@@ -1532,7 +1546,9 @@ func (r *OpenAIDowngradeProbeRunner) finishReplacement(
 		return err
 	}
 	if err := r.store.AppendOpenAIDowngradeEvent(ctx, state.AccountID, state.CurrentProxyID,
-		OpenAIDowngradeEventReplaceRequired, map[string]any{"swap_count_7d": state.SwapCount7d}); err != nil {
+		OpenAIDowngradeEventReplaceRequired, map[string]any{
+			"swap_count_7d": state.SwapCount7d, "evidence_class": result.evidenceClass(),
+		}); err != nil {
 		return err
 	}
 	// 判死即终态（r17x 选项A）：静默字段仅作展示层「何时死透」参考，

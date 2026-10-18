@@ -588,6 +588,68 @@ func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDoesNotDecodeBeforeError(
 	require.Equal(t, "summary_text", gjson.GetBytes(upstream.bodies[1], "input.0.summary.0.type").String())
 }
 
+func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureRecovery(t *testing.T) {
+	const signatureMessage = "The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed."
+	const history = `[{"type":"reasoning","encrypted_content":"stale","summary":[{"type":"summary_text","text":"keep"}]},{"type":"message","role":"user","content":"hello"},{"type":"function_call_output","call_id":"call_1","output":"result"}]`
+	for _, tc := range []struct {
+		name, code, message, input string
+		status, attempts           int
+		repeatedError              bool
+	}{
+		{"recognized", "thinking_signature_invalid", signatureMessage, history, 400, 2, false},
+		{"bounded once", "thinking_signature_invalid", signatureMessage, history, 400, 2, true},
+		{"unrelated signature", "thinking_signature_invalid", "Invalid signature", history, 400, 1, false},
+		{"wrong code", "invalid_request_error", signatureMessage, history, 400, 1, false},
+		{"wrong status", "thinking_signature_invalid", signatureMessage, history, 403, 1, false},
+		{"protection unavailable", "server_error", "response protection is unavailable", history, 400, 1, false},
+		{"no encrypted history", "thinking_signature_invalid", signatureMessage, `[{"type":"message","role":"user","content":"hello"}]`, 400, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errorBody, err := json.Marshal(map[string]any{"error": map[string]any{"code": tc.code, "message": tc.message}})
+			require.NoError(t, err)
+			response := func(status int, body string) *http.Response {
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
+			}
+			second := response(http.StatusOK, `{"id":"resp_fixture","usage":{"input_tokens":1,"output_tokens":2}}`)
+			if tc.repeatedError {
+				second = response(tc.status, string(errorBody))
+			}
+			upstream := &httpUpstreamRecorder{responses: []*http.Response{response(tc.status, string(errorBody)), second}}
+			cfg := &config.Config{}
+			cfg.Security.URLAllowlist.Enabled = false
+			svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+			account := &Account{
+				ID: 10, Name: "apikey-fixture", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
+				Credentials: map[string]any{"api_key": t.Name(), "base_url": "https://example.com"},
+				Extra:       map[string]any{"use_responses_api": true},
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+			body := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"xhigh"},"stream":false,"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":` + tc.input + `}`)
+			result, err := svc.Forward(context.Background(), c, account, body)
+			if tc.attempts == 2 && !tc.repeatedError {
+				require.NoError(t, err)
+				require.NotNil(t, result)
+			} else {
+				require.Error(t, err)
+			}
+			require.Len(t, upstream.bodies, tc.attempts)
+			if tc.attempts == 2 {
+				got := upstream.bodies[1]
+				require.False(t, gjson.GetBytes(got, "input.0.encrypted_content").Exists())
+				require.Equal(t, "keep", gjson.GetBytes(got, "input.0.summary.0.text").String())
+				require.Equal(t, "hello", gjson.GetBytes(got, "input.1.content").String())
+				require.Equal(t, "result", gjson.GetBytes(got, "input.2.output").String())
+				require.Equal(t, "lookup", gjson.GetBytes(got, "tools.0.name").String())
+				require.Equal(t, "gpt-6-astra", gjson.GetBytes(got, "model").String())
+				require.Equal(t, "xhigh", gjson.GetBytes(got, "reasoning.effort").String())
+				require.Equal(t, upstream.requests[0].URL.String(), upstream.requests[1].URL.String())
+			}
+		})
+	}
+}
+
 func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDropsCompaction(t *testing.T) {
 	upstream := &httpUpstreamRecorder{
 		responses: []*http.Response{

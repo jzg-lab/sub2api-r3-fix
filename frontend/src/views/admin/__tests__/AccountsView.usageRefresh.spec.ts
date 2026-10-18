@@ -1,21 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import AccountsView from '../AccountsView.vue'
-import AccountRecentStatsCell from '@/components/account/AccountRecentStatsCell.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
-import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import type { Account, AccountUsageInfo } from '@/types'
 
-const { getUsage, getBatchUsage, list, getBatchTodayStats } = vi.hoisted(() => ({
-  getUsage: vi.fn(), getBatchUsage: vi.fn(), list: vi.fn(), getBatchTodayStats: vi.fn()
+const { getUsage, getBatchUsage, list, listHealth } = vi.hoisted(() => ({
+  getUsage: vi.fn(), getBatchUsage: vi.fn(), list: vi.fn(), listHealth: vi.fn()
 }))
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       list, listWithEtag: async () => ({ notModified: true }),
+      listOpenAIAccountHealth: listHealth,
       getUsage, getBatchUsage,
-      listOpenAIAccountHealth: async () => ({ accounts: [] }),
-      getBatchTodayStats,
+      getBatchTodayStats: async () => ({ stats: {} }),
       getUpstreamBillingProbeSettings: async () => ({ enabled: false })
     },
     proxies: { getAll: async () => [] },
@@ -71,7 +69,7 @@ function mountView(platform = 'anthropic') {
         TablePageLayout: { template: '<div><slot name="table" /></div>' },
         DataTable: {
           props: ['data'],
-          template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-recent_stats" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-usage" :row="row" /></div></div>'
+          template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-usage" :row="row" /><slot name="cell-health" :row="row" /></div></div>'
         },
         UsageProgressBar: {
           props: ['utilization'], template: '<span data-test="quota">{{ utilization }}</span>'
@@ -93,19 +91,6 @@ function request(options?: { force?: boolean; source?: 'active' }) {
 }
 
 describe('AccountsView usage refresh ownership', () => {
-  it('updates rate-limit status along with an active quota refresh', async () => {
-    const exhausted = { ...usage(100), quota_rate_limit_reset_at: '2099-10-04T00:00:00Z' }
-    getBatchUsage.mockResolvedValueOnce({ usage: { [current.id]: exhausted }, errors: {} })
-    getUsage.mockResolvedValueOnce({ ...usage(0), quota_rate_limit_reset_at: null })
-    mountView('openai')
-    await settle()
-    expect(wrapper.getComponent(AccountStatusIndicator).text()).toContain('admin.accounts.status.rateLimited')
-    await wrapper.getComponent(AccountUsageCell).get('button').trigger('click')
-    await settle()
-    expect(wrapper.getComponent(AccountStatusIndicator).text()).toContain('admin.accounts.status.active')
-    expect(wrapper.getComponent(AccountStatusIndicator).text()).not.toContain('admin.accounts.status.rateLimited')
-  })
-
   beforeEach(() => {
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)
@@ -114,7 +99,7 @@ describe('AccountsView usage refresh ownership', () => {
     getUsage.mockReset().mockResolvedValue(usage(73))
     getBatchUsage.mockReset().mockResolvedValue(batch(12))
     list.mockReset()
- getBatchTodayStats.mockReset().mockResolvedValue({stats:{}})
+    listHealth.mockReset().mockResolvedValue({ accounts: [] })
     desktop = true
     viewportListeners.clear()
     Object.defineProperty(window, 'matchMedia', {
@@ -133,28 +118,21 @@ describe('AccountsView usage refresh ownership', () => {
     vi.unstubAllGlobals()
   })
 
-  it('shows recent account metrics from the existing batch request', async () => {
-    getBatchTodayStats.mockResolvedValue({ stats: {}, recent_stats: { [current.id]: {
-      attempts: 20, successes: 19, failures: 1, success_rate: 0.95, cache_hit_rate: 0.6, ttft_avg_ms: 1500
-    } } })
-    mountView()
+  it('refreshes an expired health badge even when the account list returns 304', async () => {
+    localStorage.setItem('account-hidden-columns', '[]')
+    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 30 }))
+    const health = { account_id: current.id, label: 'rate_limited', label_color: 'gray',
+      rate_limited: true, state: 'on_duty', schedulable: true, clickable: false }
+    listHealth.mockResolvedValue({ accounts: [health] })
+    mountView('openai')
     await settle()
-    expect(getBatchTodayStats).toHaveBeenCalledTimes(1)
-    const cell = wrapper.getComponent(AccountRecentStatsCell)
-    expect(cell.text()).toContain('95.00%')
-    expect(cell.text()).toContain('60.00%')
-    expect(cell.text()).toContain('1.50 s')
-  })
-
-  it('does not display stale metrics when the statistics store is unavailable', async () => {
-    getBatchTodayStats.mockResolvedValue({ stats: {}, recent_stats_unavailable: true, recent_stats: { [current.id]: {
-      attempts: 20, successes: 20, success_rate: 1
-    } } })
-    mountView()
-    await settle()
-    const cell = wrapper.getComponent(AccountRecentStatsCell)
-    expect(cell.text()).toContain('admin.accounts.recentStats.unavailable')
-    expect(cell.text()).not.toContain('100.00%')
+    expect(wrapper.text()).toContain('admin.accounts.health.labels.rate_limited')
+    listHealth.mockResolvedValue({ accounts: [{ ...health, label: 'normal', label_color: 'green', rate_limited: false }] })
+    await vi.advanceTimersByTimeAsync(32_000)
+    await flushPromises()
+    expect(listHealth.mock.calls.length).toBeGreaterThan(1)
+    expect(wrapper.text()).toContain('admin.accounts.health.labels.normal')
+    expect(wrapper.text()).not.toContain('admin.accounts.health.labels.rate_limited')
   })
 
   it('uses the single-account active API for the Anthropic button and updates the parent cache', async () => {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -106,12 +107,17 @@ func (s *ClaudeCodeVersionSyncService) runOnce() {
 	if !s.autoSyncEnabled(ctx) {
 		return
 	}
+	currentValue, err := s.currentSyncedVersion(ctx)
+	if err != nil {
+		slog.Warn("claude_code_version_sync_setting_read_failed", "setting", SettingKeyClaudeCodeClientVersionSynced)
+		return
+	}
 	latest := s.fetchLatestStableVersion(ctx)
 	if latest == "" {
 		return
 	}
 
-	current := NormalizeClaudeCodeClientVersion(s.currentSyncedVersion(ctx))
+	current := NormalizeClaudeCodeClientVersion(currentValue)
 	if current != "" && CompareVersions(latest, current) <= 0 {
 		return
 	}
@@ -147,18 +153,25 @@ func (s *ClaudeCodeVersionSyncService) fetchLatestStableVersion(ctx context.Cont
 
 func (s *ClaudeCodeVersionSyncService) autoSyncEnabled(ctx context.Context) bool {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyClaudeCodeVersionAutoSyncEnabled)
-	if err != nil || strings.TrimSpace(value) == "" {
+	if errors.Is(err, ErrSettingNotFound) {
+		return true
+	}
+	if err != nil {
+		slog.Warn("claude_code_version_sync_setting_read_failed", "setting", SettingKeyClaudeCodeVersionAutoSyncEnabled)
+		return false
+	}
+	if strings.TrimSpace(value) == "" {
 		return true
 	}
 	return strings.TrimSpace(value) == "true"
 }
 
-func (s *ClaudeCodeVersionSyncService) currentSyncedVersion(ctx context.Context) string {
+func (s *ClaudeCodeVersionSyncService) currentSyncedVersion(ctx context.Context) (string, error) {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyClaudeCodeClientVersionSynced)
-	if err != nil {
-		return ""
+	if errors.Is(err, ErrSettingNotFound) {
+		return "", nil
 	}
-	return value
+	return value, err
 }
 
 func latestClaudeCodeStableReleaseVersion(releases []*GitHubRelease) string {

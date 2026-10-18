@@ -146,11 +146,13 @@ func NewSOCKS5ProxyDialer(profile *Profile, proxyURL *url.URL) *SOCKS5ProxyDiale
 // DialTLSContext establishes a TLS connection through SOCKS5 proxy with the configured fingerprint.
 // Flow: SOCKS5 CONNECT to target -> TLS handshake with utls on the tunnel
 func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	conn, err := d.dialTunnel(ctx, network, addr)
-	if err != nil {
-		return nil, err
-	}
-	return performTLSHandshake(ctx, conn, d.profile, addr)
+	return connectBeforeRequest(ctx, func() (net.Conn, error) {
+		conn, err := d.dialTunnel(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return performTLSHandshake(ctx, conn, d.profile, addr)
+	})
 }
 
 func (d *SOCKS5ProxyDialer) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -198,11 +200,13 @@ func (d *SOCKS5ProxyDialer) dialTunnel(ctx context.Context, network, addr string
 // DialTLSContext establishes a TLS connection through HTTP proxy with the configured fingerprint.
 // Flow: TCP connect to proxy -> CONNECT tunnel -> TLS handshake with utls
 func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	conn, err := d.dialTunnel(ctx, network, addr)
-	if err != nil {
-		return nil, err
-	}
-	return performTLSHandshake(ctx, conn, d.profile, addr)
+	return connectBeforeRequest(ctx, func() (net.Conn, error) {
+		conn, err := d.dialTunnel(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return performTLSHandshake(ctx, conn, d.profile, addr)
+	})
 }
 
 func (d *HTTPProxyDialer) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {

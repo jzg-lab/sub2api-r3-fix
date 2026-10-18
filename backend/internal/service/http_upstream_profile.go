@@ -9,7 +9,10 @@ type HTTPUpstreamProfile string
 const (
 	HTTPUpstreamProfileDefault HTTPUpstreamProfile = ""
 	HTTPUpstreamProfileOpenAI  HTTPUpstreamProfile = "openai"
-	HTTPUpstreamProfileGrok    HTTPUpstreamProfile = "grok"
+	// Plugin business and probe traffic share host TLS settings, but never a
+	// connection pool belonging to another account on the same proxy.
+	HTTPUpstreamProfileOpenAIPlugin HTTPUpstreamProfile = "openai_plugin"
+	HTTPUpstreamProfileGrok         HTTPUpstreamProfile = "grok"
 )
 
 type httpUpstreamProfileContextKey struct{}
@@ -36,7 +39,7 @@ func HTTPUpstreamProfileFromContext(ctx context.Context) HTTPUpstreamProfile {
 		return HTTPUpstreamProfileDefault
 	}
 	switch profile {
-	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileGrok:
+	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileOpenAIPlugin, HTTPUpstreamProfileGrok:
 		return profile
 	default:
 		return HTTPUpstreamProfileDefault

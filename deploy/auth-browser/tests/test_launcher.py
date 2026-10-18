@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import shutil
 import tempfile
 import time
 import unittest
@@ -26,6 +27,23 @@ def auth_url_for(character):
 
 
 class ProxyAddressTests(unittest.TestCase):
+    def test_runtime_preflight_uses_explicit_node_without_login_or_network(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node is not installed")
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+               "SUB2API_AUTH_BROWSER_NODE": node,
+               "SUB2API_AUTH_BROWSER_CHROME": "/usr/bin/true"}
+        result = subprocess.run(["/bin/bash", str(SOURCE / "launch.sh"), "--check-runtime"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+        env["SUB2API_AUTH_BROWSER_NODE"] = "/nonexistent/sub2api-node"
+        result = subprocess.run(["/bin/bash", str(SOURCE / "launch.sh"), "--check-runtime"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_supported_addresses(self):
         cases = {
             "192.0.2.10:8080": "http://192.0.2.10:8080",

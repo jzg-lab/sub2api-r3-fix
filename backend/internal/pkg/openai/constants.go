@@ -70,9 +70,9 @@ const CodexUsageProbeModel = "codex-auto-review"
 //go:embed instructions.txt
 var DefaultInstructions string
 
-// instructionsGPT51 / instructionsGPT52 / instructionsGPT55 / instructionsGPT6Astra
-// 为对应非 codex 模型的真实 Codex 编码 agent base prompt，用于模型感知的 instructions 选择。
-// GPT-5.5 同时作为 GPT-5 系列的 fallback（覆盖 5.3 / 5.4 等未单独维护 prompt 的版本）。
+// instructionsGPT51 / instructionsGPT52 / instructionsGPT55 为 gpt-5.1 / gpt-5.2 / gpt-5.5
+// 非 codex 模型对应的真实 Codex 编码 agent base prompt，用于模型感知的 instructions 选择。
+// GPT-5.5 同时作为最新版本的 fallback（覆盖 5.3 / 5.4 等未单独维护 prompt 的版本）。
 //
 //go:embed instructions_gpt5_1.txt
 var instructionsGPT51 string
@@ -83,7 +83,7 @@ var instructionsGPT52 string
 //go:embed instructions_gpt5_5.txt
 var instructionsGPT55 string
 
-// Source: openai/codex codex-rs/models-manager/models.json at 121f91fd5d9d.
+// Source: Wei-Shaw/sub2api 3a6fd1c9db07, originally openai/codex 121f91fd5d9d.
 //
 //go:embed instructions_gpt6_astra.txt
 var instructionsGPT6Astra string

@@ -1,0 +1,48 @@
+{
+  "version": "0.162.1",
+  "captured_at": "2026-10-14T20:52:04.225Z",
+  "platform": "aarch64-apple-darwin",
+  "binary_sha256": "74c6a6d263f40d65f99c27a815275f5b4ed0bcc2baecc396b4cf3255498bdfc0",
+  "method": "Native codex exec against isolated loopback TLS and HTTP listeners, no upstream authorization",
+  "tls": {
+    "cipher_suites": [255, 49196, 49195, 49188, 49187, 49162, 49161, 49160, 49200, 49199, 49192, 49191, 49172, 49171, 49170, 157, 156, 61, 60, 53, 47, 10],
+    "curves": [23, 24, 25],
+    "point_formats": [0],
+    "signature_algorithms": [1025, 513, 1281, 1537, 1027, 515, 1283, 1539],
+    "alpn_protocols": [],
+    "supported_versions": [],
+    "key_share_groups": [],
+    "psk_modes": [],
+    "extensions": [0, 10, 11, 13, 5, 18, 23],
+    "enable_grease": false,
+    "shuffle_extensions": false,
+    "ja3_md5": "e4d448cdfe06dc1243c1eb026c74ac9a"
+  },
+  "http": {
+    "user_agent": "codex_exec/0.162.1 (Mac OS 26.3.1; arm64) dumb (codex_exec; 0.162.1)",
+    "originator": "codex_exec",
+    "version_header": false,
+    "beta_features": "remote_compaction_v2",
+    "reasoning_context": "all_turns",
+    "first_input_type": "additional_tools"
+  },
+  "source_verified": {
+    "repository": "openai/codex",
+    "tag": "rust-v0.162.1",
+    "request_compression": {
+      "feature": "enable_request_compression",
+      "default_enabled": true,
+      "scope": "ChatGPT authentication and native OpenAI provider only",
+      "encoding": "zstd",
+      "level": 3,
+      "files": ["codex-rs/features/src/lib.rs", "codex-rs/core/src/client.rs", "codex-rs/http-client/src/request.rs", "codex-rs/core/tests/suite/request_compression.rs"]
+    },
+    "telemetry_sdk": {
+      "name": "opentelemetry",
+      "version": "0.31.0",
+      "file": "codex-rs/Cargo.lock",
+      "native_emission_observed": false
+    }
+  },
+  "compatibility": "TLS parameters match the prior 0.151.0 capture; labels and outbound identity must be adopted together. Source-verified ChatGPT request compression is distinct from the isolated API-key HTTP capture."
+}

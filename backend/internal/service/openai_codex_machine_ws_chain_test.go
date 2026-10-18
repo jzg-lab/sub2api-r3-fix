@@ -136,9 +136,11 @@ func TestCodexMachineChain_WSv2_RootWindow_I1_I4_I5(t *testing.T) {
 	assert.Equal(t, p, gjson.Get(headTM, "thread_id").String())
 	assert.Equal(t, p+":0", gjson.Get(headTM, "window_id").String())
 	assert.Equal(t, "turn-real", gjson.Get(headTM, "turn_id").String())
-	// sandbox 与实际握手 UA 的 OS 段一致（无账号级 UA ⇒ 规范 UA Mac OS ⇒ seatbelt）
-	assert.Equal(t, codexMachineSandboxTagFromUA(handshake.Get("User-Agent")), gjson.Get(headTM, "sandbox").String())
-	assert.Equal(t, "seatbelt", gjson.Get(headTM, "sandbox").String())
+	// Transport metadata cannot export the client's local environment.
+	for _, field := range []string{"sandbox", "sandbox_mode", "thread_source", "timezone", "workspaces"} {
+		assert.False(t, gjson.Get(headTM, field).Exists())
+		assert.False(t, gjson.Get(bodyTM, field).Exists())
+	}
 }
 
 // I1（子 Agent，WS）：只换 thread；parent' == 根窗口 thread'；x-openai-subagent 透传到握手头。

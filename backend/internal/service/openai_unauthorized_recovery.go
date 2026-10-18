@@ -232,7 +232,16 @@ func (e *openAIUnauthorizedExecutor) CanRefresh(current *Account) bool {
 func (e *openAIUnauthorizedExecutor) NeedsRefresh(current *Account, _ time.Duration) bool {
 	// Another request may already have rotated the rejected credential while
 	// this request waited for the shared local/distributed refresh lock.
-	return current.GetOpenAIAccessToken() == e.rejected
+	// A 401 alone is not evidence that a still-valid grant must be rotated.
+	return current.GetOpenAIAccessToken() == e.rejected && openAIAccessTokenExpired(current, time.Now())
+}
+
+func openAIAccessTokenExpired(account *Account, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	expiresAt := account.GetCredentialAsTime("expires_at")
+	return expiresAt != nil && !expiresAt.After(now)
 }
 
 func (e *openAIUnauthorizedExecutor) waitForWinner(ctx context.Context, repo AccountRepository) (*OAuthRefreshResult, error) {

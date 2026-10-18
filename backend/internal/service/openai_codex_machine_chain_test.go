@@ -28,7 +28,7 @@ func machineChainTurnMetadata(sessionID, threadID, windowID, parentThreadID stri
 	if parentThreadID != "" {
 		parent = `,"parent_thread_id":"` + parentThreadID + `"`
 	}
-	return `{"installation_id":"real-install","session_id":"` + sessionID + `","thread_id":"` + threadID + `","turn_id":"turn-real","window_id":"` + windowID + `","sandbox":"seccomp","sandbox_mode":"workspace-write","thread_source":"cli"` + parent + `}`
+	return `{"installation_id":"real-install","session_id":"` + sessionID + `","thread_id":"` + threadID + `","turn_id":"turn-real","window_id":"` + windowID + `","sandbox":"seccomp","sandbox_mode":"workspace-write","thread_source":"cli","timezone":"Asia/Shanghai","workspaces":["/customer/private"]` + parent + `}`
 }
 
 // machineChainRequest 构造一次真实 Codex 窗口形态的下游请求（头 + body 同源）。
@@ -167,11 +167,10 @@ func assertMachineChainRootWindow(t *testing.T, account *Account, req *http.Requ
 	assert.Equal(t, "turn-real", cm.Get("turn_id").String())
 	assert.Equal(t, "turn-real", gjson.Get(headTM, "turn_id").String())
 	assert.Equal(t, "turn-real", gjson.Get(embTM, "turn_id").String())
-	assert.Equal(t, "workspace-write", gjson.Get(headTM, "sandbox_mode").String())
-	assert.Equal(t, "cli", gjson.Get(embTM, "thread_source").String())
-	// sandbox 与实际出站 UA 的 OS 段一致
-	assert.Equal(t, wantSandbox, gjson.Get(headTM, "sandbox").String())
-	assert.Equal(t, wantSandbox, gjson.Get(embTM, "sandbox").String())
+	for _, field := range []string{"sandbox", "sandbox_mode", "thread_source", "timezone", "workspaces"} {
+		assert.False(t, gjson.Get(headTM, field).Exists(), "client environment must not reach upstream headers")
+		assert.False(t, gjson.Get(embTM, field).Exists(), "client environment must not reach upstream body")
+	}
 	assert.Equal(t, wantSandbox, codexMachineSandboxTagFromUA(req.Header.Get("User-Agent")), "sandbox 标签必须与出站 UA 同源")
 	return p
 }

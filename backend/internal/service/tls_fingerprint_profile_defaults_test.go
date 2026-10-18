@@ -80,7 +80,7 @@ func TestTLSProfileDefaultResolutionBoundaries(t *testing.T) {
 	}{
 		{"unbound OAuth", PlatformOpenAI, AccountTypeOAuth, true, 0, "operational-default"},
 		{"explicit", PlatformOpenAI, AccountTypeOAuth, true, 12, "explicit"},
-		{"deleted explicit", PlatformOpenAI, AccountTypeOAuth, true, 99, "Built-in Default (Node.js 24.x)"},
+		{"deleted explicit", PlatformOpenAI, AccountTypeOAuth, true, 99, verifiedCodexTLSProfile().Name},
 		{"Anthropic", PlatformAnthropic, AccountTypeOAuth, true, 0, "Built-in Default (Node.js 24.x)"},
 		{"API key", PlatformOpenAI, AccountTypeAPIKey, true, 0, ""},
 		{"disabled", PlatformOpenAI, AccountTypeOAuth, false, 0, ""},
@@ -125,7 +125,7 @@ func TestTLSProfileDefaultsReloadAndFailures(t *testing.T) {
 	require.Equal(t, "second", svc.ResolveTLSProfile(account).Name)
 	settings.err = errors.New("storage unavailable")
 	require.Error(t, svc.refreshLocalCache(t.Context()))
-	require.Equal(t, "Built-in Default (Node.js 24.x)", svc.ResolveTLSProfile(account).Name)
+	require.Equal(t, verifiedCodexTLSProfile().Name, svc.ResolveTLSProfile(account).Name)
 	require.Error(t, svc.SetDefaults(t.Context(), TLSProfileDefaults{OpenAIOAuthDefaultTLSProfileID: 11}))
 	settings.err = nil
 	for _, raw := range []string{"-1", "not-an-id", "9223372036854775808"} {

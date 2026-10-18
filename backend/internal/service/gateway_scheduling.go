@@ -878,8 +878,15 @@ func (s *GatewayService) resolveGroupByID(ctx context.Context, groupID int64) (*
 	return group, nil
 }
 
-func (s *GatewayService) ResolveGroupByID(ctx context.Context, groupID int64) (*Group, error) {
-	return s.resolveGroupByID(ctx, groupID)
+func (s *GatewayService) ResolveFallbackGroupByID(ctx context.Context, groupID int64) (*Group, error) {
+	group, err := s.resolveGroupByID(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if !CanUseGatewayFallbackGroup(ctx, group) {
+		return nil, ErrGroupNotAllowed
+	}
+	return group, nil
 }
 
 // modelRoutingAppliesToPlatform 判定模型路由规则是否适用于本次请求。
@@ -952,6 +959,9 @@ func (s *GatewayService) resolveGatewayGroup(ctx context.Context, groupID *int64
 		group, err := s.resolveGroupByID(ctx, currentID)
 		if err != nil {
 			return nil, nil, err
+		}
+		if currentID != *groupID && !CanUseGatewayFallbackGroup(ctx, group) {
+			return nil, nil, ErrGroupNotAllowed
 		}
 
 		if !group.ClaudeCodeOnly || IsClaudeCodeClient(ctx) {

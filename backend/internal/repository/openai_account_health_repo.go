@@ -30,6 +30,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 			a.schedulable,
 			COALESCE(c.manual_paused, FALSE),
 			a.rate_limited_at,
+			a.rate_limit_reset_at,
 			COALESCE(a.extra->>'openai_downgrade_qualification', '') = 'true',
 			a.extra->'openai_rescue_lane',
 			a.extra->>'openai_rescue_rescued_at',
@@ -80,7 +81,7 @@ func (r *openAIDowngradeProbeRepository) ListOpenAIProbeHealthSnapshots(
 		var lpStatus *int
 		if err := rows.Scan(
 			&snap.AccountID, &snap.State, &snap.ProbeMode, &snap.Schedulable,
-			&snap.ManualPaused, &rateLimitedAt, &snap.Qualification, &rescueMarkerJSON,
+			&snap.ManualPaused, &rateLimitedAt, &snap.RateLimitResetAt, &snap.Qualification, &rescueMarkerJSON,
 			&rescuedAtRaw, &rescueCountRaw,
 			&lpID, &lpAt, &lpMode, &lpRT, &lpTransportOK, &lpCorrect, &lpLen, &lpStatus,
 			&snap.RescueTerminated,

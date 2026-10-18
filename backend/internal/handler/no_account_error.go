@@ -136,6 +136,7 @@ func classifyNoAccountError(
 			ModelNotFound: true,
 		}
 	}
+	fallback.Message = "No available accounts in this pool. Check account status and usage limits."
 	return fallback
 }
 

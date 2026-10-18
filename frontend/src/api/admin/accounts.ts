@@ -1124,6 +1124,39 @@ export async function listOpenAIAccountHealth(
   return data
 }
 
+export interface AccountEnvironmentAuditEntry {
+  account_id: number
+  configured_mode: string
+  effective_mode: string
+  seed_present: boolean
+  installation_digest?: string
+  identity_source: string
+  identity_generated_at: string | null
+  account_created_at: string
+  login_ip_recorded: boolean
+  proxy_id: number | null
+}
+
+export interface AccountEnvironmentAuditGroup {
+  kind: string
+  account_ids: number[]
+}
+
+export interface AccountEnvironmentAudit {
+  accounts: AccountEnvironmentAuditEntry[]
+  collisions: AccountEnvironmentAuditGroup[]
+  import_batches: AccountEnvironmentAuditGroup[]
+  generated_at: string
+}
+
+export async function getEnvironmentAudit(signal?: AbortSignal): Promise<AccountEnvironmentAudit> {
+  const { data } = await apiClient.get<AccountEnvironmentAudit>(
+    '/admin/accounts/environment-audit',
+    { signal }
+  )
+  return data
+}
+
 export interface OpenAIProbeNowResult {
   accepted: boolean
   already_flying?: boolean
@@ -1371,6 +1404,7 @@ export const accountsAPI = {
   refreshOpenAIQuota,
   resetOpenAIQuota,
   listOpenAIAccountHealth,
+  getEnvironmentAudit,
   triggerOpenAIProbeNow,
   reenableOpenAIAccount,
   rescueOpenAIAccount,

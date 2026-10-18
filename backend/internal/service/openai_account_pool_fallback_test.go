@@ -153,7 +153,7 @@ func TestOpenAIAccountPoolFallbackTraversesK12TeamPlus(t *testing.T) {
 	)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		context.Background(),
+		publicFallbackTestContext(context.Background(), k12ID),
 		ptrInt64(k12ID),
 		"",
 		"",
@@ -199,7 +199,7 @@ func TestOpenAIAccountPoolFallbackRestartsHopBudgetAfterTransientWait(t *testing
 	)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		context.Background(),
+		publicFallbackTestContext(context.Background(), 1000),
 		ptrInt64(1000),
 		"",
 		"",
@@ -243,7 +243,7 @@ func TestOpenAIAccountPoolFallbackDoesNotHideRepositoryErrors(t *testing.T) {
 	)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		context.Background(),
+		publicFallbackTestContext(context.Background(), k12ID),
 		ptrInt64(k12ID),
 		"",
 		"",
@@ -277,7 +277,7 @@ func TestOpenAIAccountPoolFallbackRejectsCycles(t *testing.T) {
 	svc := newOpenAIAccountPoolFallbackService(groups, nil, nil)
 
 	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
-		context.Background(),
+		publicFallbackTestContext(context.Background(), k12ID),
 		ptrInt64(k12ID),
 		"",
 		"",

@@ -35,6 +35,10 @@ type AntiBypassSettings interface {
 	IsAntiBypassEnabled(ctx context.Context) (bool, error)
 }
 
+type antiBypassPolicySettings interface {
+	GetAntiBypassSettings(context.Context) (bool, antibypass.Config, error)
+}
+
 func NewAntiBypassMiddleware(
 	guard *antibypass.Guard,
 	settings AntiBypassSettings,
@@ -83,7 +87,7 @@ func NewAntiBypassMiddleware(
 		// Install even when disabled so a long-lived WS connection observes
 		// subsequent switch changes. No request body or credential is captured.
 		frameCtx := antibypass.WithFrameInspector(c.Request.Context(), func(ctx context.Context, payload []byte) (antibypass.Detection, error) {
-			enabled, settingErr := switchCache.Enabled(ctx)
+			enabled, policy, settingErr := switchCache.Snapshot(ctx)
 			if settingErr != nil {
 				return antibypass.Detection{Reason: antibypass.ReasonStorageUnavailable}, settingErr
 			}
@@ -101,12 +105,12 @@ func NewAntiBypassMiddleware(
 			}
 			_, detection := antibypass.DetectJailbreakWithLimits(payload, frameLimit, min(textLimit, frameLimit))
 			if detection.Reason == "" && frameSession != nil {
-				return frameSession.Inspect(ctx, payload, true)
+				return frameSession.InspectWithConfig(ctx, payload, true, policy)
 			}
 			return detection, nil
 		})
 		c.Request = c.Request.WithContext(frameCtx)
-		enabled, err := switchCache.Enabled(c.Request.Context())
+		enabled, guardConfig, err := switchCache.Snapshot(c.Request.Context())
 		if err != nil {
 			recordAntiBypassEvent(c, antibypass.Decision{Reason: antibypass.ReasonStorageUnavailable})
 			c.Header("Retry-After", "1")
@@ -181,7 +185,6 @@ func NewAntiBypassMiddleware(
 			}
 		}
 
-		guardConfig := antibypass.DefaultConfig()
 		// HTTP trace IDs may span conversation turns with different bodies.
 		// Keep the header intact, but never use it as a per-operation budget.
 		decision, err := guard.Check(c.Request.Context(), guardConfig, antibypass.Request{
@@ -271,25 +274,34 @@ type antiBypassSwitchCache struct {
 	settings AntiBypassSettings
 	mu       sync.Mutex
 	enabled  bool
+	config   antibypass.Config
 	expires  time.Time
 	loaded   bool
 }
 
-func (cache *antiBypassSwitchCache) Enabled(ctx context.Context) (bool, error) {
+func (cache *antiBypassSwitchCache) Snapshot(ctx context.Context) (bool, antibypass.Config, error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	now := time.Now()
 	if cache.loaded && now.Before(cache.expires) {
-		return cache.enabled, nil
+		return cache.enabled, cache.config, nil
 	}
-	enabled, err := cache.settings.IsAntiBypassEnabled(ctx)
+	var enabled bool
+	config := antibypass.DefaultConfig()
+	var err error
+	if settings, ok := cache.settings.(antiBypassPolicySettings); ok {
+		enabled, config, err = settings.GetAntiBypassSettings(ctx)
+	} else {
+		enabled, err = cache.settings.IsAntiBypassEnabled(ctx)
+	}
 	if err != nil {
-		return false, err
+		return false, antibypass.Config{}, err
 	}
 	cache.enabled = enabled
+	cache.config = config
 	cache.expires = now.Add(5 * time.Second)
 	cache.loaded = true
-	return enabled, nil
+	return enabled, config, nil
 }
 
 func isProtectedGatewayRequest(request *http.Request) bool {

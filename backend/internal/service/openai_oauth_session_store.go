@@ -29,6 +29,7 @@ type OpenAIOAuthSession struct {
 	ReauthorizationRevision         string
 	ReauthorizationAccountRevision  string
 	ReauthorizationExitIP           string
+	ReauthorizationFreshLogin       bool
 	ReauthorizationCredentialsHash  string
 	ReauthorizationBrowserSessionID string
 	LoginExitIP                     string
@@ -88,6 +89,7 @@ func (s *pendingAuthOpenAIOAuthSessionStore) Create(ctx context.Context, session
 				"reauthorization_revision":           session.ReauthorizationRevision,
 				"reauthorization_account_revision":   session.ReauthorizationAccountRevision,
 				"reauthorization_exit_ip":            session.ReauthorizationExitIP,
+				"reauthorization_fresh_login":        session.ReauthorizationFreshLogin,
 				"reauthorization_credentials_hash":   session.ReauthorizationCredentialsHash,
 				"reauthorization_browser_session_id": session.ReauthorizationBrowserSessionID,
 				"login_exit_ip":                      session.LoginExitIP,
@@ -149,6 +151,13 @@ func decodeOpenAIOAuthSession(session *dbent.PendingAuthSession) (*OpenAIOAuthSe
 		ProxyRouteHash: oauthSessionStringValue(raw["proxy_route_hash"]),
 		Platform:       oauthSessionStringValue(raw["platform"]),
 		CreatedAt:      createdAt,
+	}
+	if value, exists := raw["reauthorization_fresh_login"]; exists {
+		fresh, valid := value.(bool)
+		if !valid {
+			return nil, ErrOpenAIOAuthSessionInvalid
+		}
+		result.ReauthorizationFreshLogin = fresh
 	}
 	for key, target := range map[string]*string{
 		"login_exit_ip":                      &result.LoginExitIP,

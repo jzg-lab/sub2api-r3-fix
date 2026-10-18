@@ -178,7 +178,17 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 // RecoverOpenAIError shares the normal refresh lock and credential flow. Only
 // the explicitly enabled recovery worker uses this error-account entry point.
 func (api *OAuthRefreshAPI) RecoverOpenAIError(ctx context.Context, account *Account, executor OAuthRefreshExecutor) (*OAuthRefreshResult, error) {
+	if executor == nil {
+		return nil, errors.New("oauth refresh executor is nil")
+	}
+	executor = openAIErrorRecoveryExecutor{executor}
 	return api.refreshIfNeeded(ctx, account, executor, 0, true)
+}
+
+type openAIErrorRecoveryExecutor struct{ OAuthRefreshExecutor }
+
+func (e openAIErrorRecoveryExecutor) NeedsRefresh(account *Account, _ time.Duration) bool {
+	return openAIAccessTokenExpired(account, time.Now()) && e.OAuthRefreshExecutor.NeedsRefresh(account, 0)
 }
 
 func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Account, executor OAuthRefreshExecutor,
@@ -271,7 +281,7 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 	}
 
 	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
-	if !recovery && !executor.NeedsRefresh(freshAccount, refreshWindow) {
+	if !executor.NeedsRefresh(freshAccount, refreshWindow) {
 		return &OAuthRefreshResult{
 			Account: freshAccount,
 		}, nil

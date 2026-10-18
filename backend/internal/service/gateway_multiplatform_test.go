@@ -3211,7 +3211,8 @@ func TestGatewayService_SelectAccountWithLoadAwareness(t *testing.T) {
 			concurrencyService: nil,
 		}
 
-		result, err := svc.SelectAccountWithLoadAwareness(ctx, &groupID, "", "gemini-2.5-pro", nil, "", int64(0))
+		fallbackCtx := publicFallbackTestContext(ctx, groupID)
+		result, err := svc.SelectAccountWithLoadAwareness(fallbackCtx, &groupID, "", "gemini-2.5-pro", nil, "", int64(0))
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.Account)
@@ -3433,7 +3434,7 @@ func TestGatewayService_GroupContext_OverwritesInvalidContextGroup(t *testing.T)
 }
 
 func TestGatewayService_GroupResolution_FallbackUsesLiteOnce(t *testing.T) {
-	ctx := context.Background()
+	ctx := publicFallbackTestContext(context.Background(), 10)
 	groupID := int64(10)
 	fallbackID := int64(11)
 	group := &Group{
@@ -3480,7 +3481,7 @@ func TestGatewayService_GroupResolution_FallbackUsesLiteOnce(t *testing.T) {
 }
 
 func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
-	ctx := context.Background()
+	ctx := publicFallbackTestContext(context.Background(), 10)
 	groupID := int64(10)
 	fallbackID := int64(11)
 

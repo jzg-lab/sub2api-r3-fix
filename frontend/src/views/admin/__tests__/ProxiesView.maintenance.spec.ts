@@ -2,12 +2,13 @@ import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProxiesView from '../ProxiesView.vue'
 
-const { removeProxy, batchDelete, updateProxy, showError, list } = vi.hoisted(() => ({
+const { removeProxy, batchDelete, updateProxy, showError, list, checkProxyQuality } = vi.hoisted(() => ({
   removeProxy: vi.fn(), batchDelete: vi.fn(), updateProxy: vi.fn(), showError: vi.fn(), list: vi.fn(),
+  checkProxyQuality: vi.fn(),
 }))
 vi.mock('@/api/admin', () => ({
   adminAPI: { proxies: {
-    delete: removeProxy, batchDelete, update: updateProxy, list,
+    delete: removeProxy, batchDelete, update: updateProxy, list, checkProxyQuality,
     getAllWithCount: vi.fn().mockResolvedValue([]),
   } },
 }))
@@ -39,12 +40,18 @@ async function view() {
     select: (id: number) => void
     selectedProxyIds: Set<number>
     editForm: { status: string; expires_at: string }
+    handleQualityCheck: (value: typeof proxy) => Promise<void>
+    runBatchProxyQualityChecks: (ids: number[]) => Promise<{ failed: number }>
+    proxies: Array<typeof proxy & {
+      ip_address?: string; country?: string; city?: string; latency_status?: string
+      quality_status?: string; quality_score?: number; quality_checked?: number
+    }>
   }
 }
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
-  list.mockResolvedValue({ items: [proxy], total: 1, pages: 1 })
+  list.mockResolvedValue({ items: [{ ...proxy }], total: 1, pages: 1 })
 })
 afterEach(() => {
   wrappers.splice(0).forEach(wrapper => wrapper.unmount())
@@ -52,6 +59,37 @@ afterEach(() => {
 })
 
 describe('代理维护与历史关联保护', () => {
+  it.each(['single', 'batch'])('clears a previous measured exit on failed %s quality check', async mode => {
+    checkProxyQuality.mockResolvedValue({
+      items: [{ target: 'base_connectivity', status: 'fail', message: 'exit unknown' }],
+      exit_ip: '', failed_count: 1, challenge_count: 0, warn_count: 0,
+      score: 0, grade: 'F', checked_at: 123, summary: 'exit unknown',
+    })
+    const vm = await view()
+    Object.assign(vm.proxies[0], { ip_address: '192.0.2.1', country: 'old', city: 'old', quality_status: 'healthy' })
+    if (mode === 'single') await vm.handleQualityCheck(proxy)
+    else expect((await vm.runBatchProxyQualityChecks([7])).failed).toBe(1)
+    expect(vm.proxies[0]).toMatchObject({ latency_status: 'failed', quality_status: 'failed' })
+    expect(vm.proxies[0].ip_address).toBeUndefined()
+    expect(vm.proxies[0].country).toBeUndefined()
+    expect(vm.proxies[0].city).toBeUndefined()
+  })
+
+  it.each(['single', 'batch'])('does not display old healthy evidence after an API failure in %s', async mode => {
+    checkProxyQuality.mockRejectedValue(new Error('fixture transport interruption'))
+    const vm = await view()
+    Object.assign(vm.proxies[0], {
+      ip_address: '192.0.2.1', quality_status: 'healthy', quality_score: 100, quality_checked: 100,
+    })
+    if (mode === 'single') await vm.handleQualityCheck(proxy)
+    else expect((await vm.runBatchProxyQualityChecks([7])).failed).toBe(1)
+    expect(vm.proxies[0].latency_status).toBe('failed')
+    expect(vm.proxies[0].ip_address).toBeUndefined()
+    expect(vm.proxies[0].quality_status).toBeUndefined()
+    expect(vm.proxies[0].quality_score).toBeUndefined()
+    expect(vm.proxies[0].quality_checked).toBeUndefined()
+  })
+
   it('历史关联删除冲突显示停用/续期的具体提示', async () => {
     removeProxy.mockRejectedValue({ reason: 'OPENAI_OAUTH_PROXY_BINDING_PROTECTED', message: 'protected' })
     const vm = await view()

@@ -148,11 +148,11 @@ func TestGatewayOpenAICompatibleHandlersClaudeCodeOnlyFallback(t *testing.T) {
 				primaryGroupIDRef := primaryGroupID
 				apiKey := &service.APIKey{
 					ID: 9320, UserID: 9330, GroupID: &primaryGroupIDRef, Group: primary, Status: service.StatusActive,
-					User: &service.User{ID: 9330, Concurrency: 10, Balance: 100},
+					User: &service.User{ID: 9330, Status: service.StatusActive, Concurrency: 10, Balance: 100},
 				}
 				recorder := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(recorder)
-				ctx := context.WithValue(context.Background(), ctxkey.Group, primary)
+				ctx := context.WithValue(service.WithGatewayGroupAccess(context.Background(), apiKey), ctxkey.Group, primary)
 				req := httptest.NewRequest(http.MethodPost, ep.path, bytes.NewBufferString(ep.body)).WithContext(ctx)
 				req.Header.Set("Content-Type", "application/json")
 				c.Request = req

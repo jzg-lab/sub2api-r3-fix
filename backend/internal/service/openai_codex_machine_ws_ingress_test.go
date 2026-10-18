@@ -49,7 +49,7 @@ func machineWSIngressSetClientHeaders(h http.Header, root string) {
 	h.Set("session_id", "underscore-session")
 }
 
-// machineWSIngressAssertHandshake 断言上游握手头：假名化、无下划线头、无真实值、sandbox 与出站 UA 一致。
+// machineWSIngressAssertHandshake checks scoped identity and absent client environment.
 func machineWSIngressAssertHandshake(t *testing.T, handshake http.Header, root, p, wantInstall string) {
 	t.Helper()
 	require.NotNil(t, handshake)
@@ -73,7 +73,9 @@ func machineWSIngressAssertHandshake(t *testing.T, handshake http.Header, root, 
 	assert.Equal(t, p, gjson.Get(headTM, "thread_id").String())
 	assert.Equal(t, p+":0", gjson.Get(headTM, "window_id").String())
 	assert.Equal(t, "turn-real", gjson.Get(headTM, "turn_id").String())
-	assert.Equal(t, codexMachineSandboxTagFromUA(handshake.Get("User-Agent")), gjson.Get(headTM, "sandbox").String())
+	for _, field := range []string{"sandbox", "sandbox_mode", "thread_source", "timezone", "workspaces"} {
+		assert.False(t, gjson.Get(headTM, field).Exists())
+	}
 }
 
 // machineWSIngressAssertPayload 断言送往上游的 response.create 帧：client_metadata / 内嵌 turn metadata / pck 假名化，无真实值。

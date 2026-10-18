@@ -761,6 +761,26 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
+  it("loads and saves administrator admission budgets without changing the switch", async () => {
+    const policy = {
+      window_seconds: 300, replay_window_seconds: 30, rpm_limit: 240,
+      max_concurrent: 64, max_distinct_keys: 16, max_distinct_ips: 8,
+      max_distinct_fingerprints: 8, max_client_request_attempts: 3,
+    };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, anti_bypass_enabled: true, anti_bypass_policy: policy });
+    const wrapper = mountView();
+    await flushPromises();
+    await openFeaturesTab(wrapper);
+    expect((wrapper.get('[data-testid="anti-bypass-rpm_limit"]').element as HTMLInputElement).value).toBe("240");
+    await wrapper.get('[data-testid="anti-bypass-max_concurrent"]').setValue(48);
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      anti_bypass_enabled: true,
+      anti_bypass_policy: { ...policy, max_concurrent: 48 },
+    }));
+  });
+
   it("submits the compact home page toggle", async () => {
     const wrapper = mountView();
     await flushPromises();

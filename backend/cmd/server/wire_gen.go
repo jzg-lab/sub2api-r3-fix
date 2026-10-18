@@ -207,7 +207,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginRepository := repository.NewPluginRepository(db)
 	pluginHostInfo := providePluginHostInfo(buildInfo)
 	pluginKVStore := repository.NewPluginKVStore(redisClient)
-	pluginManager := service.ProvidePluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo, rateLimitService, accountRepository, pluginKVStore, openAIGatewayService, openAIDowngradeProbeStore)
+	pluginManager := service.ProvidePluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo, rateLimitService, accountRepository, pluginKVStore, openAIGatewayService, openAIDowngradeProbeStore, httpUpstream, tlsFingerprintProfileService)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
 	crsSyncService := service.ProvideCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig, settingService)
 	accountHandler := admin.ProvideAccountHandler(adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService, gatewayCache)

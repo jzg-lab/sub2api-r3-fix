@@ -25,6 +25,10 @@ const maxOpenAICyberTranscriptLookupKeys = 256
 // context key requires model-generated history so shared first-turn templates
 // cannot block unrelated conversations.
 func deriveOpenAICyberTranscriptBlockKeys(apiKeyID int64, body []byte) openAICyberTranscriptBlockKeys {
+	return deriveOpenAICyberTranscriptBlockKeysForIdentity("api_key="+strconv.FormatInt(apiKeyID, 10), body)
+}
+
+func deriveOpenAICyberTranscriptBlockKeysForIdentity(identity string, body []byte) openAICyberTranscriptBlockKeys {
 	if len(body) == 0 {
 		return openAICyberTranscriptBlockKeys{}
 	}
@@ -34,8 +38,7 @@ func deriveOpenAICyberTranscriptBlockKeys(apiKeyID int64, body []byte) openAICyb
 	}
 
 	h := sha256.New()
-	_, _ = h.Write([]byte("cyber-transcript:v3|api_key="))
-	_, _ = h.Write([]byte(strconv.FormatInt(apiKeyID, 10)))
+	_, _ = h.Write([]byte("cyber-transcript:v3|" + identity))
 	// Model and tool definitions are request configuration rather than history.
 	// Root instructions remain model-visible context and participate in identity.
 	for _, field := range []string{"instructions"} {

@@ -96,3 +96,15 @@ python3 -m unittest discover -s deploy/auth-browser/tests -p 'test_*.py'
 
 测试使用合成 RFC TOTP、模拟 Chrome 子进程和隔离数据库；真实 Linux 浏览器登录、
 目标服务器依赖及真实账号挑战仍需部署验收。模拟测试不代表真实 OAuth 已成功。
+
+## 本次重新登录与运行时检查
+
+自动重新登录创建 `fresh_login` 会话，要求账号当前授权 revision；输入邮箱必须与保存的账号一致。
+workspace 选择使用宿主读取的 `chatgpt_account_id`，不信任客户端提供的 workspace。
+兑换及原子提交再次核对已知邮箱、workspace、user 和 organization 身份；一次性证明和路由校验继续有效。
+成功替换凭据后记录 `openai_oauth_relogin_verified_at`。普通无代理授权继续直连，不要求历史登录 IP，
+不引入固定出口、出口地理信息或时区绑定。显式错误代理仍拒绝，不回退直连。
+
+可运行 `launch.sh --check-runtime` 检查 Node 22+、浏览器、curl 和模块加载；不发起登录或网络请求。
+通过软链接启动时按脚本真实目录加载依赖。`manifest.json` 列出应配套发布的辅助文件。
+真实浏览器登录、验证码及供应商侧挑战仍需在目标环境验收。

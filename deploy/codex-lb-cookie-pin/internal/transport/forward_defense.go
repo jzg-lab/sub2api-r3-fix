@@ -27,6 +27,9 @@ func (s *Server) observeForwardFailureLocked(accountID int64, tmpl *probeTemplat
 	// cancellation, before allowing them to record a pass or reroll a cookie.
 	s.invalidateProbeResultsLocked(accountID)
 	if authFailed {
+		if deadline := retryAfterDeadline(header, now); deadline.After(now) {
+			s.extendProbeCooldownLocked(accountID, deadline)
+		}
 		delete(s.templates, accountID)
 		s.resetProbeStateLocked(accountID, now)
 		return true

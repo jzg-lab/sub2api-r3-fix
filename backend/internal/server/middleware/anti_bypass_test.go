@@ -29,7 +29,7 @@ func (s antiBypassSettingsStub) IsAntiBypassEnabled(context.Context) (bool, erro
 	return s.enabled, s.err
 }
 
-func antiBypassTestRouter(settings antiBypassSettingsStub, client *redis.Client, called *bool) *gin.Engine {
+func antiBypassTestRouter(settings AntiBypassSettings, client *redis.Client, called *bool) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	guard := antibypass.NewGuard(client)

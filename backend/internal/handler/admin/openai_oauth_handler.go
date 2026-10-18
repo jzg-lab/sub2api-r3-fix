@@ -124,6 +124,7 @@ type OpenAIGenerateAuthURLRequest struct {
 	AccountID                     *int64 `json:"account_id"`
 	ExpectedUpdatedAt             string `json:"expected_updated_at"`
 	ExpectedAuthorizationRevision string `json:"expected_authorization_revision"`
+	FreshLogin                    bool   `json:"fresh_login"`
 }
 
 // GenerateAuthURL generates OpenAI OAuth authorization URL
@@ -140,9 +141,9 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 	if req.AccountID != nil {
 		result, err = h.openaiOAuthService.GenerateReauthorizationAuthURL(
 			c.Request.Context(), *req.AccountID, req.ExpectedUpdatedAt,
-			req.ProxyID, req.RedirectURI, oauthPlatformFromPath(c), req.ExpectedAuthorizationRevision,
+			req.ProxyID, req.RedirectURI, oauthPlatformFromPath(c), req.ExpectedAuthorizationRevision, req.FreshLogin,
 		)
-	} else if req.ExpectedUpdatedAt != "" || req.ExpectedAuthorizationRevision != "" {
+	} else if req.FreshLogin || req.ExpectedUpdatedAt != "" || req.ExpectedAuthorizationRevision != "" {
 		response.BadRequest(c, "account_id is required for reauthorization")
 		return
 	} else {
@@ -211,6 +212,7 @@ func (h *OpenAIOAuthHandler) LaunchAuthBrowser(c *gin.Context) {
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnknown) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPChanged) ||
 			errors.Is(err, service.ErrOpenAIOAuthLoginIPUnavailable) ||
+			errors.Is(err, service.ErrOpenAIOAuthIdentityChanged) ||
 			errors.Is(err, service.ErrOpenAIOAuthReauthorizationProofRequired) ||
 			errors.Is(err, service.ErrOpenAIOAuthProxyBindingCorrupt) ||
 			errors.Is(err, service.ErrOpenAIOAuthProxyMismatch) {

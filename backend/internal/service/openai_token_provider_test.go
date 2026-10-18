@@ -145,9 +145,9 @@ func TestOpenAITokenProvider_CacheHit(t *testing.T) {
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
 			"access_token": "db-token",
-			"expires_at":   time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
+	account.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 	cacheKey := OpenAITokenCacheKey(account)
 	cache.tokens[cacheKey] = account.GetCredential("access_token")
 
@@ -840,7 +840,8 @@ func TestOpenAITokenProvider_Real_LockRace_PollingHitsCache(t *testing.T) {
 	}()
 
 	latest := *account
-	latest.Credentials = map[string]any{"access_token": "winner-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}
+	latest.Credentials = map[string]any{"access_token": "winner-token"}
+	latest.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
@@ -899,7 +900,8 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockWaitHitAndSnapshot(t *testing.T)
 	}()
 
 	latest := *account
-	latest.Credentials = map[string]any{"access_token": "winner-token", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}
+	latest.Credentials = map[string]any{"access_token": "winner-token"}
+	latest.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)

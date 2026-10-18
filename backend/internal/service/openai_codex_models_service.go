@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
@@ -118,7 +119,7 @@ type OpenAIModelsResponse struct {
 }
 
 // BuildGroupConfiguredCodexModelsManifest builds a Codex catalog exclusively
-// from the public model names configured on accounts in an OpenAI group. The
+// from the public model names configured on the group's routable OpenAI accounts. The
 // boolean result distinguishes "no explicit configuration" from a configured
 // catalog that becomes empty after group-level filtering.
 func (s *OpenAIGatewayService) BuildGroupConfiguredCodexModelsManifest(
@@ -130,7 +131,8 @@ func (s *OpenAIGatewayService) BuildGroupConfiguredCodexModelsManifest(
 		return nil, false, nil
 	}
 
-	visible, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
+	visible, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID,
+		s.cfg != nil && s.cfg.RunMode == config.RunModeSimple)
 	if err != nil {
 		return nil, false, fmt.Errorf("load group configured Codex models: %w", err)
 	}
@@ -155,6 +157,7 @@ func (s *OpenAIGatewayService) BuildGroupConfiguredCodexModelsManifest(
 		nil,
 		group.ModelAllowlist.Models,
 		group.ModelAllowlistEnabled(),
+		nil,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("build group configured Codex models: %w", err)
@@ -187,7 +190,7 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 		return nil
 	}
 
-	visible, accounts, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
+	visible, accounts, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID, s.cfg != nil && s.cfg.RunMode == config.RunModeSimple)
 	if err != nil {
 		return fmt.Errorf("load group configured Codex models: %w", err)
 	}
@@ -200,6 +203,14 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 		configuredModels,
 		group.ModelAllowlist.Models,
 		group.ModelAllowlistEnabled(),
+		func(model string) bool {
+			for i := range accounts {
+				if accounts[i].Platform == PlatformOpenAI && accounts[i].IsModelSupported(model) {
+					return true
+				}
+			}
+			return false
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("merge group configured Codex models: %w", err)
@@ -227,19 +238,27 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 	return nil
 }
 
+func loadCodexVisibleAccounts(ctx context.Context, repo AccountRepository, groupID int64, simpleOpenAI bool) ([]Account, error) {
+	if simpleOpenAI {
+		return repo.ListSchedulableByPlatform(ctx, PlatformOpenAI)
+	}
+	return repo.ListSchedulableByGroupID(ctx, groupID)
+}
+
 // loadCodexGroupCatalogAccounts separates picker membership from capability
 // intersection. visible accounts are currently schedulable and decide which
-// public aliases appear. catalog accounts are persistently enabled group
-// members; the availability query ignores transient rate-limit, overload, and
-// temporary-unschedulable state so those conditions cannot widen advertised
-// capabilities. Persistently disabled accounts are excluded because routing
+// public aliases appear. Simple mode follows the OpenAI scheduler's global
+// platform pool; other routes retain their group scope. catalog accounts are
+// persistently enabled members of that pool; the availability query ignores
+// transient rate-limit, overload, and temporary-unschedulable state so those
+// conditions cannot widen advertised capabilities. Persistently disabled accounts are excluded because routing
 // cannot select them. If the availability query fails, the catalog falls back
 // to the schedulable set so a listing error does not fail the client request.
-func loadCodexGroupCatalogAccounts(ctx context.Context, repo AccountRepository, groupID int64) (visible []Account, catalog []Account, err error) {
+func loadCodexGroupCatalogAccounts(ctx context.Context, repo AccountRepository, groupID int64, simpleOpenAI bool) (visible []Account, catalog []Account, err error) {
 	if repo == nil {
 		return nil, nil, nil
 	}
-	visible, err = repo.ListSchedulableByGroupID(ctx, groupID)
+	visible, err = loadCodexVisibleAccounts(ctx, repo, groupID, simpleOpenAI)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -248,23 +267,16 @@ func loadCodexGroupCatalogAccounts(ctx context.Context, repo AccountRepository, 
 	if !ok {
 		return visible, catalog, nil
 	}
-	groupAccounts, listErr := candidateRepo.ListModelAvailabilityCandidates(
-		ctx,
-		&groupID,
-		[]string{
-			PlatformAnthropic,
-			PlatformOpenAI,
-			PlatformGemini,
-			PlatformAntigravity,
-			PlatformGrok,
-			PlatformKimi,
-			PlatformZhipu,
-			PlatformDeepseek,
-			PlatformMiniMax,
-			PlatformOpenCodeGo,
-		},
-		false,
-	)
+	queryGroupID := &groupID
+	platforms := []string{
+		PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity,
+		PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo,
+	}
+	if simpleOpenAI {
+		queryGroupID = nil
+		platforms = []string{PlatformOpenAI}
+	}
+	groupAccounts, listErr := candidateRepo.ListModelAvailabilityCandidates(ctx, queryGroupID, platforms, simpleOpenAI)
 	if listErr != nil {
 		return visible, catalog, nil
 	}
@@ -383,8 +395,8 @@ type configuredCodexModelDescriptor struct {
 	DisplayName                       string                          `json:"display_name"`
 	Description                       string                          `json:"description"`
 	DefaultReasoningLevel             *string                         `json:"default_reasoning_level,omitempty"`
-	SupportedReasoningLevels          []configuredCodexReasoningLevel `json:"supported_reasoning_levels"`
 	MultiAgentReasoningEffort         *string                         `json:"multi_agent_reasoning_effort,omitempty"`
+	SupportedReasoningLevels          []configuredCodexReasoningLevel `json:"supported_reasoning_levels"`
 	ShellType                         string                          `json:"shell_type"`
 	Visibility                        string                          `json:"visibility"`
 	SupportedInAPI                    bool                            `json:"supported_in_api"`
@@ -525,8 +537,8 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 				descriptor.MaxContextWindow = configuredCodexGPT56MaxContext
 			}
 			if isOpenAIGPT6AstraModel(modelID) {
-				// Codex resolves the Ultra workflow to this effort before inference.
-				// openai/codex a9896da3: codex-rs/models-manager/models.json.
+				// Match the official catalog; Ultra is a client workflow, not
+				// an inference effort or a change to a client's chosen effort.
 				multiAgentEffort := "xhigh"
 				descriptor.MultiAgentReasoningEffort = &multiAgentEffort
 				descriptor.MultiAgentVersion = "v2"
@@ -878,7 +890,8 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 		return BuildCodexModelsManifest(modelIDs)
 	}
 
-	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
+	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID,
+		effectivePlatform == PlatformOpenAI && s.cfg != nil && s.cfg.RunMode == config.RunModeSimple)
 	if err != nil {
 		return BuildCodexModelsManifest(modelIDs)
 	}
@@ -1361,6 +1374,7 @@ func mergeConfiguredCodexModelsManifest(
 	configuredModels []string,
 	selectedModels []string,
 	filterBySelection bool,
+	isSupported func(string) bool,
 ) ([]byte, bool, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
@@ -1388,7 +1402,7 @@ func mergeConfiguredCodexModelsManifest(
 			Slug string `json:"slug"`
 		}
 		if err := json.Unmarshal(rawModel, &descriptor); err != nil || strings.TrimSpace(descriptor.Slug) == "" {
-			if filterBySelection {
+			if filterBySelection || isSupported != nil {
 				changed = true
 				continue
 			}
@@ -1396,6 +1410,10 @@ func mergeConfiguredCodexModelsManifest(
 			continue
 		}
 		descriptor.Slug = strings.TrimSpace(descriptor.Slug)
+		if isSupported != nil && !isSupported(descriptor.Slug) {
+			changed = true
+			continue
+		}
 		if isCodexDedicatedMediaModel(descriptor.Slug) {
 			changed = true
 			continue
@@ -1423,6 +1441,9 @@ func mergeConfiguredCodexModelsManifest(
 	}
 
 	for _, modelID := range configuredModels {
+		if isSupported != nil && !isSupported(modelID) {
+			continue
+		}
 		if isCodexDedicatedMediaModel(modelID) {
 			continue
 		}
@@ -2048,6 +2069,18 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstream(ctx context.Cont
 			}
 		}
 	}
+	body, err = normalizeCodexModelsManifestServiceTiers(body)
+	if err != nil {
+		return nil, &codexModelsManifestUpstreamError{
+			err: infraerrors.Newf(
+				http.StatusBadGateway,
+				"OPENAI_CODEX_MODELS_UPSTREAM_INVALID_MANIFEST",
+				"codex models manifest service tiers could not be normalized: %v",
+				err,
+			),
+			retryable: true,
+		}
+	}
 	etag := response.upstreamETag
 	manifest := &OpenAIModelsResponse{
 		Body:                         body,
@@ -2056,10 +2089,56 @@ func (s *OpenAIGatewayService) fetchCodexModelsManifestUpstream(ctx context.Cont
 		upstreamSourceBody:           append([]byte(nil), upstreamBody...),
 		convertedFromOpenAIModelList: convertedFromOpenAIModelList,
 	}
-	if request.useAPIKeyUpstream && !bytes.Equal(body, upstreamBody) {
+	if !bytes.Equal(body, upstreamBody) {
 		manifest.ETag = codexModelsManifestBodyETag(body)
 	}
 	return manifest, nil
+}
+
+// Only repair explicit null arrays; preserve provider capabilities and absent
+// optional fields without synthesizing a service tier.
+func normalizeCodexModelsManifestServiceTiers(body []byte) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("decode JSON object: %w", err)
+	}
+	var models []json.RawMessage
+	if err := json.Unmarshal(envelope["models"], &models); err != nil {
+		return nil, fmt.Errorf("decode top-level models array: %w", err)
+	}
+	if models == nil {
+		return nil, errors.New("top-level models field is not an array")
+	}
+	changed := false
+	for i, rawModel := range models {
+		var model map[string]json.RawMessage
+		if err := json.Unmarshal(rawModel, &model); err != nil || model == nil {
+			continue
+		}
+		if !bytes.Equal(bytes.TrimSpace(model["service_tiers"]), []byte("null")) {
+			continue
+		}
+		model["service_tiers"] = json.RawMessage("[]")
+		encoded, err := json.Marshal(model)
+		if err != nil {
+			return nil, fmt.Errorf("encode model service tiers: %w", err)
+		}
+		models[i] = encoded
+		changed = true
+	}
+	if !changed {
+		return body, nil
+	}
+	encodedModels, err := json.Marshal(models)
+	if err != nil {
+		return nil, fmt.Errorf("encode top-level models array: %w", err)
+	}
+	envelope["models"] = encodedModels
+	normalized, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("encode JSON object: %w", err)
+	}
+	return normalized, nil
 }
 
 func codexModelsManifestBodyETag(body []byte) string {
@@ -2248,6 +2327,10 @@ func (s *OpenAIGatewayService) CompleteAPIKeyCodexModelsManifestForClient(manife
 		return err
 	}
 	body, err = adjustAPIKeyCodexModelsManifest(body, account)
+	if err != nil {
+		return err
+	}
+	body, err = normalizeCodexModelsManifestServiceTiers(body)
 	if err != nil {
 		return err
 	}

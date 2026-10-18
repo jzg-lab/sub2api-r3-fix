@@ -986,7 +986,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_DisabledUsesLegacyTransform(t *te
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid"}},
-		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_legacy_transform\",\"status\":\"completed\",\"output\":[]}}\n\ndata: [DONE]\n\n")),
 	}
 	upstream := &httpUpstreamRecorder{resp: resp}
 
@@ -1027,7 +1027,7 @@ func TestOpenAIGatewayService_OAuthLegacy_GroupForceOpenAIFastInjectsMissingTier
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_group_fast_legacy"}},
-		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_legacy_tier\",\"status\":\"completed\",\"output\":[]}}\n\ndata: [DONE]\n\n")),
 	}}
 	svc := newOpenAIGatewayServiceWithSettings(t, DefaultOpenAIFastPolicySettings())
 	svc.cfg = &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}}
@@ -1061,7 +1061,7 @@ func TestOpenAIGatewayService_OAuthLegacy_GroupForceStillHonorsGlobalFilter(t *t
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_group_fast_filter"}},
-		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_legacy_filter\",\"status\":\"completed\",\"output\":[]}}\n\ndata: [DONE]\n\n")),
 	}}
 	svc := newOpenAIGatewayServiceWithSettings(t, openAIFastFilterPriorityPolicy())
 	svc.cfg = &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}}
@@ -2133,7 +2133,7 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAnd
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid"}},
-		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_legacy_identity\",\"status\":\"completed\",\"output\":[]}}\n\ndata: [DONE]\n\n")),
 	}}
 	svc := &OpenAIGatewayService{
 		cfg:           &config.Config{},

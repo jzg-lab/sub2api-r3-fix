@@ -34,8 +34,8 @@ func isExplicitOpenAICompactContext(c *gin.Context) bool {
 	return isOpenAIResponsesCompactPath(c) || isOpenAINativeCompactionV2(c)
 }
 
-func newOpenAICompactFallbackSignal(c *gin.Context, payload []byte, message string) error {
-	if !isExplicitOpenAICompactContext(c) ||
+func newOpenAICompactFallbackSignal(c *gin.Context, payload []byte, message string, usage *OpenAIUsage) error {
+	if openAIUsageHasWork(usage) || !isExplicitOpenAICompactContext(c) ||
 		!isOpenAICompactModelFailure(http.StatusBadRequest, message, payload) {
 		return nil
 	}
@@ -250,6 +250,9 @@ func (s *OpenAIGatewayService) prepareOpenAICompactFallbackRetry(
 	upstreamBody []byte,
 	alreadyRetried bool,
 ) ([]byte, string, bool) {
+	if usage, ok := extractOpenAIUsageFromJSONBytes(upstreamBody); ok && openAIUsageHasWork(&usage) {
+		return currentBody, "", false
+	}
 	if alreadyRetried || !isExplicitOpenAICompactRequest(c, currentBody) ||
 		!isOpenAICompactModelFailure(statusCode, upstreamMsg, upstreamBody) {
 		return currentBody, "", false

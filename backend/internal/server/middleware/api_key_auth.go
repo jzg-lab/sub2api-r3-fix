@@ -164,8 +164,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		if !deferRoute && abortIfAPIKeyGroupNotAllowed(c, apiKey) {
 			return
 		}
-		ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
-		c.Request = c.Request.WithContext(ctx)
+		setGatewayAccessContext(c, apiKey)
 		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
 		// Async image task polling only reads data that already belongs to the
 		// authenticated key and must remain available after the completed
@@ -379,6 +378,12 @@ func GetSubscriptionFromContext(c *gin.Context) (*service.UserSubscription, bool
 	}
 	subscription, ok := value.(*service.UserSubscription)
 	return subscription, ok
+}
+
+func setGatewayAccessContext(c *gin.Context, apiKey *service.APIKey) {
+	ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
+	ctx = service.WithGatewayGroupAccess(ctx, apiKey)
+	c.Request = c.Request.WithContext(ctx)
 }
 
 func setGroupContext(c *gin.Context, group *service.Group) {

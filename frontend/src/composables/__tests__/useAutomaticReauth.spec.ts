@@ -25,6 +25,7 @@ function setup() {
     show: true,
     account: {
       id: 41, platform: 'openai', type: 'oauth', proxy_id: 21,
+      extra: { openai_oauth_login_exit_ip: '198.51.100.25' },
       updated_at: '2026-10-06T01:00:00Z', reauthorization_revision: 'old-revision'
     } as Account
   })
@@ -85,7 +86,7 @@ describe('automatic reauthorization', () => {
     expect(api.getById).toHaveBeenCalledWith(41)
     expect(test.oauth.generateAuthUrl).toHaveBeenCalledWith(21, undefined, {
       accountId: 41, expectedUpdatedAt: '2026-10-06T02:00:00Z',
-      expectedAuthorizationRevision: 'fresh-revision'
+      expectedAuthorizationRevision: 'fresh-revision', freshLogin: true
     })
     expect(test.oauth.exchangeAuthCode).toHaveBeenCalledWith(
       'local-code', 'bound-session', 'bound-state', 21
@@ -95,6 +96,15 @@ describe('automatic reauthorization', () => {
     expect(Object.values(login).every(value => value === '')).toBe(true)
     expect(test.running.value).toBe(false)
     expect(test.session.busy.value).toBe(false)
+    test.scope.stop()
+  })
+
+  it('allows reauthorization when no historical login IP is recorded', async () => {
+    const test = setup()
+    delete test.props.account.extra?.openai_oauth_login_exit_ip
+    await test.start(loginFixture())
+    expect(test.oauth.generateAuthUrl).toHaveBeenCalledOnce()
+    expect(test.apply).toHaveBeenCalledOnce()
     test.scope.stop()
   })
 
@@ -164,7 +174,7 @@ describe('automatic reauthorization', () => {
     }
   )
 
-  it.each(['wrong state', 'missing code', 'already running', 'missing proof', 'request error'])(
+  it.each(['wrong state', 'missing code', 'already running', 'missing proof', 'request error', 'generation failed', 'exchange failed'])(
     'fails closed without exposing request data: %s', async (fault) => {
       const test = setup()
       if (fault === 'wrong state') api.automateAuthBrowser.mockResolvedValue({ launched: true, code: 'x', state: 'foreign' })
@@ -172,6 +182,8 @@ describe('automatic reauthorization', () => {
       if (fault === 'already running') api.automateAuthBrowser.mockResolvedValue({ already_running: true })
       if (fault === 'missing proof') test.oauth.exchangeAuthCode.mockResolvedValue({})
       if (fault === 'request error') api.automateAuthBrowser.mockRejectedValue(new Error('DO_NOT_DISPLAY_REQUEST'))
+      if (fault === 'generation failed') test.oauth.generateAuthUrl.mockResolvedValue(false)
+      if (fault === 'exchange failed') test.oauth.exchangeAuthCode.mockResolvedValue(null)
       await test.start(loginFixture())
       expect(test.apply).not.toHaveBeenCalled()
       expect(test.error.value).not.toBe('')

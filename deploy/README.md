@@ -4,6 +4,10 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 
 ## Deployment Methods
 
+For this maintained fork, complete the per-release
+[merge and deployment guide](../docs/merge-deploy-guide.md) before rebuilding
+and deploying. Keep the existing local validation, signing and rollback path.
+
 | Method | Best For | Setup Wizard |
 |--------|----------|--------------|
 | **Docker Compose** | Quick setup, all-in-one | Not needed (auto-setup) |

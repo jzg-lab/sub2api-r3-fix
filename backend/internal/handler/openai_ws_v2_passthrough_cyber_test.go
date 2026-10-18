@@ -25,21 +25,32 @@ type openAIWSPassthroughHandlerHarness struct {
 	moderationRepo *contentModerationHandlerTestRepo
 	gatewayCache   service.GatewayCache
 	apiKey         *service.APIKey
+	gatewayService *service.OpenAIGatewayService
 }
 
-func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, settings ...map[string]string) *openAIWSPassthroughHandlerHarness {
+func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, modes ...string) *openAIWSPassthroughHandlerHarness {
 	t.Helper()
-	gatewayCache := testutil.NewRedisGatewayCache(t)
+	return newOpenAIWSHandlerHarnessWithCache(t, upstreamURL, testutil.NewRedisGatewayCache(t), modes...)
+}
+
+func newOpenAIWSHandlerHarnessWithCache(t *testing.T, upstreamURL string, gatewayCache service.GatewayCache, modes ...string) *openAIWSPassthroughHandlerHarness {
+	return newOpenAIWSHandlerHarnessWithSettings(t, upstreamURL, gatewayCache, nil, modes...)
+}
+
+func newOpenAIWSHandlerHarnessWithSettings(t *testing.T, upstreamURL string, gatewayCache service.GatewayCache, settings map[string]string, modes ...string) *openAIWSPassthroughHandlerHarness {
+	t.Helper()
+	mode := service.OpenAIWSIngressModePassthrough
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 
 	settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
 		service.SettingKeyRiskControlEnabled:          "true",
 		service.SettingKeyCyberSessionBlockEnabled:    "true",
 		service.SettingKeyCyberSessionBlockTTLSeconds: "60",
 	}}
-	for _, overrides := range settings {
-		for key, value := range overrides {
-			settingRepo.values[key] = value
-		}
+	for key, value := range settings {
+		settingRepo.values[key] = value
 	}
 	moderationRepo := &contentModerationHandlerTestRepo{}
 	moderationSvc := service.NewContentModerationService(settingRepo, moderationRepo, nil, nil, nil, nil, nil, nil)
@@ -57,7 +68,7 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, sett
 		Credentials: map[string]any{"api_key": "sk-test", "base_url": upstreamURL},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_enabled": true,
-			"openai_apikey_responses_websockets_v2_mode":    service.OpenAIWSIngressModePassthrough,
+			"openai_apikey_responses_websockets_v2_mode":    mode,
 		},
 	}
 	cfg := &config.Config{}
@@ -79,7 +90,7 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, sett
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo, usageRepo, nil, nil, nil, nil, gatewayCache, cfg, nil, nil,
-		service.NewBillingService(cfg, nil), nil, billingCacheSvc, nil, &service.DeferredService{},
+		service.NewBillingService(cfg, nil), nil, billingCacheSvc, &drainHTTPUpstream{}, &service.DeferredService{},
 		nil, nil, nil, nil, nil, settingSvc, nil,
 	)
 	concurrencyCache := &concurrencyCacheMock{
@@ -95,8 +106,8 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, sett
 	}
 
 	apiKey := &service.APIKey{
-		ID:      1851,
 		UserID:  1751,
+		ID:      1851,
 		Name:    "ws-cyber-key",
 		Key:     "sk-handler-cyber-test",
 		GroupID: &groupID,
@@ -129,6 +140,7 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, sett
 		moderationRepo: moderationRepo,
 		gatewayCache:   gatewayCache,
 		apiKey:         apiKey,
+		gatewayService: gatewaySvc,
 	}
 }
 

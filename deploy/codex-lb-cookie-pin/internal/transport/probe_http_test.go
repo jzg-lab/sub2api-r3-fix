@@ -229,7 +229,8 @@ func TestCompactForwardUnchangedAndProbeIdentityStable(t *testing.T) {
 		if string(body) != `{"model":"gpt-6-astra"}` {
 			t.Error("business body changed")
 		}
-		fmt.Fprint(w, `{}`)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, compactCompleteFixture)
 	}))
 	defer up.Close()
 	store := cookiestore.New()

@@ -28,22 +28,28 @@ import (
 var errPluginRuntimeUnavailable = errors.New("OpenAI OAuth 插件不可用")
 
 type pluginRuntime struct {
-	installation           *PluginInstallation
-	client                 *hcplugin.Client
-	api                    pluginv1.TransportPluginClient
-	inFlight               atomic.Int64
-	draining               atomic.Bool
+	installation      *PluginInstallation
+	client            *hcplugin.Client
+	api               pluginv1.TransportPluginClient
+	broker            *hcplugin.GRPCBroker
+	capabilities      []string
+	hostHTTP          *pluginHostHTTP
+	hostHTTPServer    *grpc.Server
+	inFlight          atomic.Int64
+	draining          atomic.Bool
+	healthUnavailable atomic.Bool
+	// Only the serialized reconciler owns this timestamp.
+	healthFailureSince     time.Time
 	done                   chan struct{}
 	doneOnce               sync.Once
 	pausedAccountIDsSource func(context.Context) ([]int64, error)
 	pausedAccountIDs       []int64
 	probeBaseConfig        []byte
-	healthUnavailable      atomic.Bool
-	// Only the serialized reconciler owns this timestamp.
-	healthFailureSince time.Time
+	probeAccountsMu        sync.Mutex
+	probeAccounts          map[int64]time.Time
 }
 
-func startPluginRuntime(ctx context.Context, installation *PluginInstallation, startTimeout time.Duration, socketDir string, hostServices pluginv1.HostServiceServer) (*pluginRuntime, error) {
+func startPluginRuntime(ctx context.Context, installation *PluginInstallation, startTimeout time.Duration, socketDir string, hostServices ...pluginv1.HostServiceServer) (*pluginRuntime, error) {
 	if installation == nil {
 		return nil, errors.New("插件安装记录为空")
 	}
@@ -87,17 +93,19 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		client.Kill()
 		return nil, fmt.Errorf("获取插件传输能力: %w", err)
 	}
-	transportClient, ok := dispensed.(*pluginv1.TransportClient)
-	if !ok || transportClient.TransportPluginClient == nil {
+	api, ok := dispensed.(pluginv1.TransportPluginClient)
+	if !ok {
 		client.Kill()
 		return nil, errors.New("插件未实现传输 gRPC 客户端")
 	}
-	api := transportClient.TransportPluginClient
 	runtime := &pluginRuntime{
 		installation: installation,
 		client:       client,
 		api:          api,
 		done:         make(chan struct{}),
+	}
+	if transport, ok := dispensed.(*pluginv1.TransportClient); ok {
+		runtime.broker = transport.Broker
 	}
 	infoCtx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
@@ -111,20 +119,23 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		runtime.kill()
 		return nil, errors.New("插件运行时信息与已校验清单不一致")
 	}
+	runtime.capabilities = append([]string(nil), info.Capabilities...)
 	if err := runtime.checkHealth(infoCtx); err != nil {
 		runtime.kill()
 		return nil, err
 	}
-	// 可选地把宿主服务（HostService）反向暴露给插件。这是叠加在传输契约之上的能力：
-	// 老插件不实现 InitHostServices（返回 Unimplemented），此处静默跳过，绝不阻断启动。
-	offerPluginHostServices(ctx, installation, api, transportClient.Broker, hostServices, startTimeout)
+	// HostService is optional and additive. Older plugins return Unimplemented;
+	// that must not disable the transport or the newer HostHTTP channel.
+	var hostService pluginv1.HostServiceServer
+	if len(hostServices) > 0 {
+		hostService = hostServices[0]
+	}
+	offerPluginHostServices(ctx, installation, api, runtime.broker, hostService, startTimeout)
 	return runtime, nil
 }
 
-// offerPluginHostServices 在 go-plugin broker 上启动一个宿主服务实例，并通过
-// InitHostServices 把 broker 流 id 交给插件。服务生命周期与插件进程绑定：client.Kill()
-// 会关闭 broker，AcceptAndServe 随之 GracefulStop，无需手动清理。整个过程尽力而为，
-// 任何失败都只记录日志、不影响插件转发能力。
+// offerPluginHostServices exposes the per-plugin KV/account bridge over the
+// go-plugin broker. Failure is best effort for compatibility with old plugins.
 func offerPluginHostServices(
 	ctx context.Context,
 	installation *PluginInstallation,
@@ -289,6 +300,9 @@ func (r *pluginRuntime) drain(timeout time.Duration) {
 }
 
 func (r *pluginRuntime) kill() {
+	if r != nil && r.hostHTTPServer != nil {
+		r.hostHTTPServer.Stop()
+	}
 	if r != nil && r.client != nil {
 		r.client.Kill()
 	}
@@ -298,7 +312,22 @@ func (r *pluginRuntime) roundTrip(ctx context.Context, request *http.Request, pr
 	if request == nil || request.URL == nil || account == nil {
 		return nil, errors.New("插件出站请求参数不完整")
 	}
+	bodyDelegated := false
+	defer func() {
+		if !bodyDelegated && request.Body != nil {
+			_ = request.Body.Close()
+		}
+	}()
+	r.trackProbeAccount(account.ID, time.Now())
 	streamCtx, cancel := context.WithCancel(ctx)
+	if r.hostHTTP != nil {
+		binding, err := r.hostHTTP.bind(streamCtx, request, proxyURL, account)
+		if err != nil {
+			cancel()
+			return nil, errors.Join(errPluginRuntimeUnavailable, err)
+		}
+		streamCtx = pluginv1.WithHostHTTPBinding(streamCtx, binding)
+	}
 	stream, err := r.api.Forward(streamCtx)
 	if err != nil {
 		cancel()
@@ -324,6 +353,7 @@ func (r *pluginRuntime) roundTrip(ctx context.Context, request *http.Request, pr
 		return nil, normalizePluginRPCError(ctx, "发送插件请求元数据", err, true)
 	}
 	sendErr := make(chan error, 1)
+	bodyDelegated = true
 	go func() {
 		err := sendPluginRequestBody(stream, request.Body)
 		sendErr <- err
@@ -358,12 +388,17 @@ func (r *pluginRuntime) roundTrip(ctx context.Context, request *http.Request, pr
 		}
 	}
 	pipeReader, pipeWriter := io.Pipe()
+	done := sync.OnceFunc(r.finishRequest)
+	stop := context.AfterFunc(streamCtx, func() {
+		_ = pipeReader.CloseWithError(streamCtx.Err())
+		done()
+	})
 	body := &pluginResponseBody{
 		reader: pipeReader,
-		cancel: cancel,
-		done:   r.finishRequest,
+		cancel: func() { stop(); cancel() },
+		done:   done,
 	}
-	go receivePluginResponseBody(stream, pipeWriter, sendErr)
+	go receivePluginResponseBody(stream, pipeWriter, sendErr, cancel)
 	return &http.Response{
 		Status:        start.Status,
 		StatusCode:    int(start.StatusCode),
@@ -381,6 +416,10 @@ type PluginTransportError struct {
 	Code        string
 	Message     string
 	RequestSent bool
+}
+
+func (e *PluginTransportError) Is(target error) bool {
+	return e != nil && target == errPluginRuntimeUnavailable && e.Code == "PLUGIN_HOST_TRANSPORT"
 }
 
 func (e *PluginTransportError) Error() string {
@@ -412,7 +451,10 @@ func normalizePluginRPCError(ctx context.Context, operation string, err error, r
 
 func sendPluginRequestBody(stream pluginv1.TransportPlugin_ForwardClient, body io.ReadCloser) error {
 	if body != nil {
-		defer func() { _ = body.Close() }()
+		closeBody := sync.OnceFunc(func() { _ = body.Close() })
+		stop := context.AfterFunc(stream.Context(), closeBody)
+		defer stop()
+		defer closeBody()
 		buffer := make([]byte, 32*1024)
 		for {
 			read, err := body.Read(buffer)
@@ -436,15 +478,62 @@ func sendPluginRequestBody(stream pluginv1.TransportPlugin_ForwardClient, body i
 	return stream.CloseSend()
 }
 
-func receivePluginResponseBody(stream pluginv1.TransportPlugin_ForwardClient, writer *io.PipeWriter, sendErr <-chan error) {
+const pluginResponseSettlementTimeout = 10 * time.Second
+
+func drainPluginResponseSettlement(body io.ReadCloser, timeout time.Duration) error {
+	timer := time.AfterFunc(timeout, func() { _ = body.Close() })
+	defer timer.Stop()
+	_, err := io.CopyN(io.Discard, body, 1<<20)
+	if err == io.EOF {
+		return nil
+	}
+	if err == nil {
+		return errors.New("plugin response settlement tail exceeds limit")
+	}
+	return err
+}
+
+func receivePluginResponseBody(stream pluginv1.TransportPlugin_ForwardClient, writer *io.PipeWriter, sendErr <-chan error, cancel context.CancelFunc) {
 	defer func() { _ = writer.Close() }()
+	ended := false
+	var settlementTimer *time.Timer
+	defer func() {
+		if settlementTimer != nil {
+			settlementTimer.Stop()
+		}
+	}()
 	for {
 		frame, err := stream.Recv()
 		if err == io.EOF {
+			if ended {
+				select {
+				case bodyErr := <-sendErr:
+					if bodyErr != nil {
+						_ = writer.CloseWithError(normalizePluginRPCError(stream.Context(), "发送插件请求体", bodyErr, true))
+					}
+				default:
+				}
+				return
+			}
+			_ = writer.CloseWithError(&PluginTransportError{
+				Code: "PLUGIN_STREAM_TRUNCATED", Message: "插件流未返回完成帧", RequestSent: true,
+			})
 			return
 		}
 		if err != nil {
 			_ = writer.CloseWithError(normalizePluginRPCError(stream.Context(), "接收插件响应体", err, true))
+			return
+		}
+		if frameError := frame.GetError(); frameError != nil {
+			// Response headers already prove dispatch; a late plugin error
+			// cannot grant permission to replay the upstream request.
+			_ = writer.CloseWithError(&PluginTransportError{Code: frameError.Code, Message: frameError.Message, RequestSent: true})
+			return
+		}
+		if ended {
+			_ = writer.CloseWithError(&PluginTransportError{
+				Code: "PLUGIN_INVALID_RESPONSE", Message: "插件完成帧后返回了额外响应帧", RequestSent: true,
+			})
 			return
 		}
 		if chunk := frame.GetBodyChunk(); len(chunk) > 0 {
@@ -454,18 +543,16 @@ func receivePluginResponseBody(stream pluginv1.TransportPlugin_ForwardClient, wr
 			continue
 		}
 		if frame.GetEnd() != nil {
-			select {
-			case err := <-sendErr:
-				if err != nil {
-					_ = writer.CloseWithError(normalizePluginRPCError(stream.Context(), "发送插件请求体", err, true))
-				}
-			default:
-			}
-			return
-		}
-		if frameError := frame.GetError(); frameError != nil {
-			_ = writer.CloseWithError(&PluginTransportError{Code: frameError.Code, Message: frameError.Message, RequestSent: frameError.RequestSent})
-			return
+			// The server may still be persisting its outcome after Send(End).
+			// Exposing EOF now cancels the RPC through pluginResponseBody.Close.
+			// Wait for the RPC terminal so settlement errors remain observable.
+			ended = true
+			settlementTimer = time.AfterFunc(pluginResponseSettlementTimeout, func() {
+				_ = writer.CloseWithError(&PluginTransportError{
+					Code: "PLUGIN_SETTLEMENT_TIMEOUT", Message: "插件完成确认超时", RequestSent: true,
+				})
+				cancel()
+			})
 		}
 	}
 }
@@ -478,7 +565,11 @@ type pluginResponseBody struct {
 }
 
 func (b *pluginResponseBody) Read(data []byte) (int, error) {
-	return b.reader.Read(data)
+	n, err := b.reader.Read(data)
+	if err != nil {
+		_ = b.Close()
+	}
+	return n, err
 }
 
 func (b *pluginResponseBody) Close() error {

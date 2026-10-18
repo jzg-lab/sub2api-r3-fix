@@ -1013,7 +1013,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_AppliesStagedFingerprint(t *testi
 	turnMetadata := req.Header.Get("x-codex-turn-metadata")
 	require.NotEmpty(t, turnMetadata)
 	assert.Contains(t, turnMetadata, ids.sessionID, "turn-metadata JSON 中的 session_id 应被收敛")
-	assert.Contains(t, turnMetadata, `"sandbox":"seatbelt"`, "turn-metadata 未指定字段应原样保留")
+	assert.NotContains(t, turnMetadata, `"sandbox"`, "downstream environment must not become the upstream account environment")
 }
 
 func TestBuildUpstreamRequestOpenAIPassthrough_OffModeKeepsIsolatedSession(t *testing.T) {

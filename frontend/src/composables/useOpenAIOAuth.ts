@@ -64,7 +64,7 @@ export function useOpenAIOAuth() {
   const generateAuthUrl = async (
     proxyId?: number | null,
     redirectUri?: string,
-    reauthorization?: { accountId: number; expectedUpdatedAt: string; expectedAuthorizationRevision?: string }
+    reauthorization?: { accountId: number; expectedUpdatedAt: string; expectedAuthorizationRevision?: string; freshLogin?: boolean }
   ): Promise<boolean> => {
     const version = ++requestVersion
     authUrl.value = ''
@@ -88,6 +88,7 @@ export function useOpenAIOAuth() {
       if (reauthorization) {
         payload.account_id = reauthorization.accountId
         payload.expected_updated_at = reauthorization.expectedUpdatedAt
+        if (reauthorization.freshLogin) payload.fresh_login = true
         if (reauthorization.expectedAuthorizationRevision) {
           payload.expected_authorization_revision = reauthorization.expectedAuthorizationRevision
         }

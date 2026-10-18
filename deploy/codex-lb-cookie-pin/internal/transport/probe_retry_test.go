@@ -27,7 +27,7 @@ func TestProbeRetryDeadline(t *testing.T) {
 		{429, "120", 2 * time.Minute},
 		{429, now.Add(4 * time.Minute).Format(http.TimeFormat), 4 * time.Minute},
 		{503, "90", 90 * time.Second},
-		{503, "", 0},
+		{503, "", time.Minute},
 		{500, "120", 0},
 		{401, "120", 0},
 	} {

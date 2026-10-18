@@ -24,9 +24,12 @@ func (s *TLSFingerprintProfileService) OpenAIOAuthDefaultProfile() *tlsfingerpri
 	id := s.openAIOAuthDefaultID
 	s.localMu.RUnlock()
 	if id == 0 {
-		return nil
+		return verifiedCodexTLSProfile()
 	}
-	return s.GetProfileByID(id)
+	if profile := s.GetProfileByID(id); profile != nil {
+		return profile
+	}
+	return verifiedCodexTLSProfile()
 }
 
 func (s *TLSFingerprintProfileService) GetDefaults(ctx context.Context) (TLSProfileDefaults, error) {

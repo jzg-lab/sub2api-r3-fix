@@ -645,7 +645,8 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 		}
 		message := openAICompatFailedResponseMessage(finalResponse)
 		if openAIStreamFailedEventShouldFailover(payload, message) {
-			return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header)
+			return nil, stopOpenAIReplayAfterUsage(
+				s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header), &usage)
 		}
 		message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payload, message)
 		// 统一走语义状态推断 + body 归一化（与 /v1/responses 路径一致），
@@ -865,13 +866,13 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 						acc.ProcessEvent(&event)
 						if response := openAICompatTerminalResponse(&event, []byte(payload)); isOpenAICompatResponsesTerminalEvent(event.Type) && response != nil {
 							if event.Usage != nil {
-								usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
+								replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(event.Usage))
 								if response.Usage == nil {
 									response.Usage = event.Usage
 								}
 							}
 							if response.Usage != nil {
-								usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
+								replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(response.Usage))
 							}
 							return response, usage, acc, nil
 						}
@@ -914,13 +915,13 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 
 			if response := openAICompatTerminalResponse(&event, []byte(payload)); isOpenAICompatResponsesTerminalEvent(event.Type) && response != nil {
 				if event.Usage != nil {
-					usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
+					replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(event.Usage))
 					if response.Usage == nil {
 						response.Usage = event.Usage
 					}
 				}
 				if response.Usage != nil {
-					usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
+					replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(response.Usage))
 				}
 				return response, usage, acc, nil
 			}
@@ -1045,11 +1046,11 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					responseID = id
 				}
 				if event.Response.Usage != nil {
-					usage = copyOpenAIUsageFromResponsesUsage(event.Response.Usage)
+					replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(event.Response.Usage))
 				}
 			}
 			if event.Usage != nil {
-				usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
+				replaceOpenAITerminalUsage(&usage, copyOpenAIUsageFromResponsesUsage(event.Usage))
 			}
 			// cyber_policy 致命不可重试：标记供 handler 事后记录；以 Anthropic SSE error 事件
 			// 回写让客户端感知并停止重试（F4），丢弃后续转换输出。
@@ -1086,7 +1087,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
 				}
 				if !clientOutputStarted && shouldFailover {
-					streamFailoverErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header)
+					streamFailoverErr = stopOpenAIReplayAfterUsage(
+						s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header), &usage)
 					return true
 				}
 				message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payloadBytes, message)

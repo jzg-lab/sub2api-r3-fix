@@ -125,6 +125,7 @@ type openAIHTTP2Settings struct {
 // upstreamClientEntry 上游客户端缓存条目
 // 记录客户端实例及其元数据，用于连接池管理和淘汰策略
 type upstreamClientEntry struct {
+	diagnosticID uint64
 	client       *http.Client // HTTP 客户端实例
 	proxyKey     string       // 代理标识（用于检测代理变更）
 	poolKey      string       // 连接池配置标识（用于检测配置变更）
@@ -158,9 +159,10 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
-	cfg     *config.Config                  // 全局配置
-	mu      sync.RWMutex                    // 保护 clients map 的读写锁
-	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	cfg          *config.Config                  // 全局配置
+	mu           sync.RWMutex                    // 保护 clients map 的读写锁
+	clients      map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	nextClientID uint64
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
 }
@@ -201,6 +203,10 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if err := s.validateRequestHost(req); err != nil {
 		return nil, err
 	}
+	req, trace, err := s.prepareCodexRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	profile := service.HTTPUpstreamProfileDefault
 	if req != nil {
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
@@ -211,11 +217,27 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if err != nil {
 		return nil, err
 	}
+	trace.bindClient(accountID, entry.diagnosticID)
 
 	// 执行请求
 	client := httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
+	var upload *codexUploadGuard
+	if trace != nil {
+		req, upload = guardCodexUpload(req, codexUploadIdleTimeout)
+		trace.upload = upload
+	}
 	resp, err := servertiming.Do(client, req)
+	if upload != nil {
+		err = upload.result(err)
+		if err != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			upload.close()
+		}
+	}
+	trace.record(accountID, resp, err)
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -231,6 +253,10 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	// 包装响应体，在关闭时自动减少计数并更新时间戳
 	// 这确保了流式响应（如 SSE）在完全读取前不会被淘汰
 	resp.Body = wrapTrackedBody(resp.Body, func() {
+		if upload != nil {
+			upload.close()
+		}
+		trace.recordBodyClose()
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 	})
@@ -261,35 +287,55 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if req != nil && req.URL != nil {
 		targetHost = req.URL.Host
 	}
-	proxyInfo := "direct"
-	if proxyURL != "" {
-		proxyInfo = proxyURL
-	}
-	slog.Debug("tls_fingerprint_enabled", "account_id", accountID, "target", targetHost, "proxy", proxyInfo, "profile", profile.Name)
+	slog.Debug("tls_fingerprint_enabled", "account_id", accountID, "target", targetHost, "proxy_configured", proxyURL != "", "profile", profile.Name)
 
 	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	req, trace, err := s.prepareCodexRequest(req)
+	if err != nil {
 		return nil, err
 	}
 
 	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile)
 	if err != nil {
-		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error", err)
+		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error_type", fmt.Sprintf("%T", err))
 		return nil, err
 	}
+	trace.bindClient(accountID, entry.diagnosticID)
 
 	client := httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
+	var upload *codexUploadGuard
+	if trace != nil {
+		req, upload = guardCodexUpload(req, codexUploadIdleTimeout)
+		trace.upload = upload
+	}
 	resp, err := servertiming.Do(client, req)
+	if upload != nil {
+		err = upload.result(err)
+		if err != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			upload.close()
+		}
+	}
+	trace.record(accountID, resp, err)
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
-		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
+		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "client_id", entry.diagnosticID, "error_type", fmt.Sprintf("%T", err))
 		return nil, err
 	}
 
 	decompressResponseBody(resp)
 
 	resp.Body = wrapTrackedBody(resp.Body, func() {
+		if upload != nil {
+			upload.close()
+		}
+		trace.recordBodyClose()
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 	})
@@ -538,6 +584,9 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 		return nil, err
 	}
 	isolation := s.getIsolationMode()
+	if upstreamProfile == service.HTTPUpstreamProfileOpenAIPlugin {
+		isolation = config.ConnectionPoolIsolationAccountProxy
+	}
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, err
@@ -545,7 +594,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
 	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
-	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
+	cacheKey := "tls:" + profileCacheKey(buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault), upstreamProfile)
 	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls:" + profile.TransportKey()
 
 	now := time.Now()
@@ -559,7 +608,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 			atomic.AddInt64(&entry.inFlight, 1)
 		}
 		s.mu.RUnlock()
-		slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "cache_key", cacheKey)
+		slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "client_id", entry.diagnosticID)
 		return entry, nil
 	}
 	s.mu.RUnlock()
@@ -573,12 +622,12 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 				atomic.AddInt64(&entry.inFlight, 1)
 			}
 			s.mu.Unlock()
-			slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "cache_key", cacheKey)
+			slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "client_id", entry.diagnosticID)
 			return entry, nil
 		}
 		slog.Debug("tls_fingerprint_evicting_stale_client",
 			"account_id", accountID,
-			"cache_key", cacheKey,
+			"client_id", entry.diagnosticID,
 			"proxy_changed", entry.proxyKey != proxyKey,
 			"pool_changed", entry.poolKey != poolKey)
 		s.removeClientLocked(cacheKey, entry)
@@ -596,7 +645,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	// 创建带 TLS 指纹的 Transport
-	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "cache_key", cacheKey, "proxy", proxyKey)
+	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "proxy_configured", parsedProxy != nil)
 	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
 	if err != nil {
 		s.mu.Unlock()
@@ -616,10 +665,12 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 		client.CheckRedirect = s.redirectChecker
 	}
 
+	s.nextClientID++
 	entry := &upstreamClientEntry{
-		client:   client,
-		proxyKey: proxyKey,
-		poolKey:  poolKey,
+		diagnosticID: s.nextClientID,
+		client:       client,
+		proxyKey:     proxyKey,
+		poolKey:      poolKey,
 	}
 	atomic.StoreInt64(&entry.lastUsed, nowUnix)
 	if markInFlight {
@@ -703,6 +754,9 @@ func (s *httpUpstreamService) getOrCreateClient(proxyURL string, accountID int64
 func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
 	// 获取隔离模式
 	isolation := s.getIsolationMode()
+	if profile == service.HTTPUpstreamProfileOpenAIPlugin {
+		isolation = config.ConnectionPoolIsolationAccountProxy
+	}
 	// 标准化代理 URL 并解析
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
@@ -713,7 +767,7 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, profile)
 	// 构建缓存键（根据隔离策略不同）
-	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode)
+	cacheKey := profileCacheKey(buildCacheKey(isolation, proxyKey, accountID, protocolMode), profile)
 	// 构建连接池配置键（用于检测配置变更）
 	poolKey := buildPoolKey(settings, protocolMode)
 
@@ -767,7 +821,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
+	s.nextClientID++
 	entry := &upstreamClientEntry{
+		diagnosticID: s.nextClientID,
 		client:       client,
 		proxyKey:     proxyKey,
 		poolKey:      poolKey,
@@ -957,7 +1013,7 @@ func (s *httpUpstreamService) resolvePoolSettings(isolation string, accountConcu
 
 func (s *httpUpstreamService) applyProfilePoolSettings(settings poolSettings, profile service.HTTPUpstreamProfile) poolSettings {
 	switch profile {
-	case service.HTTPUpstreamProfileOpenAI:
+	case service.HTTPUpstreamProfileOpenAI, service.HTTPUpstreamProfileOpenAIPlugin:
 		settings.responseHeaderTimeout = 0
 		if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIResponseHeaderTimeout > 0 {
 			settings.responseHeaderTimeout = time.Duration(s.cfg.Gateway.OpenAIResponseHeaderTimeout) * time.Second
@@ -1021,6 +1077,15 @@ func buildCacheKey(isolation, proxyKey string, accountID int64, protocolMode str
 	return base
 }
 
+// Business and background requests can use different timeout policies. They
+// must not retire each other's pool when account, proxy and TLS identity match.
+func profileCacheKey(base string, profile service.HTTPUpstreamProfile) string {
+	if profile == service.HTTPUpstreamProfileDefault {
+		return base
+	}
+	return base + "|profile:" + string(profile)
+}
+
 func (s *httpUpstreamService) resolveOpenAIHTTP2Settings() openAIHTTP2Settings {
 	settings := openAIHTTP2Settings{
 		enabled:                   false,
@@ -1051,7 +1116,7 @@ func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamPr
 	if profile == service.HTTPUpstreamProfileGrok {
 		return upstreamProtocolModeGrok
 	}
-	if profile != service.HTTPUpstreamProfileOpenAI {
+	if profile != service.HTTPUpstreamProfileOpenAI && profile != service.HTTPUpstreamProfileOpenAIPlugin {
 		return upstreamProtocolModeDefault
 	}
 	settings := s.resolveOpenAIHTTP2Settings()
@@ -1156,7 +1221,7 @@ func isUpstreamTimeoutError(err error) bool {
 }
 
 func (s *httpUpstreamService) recordOpenAIHTTP2Failure(profile service.HTTPUpstreamProfile, protocolMode, proxyKey string, err error) {
-	if profile != service.HTTPUpstreamProfileOpenAI || protocolMode != upstreamProtocolModeOpenAIH2 {
+	if (profile != service.HTTPUpstreamProfileOpenAI && profile != service.HTTPUpstreamProfileOpenAIPlugin) || protocolMode != upstreamProtocolModeOpenAIH2 {
 		return
 	}
 	settings := s.resolveOpenAIHTTP2Settings()
@@ -1170,13 +1235,13 @@ func (s *httpUpstreamService) recordOpenAIHTTP2Failure(profile service.HTTPUpstr
 	activated, until := state.recordFailure(time.Now(), settings.fallbackErrorThreshold, settings.fallbackWindow, settings.fallbackTTL)
 	if activated {
 		slog.Warn("openai_http2_proxy_fallback_activated",
-			"proxy", proxyKey,
+			"proxy_configured", true,
 			"fallback_until", until.Format(time.RFC3339))
 	}
 }
 
 func (s *httpUpstreamService) recordOpenAIHTTP2Success(profile service.HTTPUpstreamProfile, protocolMode, proxyKey string) {
-	if profile != service.HTTPUpstreamProfileOpenAI || protocolMode != upstreamProtocolModeOpenAIH2 {
+	if (profile != service.HTTPUpstreamProfileOpenAI && profile != service.HTTPUpstreamProfileOpenAIPlugin) || protocolMode != upstreamProtocolModeOpenAIH2 {
 		return
 	}
 	if !isHTTPProxyKey(proxyKey) {

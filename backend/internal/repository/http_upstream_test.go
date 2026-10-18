@@ -666,6 +666,60 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileTLSFingerprintDoesNotInheritGeneric
 	require.Equal(s.T(), time.Duration(0), transport.ResponseHeaderTimeout, "OpenAI TLS path should not inherit generic header timeout")
 }
 
+func (s *HTTPUpstreamSuite) TestPluginHostProfileEnforcesAccountProxyIsolation() {
+	s.cfg.Gateway = config.GatewayConfig{
+		ConnectionPoolIsolation:     config.ConnectionPoolIsolationProxy,
+		ResponseHeaderTimeout:       600,
+		OpenAIResponseHeaderTimeout: 1800,
+		OpenAIHTTP2:                 config.GatewayOpenAIHTTP2Config{Enabled: true},
+	}
+	for _, tlsEnabled := range []bool{false, true} {
+		svc := s.newService()
+		entry := func(proxy string, account int64) *upstreamClientEntry {
+			var result *upstreamClientEntry
+			var err error
+			if tlsEnabled {
+				result, err = svc.getClientEntryWithTLS(proxy, account, 3,
+					&tlsfingerprint.Profile{Name: "fixture"}, service.HTTPUpstreamProfileOpenAIPlugin, false, false)
+			} else {
+				result, err = svc.getClientEntry(proxy, account, 3, service.HTTPUpstreamProfileOpenAIPlugin, false, false)
+			}
+			require.NoError(s.T(), err)
+			return result
+		}
+		a := entry("socks5://127.0.0.1:19001", 41)
+		b := entry("socks5://127.0.0.1:19002", 41)
+		c := entry("socks5://127.0.0.1:19001", 42)
+		require.NotSame(s.T(), a, b, "proxy changes must not share connections")
+		require.NotSame(s.T(), a, c, "accounts must not share plugin connections")
+		require.Same(s.T(), a, entry("socks5://127.0.0.1:19001", 41))
+		transport, ok := a.client.Transport.(*http.Transport)
+		require.True(s.T(), ok)
+		require.Equal(s.T(), 1800*time.Second, transport.ResponseHeaderTimeout)
+	}
+}
+
+func (s *HTTPUpstreamSuite) TestPluginHostProfilePreservesHTTP2FallbackPolicy() {
+	s.cfg.Gateway = config.GatewayConfig{
+		OpenAIHTTP2: config.GatewayOpenAIHTTP2Config{
+			Enabled: true, AllowProxyFallbackToHTTP1: true,
+			FallbackErrorThreshold: 1, FallbackWindowSeconds: 60, FallbackTTLSeconds: 600,
+		},
+	}
+	svc := s.newService()
+	proxy := "http://127.0.0.1:19001"
+	profile := service.HTTPUpstreamProfileOpenAIPlugin
+	entry, err := svc.getClientEntry(proxy, 41, 3, profile, false, false)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), upstreamProtocolModeOpenAIH2, entry.protocolMode)
+	svc.recordOpenAIHTTP2Failure(profile, entry.protocolMode, proxy, errors.New("http2: protocol error"))
+	require.True(s.T(), svc.isOpenAIHTTP2FallbackActive(proxy))
+	fallback, err := svc.getClientEntry(proxy, 41, 3, profile, false, false)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), upstreamProtocolModeOpenAIH1Fallback, fallback.protocolMode)
+	require.Equal(s.T(), entry.proxyKey, fallback.proxyKey, "protocol fallback must retain the exact proxy")
+}
+
 func (s *HTTPUpstreamSuite) TestOpenAIProfileHTTP2DisabledUsesHTTP1Transport() {
 	s.cfg.Gateway = config.GatewayConfig{
 		OpenAIHTTP2: config.GatewayOpenAIHTTP2Config{Enabled: false},

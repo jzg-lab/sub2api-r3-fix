@@ -1083,14 +1083,14 @@ func parseUsageAndAccumulate(
 		cachedResult = usageResult.Get("prompt_tokens_details.cached_tokens")
 	}
 	imageTokens := usageResult.Get("output_tokens_details.image_tokens").Int()
-	if imageTokens == 0 {
+	if imageTokens <= 0 {
 		imageTokens = usageResult.Get("completion_tokens_details.image_tokens").Int()
 	}
 	imageInputTokens := usageResult.Get("input_tokens_details.image_tokens").Int()
 	if imageInputTokens <= 0 {
 		imageInputTokens = usageResult.Get("prompt_tokens_details.image_tokens").Int()
 	}
-	// 与 HTTP Responses 同口径：usage 缺图片计数时由托管工具 tool_usage.image_gen 回填。
+	// Hosted image tools fill missing counters, but never replace usage totals.
 	imageGen := gjson.GetBytes(message, "response.tool_usage.image_gen")
 	if !imageGen.Exists() {
 		imageGen = gjson.GetBytes(message, "tool_usage.image_gen")
@@ -1147,7 +1147,7 @@ func parseUsageAndAccumulate(
 func relayUsageHasTokens(usage Usage) bool {
 	return usage.InputTokens > 0 || usage.OutputTokens > 0 ||
 		usage.CacheCreationInputTokens > 0 || usage.CacheReadInputTokens > 0 ||
-		usage.ImageInputTokens > 0 || usage.ImageOutputTokens > 0
+		usage.ReasoningTokens > 0 || usage.ImageInputTokens > 0 || usage.ImageOutputTokens > 0
 }
 
 func mergeRelayUsageNonZero(dst *Usage, src Usage) {
@@ -1185,6 +1185,7 @@ func finalizeRelayTurnUsage(state *relayState) Usage {
 	state.usage.InputTokens += turnUsage.InputTokens
 	state.usage.ImageInputTokens += turnUsage.ImageInputTokens
 	state.usage.OutputTokens += turnUsage.OutputTokens
+	state.usage.ReasoningTokens += turnUsage.ReasoningTokens
 	state.usage.CacheCreationInputTokens += turnUsage.CacheCreationInputTokens
 	state.usage.CacheReadInputTokens += turnUsage.CacheReadInputTokens
 	state.usage.ImageOutputTokens += turnUsage.ImageOutputTokens

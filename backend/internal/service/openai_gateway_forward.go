@@ -525,6 +525,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if codexResult.Modified {
 			markDecodedModified()
 		}
+		// Compact skips session rewriting, but must still reject client environment
+		// telemetry through the same OAuth boundary as ordinary Responses.
+		if isCompactRequest && sanitizeCodexClientEnvironmentMap(decoded, codexAccountIdentitySource(c, account)) {
+			markDecodedModified()
+		}
 		// 带真实 device_id 时补齐 client_metadata 安装标识，与真实 Codex 对齐（compact 形态不同，跳过）。
 		// machine 模式跳过：该 helper 是加法式（会创建 client_metadata / 新增 installation 键），
 		// 违反 machine "只改不增"，且透传链路无此步骤，两链路同输入会输出不同；machine 下
@@ -553,7 +558,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if c != nil && c.Request != nil {
 				clientHeaders = c.Request.Header
 			}
-			fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+			fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
 			// machine：按本链路终态出站 UA（与 buildUpstreamRequest 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
 			stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
 			if fpIDs != nil {

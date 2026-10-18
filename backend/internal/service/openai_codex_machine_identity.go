@@ -3,7 +3,9 @@ package service
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -11,6 +13,15 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func codexClientSessionSeed(accountSeed string, apiKeyID int64) string {
+	if apiKeyID <= 0 {
+		return accountSeed
+	}
+	mac := hmac.New(sha256.New, []byte(accountSeed))
+	_, _ = mac.Write([]byte("sub2api:codex-client-session:v1:" + strconv.FormatInt(apiKeyID, 10)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // 本文件实现 codexFingerprintMachine（"单机多窗口"）模式的假名函数与三个 sink 的改写规则。
 // 设计依据：docs/plan/2026-08-19-Codex-OAuth共享账号-machine模式实施设计.md §3–§5。
@@ -86,8 +97,8 @@ func (ids *codexFingerprintIDs) machinePseudonym(id string) string {
 }
 
 // codexMachineWindowPseudonym 窗口 ID 改写规则 W。x-codex-window-id 形态为
-// "{thread_id}:{n}"（codex-rs client.rs X_CODEX_WINDOW_ID_HEADER）：前段假名化、后段保留；
-// 整体是 UUID（无冒号）时直接假名化；其他形态原样返回。
+// "{thread_id}:{n}"（codex-rs client.rs X_CODEX_WINDOW_ID_HEADER）：前段假名化、数字计数保留；
+// 其他非空形态整体假名化，防止未知格式携带下游主机名或环境文本。
 func codexMachineWindowPseudonym(key []byte, value string) string {
 	return codexMachineWindowPseudonymWith(func(id string) string { return codexMachinePseudonym(key, id) }, value)
 }
@@ -104,15 +115,15 @@ func codexMachineWindowPseudonymWith(pseudonym func(string) string, value string
 	}
 	if idx := strings.LastIndex(raw, ":"); idx >= 0 {
 		head := raw[:idx]
+		counter := raw[idx+1:]
 		if _, err := uuid.Parse(head); err == nil {
-			return pseudonym(head) + raw[idx:]
+			if n, err := strconv.ParseUint(counter, 10, 64); err == nil &&
+				strconv.FormatUint(n, 10) == counter {
+				return pseudonym(head) + ":" + counter
+			}
 		}
-		return value
 	}
-	if _, err := uuid.Parse(raw); err == nil {
-		return pseudonym(raw)
-	}
-	return value
+	return pseudonym(raw)
 }
 
 // codexMachineSandboxTagFromUA 由出站 User-Agent 的 OS 段推导账号 OS 对应的平台沙箱标签。
@@ -221,7 +232,10 @@ func applyCodexMachineHeaders(h http.Header, ids *codexFingerprintIDs) {
 // codexMachineClientMetadataPseudonymKeys body sink 中按 P 改写的 client_metadata 键。
 var codexMachineClientMetadataPseudonymKeys = [...]string{
 	"session_id",
+	"session-id",
 	"thread_id",
+	"thread-id",
+	"x-client-request-id",
 	"x-codex-parent-thread-id",
 }
 
@@ -241,16 +255,20 @@ func applyCodexMachineClientMetadata(existing map[string]any, ids *codexFingerpr
 	}
 	// 真实 Codex 的 client_metadata 恒含 installation（responses_metadata.rs:281），
 	// 但仍按只改不增处理：下游带了才改。
-	if v, ok := existing["x-codex-installation-id"].(string); ok && strings.TrimSpace(v) != "" {
-		set("x-codex-installation-id", ids.installationID)
+	for _, key := range []string{"installation_id", "x-codex-installation-id"} {
+		if v, ok := existing[key].(string); ok && strings.TrimSpace(v) != "" {
+			set(key, ids.installationID)
+		}
 	}
 	for _, key := range codexMachineClientMetadataPseudonymKeys {
 		if v, ok := existing[key].(string); ok && strings.TrimSpace(v) != "" {
 			set(key, ids.machinePseudonym(v))
 		}
 	}
-	if v, ok := existing["x-codex-window-id"].(string); ok && strings.TrimSpace(v) != "" {
-		set("x-codex-window-id", ids.machineWindowPseudonym(v))
+	for _, key := range []string{"window_id", "x-codex-window-id"} {
+		if v, ok := existing[key].(string); ok && strings.TrimSpace(v) != "" {
+			set(key, ids.machineWindowPseudonym(v))
+		}
 	}
 	if raw, ok := existing["x-codex-turn-metadata"].(string); ok && strings.TrimSpace(raw) != "" {
 		if rebuilt, changed := rewriteCodexMachineTurnMetadata(raw, ids); changed {

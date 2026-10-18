@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -170,29 +172,81 @@ func responsesRequest(method, rawURL string) bool {
 		(strings.HasSuffix(u.Path, "/responses") || strings.HasSuffix(u.Path, "/responses/compact"))
 }
 
+func compactRequest(method, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && strings.EqualFold(method, "POST") && strings.HasSuffix(u.Path, "/responses/compact")
+}
+
 // The observer is bounded per SSE event, not per response, and never retains
 // model text outside transient parsing buffers. Transport delivery is unchanged.
 type responseObserver struct {
-	sse       bool
-	line      []byte
-	data      []byte
-	eventType string
-	invalid   bool
-	completed bool
-	failed    bool
-	bareError bool
-	category  string
-	onEvent   func(string, []byte)
+	sse             bool
+	sniffSSE        bool
+	inferredSSE     bool
+	compact         bool
+	line            []byte
+	data            []byte
+	eventType       string
+	invalid         bool
+	invalidCause    responseInvalidCause
+	completed       bool
+	failed          bool
+	bareError       bool
+	errorStatus     int
+	bareErrorStatus int
+	quotaUntil      time.Time
+	bareQuotaUntil  time.Time
+	category        string
+	onEvent         func(string, []byte)
+}
+
+type responseInvalidCause uint8
+
+const (
+	responseInvalidUnknown responseInvalidCause = iota
+	responseInvalidBodyLimit
+	responseInvalidLineLimit
+	responseInvalidEventLimit
+	responseInvalidJSONSyntax
+	responseInvalidJSONSchema
+)
+
+func (o *responseObserver) invalidate(cause responseInvalidCause) {
+	if !o.invalid {
+		o.invalidCause = cause
+	}
+	o.invalid = true
+	o.line, o.data = nil, nil
 }
 
 func (o *responseObserver) write(chunk []byte) {
 	if o.invalid {
 		return
 	}
+	// Decide from a bounded physical-line prefix, before JSON string contents
+	// could be confused with SSE fields. Forwarding retains the original bytes.
+	for o.sniffSSE && len(chunk) > 0 {
+		o.data = append(o.data, chunk[0])
+		chunk = chunk[1:]
+		prefix := bytes.TrimLeft(o.data, "\r\n")
+		possible := len(prefix) == 0
+		for _, field := range []string{"data:", "event:", ":", "id:", "retry:"} {
+			if bytes.HasPrefix(prefix, []byte(field)) {
+				o.sse, o.inferredSSE, o.sniffSSE = true, true, false
+				buffered := o.data
+				o.data = nil
+				o.write(buffered)
+				break
+			}
+			possible = possible || bytes.HasPrefix([]byte(field), prefix)
+		}
+		if !possible || len(o.data) >= 64 {
+			o.sniffSSE = false
+		}
+	}
 	if !o.sse {
 		if len(o.data)+len(chunk) > 2<<20 {
-			o.invalid = true
-			o.data = nil
+			o.invalidate(responseInvalidBodyLimit)
 			return
 		}
 		o.data = append(o.data, chunk...)
@@ -204,8 +258,7 @@ func (o *responseObserver) write(chunk []byte) {
 			n = len(chunk)
 		}
 		if len(o.line)+n > 2<<20 {
-			o.invalid = true
-			o.line, o.data = nil, nil
+			o.invalidate(responseInvalidLineLimit)
 			return
 		}
 		o.line = append(o.line, chunk[:n]...)
@@ -217,14 +270,16 @@ func (o *responseObserver) write(chunk []byte) {
 		line := bytes.TrimSuffix(o.line, []byte{'\r'})
 		if len(line) == 0 {
 			o.parse()
+			if o.invalid {
+				return
+			}
 			o.data = o.data[:0]
 			o.eventType = ""
 		} else if bytes.HasPrefix(line, []byte("event:")) {
 			o.eventType = strings.TrimSpace(string(line[6:]))
 		} else if bytes.HasPrefix(line, []byte("data:")) {
 			if len(o.data)+len(line) > 2<<20 {
-				o.invalid = true
-				o.line, o.data = nil, nil
+				o.invalidate(responseInvalidEventLimit)
 				return
 			}
 			o.data = append(o.data, bytes.TrimPrefix(line[5:], []byte(" "))...)
@@ -235,6 +290,9 @@ func (o *responseObserver) write(chunk []byte) {
 }
 
 func (o *responseObserver) parse() {
+	if o.invalid {
+		return
+	}
 	raw := bytes.TrimSpace(o.data)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("[DONE]")) {
 		return
@@ -247,10 +305,24 @@ func (o *responseObserver) parse() {
 			Status string          `json:"status"`
 			Error  json.RawMessage `json:"error"`
 		} `json:"response"`
-		Error json.RawMessage `json:"error"`
+		Error  json.RawMessage `json:"error"`
+		Output []struct {
+			Type             string `json:"type"`
+			Status           string `json:"status"`
+			EncryptedContent string `json:"encrypted_content"`
+		} `json:"output"`
 	}
-	if json.Unmarshal(raw, &event) != nil {
-		o.invalid = true
+	if err := json.Unmarshal(raw, &event); err != nil {
+		cause := responseInvalidUnknown
+		var syntax *json.SyntaxError
+		var schema *json.UnmarshalTypeError
+		switch {
+		case errors.As(err, &syntax):
+			cause = responseInvalidJSONSyntax
+		case errors.As(err, &schema):
+			cause = responseInvalidJSONSchema
+		}
+		o.invalidate(cause)
 		return
 	}
 	eventType := strings.TrimSpace(event.Type)
@@ -260,11 +332,26 @@ func (o *responseObserver) parse() {
 	if category := admissionEventCategory(raw, eventType); category != "" {
 		o.category = category
 	}
+	errorRaw := event.Error
+	if event.Response != nil && len(event.Response.Error) > 0 && string(event.Response.Error) != "null" {
+		errorRaw = event.Response.Error
+	}
+	if (len(errorRaw) == 0 || string(errorRaw) == "null") && eventType == "error" {
+		errorRaw = raw
+	}
+	var quotaUntil time.Time
+	if len(errorRaw) > 0 && string(errorRaw) != "null" {
+		quotaUntil = probeQuotaErrorDeadline(errorRaw, time.Now())
+	}
 	switch eventType {
 	case "error":
 		o.bareError = true
+		o.bareErrorStatus = strongerFailureStatus(o.bareErrorStatus, responseErrorStatus(raw))
+		o.bareQuotaUntil = maxTime(o.bareQuotaUntil, quotaUntil)
 	case "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		o.failed = true
+		o.errorStatus = strongerFailureStatus(o.errorStatus, responseErrorStatus(raw))
+		o.quotaUntil = maxTime(o.quotaUntil, quotaUntil)
 	case "response.completed", "response.done":
 		o.completed = event.Response != nil && (event.Response.Status == "" || event.Response.Status == "completed") &&
 			(len(event.Response.Error) == 0 || string(event.Response.Error) == "null") &&
@@ -273,14 +360,135 @@ func (o *responseObserver) parse() {
 			// Match the host: a later successful terminal can supersede a
 			// pending bare error, never an authoritative failed terminal.
 			o.bareError = false
+			o.bareErrorStatus = 0
+			o.bareQuotaUntil = time.Time{}
+		} else if event.Response != nil && (event.Response.Status == "failed" ||
+			event.Response.Status == "incomplete" || event.Response.Status == "cancelled" ||
+			event.Response.Status == "canceled" ||
+			len(event.Response.Error) > 0 && string(event.Response.Error) != "null") ||
+			len(event.Error) > 0 && string(event.Error) != "null" {
+			o.failed = true
+			o.errorStatus = strongerFailureStatus(o.errorStatus, responseErrorStatus(raw))
+			o.quotaUntil = maxTime(o.quotaUntil, quotaUntil)
 		}
 	}
-	if !o.sse && event.Object == "response" && event.Status == "completed" {
+	if o.compact {
+		// Compact uses a JSON response.compaction object, not an SSE terminal.
+		// Do not allow this shape to certify an ordinary Responses request.
+		o.completed = false
+		if !o.sse && event.Object == "response.compaction" &&
+			(event.Status == "" || event.Status == "completed") &&
+			(len(event.Error) == 0 || string(event.Error) == "null") {
+			compactions := 0
+			valid := true
+			for _, item := range event.Output {
+				if item.Type == "compaction" {
+					compactions++
+					valid = valid && strings.TrimSpace(item.EncryptedContent) != "" &&
+						(item.Status == "" || item.Status == "completed")
+				}
+			}
+			o.completed = valid && compactions > 0
+		}
+	} else if !o.sse && event.Object == "response" && event.Status == "completed" {
 		o.completed = len(event.Error) == 0 || string(event.Error) == "null"
+	}
+	if !o.sse && (event.Status == "failed" || event.Status == "incomplete" ||
+		event.Status == "cancelled" || event.Status == "canceled" ||
+		len(event.Error) > 0 && string(event.Error) != "null") {
+		o.failed = true
+		o.errorStatus = strongerFailureStatus(o.errorStatus, responseErrorStatus(raw))
+		o.quotaUntil = maxTime(o.quotaUntil, quotaUntil)
 	}
 	if o.onEvent != nil {
 		o.onEvent(eventType, raw)
 	}
+}
+
+// A received terminal rejection is not an ambiguous dispatched operation. Do
+// not infer retry eligibility or authentication state from error prose.
+func (o *responseObserver) knownFailure() bool {
+	return !o.invalid && (o.failed || o.bareError)
+}
+
+func (o *responseObserver) failureStatus() int {
+	if !o.knownFailure() {
+		return 0
+	}
+	status := o.errorStatus
+	if o.bareError {
+		status = strongerFailureStatus(status, o.bareErrorStatus)
+	}
+	return status
+}
+
+func (o *responseObserver) failureRetryDeadline() time.Time {
+	if o.failureStatus() != http.StatusTooManyRequests {
+		return time.Time{}
+	}
+	if o.bareError {
+		return maxTime(o.quotaUntil, o.bareQuotaUntil)
+	}
+	return o.quotaUntil
+}
+
+func strongerFailureStatus(current, next int) int {
+	if current == http.StatusUnauthorized || current == http.StatusForbidden {
+		return current
+	}
+	if next == http.StatusUnauthorized || next == http.StatusForbidden {
+		return next
+	}
+	if current == http.StatusTooManyRequests {
+		return current
+	}
+	if next != 0 {
+		return next
+	}
+	return current
+}
+
+func responseErrorStatus(raw []byte) int {
+	type failure struct {
+		Code string `json:"code"`
+		Type string `json:"type"`
+	}
+	var event struct {
+		Code     string   `json:"code"`
+		Type     string   `json:"type"`
+		Error    *failure `json:"error"`
+		Response *struct {
+			Error *failure `json:"error"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(raw, &event) != nil {
+		return 0
+	}
+	fields := event.Error
+	if event.Response != nil && event.Response.Error != nil {
+		fields = event.Response.Error
+	}
+	if fields == nil {
+		fields = &failure{Code: event.Code, Type: event.Type}
+	}
+	status := 0
+	for _, value := range []string{fields.Code, fields.Type} {
+		if isProbeQuotaError(value) {
+			status = strongerFailureStatus(status, http.StatusTooManyRequests)
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "invalid_api_key", "api_key_disabled", "unauthorized", "authentication_error",
+			"authentication_failed", "unauthorized_error", "invalid_token", "token_expired",
+			"token_revoked", "token_invalidated", "session_expired", "refresh_token_reused":
+			status = strongerFailureStatus(status, http.StatusUnauthorized)
+		case "permission_error", "permission_denied", "forbidden":
+			status = strongerFailureStatus(status, http.StatusForbidden)
+		case "server_overloaded", "overloaded_error", "service_unavailable":
+			status = strongerFailureStatus(status, http.StatusServiceUnavailable)
+		}
+	}
+	return status
 }
 
 func forEachResponseSSE(raw []byte, visit func(string, []byte)) {
@@ -295,4 +503,40 @@ func (o *responseObserver) finish() bool {
 		o.parse()
 	}
 	return o.completed && !o.failed && !o.bareError && !o.invalid && len(o.line) == 0 && (len(o.data) == 0 || !o.sse)
+}
+
+func (o *responseObserver) settledSSE() bool {
+	return o.sse && !o.invalid && len(o.line) == 0 && len(o.data) == 0 &&
+		(o.failed || o.completed && !o.bareError)
+}
+
+// Finite diagnostics only: never retain response text, IDs or error messages.
+func (o *responseObserver) incompleteReason() string {
+	switch {
+	case o.invalid:
+		switch o.invalidCause {
+		case responseInvalidBodyLimit:
+			return "json_body_limit"
+		case responseInvalidLineLimit:
+			return "sse_line_limit"
+		case responseInvalidEventLimit:
+			return "sse_event_limit"
+		case responseInvalidJSONSyntax:
+			return "json_syntax"
+		case responseInvalidJSONSchema:
+			return "json_schema"
+		default:
+			return "invalid_event"
+		}
+	case o.failed || o.bareError:
+		return "failed_event"
+	case len(o.line) != 0 || o.sse && len(o.data) != 0:
+		return "partial_event"
+	case o.completed:
+		return "delivery_interrupted"
+	case !o.sse:
+		return "unrecognized_json"
+	default:
+		return "missing_terminal"
+	}
 }

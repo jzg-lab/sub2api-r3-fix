@@ -90,12 +90,15 @@ func TestProxyMaintenancePostgresRefreshesAllConsumers(t *testing.T) {
 			var afterReplay time.Time
 			require.NoError(t, db.QueryRow("SELECT updated_at FROM accounts WHERE id=101").Scan(&afterReplay))
 			require.Equal(t, accountAfter, afterReplay)
-			require.ErrorIs(t, repo.Delete(t.Context(), 7), service.ErrOpenAIOAuthProxyBindingProtected)
+			// Admin deletion checks live references; historical OAuth use does not lock the route.
+			count, err := repo.CountAccountsByProxyID(t.Context(), 7)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), count)
 		})
 	}
 }
 
-func TestProxyMaintenancePostgresProtectedRoutesAndHistory(t *testing.T) {
+func TestProxyMaintenancePostgresHistoricalRoutesRemainEditable(t *testing.T) {
 	for _, change := range []string{"protocol", "host", "port", "username", "password"} {
 		t.Run(change, func(t *testing.T) {
 			db, repo := newProxyMaintenancePostgres(t)
@@ -103,7 +106,9 @@ func TestProxyMaintenancePostgresProtectedRoutesAndHistory(t *testing.T) {
 			require.NoError(t, err)
 			current, err := repo.GetByID(t.Context(), 7)
 			require.NoError(t, err)
-			before := proxyExpirySnapshot(t, db)
+			const historyQuery = "SELECT jsonb_agg(to_jsonb(a) ORDER BY id)::text FROM accounts a"
+			var before, after string
+			require.NoError(t, db.QueryRow(historyQuery).Scan(&before))
 			switch change {
 			case "protocol":
 				current.Protocol = "http"
@@ -116,9 +121,18 @@ func TestProxyMaintenancePostgresProtectedRoutesAndHistory(t *testing.T) {
 			case "password":
 				current.Password = "changed-fixture"
 			}
-			require.ErrorIs(t, repo.Update(t.Context(), current), service.ErrOpenAIOAuthProxyBindingProtected)
-			require.ErrorIs(t, repo.Delete(t.Context(), 7), service.ErrOpenAIOAuthProxyBindingProtected)
-			require.Equal(t, before, proxyExpirySnapshot(t, db))
+			require.NoError(t, repo.Update(t.Context(), current))
+			got, err := repo.GetByID(t.Context(), 7)
+			require.NoError(t, err)
+			require.Equal(t, proxyProbeIdentityFromService(current), proxyProbeIdentityFromService(got))
+			count, err := repo.CountAccountsByProxyID(t.Context(), 7)
+			require.NoError(t, err)
+			require.Zero(t, count)
+			require.NoError(t, repo.Delete(t.Context(), 7))
+			_, err = repo.GetByID(t.Context(), 7)
+			require.ErrorIs(t, err, service.ErrProxyNotFound)
+			require.NoError(t, db.QueryRow(historyQuery).Scan(&after))
+			require.JSONEq(t, before, after, "proxy maintenance must preserve historical account records")
 			require.NoError(t, repo.Delete(t.Context(), 8), "unreferenced proxy remains deletable")
 		})
 	}

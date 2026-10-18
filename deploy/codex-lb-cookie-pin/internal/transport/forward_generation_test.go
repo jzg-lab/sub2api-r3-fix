@@ -183,13 +183,13 @@ func TestProxyClientReusesConnectionsAndBoundsCache(t *testing.T) {
 	}))
 	defer proxy.Close()
 	srv := stoppedProbeServer(t, cookiestore.New())
-	first, err := srv.clientFor(proxy.URL)
+	first, err := srv.clientFor(proxy.URL, 42, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.CloseIdleConnections()
 	for i := 0; i < 3; i++ {
-		client, err := srv.clientFor(proxy.URL)
+		client, err := srv.clientFor(proxy.URL, 42, 4)
 		if err != nil || client != first {
 			t.Fatal("proxy client was not reused")
 		}
@@ -208,7 +208,7 @@ func TestProxyClientReusesConnectionsAndBoundsCache(t *testing.T) {
 	}
 	for i := 0; i < 40; i++ {
 		endpoint := "http://proxy-" + time.Unix(int64(i), 0).Format("150405") + ".invalid:8888"
-		if _, err := srv.clientFor(endpoint); err != nil {
+		if _, err := srv.clientFor(endpoint, 42, 4); err != nil {
 			t.Fatal(err)
 		}
 	}

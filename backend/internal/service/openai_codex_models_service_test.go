@@ -81,13 +81,25 @@ func (r *countingCodexModelsAccountRepo) ListModelAvailabilityCandidates(_ conte
 
 type splitCodexModelsAccountRepo struct {
 	AccountRepository
-	schedulable map[int64][]Account
-	catalog     map[int64][]Account
-	all         map[int64][]Account
+	schedulable       map[int64][]Account
+	catalog           map[int64][]Account
+	all               map[int64][]Account
+	globalSchedulable []Account
+	globalCatalog     []Account
 }
 
 func (r splitCodexModelsAccountRepo) ListSchedulableByGroupID(_ context.Context, groupID int64) ([]Account, error) {
 	return append([]Account(nil), r.schedulable[groupID]...), nil
+}
+
+func (r splitCodexModelsAccountRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]Account, error) {
+	var accounts []Account
+	for _, account := range r.globalSchedulable {
+		if account.Platform == platform {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
 }
 
 func (r splitCodexModelsAccountRepo) ListByGroup(_ context.Context, groupID int64) ([]Account, error) {
@@ -98,9 +110,20 @@ func (r splitCodexModelsAccountRepo) ListByGroup(_ context.Context, groupID int6
 	return append([]Account(nil), accounts...), nil
 }
 
-func (r splitCodexModelsAccountRepo) ListModelAvailabilityCandidates(_ context.Context, groupID *int64, _ []string, _ bool) ([]Account, error) {
+func (r splitCodexModelsAccountRepo) ListModelAvailabilityCandidates(_ context.Context, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error) {
 	if groupID == nil {
-		return nil, nil
+		var accounts []Account
+		if includeGrouped {
+			for _, account := range r.globalCatalog {
+				for _, platform := range platforms {
+					if account.Platform == platform {
+						accounts = append(accounts, account)
+						break
+					}
+				}
+			}
+		}
+		return accounts, nil
 	}
 	return append([]Account(nil), r.catalog[*groupID]...), nil
 }
@@ -374,6 +397,10 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 	require.NotNil(t, astra.DefaultReasoningLevel)
 	require.Equal(t, "medium", *astra.DefaultReasoningLevel)
 	require.Equal(t, []string{"low", "medium", "high", "xhigh", "max", "ultra"}, effortsFromConfiguredCodexLevels(astra.SupportedReasoningLevels))
+	require.NotNil(t, astra.MultiAgentReasoningEffort)
+	require.Equal(t, "xhigh", *astra.MultiAgentReasoningEffort)
+	require.Equal(t, "v2", astra.MultiAgentVersion)
+	require.Contains(t, astra.ModelMessages.InstructionsTemplate, "You are Codex, an agent based on GPT-6")
 	require.NotContains(t, astra.SupportedReasoningLevels, configuredCodexReasoningLevel{Effort: "none"})
 	require.NotContains(t, astra.SupportedReasoningLevels, configuredCodexReasoningLevel{Effort: "minimal"})
 	require.Len(t, astra.ServiceTiers, 1)
@@ -386,6 +413,7 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 	gpt6 := newConfiguredCodexModelDescriptor("gpt-6")
 	require.Equal(t, "GPT-6 (Astra)", gpt6.DisplayName)
 	require.Equal(t, []string{"low", "medium", "high", "xhigh", "max", "ultra"}, effortsFromConfiguredCodexLevels(gpt6.SupportedReasoningLevels))
+	require.Equal(t, astra.MultiAgentReasoningEffort, gpt6.MultiAgentReasoningEffort)
 	require.Equal(t, int64(1_050_000), gpt6.ContextWindow)
 
 	for _, modelID := range []string{"gpt-6-sol", "gpt-6-luna"} {
@@ -395,6 +423,8 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 		require.Len(t, model.ServiceTiers, 1, modelID)
 		require.Equal(t, "priority", model.ServiceTiers[0].ID, modelID)
 		require.True(t, isOpenAICodexImageInputModel(modelID), modelID)
+		require.Nil(t, model.MultiAgentReasoningEffort, modelID)
+		require.Nil(t, model.MultiAgentVersion, modelID)
 	}
 
 	gpt61Sol := newConfiguredCodexModelDescriptor("gpt-6.1-sol")
@@ -1102,6 +1132,7 @@ func TestMergeGroupConfiguredCodexModelsInjectsCurrentGroupAliases(t *testing.T)
 					Credentials: map[string]any{
 						"model_mapping": map[string]any{
 							"deepseek-4-pro": "deepseek-v4-pro",
+							"gpt-*":          "gpt-*",
 						},
 					},
 				},
@@ -1141,6 +1172,148 @@ func TestMergeGroupConfiguredCodexModelsInjectsCurrentGroupAliases(t *testing.T)
 }
 
 // Scenario: OpenAI 分组存在账号模型配置时直接生成本地 Codex 清单。
+func TestBuildGroupConfiguredCodexModelsManifestPreservesAstraCompatibility(t *testing.T) {
+	t.Parallel()
+
+	const groupID int64 = 77
+	account := Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gpt-6-astra": "gpt-6-astra",
+			},
+		},
+	}
+	svc := &OpenAIGatewayService{accountRepo: codexModelsVisibilityAccountRepo{
+		byGroup: map[int64][]Account{groupID: {account}},
+	}}
+	group := &Group{ID: groupID, Platform: PlatformOpenAI}
+	manifest, configured, err := svc.BuildGroupConfiguredCodexModelsManifest(t.Context(), group, "")
+	require.NoError(t, err)
+	require.True(t, configured)
+	models := decodeCodexManifestModels(t, manifest.Body)
+	require.Len(t, models, 1, "compatibility must not expand the configured whitelist")
+	model := models[0]
+	require.Equal(t, "gpt-6-astra", model["slug"])
+	require.Equal(t, "medium", model["default_reasoning_level"], "do not choose Ultra for the client")
+	require.Contains(t, effortsFromManifestModel(t, model), "ultra")
+	require.Equal(t, "xhigh", model["multi_agent_reasoning_effort"])
+	require.Equal(t, "v2", model["multi_agent_version"])
+	messages, ok := model["model_messages"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, openai.CodexBaseInstructionsForModel("gpt-6-astra"), messages["instructions_template"])
+	require.Contains(t, messages["instructions_template"], "You are Codex, an agent based on GPT-6")
+	require.Equal(t, codexModelsManifestBodyETag(manifest.Body), manifest.ETag)
+	require.Equal(t, map[string]any{"gpt-6-astra": "gpt-6-astra"}, account.Credentials["model_mapping"])
+
+	reasoning := true
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Models: map[string]UpstreamModelMetadata{
+		"gpt-6-astra": {
+			ID:                       "gpt-6-astra",
+			Reasoning:                &reasoning,
+			DefaultReasoningLevel:    "xhigh",
+			SupportedReasoningLevels: []string{"xhigh"},
+		},
+	}})
+	svc.accountRepo = codexModelsVisibilityAccountRepo{byGroup: map[int64][]Account{groupID: {account}}}
+	restricted, configured, err := svc.BuildGroupConfiguredCodexModelsManifest(t.Context(), group, manifest.ETag)
+	require.NoError(t, err)
+	require.True(t, configured)
+	require.False(t, restricted.NotModified, "changed account capabilities invalidate the client cache")
+	restrictedModel := decodeCodexManifestModels(t, restricted.Body)[0]
+	require.Equal(t, []string{"xhigh"}, effortsFromManifestModel(t, restrictedModel), "observed account restrictions remain authoritative")
+	require.Equal(t, "xhigh", restrictedModel["default_reasoning_level"])
+}
+
+func TestCodexModelsManifestSimpleModeMatchesOpenAIRoutingScope(t *testing.T) {
+	t.Parallel()
+
+	const groupID int64 = 198
+	account := Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-6-astra": "gpt-6-astra",
+			"gpt-6-sol":   "gpt-6-sol",
+		}},
+	}
+	repo := splitCodexModelsAccountRepo{
+		globalSchedulable: []Account{account},
+		globalCatalog:     []Account{account},
+	}
+	group := &Group{ID: groupID, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{
+		Enabled: true, Models: []string{"gpt-6-astra"},
+	}}
+	for _, simple := range []bool{false, true} {
+		t.Run(fmt.Sprintf("simple=%t", simple), func(t *testing.T) {
+			cfg := &config.Config{}
+			if simple {
+				cfg.RunMode = config.RunModeSimple
+			}
+			svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+			manifest, configured, err := svc.BuildGroupConfiguredCodexModelsManifest(t.Context(), group, "")
+			require.NoError(t, err)
+			require.Equal(t, simple, configured, "standard mode must not expose another group's accounts")
+			if simple {
+				models := decodeCodexManifestModels(t, manifest.Body)
+				require.Len(t, models, 1, "the group whitelist still limits the picker")
+				require.Equal(t, "gpt-6-astra", models[0]["slug"])
+				require.Contains(t, effortsFromManifestModel(t, models[0]), "ultra")
+				require.Equal(t, "xhigh", models[0]["multi_agent_reasoning_effort"])
+				cached, _, err := svc.BuildGroupConfiguredCodexModelsManifest(t.Context(), group, manifest.ETag)
+				require.NoError(t, err)
+				require.True(t, cached.NotModified)
+			}
+			remote := &OpenAIModelsResponse{Body: []byte(`{"models":[{"slug":"gpt-6-astra","unknown":{"kept":true}},{"slug":"gpt-6-sol"},{"slug":"unsupported"}]}`)}
+			require.NoError(t, svc.MergeGroupConfiguredCodexModels(t.Context(), group, remote, ""))
+			if simple {
+				require.Equal(t, []string{"gpt-6-astra"}, codexManifestModelSlugs(t, remote.Body))
+				require.Equal(t, map[string]any{"kept": true}, decodeCodexManifestModels(t, remote.Body)[0]["unknown"])
+				require.Equal(t, codexModelsManifestBodyETag(remote.Body), remote.ETag)
+				require.NoError(t, svc.MergeGroupConfiguredCodexModels(t.Context(), group, remote, remote.ETag))
+				require.True(t, remote.NotModified)
+			} else {
+				require.Empty(t, decodeCodexManifestModels(t, remote.Body))
+			}
+		})
+	}
+}
+
+func TestCodexModelsManifestSimpleModeIntersectsUnavailableAccounts(t *testing.T) {
+	t.Parallel()
+
+	visible := newCodexCatalogMappedAccount(41, "gpt-6-astra", "GPT-6 Astra",
+		[]string{"low", "medium", "high", "xhigh", "max", "ultra"},
+		[]string{"text", "image"}, 1_000_000, true, nil)
+	cooling := newCodexCatalogMappedAccount(42, "gpt-6-sol", "GPT-6 Sol",
+		[]string{"low", "medium", "high", "xhigh"},
+		[]string{"text"}, 272_000, true, map[string]any{"cooling-only": "gpt-6-sol"})
+	repo := splitCodexModelsAccountRepo{
+		globalSchedulable: []Account{visible},
+		globalCatalog:     []Account{visible, cooling},
+	}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	group := &Group{ID: 198, Platform: PlatformOpenAI}
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+	manifest, configured, err := svc.BuildGroupConfiguredCodexModelsManifest(t.Context(), group, "")
+	require.NoError(t, err)
+	require.True(t, configured)
+	require.Equal(t, []string{"my-coder"}, codexManifestModelSlugs(t, manifest.Body))
+	assertIntersection := func(body []byte) {
+		t.Helper()
+		model := decodeCodexManifestModels(t, body)[0]
+		require.Equal(t, []string{"low", "medium", "high", "xhigh"}, effortsFromManifestModel(t, model))
+		require.Equal(t, []any{"text"}, model["input_modalities"])
+		require.EqualValues(t, 272_000, model["context_window"])
+	}
+	assertIntersection(manifest.Body)
+	gateway := &GatewayService{accountRepo: repo, cfg: cfg}
+	body, err := gateway.BuildCodexModelsManifestForGroup(t.Context(), group, "", []string{"my-coder"})
+	require.NoError(t, err)
+	assertIntersection(body)
+}
+
 func TestBuildGroupConfiguredCodexModelsManifestUsesAdministratorConfiguration(t *testing.T) {
 	t.Parallel()
 
@@ -1364,7 +1537,9 @@ func TestMergeGroupConfiguredCodexModelsFiltersAutoReviewByDefault(t *testing.T)
 	t.Parallel()
 
 	const groupID int64 = 74
-	svc := &OpenAIGatewayService{accountRepo: codexModelsVisibilityAccountRepo{}}
+	svc := &OpenAIGatewayService{accountRepo: codexModelsVisibilityAccountRepo{
+		byGroup: map[int64][]Account{groupID: {{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}}},
+	}}
 	manifest := &OpenAIModelsResponse{
 		Body: []byte(`{"models":[{"slug":"codex-auto-review","visibility":"list"},{"slug":"codex-auto-future","visibility":"list"},{"slug":"gpt-image-2","visibility":"list"},{"slug":"gpt-5.6","visibility":"list"}]}`),
 	}
@@ -1394,6 +1569,7 @@ func TestMergeGroupConfiguredCodexModelsFiltersAccountMappedAutoReviewByDefault(
 					Credentials: map[string]any{
 						"model_mapping": map[string]any{
 							openai.CodexUsageProbeModel: openai.CodexUsageProbeModel,
+							"gpt-5.6":                   "gpt-5.6",
 						},
 					},
 				},
@@ -1418,7 +1594,9 @@ func TestMergeGroupConfiguredCodexModelsKeepsExplicitAutoReviewSelection(t *test
 	t.Parallel()
 
 	const groupID int64 = 76
-	svc := &OpenAIGatewayService{accountRepo: codexModelsVisibilityAccountRepo{}}
+	svc := &OpenAIGatewayService{accountRepo: codexModelsVisibilityAccountRepo{
+		byGroup: map[int64][]Account{groupID: {{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}}},
+	}}
 	manifest := &OpenAIModelsResponse{
 		Body: []byte(`{"models":[{"slug":"codex-auto-review","visibility":"list"},{"slug":"gpt-5.6","visibility":"list"}]}`),
 	}
@@ -2710,8 +2888,10 @@ func TestFetchCodexModelsManifestAPIKeyCacheSurvivesClientMutation(t *testing.T)
 		}, nil
 	}}
 	s := newCodexModelsAPIKeyTestService(upstream)
-	s.accountRepo = codexModelsVisibilityAccountRepo{}
 	account := newCodexModelsAPIKeyTestAccount("https://upstream.example")
+	s.accountRepo = codexModelsVisibilityAccountRepo{
+		byGroup: map[int64][]Account{81: {*account}, 82: {*account}},
+	}
 
 	first, err := s.FetchCodexModelsManifest(context.Background(), account, "0.144.0", "")
 	require.NoError(t, err)
@@ -3638,8 +3818,8 @@ func TestFetchCodexModelsManifestOAuthSharedAcrossGroupsWithIndependentFiltering
 	s := &OpenAIGatewayService{
 		accountRepo: codexModelsVisibilityAccountRepo{
 			byGroup: map[int64][]Account{
-				91: {},
-				92: {},
+				91: {{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}},
+				92: {{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}},
 			},
 		},
 	}

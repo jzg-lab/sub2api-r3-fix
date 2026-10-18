@@ -48,9 +48,8 @@ func TestEnsureCodexIdentityHeaders(t *testing.T) {
 
 		require.Equal(t, openai.CodexDefaultOriginator, h.Get("originator"))
 		require.Equal(t, codexCLIUserAgent, h.Get("user-agent"))
-		// 客户端自带且高于门槛的 version 原样保留（网关不增不减），
-		// OpenAI-Beta 属客户端自己的头，网关同样不注入也不删除。
-		require.Equal(t, "9.9.9", h.Get("version"))
+		// Optional version must match the server UA; feature negotiation stays intact.
+		require.Equal(t, codexCLIVersion, h.Get("version"))
 		require.Equal(t, "assistants=v2", h.Get("OpenAI-Beta"))
 	})
 
@@ -91,11 +90,11 @@ func TestEnforceCodexIdentityHeaders(t *testing.T) {
 			userAgent:  "codex_vscode/1.2.3 (Ubuntu 22.4.0; x86_64) vscode (codex_vscode; 1.2.3)",
 		},
 		{
-			name:          "第三方客户端身份（自带 version 原样保留）",
+			name:          "第三方客户端身份与版本一起统一",
 			originator:    "opencode",
 			userAgent:     "luna/1.0.0",
 			version:       "2.1.0",
-			expectVersion: "2.1.0",
+			expectVersion: codexCLIVersion,
 		},
 		{
 			name:       "浏览器型 UA（原浏览器兜底已被统一出口吸收）",
@@ -153,8 +152,7 @@ func TestEnforceCodexIdentityHeadersWithAccountOverrideUA(t *testing.T) {
 
 		require.Equal(t, "codex_vscode", h.Get("originator"))
 		require.Equal(t, "codex_vscode/"+codexCLIVersion+" (Ubuntu 22.4.0; x86_64) vscode", h.Get("user-agent"))
-		// 客户端自带且高于门槛的 version 原样保留；网关不再补写。
-		require.Equal(t, "2.1.0", h.Get("version"))
+		require.Equal(t, codexCLIVersion, h.Get("version"))
 	})
 
 	t.Run("非官方形态覆写 UA 回退规范身份", func(t *testing.T) {
@@ -314,9 +312,9 @@ func TestEnforceCodexIdentityHeadersIsIdempotent(t *testing.T) {
 	require.Equal(t, openai.CodexDefaultOriginator, h.Get("originator"))
 }
 
-// 缺少 originator 时必须保持 no-op：compat 桥接等非 ChatGPT 内部接口路径会显式删除
-// originator，不应被补回身份头。
-func TestEnforceCodexIdentityHeaders_NoOriginatorIsNoop(t *testing.T) {
+// The bridge omits originator, but cannot leak the customer's browser identity.
+func TestEnforceCodexIdentityHeaders_NoOriginatorStillUsesServerUA(t *testing.T) {
+	SetCodexIdentityEnforcementEnabled(true)
 	h := make(http.Header)
 	h.Set("user-agent", "third-party-client/1.0.0")
 
@@ -324,7 +322,34 @@ func TestEnforceCodexIdentityHeaders_NoOriginatorIsNoop(t *testing.T) {
 
 	require.Empty(t, h.Get("originator"))
 	require.Empty(t, h.Get("version"))
-	require.Equal(t, "third-party-client/1.0.0", h.Get("user-agent"))
+	require.Equal(t, CodexCanonicalUserAgent(), h.Get("user-agent"))
+}
+
+func TestCodexIdentityDropsDownstreamEnvironment(t *testing.T) {
+	t.Cleanup(func() { SetCodexIdentityEnforcementEnabled(true) })
+	for _, originator := range []string{"", "customer-gateway"} {
+		for _, enforced := range []bool{false, true} {
+			SetCodexIdentityEnforcementEnabled(enforced)
+			h := make(http.Header)
+			for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host",
+				"X-Forwarded-Proto", "X-Real-IP", "True-Client-IP", "CF-Connecting-IP",
+				"CF-IPCountry", "X-Client-IP", "X-Client-Timezone", "X-Timezone",
+				"Accept-Language", "Origin", "Referer"} {
+				// Include noncanonical casing, as plugin/middleware maps may have it.
+				h[name] = []string{"customer-environment"}
+			}
+			h.Set("originator", originator)
+			h.Set("Content-Type", "application/json")
+			h.Set("session-id", "already-scoped-session")
+			enforceCodexIdentityHeadersWithUA(h, "")
+			for name, values := range h {
+				require.NotContains(t, values, "customer-environment", name)
+			}
+			require.Equal(t, "application/json", h.Get("Content-Type"))
+			require.Equal(t, "already-scoped-session", h.Get("session-id"))
+		}
+	}
+	SetCodexIdentityEnforcementEnabled(true)
 }
 
 func TestNormalizeCodexClientVersion(t *testing.T) {

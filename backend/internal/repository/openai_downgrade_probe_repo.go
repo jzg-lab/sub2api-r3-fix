@@ -75,11 +75,14 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 	if limit <= 0 {
 		limit = 100
 	}
-	// First qualification is admission work, not routine polling. Retain an
-	// exit-wide one-minute floor, including deleted accounts' history, and the
-	// full ten-minute floor for 429s and all repeat probes.
-	firstQualification := "(s.probe_mode = 'qualification' AND s.last_probe_at IS NULL)"
-	recentInterval := `CASE WHEN ` + firstQualification + ` AND recent.http_status <> 429
+	// Admission, including an interrupted attempt, precedes routine polling.
+	// A transport failure without an HTTP response must not extend its own
+	// scheduled retry to ten minutes. Keep the exit-wide floor and never shorten
+	// a 429 or a completed repeat probe's cooldown.
+	qualification := "(s.probe_mode = 'qualification')"
+	recentInterval := `CASE WHEN ` + qualification + ` AND (
+			(s.last_probe_at IS NULL AND recent.http_status IS DISTINCT FROM 429)
+			OR (recent.transport_ok IS FALSE AND recent.http_status IS NULL))
 		THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END`
 	rows, err := r.db.QueryContext(ctx, `
 		WITH due AS (
@@ -91,7 +94,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 				s.last_swap_at, s.last_probe_at, s.auth_consecutive_failures,
 				s.astra_consecutive_failures, s.astra_consecutive_successes, s.astra_next_probe_at,
 				s.updated_at, s.consecutive_429s,
-				`+firstQualification+` AS first_qualification,
+				`+qualification+` AS qualification,
 				CASE
 					WHEN p.exit_ip IS NOT NULL AND TRIM(p.exit_ip) <> ''
 						THEN 'ip:' || TRIM(p.exit_ip)
@@ -107,7 +110,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 							THEN 'proxy:' || a.proxy_id::text
 						ELSE 'account:' || s.account_id::text
 					END
-					ORDER BY `+firstQualification+` DESC, s.next_probe_at, s.account_id
+					ORDER BY `+qualification+` DESC, s.next_probe_at, s.account_id
 				) AS probe_rank
 			FROM openai_downgrade_probe_states s
 			JOIN accounts a ON a.id = s.account_id
@@ -178,7 +181,7 @@ func (r *openAIDowngradeProbeRepository) ListDueOpenAIDowngradeStates(
 			updated_at, consecutive_429s
 		FROM due
 		WHERE probe_rank = 1
-		ORDER BY first_qualification DESC, next_probe_at, account_id
+		ORDER BY qualification DESC, next_probe_at, account_id
 		LIMIT $2
 	`, now, limit)
 	if err != nil {
@@ -218,6 +221,34 @@ func (r *openAIDowngradeProbeRepository) CanRunOpenAIDowngradeProbe(ctx context.
 		)
 	`, []any{accountID}, &allowed)
 	return allowed, err
+}
+
+func (r *openAIDowngradeProbeRepository) AllowedOpenAIProbeAccounts(ctx context.Context, ids []int64) (map[int64]bool, error) {
+	allowed := make(map[int64]bool)
+	if len(ids) == 0 {
+		return allowed, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT a.id FROM accounts a
+		LEFT JOIN openai_downgrade_probe_controls c ON c.account_id = a.id
+		WHERE a.id = ANY($1) AND a.deleted_at IS NULL AND a.platform = 'openai' AND a.type = 'oauth'
+			AND a.parent_account_id IS NULL AND COALESCE(c.manual_paused, FALSE) IS FALSE
+			AND COALESCE(a.extra->'openai_rescue_terminated_at', 'null'::jsonb) = 'null'::jsonb
+			AND (a.status = 'active' OR (a.status = 'error' AND c.owned_error = a.error_message))
+			AND (a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > NOW())
+	`, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		allowed[id] = true
+	}
+	return allowed, rows.Err()
 }
 
 // RecentProbeOnExitIP 同出口近窗合成探针判定（路径B 手动诊断针的节流闸，

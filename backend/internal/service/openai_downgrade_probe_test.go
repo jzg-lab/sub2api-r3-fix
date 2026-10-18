@@ -2836,11 +2836,14 @@ func TestProbeOpenAI429ResetTimeParsesCodexHeaders(t *testing.T) {
 	require.NotNil(t, resetAt)
 	require.InDelta(t, time.Now().Add(72*time.Hour).Unix(), resetAt.Unix(), 5)
 
-	futureReset := time.Now().Add(48 * time.Hour).Unix()
+	futureReset := time.Now().Add(time.Hour).Unix()
 	body := []byte(fmt.Sprintf(`{"error":{"type":"usage_limit_reached","resets_at":%d}}`, futureReset))
 	resetAt = probeOpenAI429ResetTime(http.Header{}, body)
 	require.NotNil(t, resetAt)
 	require.Equal(t, futureReset, resetAt.Unix())
+	pastReset := time.Now().Add(-time.Hour).Unix()
+	require.Nil(t, probeOpenAI429ResetTime(http.Header{}, []byte(fmt.Sprintf(
+		`{"error":{"type":"usage_limit_reached","resets_at":%d}}`, pastReset))))
 
 	require.Nil(t, probeOpenAI429ResetTime(http.Header{}, []byte(`{"error":{"type":"rate_limited"}}`)))
 }
@@ -3331,7 +3334,8 @@ func TestOpenAIDowngradeReplacementRetainsCurrentRoute(t *testing.T) {
 	state := &OpenAIDowngradeProbeState{
 		AccountID: 1, OriginalProxyID: &original, CurrentProxyID: &current,
 	}
-	require.NoError(t, runner.finishReplacement(context.Background(), state, now))
+	result := OpenAIDowngradeProbeResult{TransportOK: true, AnswerCorrect: false}
+	require.NoError(t, runner.finishReplacement(context.Background(), state, result, now))
 	require.Empty(t, store.proxyChanges)
 	require.Equal(t, &current, state.CurrentProxyID)
 	require.Equal(t, &current, account.ProxyID)

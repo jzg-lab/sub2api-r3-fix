@@ -34,7 +34,7 @@ type AccountStatus struct {
 	Names           string     `json:"names"`
 	NewestRemaining int64      `json:"newest_remaining_seconds"`
 	Fresh           bool       `json:"fresh"`
-	SignCapturedAt  time.Time  `json:"sign_captured_at"`              // 最新签捕获时刻（零值=无签）
+	SignCapturedAt  *time.Time `json:"sign_captured_at"`              // null means no captured sign.
 	LifetimeStats   *SignStats `json:"sign_lifetime_stats,omitempty"` // 实测寿命统计（有样本才带）
 }
 
@@ -158,6 +158,9 @@ func (s *Store) SignInfo(accountID int64, now time.Time) SignInfo {
 		return info
 	}
 	for _, entry := range accountJar.Entries {
+		if entry.CapturedAt.IsZero() || entry.CapturedAt.After(now) || !entry.ExpiresAt.After(now) {
+			continue
+		}
 		if entry.CapturedAt.After(info.CapturedAt) {
 			info.CapturedAt = entry.CapturedAt
 			info.ExpiresAt = entry.ExpiresAt
@@ -469,6 +472,9 @@ func (s *Store) Status(now time.Time) Status {
 		var signCapturedAt time.Time
 		horizon := now.Add(time.Duration(s.cfg.RefreshBeforeSeconds) * time.Second)
 		for name, entry := range s.jars[accountID].Entries {
+			if entry.CapturedAt.IsZero() || entry.CapturedAt.After(now) || !entry.ExpiresAt.After(now) {
+				continue
+			}
 			names = append(names, name)
 			if remaining := int64(entry.ExpiresAt.Sub(now).Seconds()); remaining > newestRemaining {
 				newestRemaining = remaining
@@ -480,7 +486,7 @@ func (s *Store) Status(now time.Time) Status {
 		sort.Strings(names)
 		fresh := false
 		for _, entry := range s.jars[accountID].Entries {
-			if entry.ExpiresAt.After(horizon) {
+			if !entry.CapturedAt.IsZero() && !entry.CapturedAt.After(now) && entry.ExpiresAt.After(horizon) {
 				fresh = true
 				break
 			}
@@ -490,7 +496,9 @@ func (s *Store) Status(now time.Time) Status {
 			Names:           strings.Join(names, ","),
 			NewestRemaining: newestRemaining,
 			Fresh:           fresh,
-			SignCapturedAt:  signCapturedAt,
+		}
+		if !signCapturedAt.IsZero() {
+			status.SignCapturedAt = &signCapturedAt
 		}
 		if m := s.meters[accountID]; m != nil {
 			if stats := m.stats(); stats.Samples > 0 {

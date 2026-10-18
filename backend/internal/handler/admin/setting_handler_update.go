@@ -361,8 +361,9 @@ type UpdateSettingsRequest struct {
 	AffiliateEnabled *bool `json:"affiliate_enabled"`
 
 	// 风控中心功能开关
-	RiskControlEnabled *bool `json:"risk_control_enabled"`
-	AntiBypassEnabled  *bool `json:"anti_bypass_enabled"`
+	RiskControlEnabled *bool                     `json:"risk_control_enabled"`
+	AntiBypassEnabled  *bool                     `json:"anti_bypass_enabled"`
+	AntiBypassPolicy   *service.AntiBypassPolicy `json:"anti_bypass_policy"`
 
 	// cyber 会话屏蔽开关 + TTL
 	CyberSessionBlockEnabled    *bool   `json:"cyber_session_block_enabled"`
@@ -499,6 +500,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	auditReq := settingsAuditRequest(req)
+	if req.AntiBypassPolicy != nil {
+		if err := req.AntiBypassPolicy.Validate(); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+	}
 	omitted := omittedSettingKeys(sentFields)
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
@@ -1457,6 +1464,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			response.Error(c, http.StatusBadRequest, "openai_codex_client_version must be empty or a valid version (e.g. 0.146.0)")
 			return
 		}
+		if normalized != "" && !service.IsVerifiedCodexClientVersion(normalized) {
+			response.Error(c, http.StatusBadRequest, "Codex client version requires a verified native transport capture")
+			return
+		}
 		req.OpenAICodexClientVersion = &normalized
 	}
 	if req.ClaudeCodeClientVersion != nil {
@@ -2015,6 +2026,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.CyberPolicyUserAllowlist
 		}(),
+		// Omitted policies are not rewritten by old clients or unrelated saves.
+		AntiBypassPolicy: req.AntiBypassPolicy,
 		CyberSessionBlockEnabled: func() bool {
 			if req.CyberSessionBlockEnabled != nil {
 				return *req.CyberSessionBlockEnabled
@@ -2440,6 +2453,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 
 		RiskControlEnabled:          updatedSettings.RiskControlEnabled,
 		AntiBypassEnabled:           updatedSettings.AntiBypassEnabled,
+		AntiBypassPolicy:            updatedSettings.AntiBypassPolicy,
 		CyberSessionBlockEnabled:    updatedSettings.CyberSessionBlockEnabled,
 		CyberPolicyUserAllowlist:    updatedSettings.CyberPolicyUserAllowlist,
 		CyberSessionBlockTTLSeconds: updatedSettings.CyberSessionBlockTTLSeconds,

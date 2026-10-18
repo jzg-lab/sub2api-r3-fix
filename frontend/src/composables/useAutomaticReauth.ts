@@ -48,9 +48,11 @@ export function useAutomaticReauth(
           const generated = await oauth.generateAuthUrl(operation.account.proxy_id, undefined, {
             accountId: operation.account.id,
             expectedUpdatedAt: operation.expectedUpdatedAt,
-            expectedAuthorizationRevision: operation.account.reauthorization_revision
+            expectedAuthorizationRevision: operation.account.reauthorization_revision,
+            freshLogin: true
           })
-          if (!generated || !session.isCurrent(operation) || abort.signal.aborted) return
+          if (!session.isCurrent(operation) || abort.signal.aborted) return
+          if (!generated) throw new Error('Authorization session unavailable')
           const sessionID = oauth.sessionId.value
           const result = await adminAPI.accounts.automateAuthBrowser(sessionID, login, abort.signal)
           if (!session.isCurrent(operation) || abort.signal.aborted || sessionID !== oauth.sessionId.value) return
@@ -59,7 +61,8 @@ export function useAutomaticReauth(
           }
           const info = await oauth.exchangeAuthCode(result.code, sessionID, result.state, operation.account.proxy_id)
           result.code = undefined
-          if (!info || !session.isCurrent(operation) || abort.signal.aborted) return
+          if (!session.isCurrent(operation) || abort.signal.aborted) return
+          if (!info) throw new Error('Authorization exchange failed')
           if (!info.reauthorization_proof) throw new Error('授权证明缺失，未覆盖账号')
           // A committed account update cannot be undone by canceling the browser.
           running.value = false

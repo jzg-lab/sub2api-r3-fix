@@ -18,6 +18,7 @@ type codexVersionSyncSettingRepoStub struct {
 	mu        sync.Mutex
 	values    map[string]string
 	getErr    error
+	getErrors map[string]error
 	setErr    error
 	updatedAt time.Time
 	writes    []string
@@ -35,6 +36,9 @@ func (r *codexVersionSyncSettingRepoStub) GetValue(_ context.Context, key string
 	defer r.mu.Unlock()
 	if r.getErr != nil {
 		return "", r.getErr
+	}
+	if err := r.getErrors[key]; err != nil {
+		return "", err
 	}
 	return r.values[key], nil
 }
@@ -98,37 +102,37 @@ func newCodexVersionSyncService(
 func TestLatestCodexStableReleaseVersion(t *testing.T) {
 	releases := []*GitHubRelease{
 		{TagName: "rusty-v8-v150.4.0"},
-		{TagName: "rust-v0.147.0-alpha.4", Prerelease: true},
-		{TagName: "rust-v0.146.0"},
+		{TagName: "rust-v0.163.0-alpha.4", Prerelease: true},
+		{TagName: "rust-v0.162.1"},
 		{TagName: "rust-v0.145.0"},
 		{TagName: "rust-v0.999.0", Draft: true},
 		{TagName: "not-a-tag"},
 		nil,
 	}
 
-	require.Equal(t, "0.146.0", latestCodexStableReleaseVersion(releases))
+	require.Equal(t, "0.162.1", latestCodexStableReleaseVersion(releases))
 	require.Empty(t, latestCodexStableReleaseVersion(nil))
 	require.Empty(t, latestCodexStableReleaseVersion([]*GitHubRelease{{TagName: "rusty-v8-v150.4.0"}}))
 	// 预发布 tag 即使漏标 Prerelease 也要被版本号后缀挡住。
-	require.Empty(t, latestCodexStableReleaseVersion([]*GitHubRelease{{TagName: "rust-v0.147.0-alpha.4"}}))
+	require.Empty(t, latestCodexStableReleaseVersion([]*GitHubRelease{{TagName: "rust-v0.163.0-alpha.4"}}))
 }
 
 func TestOpenAICodexVersionSyncWritesLatestStableVersion(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(nil)
 	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{
 		{TagName: "rust-v0.145.0"},
-		{TagName: "rust-v0.146.0"},
+		{TagName: "rust-v0.162.1"},
 	}}
 
 	newCodexVersionSyncService(repo, github).runOnce()
 
-	require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+	require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 }
 
 // 只向前推进：上游偶发返回旧数据或重新发布历史 tag 时不把已同步版本降级。
 func TestOpenAICodexVersionSyncNeverMovesBackwards(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
-		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+		SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 	})
 	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.145.0"}}}
 
@@ -141,7 +145,7 @@ func TestOpenAICodexVersionSyncSkippedWhenDisabled(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
 		SettingKeyOpenAICodexVersionAutoSyncEnabled: "false",
 	})
-	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.146.0"}}}
+	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.162.1"}}}
 
 	newCodexVersionSyncService(repo, github).runOnce()
 
@@ -150,24 +154,71 @@ func TestOpenAICodexVersionSyncSkippedWhenDisabled(t *testing.T) {
 	require.Empty(t, repo.syncedWrites())
 }
 
+func TestClientVersionSyncReadFailurePreservesPolicyAndVersion(t *testing.T) {
+	for _, client := range []struct {
+		name, enabledKey, syncedKey, tag, current, latest string
+		run                                               func(SettingRepository, GitHubReleaseClient)
+	}{
+		{"codex", SettingKeyOpenAICodexVersionAutoSyncEnabled, SettingKeyOpenAICodexClientVersionSynced,
+			"rust-v0.162.1", "0.163.0", "0.162.1", func(r SettingRepository, g GitHubReleaseClient) {
+				newCodexVersionSyncService(r, g).runOnce()
+			}},
+		{"claude", SettingKeyClaudeCodeVersionAutoSyncEnabled, SettingKeyClaudeCodeClientVersionSynced,
+			"v2.1.280", "2.1.281", "2.1.280", func(r SettingRepository, g GitHubReleaseClient) {
+				NewClaudeCodeVersionSyncService(r, nil, g, time.Hour).runOnce()
+			}},
+	} {
+		t.Run(client.name, func(t *testing.T) {
+			for _, key := range []string{client.enabledKey, client.syncedKey} {
+				t.Run(key, func(t *testing.T) {
+					repo := newCodexVersionSyncSettingRepoStub(map[string]string{
+						client.enabledKey: "true", client.syncedKey: client.current,
+					})
+					repo.getErrors = map[string]error{key: errors.New("read unavailable")}
+					github := &codexVersionSyncGitHubStub{latest: &GitHubRelease{TagName: client.tag}}
+					client.run(repo, github)
+					require.Zero(t, github.latestCalls)
+					require.Zero(t, github.calls)
+					require.Empty(t, repo.syncedWrites())
+
+					delete(repo.getErrors, key)
+					client.run(repo, github)
+					require.Equal(t, 1, github.latestCalls, "a later healthy cycle must recover")
+					require.Empty(t, repo.syncedWrites(), "an older release must not replace the persisted version")
+					require.Equal(t, client.current, repo.values[client.syncedKey])
+				})
+			}
+			t.Run("missing-settings-retain-default", func(t *testing.T) {
+				repo := newCodexVersionSyncSettingRepoStub(nil)
+				repo.getErrors = map[string]error{
+					client.enabledKey: ErrSettingNotFound, client.syncedKey: ErrSettingNotFound,
+				}
+				github := &codexVersionSyncGitHubStub{latest: &GitHubRelease{TagName: client.tag}}
+				client.run(repo, github)
+				require.Equal(t, []string{client.latest}, repo.syncedWrites())
+			})
+		})
+	}
+}
+
 // 面板开关缺失或为空一律视为开启，与设置默认值一致。
 func TestOpenAICodexVersionSyncEnabledByDefault(t *testing.T) {
 	for _, value := range []string{"", "true"} {
 		repo := newCodexVersionSyncSettingRepoStub(map[string]string{
 			SettingKeyOpenAICodexVersionAutoSyncEnabled: value,
 		})
-		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.146.0"}}}
+		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.162.1"}}}
 
 		newCodexVersionSyncService(repo, github).runOnce()
 
-		require.Equal(t, []string{"0.146.0"}, repo.syncedWrites(), "开关值 %q", value)
+		require.Equal(t, []string{"0.162.1"}, repo.syncedWrites(), "开关值 %q", value)
 	}
 }
 
 // 抓取失败保持既有值，不清空、不降级。两条取数路径都失败才算真正拿不到。
 func TestOpenAICodexVersionSyncKeepsValueOnFetchError(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
-		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+		SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 	})
 	github := &codexVersionSyncGitHubStub{
 		latestErr: errors.New("network down"),
@@ -181,7 +232,7 @@ func TestOpenAICodexVersionSyncKeepsValueOnFetchError(t *testing.T) {
 	require.Empty(t, repo.syncedWrites())
 	value, err := repo.GetValue(context.Background(), SettingKeyOpenAICodexClientVersionSynced)
 	require.NoError(t, err)
-	require.Equal(t, "0.146.0", value)
+	require.Equal(t, "0.162.1", value)
 }
 
 // 主路径 /releases/latest：该端点已排除 draft / prerelease，直接给出最新正式发布，
@@ -189,7 +240,7 @@ func TestOpenAICodexVersionSyncKeepsValueOnFetchError(t *testing.T) {
 func TestOpenAICodexVersionSyncUsesLatestReleaseEndpoint(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(nil)
 	github := &codexVersionSyncGitHubStub{
-		latest: &GitHubRelease{TagName: "rust-v0.146.0"},
+		latest: &GitHubRelease{TagName: "rust-v0.162.1"},
 		// 列表若被调用会给出不同答案，用于证明取值确实来自主路径。
 		releases: []*GitHubRelease{{TagName: "rust-v0.145.0"}},
 	}
@@ -198,7 +249,7 @@ func TestOpenAICodexVersionSyncUsesLatestReleaseEndpoint(t *testing.T) {
 
 	require.Equal(t, 1, github.latestCalls)
 	require.Zero(t, github.calls, "主路径可用时不应再拉列表页")
-	require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+	require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 }
 
 // 回退列表扫描：latest 是跨 tag 家族按 published_at 取的，主路径拿不到客户端稳定版时
@@ -212,7 +263,7 @@ func TestOpenAICodexVersionSyncFallsBackToReleaseList(t *testing.T) {
 		// 同仓库其他组件（rusty-v8-*）某天发了正式 release 而成为 latest。
 		{name: "latest 属于其他 tag 家族", latest: &GitHubRelease{TagName: "rusty-v8-v150.4.0"}},
 		// 端点语义若变化（返回 draft/prerelease），过滤仍然拦得住，并照常回退。
-		{name: "latest 是预发布", latest: &GitHubRelease{TagName: "rust-v0.147.0-alpha.4", Prerelease: true}},
+		{name: "latest 是预发布", latest: &GitHubRelease{TagName: "rust-v0.163.0-alpha.4", Prerelease: true}},
 		{name: "latest 抓取失败", latestErr: errors.New("network down")},
 		// 上游返回空对象：不得因此 panic，按拿不到处理。
 		{name: "latest 为空", latest: nil},
@@ -225,8 +276,8 @@ func TestOpenAICodexVersionSyncFallsBackToReleaseList(t *testing.T) {
 				latest:    tt.latest,
 				latestErr: tt.latestErr,
 				releases: []*GitHubRelease{
-					{TagName: "rust-v0.147.0-alpha.4", Prerelease: true},
-					{TagName: "rust-v0.146.0"},
+					{TagName: "rust-v0.163.0-alpha.4", Prerelease: true},
+					{TagName: "rust-v0.162.1"},
 					{TagName: "rust-v0.145.0"},
 				},
 			}
@@ -235,7 +286,7 @@ func TestOpenAICodexVersionSyncFallsBackToReleaseList(t *testing.T) {
 
 			require.Equal(t, 1, github.latestCalls)
 			require.Equal(t, 1, github.calls)
-			require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+			require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 		})
 	}
 }
@@ -248,12 +299,12 @@ func TestOpenAICodexVersionSyncLatestSharesFiltering(t *testing.T) {
 		// 仓库里确实存在 rust-vv0.99.0-alpha.8 / rust-vrust-v0.145.0-alpha.6 这类畸形 tag：
 		// 剥掉前缀后不是合法版本号，必须被拒绝而不是写成 v0.99.0。
 		latest:   &GitHubRelease{TagName: "rust-vv0.99.0"},
-		releases: []*GitHubRelease{{TagName: "rust-v0.146.0"}},
+		releases: []*GitHubRelease{{TagName: "rust-v0.162.1"}},
 	}
 
 	newCodexVersionSyncService(repo, github).runOnce()
 
-	require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+	require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 }
 
 // 依赖缺失时 Start 必须直接返回，不能起一个空转的 goroutine。
@@ -302,10 +353,10 @@ func TestGetOpenAICodexClientVersionPriority(t *testing.T) {
 		synced   string
 		want     string
 	}{
-		{name: "面板覆写优先", override: "0.150.0", synced: "0.146.0", want: "0.150.0"},
-		{name: "覆写为空时用同步值", synced: "0.146.0", want: "0.146.0"},
+		{name: "面板覆写优先", override: "0.151.0", synced: "0.162.1", want: "0.151.0"},
+		{name: "覆写为空时用同步值", synced: "0.162.1", want: "0.162.1"},
 		{name: "两者皆空时用内置常量", want: codexCLIVersion},
-		{name: "非法覆写回退同步值", override: "latest", synced: "0.146.0", want: "0.146.0"},
+		{name: "非法覆写回退同步值", override: "latest", synced: "0.162.1", want: "0.162.1"},
 		{name: "非法同步值回退内置常量", synced: "not-a-version", want: codexCLIVersion},
 	}
 
@@ -332,11 +383,11 @@ func TestGetOpenAICodexClientVersionFallsBackOnError(t *testing.T) {
 // 一并重建，不能再用「版本无关后缀」拼预期。
 func TestGetOpenAICodexCanonicalUserAgentBuildsFromVersion(t *testing.T) {
 	svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
-		SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+		SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 	}}, nil)
 
 	require.Equal(t,
-		"codex-tui/0.200.1 (Mac OS 26.3.1; arm64) Apple_Terminal/466 (codex-tui; 0.200.1)",
+		"codex-tui/0.162.1 (Mac OS 26.3.1; arm64) Apple_Terminal/466 (codex-tui; 0.162.1)",
 		svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 	)
 }
@@ -349,11 +400,11 @@ func TestGetOpenAICodexCanonicalUserAgentRebuildsPanelUAVersion(t *testing.T) {
 		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
 			// 历史面板 placeholder 的原文，照抄填写过的存量部署就是这个值。
 			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
-			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+			SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 		}}, nil)
 
 		require.Equal(t,
-			"codex_cli_rs/0.200.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			"codex_cli_rs/0.162.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
 			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 		)
 	})
@@ -361,11 +412,11 @@ func TestGetOpenAICodexCanonicalUserAgentRebuildsPanelUAVersion(t *testing.T) {
 	t.Run("自定义指纹原样保留", func(t *testing.T) {
 		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
 			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.140.0 (Mac OS X 15.1.0; arm64) iTerm.app",
-			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+			SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 		}}, nil)
 
 		require.Equal(t,
-			"codex_cli_rs/0.200.1 (Mac OS X 15.1.0; arm64) iTerm.app",
+			"codex_cli_rs/0.162.1 (Mac OS X 15.1.0; arm64) iTerm.app",
 			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 		)
 	})
@@ -373,11 +424,11 @@ func TestGetOpenAICodexCanonicalUserAgentRebuildsPanelUAVersion(t *testing.T) {
 	t.Run("TUI UA 的首尾两个版本号同时更新", func(t *testing.T) {
 		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
 			SettingKeyOpenAICodexUserAgent:           "codex-tui/0.146.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal (codex-tui; 0.146.1)",
-			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+			SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 		}}, nil)
 
 		require.Equal(t,
-			"codex-tui/0.200.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal (codex-tui; 0.200.1)",
+			"codex-tui/0.162.1 (Ubuntu 22.4.0; x86_64) WindowsTerminal (codex-tui; 0.162.1)",
 			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 		)
 	})
@@ -386,12 +437,12 @@ func TestGetOpenAICodexCanonicalUserAgentRebuildsPanelUAVersion(t *testing.T) {
 	t.Run("面板版本号覆写优先", func(t *testing.T) {
 		svc := NewSettingService(&codexVersionSettingRepoStub{values: map[string]string{
 			SettingKeyOpenAICodexUserAgent:           "codex_cli_rs/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color",
-			SettingKeyOpenAICodexClientVersion:       "0.150.0",
-			SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
+			SettingKeyOpenAICodexClientVersion:       "0.151.0",
+			SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 		}}, nil)
 
 		require.Equal(t,
-			"codex_cli_rs/0.150.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
+			"codex_cli_rs/0.151.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
 			svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
 		)
 	})
@@ -423,10 +474,10 @@ func (r *codexVersionSyncSettingRepoStub) Get(_ context.Context, key string) (*S
 // 放大成对 GitHub 的连续请求。
 func TestOpenAICodexVersionSyncInitialSkipsWhenRecentlySynced(t *testing.T) {
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
-		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+		SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 	})
 	repo.updatedAt = time.Now().Add(-time.Hour)
-	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.147.0"}}}
+	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.163.0"}}}
 
 	newCodexVersionSyncService(repo, github).runInitial()
 
@@ -437,46 +488,46 @@ func TestOpenAICodexVersionSyncInitialSkipsWhenRecentlySynced(t *testing.T) {
 func TestOpenAICodexVersionSyncInitialRunsWhenStaleOrMissing(t *testing.T) {
 	t.Run("同步值已过期", func(t *testing.T) {
 		repo := newCodexVersionSyncSettingRepoStub(map[string]string{
-			SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+			SettingKeyOpenAICodexClientVersionSynced: "0.151.0",
 		})
 		repo.updatedAt = time.Now().Add(-7 * time.Hour)
-		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.147.0"}}}
+		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.162.1"}}}
 
 		newCodexVersionSyncService(repo, github).runInitial()
 
 		require.Equal(t, 1, github.calls)
-		require.Equal(t, []string{"0.147.0"}, repo.syncedWrites())
+		require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 	})
 
 	// 首次部署尚无同步值：必须立刻同步，不能被防抖挡住。
 	t.Run("尚无同步值", func(t *testing.T) {
 		repo := newCodexVersionSyncSettingRepoStub(nil)
 		repo.updatedAt = time.Now()
-		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.146.0"}}}
+		github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.162.1"}}}
 
 		newCodexVersionSyncService(repo, github).runInitial()
 
 		require.Equal(t, 1, github.calls)
-		require.Equal(t, []string{"0.146.0"}, repo.syncedWrites())
+		require.Equal(t, []string{"0.162.1"}, repo.syncedWrites())
 	})
 }
 
-// 版本比较必须按段取数字：字典序会把 0.99.0 判为大于 0.146.0，
+// 版本比较必须按段取数字：字典序会把 0.99.0 判为大于 0.162.1，
 // 从而让「取最大值」和「只向前推进」两处逻辑同时判错。
 func TestCodexVersionComparisonIsNumericNotLexical(t *testing.T) {
-	require.Greater(t, CompareVersions("0.146.0", "0.99.0"), 0)
+	require.Greater(t, CompareVersions("0.162.1", "0.99.0"), 0)
 
-	require.Equal(t, "0.146.0", latestCodexStableReleaseVersion([]*GitHubRelease{
+	require.Equal(t, "0.162.1", latestCodexStableReleaseVersion([]*GitHubRelease{
 		{TagName: "rust-v0.99.0"},
-		{TagName: "rust-v0.146.0"},
+		{TagName: "rust-v0.162.1"},
 	}))
 
 	repo := newCodexVersionSyncSettingRepoStub(map[string]string{
-		SettingKeyOpenAICodexClientVersionSynced: "0.146.0",
+		SettingKeyOpenAICodexClientVersionSynced: "0.162.1",
 	})
 	github := &codexVersionSyncGitHubStub{releases: []*GitHubRelease{{TagName: "rust-v0.99.0"}}}
 
 	newCodexVersionSyncService(repo, github).runOnce()
 
-	require.Empty(t, repo.syncedWrites(), "0.99.0 低于已同步的 0.146.0，不得写入")
+	require.Empty(t, repo.syncedWrites(), "0.99.0 低于已同步的 0.162.1，不得写入")
 }

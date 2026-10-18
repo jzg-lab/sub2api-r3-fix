@@ -1182,6 +1182,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		firstTurnStartedAt = hooks.InitialTurnStartedAt
 	}
 	failureAccountSideEffectsApplied := false
+	bindResponseOwner := s.newOpenAIWSResponseOwnerBinder(ctx, c, account.ID)
 	relayResult, relayExit := openaiwsv2.RunEntry(openaiwsv2.EntryInput{
 		Ctx:                ctx,
 		ClientConn:         policyClientConn,
@@ -1298,6 +1299,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				_ = clientConn.CloseNow()
 			},
 			BeforeWriteClient: func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error {
+				if msgType == coderws.MessageText || msgType == coderws.MessageBinary {
+					if err := bindResponseOwner(payload); err != nil {
+						return err
+					}
+				}
 				if msgType != coderws.MessageText {
 					return nil
 				}

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // State is outside versioned installations, whose replacement deletes assets.
@@ -34,7 +35,7 @@ func pluginEvidenceDir(socketDir, key string) (string, error) {
 	return filepath.Join(base, hex.EncodeToString(hash[:])), nil
 }
 
-// Only a fixed structured event reaches the host's existing warning channel.
+// Only fixed structured events reach the host's existing logging channel.
 // All other stderr, extra fields and oversized lines are discarded.
 type pluginEvidenceLog struct {
 	mu      sync.Mutex
@@ -73,16 +74,70 @@ func (w *pluginEvidenceLog) Write(p []byte) (int, error) {
 
 func (w *pluginEvidenceLog) emit(raw []byte) {
 	var event struct {
-		Message   string `json:"msg"`
-		Account   int64  `json:"account_id"`
-		Category  string `json:"category"`
-		Window    int    `json:"window_seconds"`
-		Operation string `json:"operation_id"`
+		Message            string `json:"msg"`
+		Account            int64  `json:"account_id"`
+		Category           string `json:"category"`
+		Window             int    `json:"window_seconds"`
+		Operation          string `json:"operation_id"`
+		TemplateGeneration uint64 `json:"template_generation"`
+		CookieGeneration   uint64 `json:"cookie_generation"`
+		Probe              int64  `json:"probe"`
+		QualityRerolls     int64  `json:"quality_rerolls"`
+		Verdict            string `json:"verdict"`
+		Action             string `json:"action"`
+		ReasoningTokens    int    `json:"reasoning_tokens"`
+		ObservedAt         string `json:"observed_at"`
+		Stage              string `json:"stage"`
+		Reason             string `json:"reason"`
 	}
 	if json.Unmarshal(raw, &event) != nil {
 		return
 	}
 	switch event.Message {
+	case "plugin_business_succeeded":
+		w.emitBusinessSuccess(raw)
+	case "upstream_transport_failure":
+		w.emitTransportFailure(raw)
+	case "plugin_business_unknown":
+		if event.Account <= 0 {
+			return
+		}
+		switch event.Stage {
+		case "dispatch", "headers", "body", "end":
+		default:
+			return
+		}
+		switch event.Reason {
+		case "invalid_event", "failed_event", "partial_event", "delivery_interrupted",
+			"unrecognized_json", "missing_terminal":
+			w.logger.Warn("plugin_business_unknown", "account_id", event.Account,
+				"stage", event.Stage, "reason", event.Reason)
+		}
+	case "quality_probe_observation":
+		if event.Account <= 0 || event.TemplateGeneration == 0 || event.Probe <= 0 ||
+			event.QualityRerolls < 0 || event.QualityRerolls > event.Probe ||
+			event.ReasoningTokens < 0 {
+			return
+		}
+		switch event.Verdict {
+		case "pass", "fail", "error":
+		default:
+			return
+		}
+		switch event.Action {
+		case "scheduled", "reroll", "backoff", "retry_later":
+		default:
+			return
+		}
+		observedAt, err := time.Parse(time.RFC3339Nano, event.ObservedAt)
+		if err != nil {
+			return
+		}
+		w.logger.Info("quality_probe_observation", "account_id", event.Account,
+			"template_generation", event.TemplateGeneration, "cookie_generation", event.CookieGeneration,
+			"probe", event.Probe, "quality_rerolls", event.QualityRerolls,
+			"verdict", event.Verdict, "action", event.Action,
+			"reasoning_tokens", event.ReasoningTokens, "observed_at", observedAt)
 	case "plugin_evidence_unavailable":
 		w.logger.Error("plugin_evidence_unavailable")
 	case "plugin_probe_unknown":

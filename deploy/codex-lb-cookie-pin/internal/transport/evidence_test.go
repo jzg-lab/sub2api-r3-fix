@@ -99,6 +99,134 @@ func TestResponseObserverRequiresCompleteTerminalAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestResponseObserverIncompleteReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    responseObserver
+		want string
+	}{
+		{"invalid", responseObserver{invalid: true, completed: true}, "invalid_event"},
+		{"failed", responseObserver{failed: true, completed: true}, "failed_event"},
+		{"bare error", responseObserver{bareError: true}, "failed_event"},
+		{"partial line", responseObserver{sse: true, line: []byte("data:")}, "partial_event"},
+		{"partial event", responseObserver{sse: true, data: []byte("{}")}, "partial_event"},
+		{"delivered terminal without settlement", responseObserver{sse: true, completed: true}, "delivery_interrupted"},
+		{"unrecognized json", responseObserver{}, "unrecognized_json"},
+		{"missing terminal", responseObserver{sse: true}, "missing_terminal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.o.incompleteReason(); got != tc.want {
+				t.Fatalf("reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResponseObserverInvalidCauseIsBoundedAndSticky(t *testing.T) {
+	const limit = 2 << 20
+	for _, tc := range []struct {
+		name, raw, want string
+		sse             bool
+	}{
+		{"json body limit", strings.Repeat(" ", limit+1), "json_body_limit", false},
+		{"sse line limit", "data: " + strings.Repeat(" ", limit), "sse_line_limit", true},
+		{"sse event limit", "data: " + strings.Repeat(" ", limit/2) + "\n" +
+			"data: " + strings.Repeat(" ", limit/2) + "\n", "sse_event_limit", true},
+		{"json syntax", `{"private_fixture":`, "json_syntax", false},
+		{"sse syntax", "data: private_fixture\n\n", "json_syntax", true},
+		{"json schema", `{"type":{"private_fixture":true}}`, "json_schema", false},
+		{"sse schema", "data: {\"response\":\"private_fixture\"}\n\n", "json_schema", true},
+		{"mislabelled sse", completeFixture, "json_syntax", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, size := range []int{7, len(tc.raw)} {
+				o := responseObserver{sse: tc.sse}
+				for raw := []byte(tc.raw); len(raw) > 0; {
+					n := min(size, len(raw))
+					o.write(raw[:n])
+					raw = raw[n:]
+				}
+				if o.finish() || !o.invalid || o.knownFailure() || o.settledSSE() {
+					t.Fatal("invalid response was certified or classified as an upstream rejection")
+				}
+				if got := o.incompleteReason(); got != tc.want {
+					t.Fatalf("chunk=%d reason=%q want=%q", size, got, tc.want)
+				}
+				if len(o.data) != 0 || len(o.line) != 0 {
+					t.Fatal("invalid payload retained")
+				}
+				o.write([]byte(completeFixture))
+				if o.finish() || o.incompleteReason() != tc.want {
+					t.Fatal("later input erased the original failure")
+				}
+			}
+		})
+	}
+	t.Run("same chunk later terminal", func(t *testing.T) {
+		calls := 0
+		o := responseObserver{sse: true, onEvent: func(string, []byte) { calls++ }}
+		o.write([]byte("data: not-json\n\n" + completeFixture))
+		if o.finish() || o.completed || calls != 0 || o.incompleteReason() != "json_syntax" {
+			t.Fatal("a terminal after invalid input reached evidence consumers")
+		}
+	})
+}
+
+func TestResponseObserverInfersFramingWithoutInspectingJSONText(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw        string
+		compact, sse, ok bool
+	}{
+		{"data", completeFixture, false, true, true},
+		{"event", "event: response.completed\n" + completeFixture, false, true, true},
+		{"blank lines", "\r\n\n" + completeFixture, false, true, true},
+		{"comment", ": keepalive\n\n" + completeFixture, false, true, true},
+		{"id", "id: fixture\n" + completeFixture, false, true, true},
+		{"retry", "retry: 1000\n" + completeFixture, false, true, true},
+		{"json text", `{"object":"response","status":"completed","output":[{"type":"message","text":"data: fixture\nevent: response.completed"}]}`, false, false, true},
+		{"json whitespace", "\r\n " + `{"object":"response","status":"completed"}`, false, false, true},
+		{"json padded", strings.Repeat("\n", 65) + `{"object":"response","status":"completed"}`, false, false, true},
+		{"json then sse", "{}\n" + completeFixture, false, false, false},
+		{"unexpected preamble", "not-sse\n" + completeFixture, false, false, false},
+		{"partial prefix", "data", false, false, false},
+		{"partial terminal", strings.TrimSuffix(completeFixture, "\n"), false, true, false},
+		{"done only", "data: [DONE]\n\n", false, true, false},
+		{"malformed", "data: not-json\n\n" + completeFixture, false, true, false},
+		{"failed", "event: response.failed\ndata: {}\n\n" + completeFixture, false, true, false},
+		{"compact json", `{"object":"response.compaction","output":[{"type":"compaction","encrypted_content":"fixture"}]}`, true, false, true},
+		{"compact sse", completeFixture, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, size := range []int{1, 3, 7, len(tc.raw)} {
+				o := responseObserver{sniffSSE: !tc.compact, compact: tc.compact}
+				for raw := []byte(tc.raw); len(raw) > 0; {
+					n := min(size, len(raw))
+					o.write(raw[:n])
+					raw = raw[n:]
+				}
+				if got := o.finish(); got != tc.ok || o.sse != tc.sse || o.inferredSSE != tc.sse {
+					t.Fatalf("chunk=%d completed=%v sse=%v inferred=%v reason=%s",
+						size, got, o.sse, o.inferredSSE, o.incompleteReason())
+				}
+			}
+		})
+	}
+	t.Run("stream bound remains per event", func(t *testing.T) {
+		o := responseObserver{sniffSSE: true}
+		o.write([]byte(strings.Repeat("data: {}\n\n", (2<<20)/10+1) + completeFixture))
+		if !o.finish() {
+			t.Fatalf("valid stream treated as one JSON body: %s", o.incompleteReason())
+		}
+	})
+	t.Run("JSON limit unchanged", func(t *testing.T) {
+		o := responseObserver{sniffSSE: true}
+		o.write([]byte(strings.Repeat("\n", 2<<20) + "{}"))
+		if o.finish() || o.incompleteReason() != "json_body_limit" {
+			t.Fatal("framing detection bypassed JSON body limit")
+		}
+	})
+}
+
 func TestProbeEvidenceConsumersShareSSEFraming(t *testing.T) {
 	raw := "event: error\ndata: {\"message\":\"temporary\"}\n\n" +
 		"event: response.done\ndata: {\"response\":{\"status\":\"completed\",\n" +
@@ -148,6 +276,147 @@ func TestForwardEvidenceConsumesAuthoritativeTerminal(t *testing.T) {
 				t.Fatalf("business terminal observation misclassified: %+v", st)
 			}
 		})
+	}
+}
+
+func TestForwardRecognizesSSEWithoutContentType(t *testing.T) {
+	for _, contentType := range []string{"", "text/plain", "application/json"} {
+		for _, probe := range []bool{false, true} {
+			t.Run(contentType+"/"+map[bool]string{false: "business", true: "host-probe"}[probe], func(t *testing.T) {
+				var calls atomic.Int64
+				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls.Add(1)
+					w.Header()["Content-Type"] = nil
+					if contentType != "" {
+						w.Header().Set("Content-Type", contentType)
+					}
+					_, _ = io.WriteString(w, completeFixture)
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+				}))
+				defer up.Close()
+				srv := stoppedProbeServer(t, cookiestore.New())
+				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+				defer cancel()
+				streamCtx := ctx
+				if probe {
+					streamCtx = hostProbeContext(ctx)
+				}
+				stream := forwardFixture(streamCtx, up.URL+"/responses", "fixture")
+				if err := srv.Forward(stream); err != nil {
+					t.Fatal(err)
+				}
+				state, err := srv.evidence.Read(42)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body strings.Builder
+				var ends, transportErrors int
+				for _, frame := range stream.responses {
+					body.Write(frame.GetBodyChunk())
+					if frame.GetEnd() != nil {
+						ends++
+					}
+					if frame.GetError() != nil {
+						transportErrors++
+					}
+				}
+				if calls.Load() != 1 || body.String() != completeFixture {
+					t.Fatal("request replayed or forwarded body changed")
+				}
+				if ctx.Err() != nil || ends != 1 || transportErrors != 0 {
+					t.Fatalf("framed terminal lost: context=%v ends=%d transport_errors=%d",
+						ctx.Err(), ends, transportErrors)
+				}
+				if probe {
+					if state.Operation.Phase != "ok" || state.BusinessDispatched != 0 {
+						t.Fatalf("host probe terminal misclassified: phase=%s", state.Operation.Phase)
+					}
+				} else if state.BusinessDispatched != 1 || state.BusinessSucceeded != 1 {
+					t.Fatalf("business terminal misclassified: dispatched=%d succeeded=%d",
+						state.BusinessDispatched, state.BusinessSucceeded)
+				}
+			})
+		}
+	}
+}
+
+func TestForwardTerminalDoesNotWaitForTransportEOF(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, phase string
+	}{
+		{"completed", completeFixture, "ok"},
+		{"header_terminal", "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n", "ok"},
+		{"pending_error_completed", "event: error\ndata: {\"code\":\"service_unavailable\"}\n\n" + completeFixture, "ok"},
+		{"failed", "event: response.failed\ndata: {\"response\":{\"status\":\"failed\"}}\n\n", "failed"},
+		{"failed_then_completed", "event: response.failed\ndata: {\"response\":{\"status\":\"failed\"}}\n\n" + completeFixture, "failed"},
+		{"partial_terminal", strings.TrimSuffix(completeFixture, "\n"), "unknown"},
+		{"done_only", "data: [DONE]\n\n", "unknown"},
+		{"bare_error", "event: error\ndata: {\"code\":\"service_unavailable\"}\n\n", "failed"},
+		{"malformed", "data: not-json\n\n" + completeFixture, "unknown"},
+	} {
+		for _, probe := range []bool{false, true} {
+			t.Run(tc.name+"/"+map[bool]string{false: "business", true: "host-probe"}[probe], func(t *testing.T) {
+				var calls atomic.Int64
+				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, tc.body)
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+				}))
+				defer up.Close()
+				srv := stoppedProbeServer(t, cookiestore.New())
+				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+				defer cancel()
+				streamCtx := ctx
+				if probe {
+					streamCtx = hostProbeContext(ctx)
+				}
+				stream := forwardFixture(streamCtx, up.URL+"/responses", "fixture")
+				if err := srv.Forward(stream); err != nil {
+					t.Fatal(err)
+				}
+				state, err := srv.evidence.Read(42)
+				if err != nil {
+					t.Fatal(err)
+				}
+				terminal := tc.phase != "unknown" && tc.name != "bare_error"
+				var ends, transportErrors int
+				var body strings.Builder
+				for _, frame := range stream.responses {
+					if frame.GetEnd() != nil {
+						ends++
+					}
+					if frame.GetError() != nil {
+						transportErrors++
+					}
+					body.Write(frame.GetBodyChunk())
+				}
+				if calls.Load() != 1 || body.String() != tc.body {
+					t.Fatalf("request replay or changed response: calls=%d body_equal=%v", calls.Load(), body.String() == tc.body)
+				}
+				if terminal && (ctx.Err() != nil || ends != 1 || transportErrors != 0) {
+					t.Fatalf("terminal waited for EOF: context=%v ends=%d transport_errors=%d", ctx.Err(), ends, transportErrors)
+				}
+				if !terminal && (ctx.Err() == nil || ends != 0 || transportErrors != 1) {
+					t.Fatalf("unfinished stream settled early: context=%v ends=%d transport_errors=%d", ctx.Err(), ends, transportErrors)
+				}
+				if probe {
+					if state.Operation.Phase != tc.phase {
+						t.Fatalf("operation=%s want=%s", state.Operation.Phase, tc.phase)
+					}
+				} else {
+					wantSuccess := uint64(0)
+					if tc.phase == "ok" {
+						wantSuccess = 1
+					}
+					if state.BusinessDispatched != 1 || state.BusinessSucceeded != wantSuccess {
+						t.Fatalf("business evidence: dispatched=%d succeeded=%d", state.BusinessDispatched, state.BusinessSucceeded)
+					}
+				}
+			})
+		}
 	}
 }
 

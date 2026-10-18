@@ -68,9 +68,9 @@ const (
 	// 陈旧版本会被优先丢弃（HTTP 200 + 流内 server_is_overloaded）；非官方客户端配不出
 	// 官方身份时整体回退到本常量，因此它必须跟随官方 CLI 的当前发布版本，
 	// 落后多个版本会让这些请求稳定落在被优先丢弃的一侧。
-	// 0.151.0 与全账号绑定的 TLS profile（codex-exec-0.151-macos）同版本：
-	// UA 版本段与 TLS 抓包来源描述的是同一个客户端，二者偏离即自我矛盾。
-	codexCLIVersion = "0.151.0"
+	// Native macOS arm64 0.162.1 capture, 2026-10-15: TLS parameters match
+	// the existing 0.151.0 profile. See deploy/client-identity/0.162.1.json.
+	codexCLIVersion = "0.162.1"
 	// Codex 限额快照仅用于后台展示/诊断，不需要每个成功请求都立即落库。
 	openAICodexSnapshotPersistMinInterval = 30 * time.Second
 	// 配额自动暂停时，超过该时长仍未刷新的 used% 快照视为陈旧，不再据此暂停账号。

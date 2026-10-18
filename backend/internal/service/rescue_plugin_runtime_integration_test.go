@@ -5,19 +5,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +36,7 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.NoError(t, err)
 	defer packageFile.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	hostVersion := os.Getenv("SUB2API_TEST_RESCUE_HOST_VERSION")
 	require.NotEmpty(t, hostVersion, "use the exact candidate host version")
@@ -63,15 +65,30 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	require.Equal(t, PluginSignatureTrusted, installation.SignatureStatus)
 	require.True(t, installation.Compatibility.Compatible)
 	require.Equal(t, "lyunlong.codex.lb-cookie-pin", installation.PluginKey)
-	require.Equal(t, "0.3.14", installation.Version)
+	sourceManifest, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy",
+		"codex-lb-cookie-pin", "manifest.source.json"))
+	require.NoError(t, err)
+	var expectedManifest struct {
+		ID      string `json:"id"`
+		Version string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(sourceManifest, &expectedManifest))
+	require.Equal(t, installation.PluginKey, expectedManifest.ID)
+	require.NotEmpty(t, expectedManifest.Version)
+	require.Equal(t, expectedManifest.Version, installation.Version,
+		"the signed package must match the committed source manifest")
 	installation.ID = 7
 
 	// macOS Unix socket paths have a short limit; keep RPC outside the long
 	// test name while retaining the caller's SSD-backed TMPDIR.
-	socketDir, err := os.MkdirTemp(os.TempDir(), "rescue-rpc-")
+	runtimeDir, err := os.MkdirTemp(os.TempDir(), "rr-")
 	require.NoError(t, err)
-	defer os.RemoveAll(socketDir)
-	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir, nil)
+	defer os.RemoveAll(runtimeDir)
+	socketDir := filepath.Join(runtimeDir, "rpc")
+	require.NoError(t, os.Mkdir(socketDir, 0700))
+	evidenceDir, err := pluginEvidenceDir(socketDir, installation.PluginKey)
+	require.NoError(t, err)
+	runtime, err := startPluginRuntime(ctx, installation, 10*time.Second, socketDir)
 	require.NoError(t, err)
 	defer runtime.kill()
 	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
@@ -89,8 +106,10 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	}
 	var mu sync.Mutex
 	seen := make(map[string]observation)
+	settlementConnections := make(map[string]bool)
 	slowStarted := make(chan struct{})
 	slowRelease := make(chan struct{})
+	stalledTerminalReleased := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(slowRelease) }) }
 	defer release()
@@ -108,30 +127,6 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 			}
 		}
 		switch step {
-		case "native-low-rt", "native-ambiguous", "native-wrong":
-			answer := "FINAL_ANSWER: 21"
-			if step == "native-ambiguous" {
-				answer = "not 21, no reliable final answer"
-			} else if step == "native-wrong" {
-				answer = "reasoning mentions 21\nFINAL_ANSWER: 0"
-			}
-			w.Header().Set("Set-Cookie", "__cflb=native-probe; Path=/")
-			w.Header().Set("Content-Type", "text/event-stream")
-			body, marshalErr := json.Marshal(map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{"status": "completed",
-					"output": []any{map[string]any{"type": "message",
-						"content": []any{map[string]any{"type": "output_text", "text": answer}}}},
-					"usage": map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": 300}}},
-			})
-			if marshalErr != nil {
-				t.Error(marshalErr)
-				return
-			}
-			_, _ = io.WriteString(w, "data: "+string(body)+"\n\n")
-			return
-		case "paused-seed":
-			w.Header().Set("Set-Cookie", "__cflb=must-not-capture; Path=/")
 		case "seed-a":
 			w.Header().Set("Set-Cookie", "__cflb=old-a; Path=/")
 		case "seed-b":
@@ -144,7 +139,30 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 			w.Header().Set("Set-Cookie", "__cflb=rejected-a; Path=/")
 			w.WriteHeader(http.StatusUnauthorized)
 		}
-		_, _ = io.WriteString(w, `{"fixture":true}`)
+		if step == "settlement-sse" || step == "settlement-no-media" || step == "settlement-stalled-tail" {
+			if step != "settlement-stalled-tail" {
+				mu.Lock()
+				settlementConnections[r.RemoteAddr] = true
+				mu.Unlock()
+			}
+			if step == "settlement-no-media" {
+				// The real upstream omits this header. Suppress net/http sniffing.
+				w.Header()["Content-Type"] = nil
+			} else {
+				w.Header().Set("Content-Type", "text/event-stream")
+			}
+			_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+			w.(http.Flusher).Flush()
+			if step == "settlement-stalled-tail" {
+				<-r.Context().Done()
+				close(stalledTerminalReleased)
+				return
+			}
+			// A terminal frame can arrive before the final HTTP chunk.
+			time.Sleep(10 * time.Millisecond)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":"response","status":"completed","output":[]}`)
 	}))
 	defer proxy.Close()
 	// Release pending requests before httptest waits for its handlers.
@@ -160,6 +178,31 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 		return &Account{ID: id, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 			Concurrency: 1, ProxyID: &proxyID, Proxy: proxyRecord}
 	}
+	// Native broker/lifecycle acceptance uses only the loopback proxy. Assert
+	// the host-resolved profile at the transport seam; repository tests cover
+	// TLS dialing and pool isolation, not this plain-HTTP fixture.
+	localTransport := http.DefaultTransport.(*http.Transport).Clone()
+	localTransport.Proxy = http.ProxyURL(proxyURL)
+	defer localTransport.CloseIdleConnections()
+	localClient := &http.Client{Transport: localTransport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	fingerprint := &tlsfingerprint.Profile{CipherSuites: []uint16{0x1301}}
+	boundHost := &pluginHostHTTP{
+		brokerID: runtime.broker.NextId(), business: make(map[string]*pluginHTTPGrant),
+		probes: make(map[int64]*pluginHTTPGrant), probeRunning: make(map[int64]bool),
+		resolve: func(*Account) *tlsfingerprint.Profile { return fingerprint },
+		runtime: runtime,
+		upstream: hostHTTPUpstreamFixture{call: func(req *http.Request, route string, id int64, concurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+			if route != proxyRecord.URL() || (id != 41 && id != 42) || concurrency != 1 ||
+				pluginHTTPProfileKey(profile) != pluginHTTPProfileKey(fingerprint) ||
+				!HTTPUpstreamRedirectsDisabled(req.Context()) || req.GetBody != nil {
+				return nil, errors.New("native host transport binding mismatch")
+			}
+			return localClient.Do(req)
+		}},
+	}
+	require.NoError(t, boundHost.start(runtime))
 	request := func(acc *Account, credential, step, route string) (int, error) {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost,
 			"http://chatgpt.com/backend-api/codex/responses",
@@ -198,6 +241,46 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	send(42, "other", "seed-b", http.StatusOK)
 	cookie("seed-a", "")
 	cookie("seed-b", "")
+	// Reading body EOF must include the signed plugin's durable settlement.
+	// This catches RPC cancellation races that unit transport fixtures cannot.
+	for n := uint64(2); n <= 25; n++ {
+		step := "settlement-sse"
+		if n >= 14 {
+			step = "settlement-no-media"
+		}
+		send(42, "other", step, http.StatusOK)
+		raw, readErr := os.ReadFile(filepath.Join(evidenceDir, "42.jsonl"))
+		require.NoError(t, readErr)
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		var record struct {
+			State struct {
+				Dispatched uint64 `json:"business_dispatched"`
+				Succeeded  uint64 `json:"business_succeeded"`
+				LastEvent  struct {
+					Result string `json:"result"`
+				} `json:"last_event"`
+			} `json:"state"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &record))
+		require.Equal(t, n, record.State.Dispatched)
+		require.Equal(t, n, record.State.Succeeded)
+		require.Equal(t, "succeeded", record.State.LastEvent.Result)
+	}
+	mu.Lock()
+	settlementConnectionCount := len(settlementConnections)
+	mu.Unlock()
+	require.Equal(t, 1, settlementConnectionCount,
+		"settled SSE must retain the HTTP connection when its final chunk follows promptly")
+	stalledStart := time.Now()
+	send(42, "other", "settlement-stalled-tail", http.StatusOK)
+	require.Less(t, time.Since(stalledStart), 2*time.Second,
+		"connection reuse must not leave a completed model response waiting for EOF")
+	select {
+	case <-stalledTerminalReleased:
+	case <-time.After(time.Second):
+		t.Fatal("stalled terminal HTTP connection was not released")
+	}
+	send(42, "other", "after-stalled-tail", http.StatusOK)
 
 	slowDone := make(chan error, 1)
 	go func() {
@@ -256,60 +339,6 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 	assert.False(t, reachedProxy)
 	assert.Equal(t, 0, legacy.doCalls, "no fallback for an inactive assigned proxy")
 
-	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
-		"enabled":true,"quality_probe_enabled":false,"persist_kv":false,"paused_account_ids":[41]
-	}`)))
-	send(41, "new", "paused-seed", http.StatusOK)
-	send(41, "new", "while-paused", http.StatusOK)
-	cookie("paused-seed", "")
-	cookie("while-paused", "")
-	send(42, "other", "other-while-paused", http.StatusOK)
-	cookie("other-while-paused", "__cflb=other-b")
-
-	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
-		"enabled":true,"quality_probe_enabled":true,"persist_kv":false,"paused_account_ids":[41]
-	}`)))
-	send(55, "low", "native-low-rt", http.StatusOK)
-	send(56, "ambiguous", "native-ambiguous", http.StatusOK)
-	send(57, "wrong", "native-wrong", http.StatusOK)
-	type probeView struct {
-		AccountID int64  `json:"account_id"`
-		Probes    int64  `json:"probes"`
-		Fails     int64  `json:"fails"`
-		Rerolls   int64  `json:"quality_rerolls"`
-		Passes    int    `json:"consecutive_passes"`
-		Verdict   string `json:"last_verdict"`
-	}
-	var views map[int64]probeView
-	require.Eventually(t, func() bool {
-		health, healthErr := runtime.api.Health(ctx, &pluginv1.HealthRequest{})
-		if healthErr != nil {
-			return false
-		}
-		var status struct {
-			Prober struct {
-				Accounts []probeView `json:"accounts"`
-			} `json:"prober"`
-		}
-		if json.Unmarshal([]byte(health.StatusJson), &status) != nil {
-			return false
-		}
-		views = make(map[int64]probeView)
-		for _, view := range status.Prober.Accounts {
-			views[view.AccountID] = view
-		}
-		return views[55].Probes > 0 && views[56].Probes > 0 && views[57].Fails > 0
-	}, 25*time.Second, 100*time.Millisecond)
-	for _, id := range []int64{55, 56} {
-		require.Equal(t, "error", views[id].Verdict)
-		require.Zero(t, views[id].Fails)
-		require.Zero(t, views[id].Rerolls)
-		require.Zero(t, views[id].Passes)
-	}
-	require.NoError(t, runtime.validateAndApplyConfig(ctx, []byte(`{
-		"enabled":true,"quality_probe_enabled":false,"persist_kv":false,"paused_account_ids":[41]
-	}`)))
-
 	require.Eventually(t, func() bool { return runtime.inFlight.Load() == 0 },
 		time.Second, 10*time.Millisecond)
 	runtime.draining.Store(true)
@@ -353,9 +382,11 @@ func TestRescuePluginRuntimeReauthorizationIsolation(t *testing.T) {
 			"trusted_publishers_sha256": sum(policy),
 			"trust_config_sha256":       sum(trustSource),
 			"test_source_sha256":        sum(source),
+			"source_manifest_sha256":    sum(sourceManifest),
 			"checks": []string{"native_installer", "rpc", "gateway", "credential_rotation",
 				"stale_response", "account_isolation", "401", "reroll", "proxy_fail_closed", "drain",
-				"paused_account", "low_rt_observation", "ambiguous_answer", "explicit_wrong_answer"},
+				"host_http_broker", "host_resolved_profile_binding", "host_route_binding",
+				"no_redirect", "no_request_body_replay"},
 			"production_adoption": false,
 		}, "", "  ")
 		require.NoError(t, marshalErr)

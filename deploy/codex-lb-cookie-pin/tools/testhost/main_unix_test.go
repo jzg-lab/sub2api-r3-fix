@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/cookiestore"
 	"github.com/liyunlong/sub2api-cookie-plugin/internal/evidence"
+	"github.com/liyunlong/sub2api-cookie-plugin/internal/transport"
 	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
@@ -26,26 +28,34 @@ type hostFixture struct {
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv("SUB2API_TESTHOST_FIXTURE"); mode != "" {
-		if _, err := evidence.Open(os.Getenv("SUB2API_PLUGIN_STATE_DIR")); err != nil {
+		journal, err := evidence.Open(os.Getenv("SUB2API_PLUGIN_STATE_DIR"))
+		if err != nil {
 			os.Exit(3)
 		}
 		if err := os.WriteFile(os.Getenv("SUB2API_TESTHOST_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 			os.Exit(2)
 		}
-		pluginv1.Serve(&hostFixture{mode: mode})
+		if mode == "real-transport" {
+			server := transport.NewWithEvidence(cookiestore.New(), journal)
+			server.RequireHostProbePolicy()
+			server.RequireHostHTTP()
+			pluginv1.Serve(server)
+		} else {
+			pluginv1.Serve(&hostFixture{mode: mode})
+		}
 		return
 	}
 	os.Exit(m.Run())
 }
 
-func TestRunRequiresDurableStateForRealForward(t *testing.T) {
+func TestRunRejectsRealForwardWithoutNativeHost(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = run([]string{"-plugin", executable, "-forward", "-token", "fixture"})
-	if err == nil || !strings.Contains(err.Error(), "-state-dir") {
-		t.Fatalf("real forward accepted disposable state: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "native host") {
+		t.Fatalf("real forward bypassed native host controls: %v", err)
 	}
 	dir := t.TempDir()
 	link := filepath.Join(t.TempDir(), "linked")
@@ -124,6 +134,7 @@ func TestRunReapsPluginOnEveryExit(t *testing.T) {
 		mock bool
 	}{
 		{mode: "success"},
+		{mode: "real-transport", mock: true},
 		{mode: "reject", want: "ValidateConfig"},
 		{mode: "test-failed", want: "TestConfig"},
 		{mode: "final-unhealthy", want: "最终健康检查"},

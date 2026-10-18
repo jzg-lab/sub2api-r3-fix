@@ -60,7 +60,17 @@ func (s *OpenAIOAuthService) issueReauthorizationProof(
 	if session.ReauthorizationAccountID == 0 {
 		return nil
 	}
-	hash, err := openAIReauthorizationCredentialsHash(s.BuildAccountCredentials(result))
+	credentials := s.BuildAccountCredentials(result)
+	if session.ReauthorizationFreshLogin {
+		current, err := s.lookupReauthorizationAccount(ctx, session.ReauthorizationAccountID)
+		if err != nil {
+			return err
+		}
+		if err := validateExplicitReloginIdentity(current, credentials); err != nil {
+			return err
+		}
+	}
+	hash, err := openAIReauthorizationCredentialsHash(credentials)
 	if err != nil {
 		return err
 	}
@@ -169,5 +179,40 @@ func ValidateOpenAIOAuthReauthorizationCommit(ctx context.Context, current *Acco
 	if err != nil || hash != proof.ReauthorizationCredentialsHash {
 		return ErrOpenAIOAuthReauthorizationProofRequired
 	}
+	if proof.ReauthorizationFreshLogin {
+		return validateExplicitReloginIdentity(current, credentials)
+	}
+	return nil
+}
+
+func validateExplicitReloginIdentity(current *Account, credentials map[string]any) error {
+	for _, key := range []string{"email", "chatgpt_account_id", "chatgpt_user_id", "organization_id"} {
+		previous := strings.TrimSpace(current.GetCredential(key))
+		next, _ := credentials[key].(string)
+		next = strings.TrimSpace(next)
+		if key == "email" {
+			previous, next = strings.ToLower(previous), strings.ToLower(next)
+		}
+		if previous != "" && previous != next {
+			return ErrOpenAIOAuthIdentityChanged
+		}
+	}
+	kind, _, identified := OpenAIOAuthStableIdentity(current)
+	if !identified || kind != "email" {
+		return ErrOpenAIOAuthIdentityChanged
+	}
+	return nil
+}
+
+// Record fresh-login evidence in the same transaction as credential replacement.
+func RecordOpenAIOAuthReloginEvidence(ctx context.Context, current *Account, credentials, extra map[string]any) error {
+	proof, ok := ctx.Value(openAIReauthorizationProofKey{}).(OpenAIOAuthSession)
+	if !ok || !proof.ReauthorizationFreshLogin {
+		return nil
+	}
+	if err := ValidateOpenAIOAuthReauthorizationCommit(ctx, current, credentials); err != nil {
+		return err
+	}
+	extra["openai_oauth_relogin_verified_at"] = proof.CreatedAt.UTC().Format(time.RFC3339Nano)
 	return nil
 }

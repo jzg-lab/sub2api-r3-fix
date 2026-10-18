@@ -27,13 +27,7 @@ func probeRetryDeadlineWithPolicy(status int, header http.Header, now time.Time,
 	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
 		return time.Time{}
 	}
-	raw := strings.TrimSpace(header.Get("Retry-After"))
-	var deadline time.Time
-	if seconds, ok := retrySeconds(raw); ok {
-		deadline = retryResetAfter(seconds, now)
-	} else if date, err := http.ParseTime(raw); err == nil {
-		deadline = date
-	}
+	deadline := retryAfterDeadline(header, now)
 	if status == http.StatusTooManyRequests {
 		for _, slot := range []string{"primary", "secondary"} {
 			prefix := "x-codex-" + slot + "-"
@@ -51,12 +45,23 @@ func probeRetryDeadlineWithPolicy(status int, header http.Header, now time.Time,
 			}
 		}
 	}
-	if status == http.StatusTooManyRequests || !deadline.IsZero() {
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
 		if status == http.StatusTooManyRequests && !deadline.After(now) {
 			deadline = now.Add(policy.FallbackDuration())
 		}
 		deadline = maxTime(deadline, policy.NotBefore)
 		return maxTime(deadline, now.Add(time.Minute))
+	}
+	return time.Time{}
+}
+
+func retryAfterDeadline(header http.Header, now time.Time) time.Time {
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if seconds, ok := retrySeconds(raw); ok {
+		return retryResetAfter(seconds, now)
+	}
+	if date, err := http.ParseTime(raw); err == nil {
+		return date
 	}
 	return time.Time{}
 }
@@ -81,18 +86,28 @@ func probeQuotaBodyDeadline(raw []byte, now time.Time) time.Time {
 		return time.Time{}
 	}
 	var envelope struct {
-		Error struct {
-			Type            string          `json:"type"`
-			ResetsAt        json.RawMessage `json:"resets_at"`
-			ResetsInSeconds json.RawMessage `json:"resets_in_seconds"`
-		} `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return time.Time{}
 	}
-	switch envelope.Error.Type {
-	case "usage_limit_reached", "rate_limit_exceeded", "GoUsageLimitError":
-	default:
+	return probeQuotaErrorDeadline(envelope.Error, now)
+}
+
+// Share the same bounded quota decoder across HTTP errors and SSE error fields.
+// Unrelated event content and error prose cannot establish a recovery deadline.
+func probeQuotaErrorDeadline(raw []byte, now time.Time) time.Time {
+	if len(raw) > maxProbeErrorBody {
+		return time.Time{}
+	}
+	var failure struct {
+		Code            string          `json:"code"`
+		Type            string          `json:"type"`
+		ResetsAt        json.RawMessage `json:"resets_at"`
+		ResetsInSeconds json.RawMessage `json:"resets_in_seconds"`
+	}
+	if json.Unmarshal(raw, &failure) != nil ||
+		!isProbeQuotaError(failure.Code) && !isProbeQuotaError(failure.Type) {
 		return time.Time{}
 	}
 	number := func(raw json.RawMessage) (float64, bool) {
@@ -103,7 +118,7 @@ func probeQuotaBodyDeadline(raw []byte, now time.Time) time.Time {
 		return retrySeconds(string(raw))
 	}
 	var deadline time.Time
-	if seconds, valid := number(envelope.Error.ResetsAt); valid {
+	if seconds, valid := number(failure.ResetsAt); valid {
 		maximum := now.Add(time.Duration(1<<63 - 1))
 		if seconds >= float64(maximum.Unix()) {
 			deadline = maximum
@@ -111,10 +126,20 @@ func probeQuotaBodyDeadline(raw []byte, now time.Time) time.Time {
 			deadline = time.Unix(int64(seconds), 0)
 		}
 	}
-	if seconds, valid := number(envelope.Error.ResetsInSeconds); valid {
+	if seconds, valid := number(failure.ResetsInSeconds); valid {
 		deadline = maxTime(deadline, retryResetAfter(seconds, now))
 	}
 	return deadline
+}
+
+func isProbeQuotaError(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "rate_limit_error", "rate_limit_exceeded", "too_many_requests",
+		"insufficient_quota", "usage_limit_reached", "quota_exceeded", "gousagelimiterror":
+		return true
+	default:
+		return false
+	}
 }
 
 func maxTime(a, b time.Time) time.Time {

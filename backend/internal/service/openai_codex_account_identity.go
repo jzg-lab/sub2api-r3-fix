@@ -163,10 +163,10 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 }
 
 func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, account *Account, apiKeyID int64) bool {
+	changed := sanitizeCodexClientEnvironmentMap(requestBody, account)
 	if requestBody == nil || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
-		return false
+		return changed
 	}
-	changed := false
 	clientMetadata, _ := requestBody["client_metadata"].(map[string]any)
 	originalBodySessionID := ""
 	if clientMetadata != nil {
@@ -196,8 +196,12 @@ func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, acco
 // subobjects with gjson/sjson. The passthrough hot path never unmarshals the
 // potentially multi-megabyte request body.
 func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, apiKeyID int64) ([]byte, bool, error) {
+	body, cleaned, err := sanitizeCodexClientEnvironmentRaw(body, account)
+	if err != nil {
+		return nil, false, err
+	}
 	if len(body) == 0 || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
-		return body, false, nil
+		return body, cleaned, nil
 	}
 	root := gjson.ParseBytes(body)
 	if !root.IsObject() {
@@ -205,7 +209,7 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 	}
 
 	next := body
-	changed := false
+	changed := cleaned
 	originalBodySessionID := ""
 	if cm := gjson.GetBytes(body, "client_metadata"); cm.IsObject() {
 		clientMetadata := map[string]any{}
@@ -250,6 +254,11 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 }
 
 func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, apiKeyID int64) {
+	// Filter before fingerprinting so newly generated server timestamps/IDs are
+	// retained, while untrusted downstream environment metadata is discarded.
+	if account != nil && account.IsOpenAIOAuthLike() {
+		sanitizeCodexClientEnvironmentHeaders(headers)
+	}
 	if headers == nil || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
 		return
 	}

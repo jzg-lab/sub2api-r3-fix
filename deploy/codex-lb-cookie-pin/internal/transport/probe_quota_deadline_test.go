@@ -42,6 +42,8 @@ func TestProbeQuotaDeadline(t *testing.T) {
 	for _, raw := range []string{
 		`{"error":{"type":"usage_limit_reached","resets_in_seconds":1800}}`,
 		`{"error":{"type":"rate_limit_exceeded","resets_in_seconds":"1800"}}`,
+		`{"error":{"type":"server_error","code":"usage_limit_reached","resets_in_seconds":1800}}`,
+		`{"error":{"type":"GoUsageLimitError","resets_in_seconds":1800}}`,
 		fmt.Sprintf(`{"error":{"type":"usage_limit_reached","resets_at":%d}}`, now.Unix()+1800),
 	} {
 		if got := probeQuotaBodyDeadline([]byte(raw), now); !got.Equal(now.Add(30 * time.Minute)) {

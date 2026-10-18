@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -148,5 +149,174 @@ func TestOpenAIStreamFailureConsumers(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestOpenAIStreamFailureConsumedUsageStopsReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		usage     string
+		prefix    string
+		wantRetry bool
+	}{
+		{"input_only", `{"input_tokens":7,"output_tokens":0}`, "", false},
+		{"output_only", `{"input_tokens":0,"output_tokens":2}`, "", false},
+		{"reasoning_only", `{"output_tokens_details":{"reasoning_tokens":2}}`, "", false},
+		{"cached_only", `{"input_tokens_details":{"cached_tokens":7}}`, "", false},
+		{"progressive_usage", `null`, "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":7}}}\n\n", false},
+		{"progressive_usage_then_zero", `{"input_tokens":0,"output_tokens":0}`, "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":7}}}\n\n", false},
+		{"progressive_reasoning_then_zero", `{"input_tokens":0,"output_tokens":0}`, "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\n", false},
+		{"explicit_zero", `{"input_tokens":0,"output_tokens":0}`, "", true},
+		{"absent", `null`, "", true},
+	} {
+		for _, mode := range []string{
+			"native_stream", "passthrough_stream", "native_buffered", "passthrough_buffered",
+			"chat_stream", "chat_buffered", "messages_stream", "messages_buffered",
+		} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				payload := `{"type":"response.failed","response":{"status":"failed","output":[],"error":{"type":"server_error","message":"temporary failure"},"usage":` + tc.usage + `}}`
+				body := tc.prefix + "event: response.failed\ndata: " + payload + "\n\n"
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
+				account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+				var err error
+				switch mode {
+				case "native_stream":
+					_, err = svc.handleStreamingResponse(context.Background(), resp, c, account, time.Now(), "model", "model")
+				case "passthrough_stream":
+					_, err = svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now(), "model", "model")
+				case "native_buffered":
+					_, err = svc.handleSSEToJSON(resp, c, account, []byte(body), "model", "model")
+				case "passthrough_buffered":
+					_, err = svc.handlePassthroughSSEToJSON(resp, c, account, []byte(body), "model", "model")
+				case "chat_stream":
+					_, err = svc.handleChatStreamingResponse(resp, c, account, "model", "model", "model", time.Now(), 0)
+				case "chat_buffered":
+					_, err = svc.handleChatBufferedStreamingResponse(resp, c, account, "model", "model", "model", time.Now())
+				case "messages_stream":
+					_, err = svc.handleAnthropicStreamingResponse(resp, c, account, "model", "model", "model", time.Now())
+				case "messages_buffered":
+					_, err = svc.handleAnthropicBufferedStreamingResponse(resp, c, account, "model", "model", "model", time.Now())
+				}
+				var failure *UpstreamFailoverError
+				require.ErrorAs(t, err, &failure)
+				require.Equal(t, tc.wantRetry, failure.ShouldRetryNextAccount())
+				if !tc.wantRetry {
+					require.False(t, failure.RetryableOnSameAccount)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIStreamFailureConsumedUsageBeforeDisconnectStopsReplay(t *testing.T) {
+	for _, end := range []string{"eof", "read_error"} {
+		for _, mode := range []string{"native", "passthrough"} {
+			for _, consumed := range []bool{false, true} {
+				name := "unused"
+				if consumed {
+					name = "consumed"
+				}
+				t.Run(end+"/"+mode+"/"+name, func(t *testing.T) {
+					prefix := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n"
+					if consumed {
+						prefix += "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+					}
+					var reader io.Reader = strings.NewReader(prefix)
+					if end == "read_error" {
+						reader = io.MultiReader(reader, iotest.ErrReader(io.ErrUnexpectedEOF))
+					}
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+					svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
+					account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+					resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(reader)}
+					var err error
+					if mode == "native" {
+						_, err = svc.handleStreamingResponse(context.Background(), resp, c, account, time.Now(), "model", "model")
+					} else {
+						_, err = svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now(), "model", "model")
+					}
+					var failure *UpstreamFailoverError
+					require.ErrorAs(t, err, &failure)
+					require.Equal(t, !consumed, failure.ShouldRetryNextAccount())
+					if consumed {
+						require.False(t, failure.RetryableOnSameAccount)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpenAIStreamFailureConsumedUsagePreventsCompactFallback(t *testing.T) {
+	for _, mode := range []string{"native_stream", "passthrough_stream", "native_buffered", "passthrough_buffered"} {
+		for _, consumed := range []bool{false, true} {
+			name := "unused"
+			if consumed {
+				name = "consumed"
+			}
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				body := ""
+				if consumed {
+					body = "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+				}
+				body += "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"context window exceeded\"}}}\n\n"
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
+				account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+				var err error
+				switch mode {
+				case "native_stream":
+					_, err = svc.handleStreamingResponse(context.Background(), resp, c, account, time.Now(), "model", "model")
+				case "passthrough_stream":
+					_, err = svc.handleStreamingResponsePassthrough(context.Background(), resp, c, account, time.Now(), "model", "model")
+				case "native_buffered":
+					_, err = svc.handleSSEToJSON(resp, c, account, []byte(body), "model", "model")
+				case "passthrough_buffered":
+					_, err = svc.handlePassthroughSSEToJSON(resp, c, account, []byte(body), "model", "model")
+				}
+				require.Error(t, err)
+				_, fallback := asOpenAICompactFallbackSignal(err)
+				require.Equal(t, !consumed, fallback)
+				var failure *UpstreamFailoverError
+				if errors.As(err, &failure) && consumed {
+					require.False(t, failure.ShouldRetryNextAccount())
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIStreamFailureConsumedUsagePreventsCompactHTTPRetry(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	svc.cfg.Gateway.OpenAICompactModel = "compact-fallback"
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+	request := []byte(`{"model":"model","input":[]}`)
+	for _, tc := range []struct {
+		name      string
+		usage     string
+		wantRetry bool
+	}{
+		{"consumed", `{"input_tokens":7}`, false},
+		{"reasoning", `{"output_tokens_details":{"reasoning_tokens":2}}`, false},
+		{"zero", `{"input_tokens":0,"output_tokens":0}`, true},
+		{"absent", `null`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"error":{"code":"context_length_exceeded","message":"context window exceeded"},"usage":` + tc.usage + `}`)
+			got, _, retry := svc.prepareOpenAICompactFallbackRetry(c, nil, "model", request,
+				http.StatusBadRequest, "context window exceeded", body, false)
+			require.Equal(t, tc.wantRetry, retry)
+			if !tc.wantRetry {
+				require.Equal(t, request, got)
+			}
+		})
 	}
 }

@@ -151,6 +151,60 @@ func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputFailsOver(t *testing.T
 	require.Empty(t, rec.Body.String(), "failover path must not commit downstream output")
 }
 
+func TestForwardAsAnthropic_StreamingGenericBareErrorBeforeOutputIsNotHiddenByFailover(t *testing.T) {
+
+	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ssePayload := "event: error\n" +
+		`data: {"type":"error","error":{"message":"mixed tools failed"}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(ssePayload)),
+	}}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+
+	_, err := svc.ForwardAsAnthropic(context.Background(), c, rawChatCompletionsTestAccount(), body, "", "")
+
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Contains(t, rec.Body.String(), "mixed tools failed")
+}
+
+func TestForwardAsAnthropic_BufferedResponseFailed_Failover(t *testing.T) {
+
+	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ssePayload := buildResponsesFailedSSEStream("rate_limit_error", "Rate limit reached")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(ssePayload)),
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+
+	account := rawChatCompletionsTestAccount()
+	_, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.True(t, errors.As(err, &failoverErr), "rate_limit_error should trigger UpstreamFailoverError for failover, got: %T: %v", err, err)
+}
+
 func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputClassification(t *testing.T) {
 	for _, errorType := range []string{"server_error", "unclassified_error"} {
 		t.Run(errorType, func(t *testing.T) {
@@ -184,32 +238,4 @@ func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputClassification(t *test
 			}
 		})
 	}
-}
-
-func TestForwardAsAnthropic_BufferedResponseFailed_Failover(t *testing.T) {
-
-	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-
-	ssePayload := buildResponsesFailedSSEStream("rate_limit_error", "Rate limit reached")
-
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(ssePayload)),
-	}}
-	svc := &OpenAIGatewayService{
-		cfg:          rawChatCompletionsTestConfig(),
-		httpUpstream: upstream,
-	}
-
-	account := rawChatCompletionsTestAccount()
-	_, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
-
-	require.Error(t, err)
-	var failoverErr *UpstreamFailoverError
-	require.True(t, errors.As(err, &failoverErr), "rate_limit_error should trigger UpstreamFailoverError for failover, got: %T: %v", err, err)
 }

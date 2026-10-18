@@ -147,7 +147,11 @@ func TestProbeFailureDiagnosticPrecedesCleanupCancellation(t *testing.T) {
 			if !body {
 				transport.cancel = cancel
 			}
-			srv.Client.Transport = transport
+			client, err := srv.clientFor(tmpl.ProxyURL, 42, tmpl.AccountConcurrency)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.Transport = transport
 			verdict, _, _ := srv.sendProbe(ctx, 42, &tmpl, prober.Question{Prompt: "private-question"}, cfg)
 			if verdict != prober.VerdictError || transport.calls != 1 {
 				t.Fatal("diagnostics changed probe cancellation or result semantics")
@@ -203,8 +207,13 @@ func TestForwardFailureLogsWithoutRetryOrAdmission(t *testing.T) {
 			store.SetConfig(cfg)
 			srv := stoppedProbeServer(t, store)
 			transport := &failingDiagnosticTransport{body: body}
-			srv.Client.Transport = transport
 			stream := forwardFixture(t.Context(), "https://private.invalid/private-query", "private-auth")
+			start := stream.requests[0].GetStart()
+			client, err := srv.clientFor(start.GetProxyUrl(), start.GetAccountId(), start.GetAccountConcurrency())
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.Transport = transport
 			if err := srv.Forward(stream); err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +257,11 @@ func TestProbeHTTPFailureDiagnosticKeepsBodyErrorBeforeCancel(t *testing.T) {
 	stashFrom(srv, 42, "https://private.invalid/private-query", time.Now())
 	tmpl := *srv.templates[42]
 	transport := &failingDiagnosticTransport{body: true, statusCode: http.StatusUnauthorized}
-	srv.Client.Transport = transport
+	client, err := srv.clientFor(tmpl.ProxyURL, 42, tmpl.AccountConcurrency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Transport = transport
 	verdict, reason, _ := srv.sendProbe(t.Context(), 42, &tmpl, prober.Question{Prompt: "private-question"}, cfg)
 	if verdict != prober.VerdictError || reason != "http:401+tmpl-dropped" || transport.calls != 1 {
 		t.Fatal("diagnostics changed the existing non-retryable HTTP failure")

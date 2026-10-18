@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/antibypass"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -50,4 +51,33 @@ func TestUpdateSettingsAntiBypassRoundTrip(t *testing.T) {
 			require.Equal(t, "true", repo.values[service.SettingKeyAntiBypassEnabled])
 		}
 	}
+}
+
+func TestUpdateSettingsAntiBypassPolicyRoundTripAndOmission(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
+		service.SettingKeyAntiBypassEnabled: "true",
+	})
+	policy := antibypass.DefaultPolicy()
+	policy.MaxConcurrent, policy.RPMLimit = 64, 240
+	rec := doUpdateSettings(t, h, map[string]any{"anti_bypass_policy": policy}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	stored := repo.values[service.SettingKeyAntiBypassPolicy]
+	parsed, err := antibypass.ParsePolicy(stored)
+	require.NoError(t, err)
+	require.Equal(t, policy, parsed)
+	var responseBody struct {
+		Data struct {
+			Policy antibypass.Policy `json:"anti_bypass_policy"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, policy, responseBody.Data.Policy)
+	rec = doUpdateSettings(t, h, map[string]any{"registration_enabled": true}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, stored, repo.values[service.SettingKeyAntiBypassPolicy])
+	policy.MaxConcurrent = 0
+	rec = doUpdateSettings(t, h, map[string]any{"anti_bypass_policy": policy}, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, stored, repo.values[service.SettingKeyAntiBypassPolicy])
+	require.Equal(t, "true", repo.values[service.SettingKeyAntiBypassEnabled])
 }

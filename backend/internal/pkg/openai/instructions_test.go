@@ -33,6 +33,11 @@ func TestCodexBaseInstructionsForModel(t *testing.T) {
 		{" GPT-5.5 ", "You are Codex, a coding agent based on GPT-5"},
 		{"gpt-5.2", "You are GPT-5.2 running in the Codex CLI"},
 		{"gpt-5.1", "You are GPT-5.1 running in the Codex CLI"},
+		{"gpt-6", "You are Codex, an agent based on GPT-6"},
+		{"gpt-6-astra", "You are Codex, an agent based on GPT-6"},
+		{"openai/GPT-6-ASTRA", "You are Codex, an agent based on GPT-6"},
+		{" GPT_6_ASTRA ", "You are Codex, an agent based on GPT-6"},
+		{"gpt-6-astra-2026-09-01", "You are Codex, an agent based on GPT-6"},
 		{"gpt-5", "You are Codex, a coding agent based on GPT-5"},   // 回退到最新（GPT-5.5）
 		{"gpt-5.4", "You are Codex, a coding agent based on GPT-5"}, // 未单独维护 → 最新
 		{"gpt-5.3", "You are Codex, a coding agent based on GPT-5"}, // 未单独维护 → 最新
@@ -48,5 +53,14 @@ func TestCodexBaseInstructionsForModel(t *testing.T) {
 		if !strings.HasPrefix(got, c.wantHead) {
 			t.Errorf("model %q: got prefix %q, want %q", c.model, firstLine(got), c.wantHead)
 		}
+	}
+}
+
+func TestCodexBaseInstructionsAstraTemplateFallback(t *testing.T) {
+	saved := instructionsGPT6Astra
+	t.Cleanup(func() { instructionsGPT6Astra = saved })
+	instructionsGPT6Astra = " \n"
+	if got := CodexBaseInstructionsForModel("openai/gpt-6-astra"); got != latestCodexInstructions() {
+		t.Fatal("an empty dedicated template must retain the nonempty fallback")
 	}
 }

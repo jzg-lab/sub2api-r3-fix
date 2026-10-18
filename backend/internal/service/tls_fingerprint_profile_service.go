@@ -223,7 +223,10 @@ func (s *TLSFingerprintProfileService) ResolveTLSProfile(account *Account) *tlsf
 			}
 		}
 	}
-	// TLS 启用但无绑定 profile → 空 Profile → dialer 使用内置默认值
+	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		return verifiedCodexTLSProfile()
+	}
+	// Other providers retain their existing Node.js default.
 	return &tlsfingerprint.Profile{Name: "Built-in Default (Node.js 24.x)"}
 }
 

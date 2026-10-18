@@ -31,6 +31,10 @@ func (r *pinnedModelsRoutesRepository) ListSchedulableByGroupID(context.Context,
 	return []service.Account{r.account}, nil
 }
 
+func (r *pinnedModelsRoutesRepository) ListSchedulableByPlatform(context.Context, string) ([]service.Account, error) {
+	return []service.Account{r.account}, nil
+}
+
 func (r *pinnedModelsRoutesRepository) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]service.Account, error) {
 	return []service.Account{r.account}, nil
 }

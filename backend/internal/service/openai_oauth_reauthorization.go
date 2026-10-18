@@ -63,7 +63,7 @@ func validateOpenAIOAuthReauthorizationBinding(session *OpenAIOAuthSession) erro
 		return ErrOpenAIOAuthSessionInvalid
 	}
 	if session.ReauthorizationAccountID == 0 {
-		if session.ReauthorizationRevision != "" || session.ReauthorizationExitIP != "" ||
+		if session.ReauthorizationFreshLogin || session.ReauthorizationRevision != "" || session.ReauthorizationExitIP != "" ||
 			session.ReauthorizationCredentialsHash != "" || session.ReauthorizationBrowserSessionID != "" ||
 			session.ReauthorizationAccountRevision != "" {
 			return ErrOpenAIOAuthSessionInvalid
@@ -92,7 +92,7 @@ func validateOpenAIOAuthReauthorizationBinding(session *OpenAIOAuthSession) erro
 }
 
 func (s *OpenAIOAuthService) GenerateReauthorizationAuthURL(
-	ctx context.Context, accountID int64, revision string, proxyID *int64, redirectURI, platform, accountRevision string,
+	ctx context.Context, accountID int64, revision string, proxyID *int64, redirectURI, platform, accountRevision string, freshLogin ...bool,
 ) (*OpenAIAuthURLResult, error) {
 	account, err := s.lookupReauthorizationAccount(ctx, accountID)
 	if err != nil {
@@ -116,10 +116,15 @@ func (s *OpenAIOAuthService) GenerateReauthorizationAuthURL(
 	if proxyIDValue(proxyID) != proxyIDValue(account.ProxyID) {
 		return nil, ErrOpenAIOAuthProxyMismatch
 	}
+	fresh := len(freshLogin) == 1 && freshLogin[0]
+	if fresh && accountRevision == "" {
+		return nil, ErrOAuthReauthorizationStale
+	}
 	binding := &OpenAIOAuthSession{
 		ReauthorizationAccountID:       account.ID,
 		ReauthorizationRevision:        expected.UTC().Format(time.RFC3339Nano),
 		ReauthorizationAccountRevision: currentRevision,
+		ReauthorizationFreshLogin:      fresh,
 	}
 	return s.generateAuthURL(ctx, proxyID, redirectURI, platform, binding)
 }

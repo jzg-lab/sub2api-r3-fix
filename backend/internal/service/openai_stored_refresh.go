@@ -91,7 +91,12 @@ func (api *OAuthRefreshAPI) refreshStoredOpenAIAccount(ctx context.Context, acco
 	var result *OAuthRefreshResult
 	var err error
 	if account.Status == StatusError {
-		result, err = api.RecoverOpenAIError(ctx, account, wrapped)
+		if force {
+			// An explicit administrator action keeps its existing force semantics.
+			result, err = api.refreshIfNeeded(ctx, account, wrapped, 0, true)
+		} else {
+			result, err = api.RecoverOpenAIError(ctx, account, wrapped)
+		}
 	} else {
 		result, err = api.RefreshIfNeeded(withOAuthRefreshRequestPath(ctx), account, wrapped, openAITokenRefreshSkew)
 	}

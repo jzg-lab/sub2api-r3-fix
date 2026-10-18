@@ -227,6 +227,7 @@
               <span
                 v-else-if="typeof row.latency_ms === 'number'"
                 :class="['badge', row.latency_ms < 200 ? 'badge-success' : 'badge-warning']"
+                :title="t('admin.proxies.latencyMeasurement')"
               >
                 {{ row.latency_ms }}ms
               </span>
@@ -988,6 +989,7 @@ import { useTableSelection } from '@/composables/useTableSelection'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatDateTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
+import { applyProxyExitObservation, proxyQualityExitObservation } from '@/utils/proxyHealth'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -1510,24 +1512,7 @@ const applyLatencyResult = (
 ) => {
   const target = proxies.value.find((proxy) => proxy.id === proxyId)
   if (!target) return
-  if (result.success) {
-    target.latency_status = 'success'
-    target.latency_ms = result.latency_ms
-    target.ip_address = result.ip_address
-    target.country = result.country
-    target.country_code = result.country_code
-    target.region = result.region
-    target.city = result.city
-  } else {
-    target.latency_status = 'failed'
-    target.latency_ms = undefined
-    target.ip_address = undefined
-    target.country = undefined
-    target.country_code = undefined
-    target.region = undefined
-    target.city = undefined
-  }
-  target.latency_message = result.message
+  applyProxyExitObservation(target, result)
 }
 
 const summarizeQualityStatus = (result: ProxyQualityCheckResult): Proxy['quality_status'] => {
@@ -1545,6 +1530,17 @@ const applyQualityResult = (proxyId: number, result: ProxyQualityCheckResult) =>
   target.quality_grade = result.grade
   target.quality_summary = result.summary
   target.quality_checked = result.checked_at
+}
+
+const markQualityUnavailable = (proxyId: number, message: string) => {
+  applyLatencyResult(proxyId, { success: false, message })
+  const target = proxies.value.find((proxy) => proxy.id === proxyId)
+  if (!target) return
+  target.quality_status = undefined
+  target.quality_score = undefined
+  target.quality_grade = undefined
+  target.quality_summary = message
+  target.quality_checked = undefined
 }
 
 const formatLocation = (proxy: Proxy) => {
@@ -1616,17 +1612,7 @@ const handleQualityCheck = async (proxy: Proxy) => {
     qualityReport.value = result
     showQualityReportDialog.value = true
 
-    const baseStep = result.items.find((item) => item.target === 'base_connectivity')
-    if (baseStep && baseStep.status === 'pass') {
-      applyLatencyResult(proxy.id, {
-        success: true,
-        latency_ms: result.base_latency_ms,
-        message: result.summary,
-        ip_address: result.exit_ip,
-        country: result.country,
-        country_code: result.country_code
-      })
-    }
+    applyLatencyResult(proxy.id, proxyQualityExitObservation(result))
     applyQualityResult(proxy.id, result)
 
     appStore.showSuccess(
@@ -1634,6 +1620,7 @@ const handleQualityCheck = async (proxy: Proxy) => {
     )
   } catch (error: any) {
     const message = error.response?.data?.detail || t('admin.proxies.qualityCheckFailed')
+    markQualityUnavailable(proxy.id, message)
     appStore.showError(message)
     console.error('Error checking proxy quality:', error)
   } finally {
@@ -1658,20 +1645,7 @@ const runBatchProxyQualityChecks = async (ids: number[]) => {
       startQualityCheckingProxy(current)
       try {
         const result = await adminAPI.proxies.checkProxyQuality(current)
-        const target = proxies.value.find((proxy) => proxy.id === current)
-        if (target) {
-          const baseStep = result.items.find((item) => item.target === 'base_connectivity')
-          if (baseStep && baseStep.status === 'pass') {
-            applyLatencyResult(current, {
-              success: true,
-              latency_ms: result.base_latency_ms,
-              message: result.summary,
-              ip_address: result.exit_ip,
-              country: result.country,
-              country_code: result.country_code
-            })
-          }
-        }
+        applyLatencyResult(current, proxyQualityExitObservation(result))
         applyQualityResult(current, result)
         if (result.challenge_count > 0) {
           challenge++
@@ -1683,6 +1657,7 @@ const runBatchProxyQualityChecks = async (ids: number[]) => {
           healthy++
         }
       } catch {
+        markQualityUnavailable(current, t('admin.proxies.qualityCheckFailed'))
         failed++
       } finally {
         stopQualityCheckingProxy(current)

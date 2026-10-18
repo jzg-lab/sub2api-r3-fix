@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -125,13 +126,24 @@ func (s *OpenAICodexVersionSyncService) runOnce() {
 	if !s.autoSyncEnabled(ctx) {
 		return
 	}
+	currentValue, err := s.currentSyncedVersion(ctx)
+	if err != nil {
+		slog.Warn("openai_codex_version_sync_setting_read_failed", "setting", SettingKeyOpenAICodexClientVersionSynced)
+		return
+	}
 
 	latest := s.fetchLatestStableVersion(ctx)
 	if latest == "" {
 		return
 	}
+	// A release tag alone cannot qualify a transport identity. Keep the
+	// installed capture, headers and telemetry on the same reviewed version.
+	if latest != codexCLIVersion {
+		slog.Warn("openai_codex_version_capture_required", "published_version", latest, "verified_version", codexCLIVersion)
+		return
+	}
 
-	current := NormalizeCodexClientVersion(s.currentSyncedVersion(ctx))
+	current := NormalizeCodexClientVersion(currentValue)
 	// 只向前推进：上游偶发返回旧数据或重新发布历史 tag 时不把已同步的版本号降级。
 	if current != "" && CompareVersions(latest, current) <= 0 {
 		return
@@ -177,11 +189,15 @@ func (s *OpenAICodexVersionSyncService) fetchLatestStableVersion(ctx context.Con
 }
 
 // autoSyncEnabled 读取面板开关。缺失或空值视为开启，与设置默认值一致；
-// 读取失败时保持开启，避免一次数据库抖动就静默停掉版本跟随。
+// Failed reads suspend this cycle; an unavailable setting is not permission.
 func (s *OpenAICodexVersionSyncService) autoSyncEnabled(ctx context.Context) bool {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyOpenAICodexVersionAutoSyncEnabled)
-	if err != nil {
+	if errors.Is(err, ErrSettingNotFound) {
 		return true
+	}
+	if err != nil {
+		slog.Warn("openai_codex_version_sync_setting_read_failed", "setting", SettingKeyOpenAICodexVersionAutoSyncEnabled)
+		return false
 	}
 	if strings.TrimSpace(value) == "" {
 		return true
@@ -189,12 +205,12 @@ func (s *OpenAICodexVersionSyncService) autoSyncEnabled(ctx context.Context) boo
 	return strings.TrimSpace(value) == "true"
 }
 
-func (s *OpenAICodexVersionSyncService) currentSyncedVersion(ctx context.Context) string {
+func (s *OpenAICodexVersionSyncService) currentSyncedVersion(ctx context.Context) (string, error) {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyOpenAICodexClientVersionSynced)
-	if err != nil {
-		return ""
+	if errors.Is(err, ErrSettingNotFound) {
+		return "", nil
 	}
-	return value
+	return value, err
 }
 
 // latestCodexStableReleaseVersion 从 release 列表里挑出最大的稳定版客户端版本号。

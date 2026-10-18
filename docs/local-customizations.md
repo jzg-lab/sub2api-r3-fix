@@ -4,7 +4,29 @@
 LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 产品选择及尚未实施的决定统一见 [产品规则与上游差异](upstream-integration-policy.md)，
 来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
-r17bm 适配已于 2026-10-12 合入主分支并推送，尚未部署，不能据此推定线上行为已改变。
+本文以本地源码为准；当前线上提交、插件和实际部署证据统一见[部署状态](deployment-state.md)。
+
+## 老板 e3cad515 本地适配
+
+本轮从老板 `1f7d36c60f361c93c828cec2a1516f11e852608f` 到
+`e3cad515d5171ffc2e16eb725fa07f98352adec1` 的真实增量进行适配，保留已集成官方及本地行为。
+状态、结果提交和本次验证见[版本记录](upstream-sync-state.md#老板-e3cad515-整合2026-10-19)。
+
+- OAuth 与下游窗口/租户身份隔离、重登录同账号校验、WS continuation 归属、备用池权限检查配套接入。
+  Linux 和无代理直连保留，不依赖历史登录 IP、地理信息或出口时区。
+- Cookie Pin 源码更新至 0.3.20，宿主提供受账号/路由/灰度限制的 HTTP 通道与短期探针许可。
+  新批量准入保留手动终止保护；保留旧暂停同步及 HostService broker 兼容。流结束与持久结算配套，
+  已有用量不重放；正确低 token 和最终答案模糊保持中性。
+- Codex 模型清单沿用 OAuth/API Key 共用缓存、白名单与固定排序、500k context 和实时元数据，
+  新增 simple mode 目录范围对齐、null service_tiers 规范化及规范化后 ETag。
+- 保留无数据终态和缺失终态的协议错误处理改进、连接池/上传超时与启动队列隔离、环境诊断界面，
+  健康限流标签以 reset 截止时间为准。原首输出期限、空白流判断与计费模型回写继续保留。
+- Mihomo 下层排序和启动策略脚本只提供工具及测试，没有修改或执行生产配置。
+  本轮没有新增依赖、迁移或覆盖历史 SQL/checksum；内嵌前端由本地源码构建。
+
+新增回归主要在 `openai_codex_models_service_tiers_test.go`、`openai_oauth_relogin_test.go`、
+`plugin_host_http_test.go`、`plugin_probe_policy_test.go`、`plugin_bridge_settlement_test.go`、
+`openai_ws_turn_billing_test.go`、Cookie Pin transport 测试及环境审计前端测试。
 
 ## 官方 v0.2.17 本地适配
 

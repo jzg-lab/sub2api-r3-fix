@@ -6,8 +6,9 @@
 set -eu
 umask 077
 
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PYTHON="${SUB2API_AUTH_BROWSER_PYTHON:-/usr/bin/python3}"
+LAUNCHER_FILE="$("$PYTHON" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+BASE_DIR="$(cd "$(dirname "$LAUNCHER_FILE")" && pwd -P)"
 CURL="${SUB2API_AUTH_BROWSER_CURL:-/usr/bin/curl}"
 CHROME="${SUB2API_AUTH_BROWSER_CHROME:-}"
 if [ -z "$CHROME" ]; then
@@ -19,6 +20,19 @@ fi
 PROFILE_ROOT="${SUB2API_AUTH_BROWSER_PROFILE_ROOT:-$BASE_DIR/profiles}"
 LOG_FILE="${SUB2API_AUTH_BROWSER_LOG_FILE:-$BASE_DIR/launcher.log}"
 PROFILE_MAX_AGE_HOURS="${SUB2API_AUTH_BROWSER_PROFILE_MAX_AGE_HOURS:-72}"
+
+NODE="${SUB2API_AUTH_BROWSER_NODE:-node}"
+
+if [ "${1:-}" = "--check-runtime" ]; then
+  [ "$#" -eq 1 ] && [ -x "$CHROME" ] && [ -x "$CURL" ] || exit 1
+  exec "$NODE" --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    if (Number(process.versions.node.split(".")[0]) < 22 ||
+        typeof WebSocket !== "function" || typeof fetch !== "function") process.exit(1);
+    await import(pathToFileURL(process.argv[2]).href);
+    console.log(JSON.stringify({ok: true, node: process.versions.node}));
+  ' runtime-check "$BASE_DIR/automate.mjs"
+fi
 
 if [ "${1:-}" = "--validate-proxy" ]; then
   exec "$PYTHON" "$BASE_DIR/proxy_address.py" --proxy "${2:-}"

@@ -238,7 +238,8 @@ func TestForwardIncompleteAttemptNeverAdmitsTemplate(t *testing.T) {
 				t.Fatal("failed attempt did not retain its transport error")
 			}
 			srv.scanProbeTemplates(t.Context(), time.Now())
-			if srv.templates[42].Confirmed || srv.states[42] != nil {
+			tmpl := srv.templates[42]
+			if (tmpl != nil && tmpl.Confirmed) || srv.states[42] != nil {
 				t.Fatal("incomplete attempt admitted an autonomous probe")
 			}
 			if (kind == "invalid-proxy" || kind == "cancelled") && calls.Load() != 0 {

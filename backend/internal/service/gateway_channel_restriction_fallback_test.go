@@ -63,6 +63,7 @@ func TestSelectAccountForModelWithExclusions_UsesFallbackGroupForChannelRestrict
 	}
 
 	ctx := context.WithValue(context.Background(), ctxkey.Group, groupRepo.groups[groupID])
+	ctx = publicFallbackTestContext(ctx, groupID)
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-sonnet-4-6", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
@@ -122,6 +123,7 @@ func TestSelectAccountWithLoadAwareness_UsesFallbackGroupForChannelRestriction(t
 	}
 
 	ctx := context.WithValue(context.Background(), ctxkey.Group, groupRepo.groups[groupID])
+	ctx = publicFallbackTestContext(ctx, groupID)
 	result, err := svc.SelectAccountWithLoadAwareness(ctx, &groupID, "", "claude-sonnet-4-6", nil, "", 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)

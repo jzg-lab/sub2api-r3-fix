@@ -279,13 +279,7 @@ const currentLoading = computed(() => {
   return claudeOAuth.loading.value
 })
 const currentError = computed(() => {
-  if (isOpenAILike.value) {
-    const history = reauthSession.account.value?.extra?.openai_oauth_login_exit_ip
-    return openaiOAuth.error.value || (
-      typeof history !== 'string' || !history.trim()
-        ? t('admin.accounts.oauth.openai.errors.OPENAI_OAUTH_LOGIN_IP_UNKNOWN') : ''
-    )
-  }
+  if (isOpenAILike.value) return openaiOAuth.error.value
   if (isGemini.value) return geminiOAuth.error.value
   if (isAntigravity.value) return antigravityOAuth.error.value
   return claudeOAuth.error.value

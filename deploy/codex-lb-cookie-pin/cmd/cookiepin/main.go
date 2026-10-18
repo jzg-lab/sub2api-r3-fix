@@ -39,5 +39,8 @@ func main() {
 		fmt.Println("unknown acknowledged; counters and cooldown preserved; no request replayed")
 		return
 	}
-	pluginv1.Serve(transport.NewWithEvidence(cookiestore.New(), journal))
+	server := transport.NewWithEvidence(cookiestore.New(), journal)
+	server.RequireHostProbePolicy()
+	server.RequireHostHTTP()
+	pluginv1.Serve(server)
 }

@@ -6,6 +6,7 @@ import {
   resetPlatformCatalog,
   setPlatformCatalog
 } from '@/constants/platformCatalog'
+import type { AdminGroup } from '@/types'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -308,13 +309,13 @@ function buildOpenAIOAuthParentAccount() {
   } as any
 }
 
-function mountModal(account = buildAccount()) {
+function mountModal(account = buildAccount(), groups: AdminGroup[] = []) {
   return mount(EditAccountModal, {
     props: {
       show: true,
       account,
       proxies: [],
-      groups: []
+      groups
     },
     global: {
       stubs: {
@@ -1079,6 +1080,21 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_long_context_billing_enabled).toBe(
       false
     )
+  })
+
+  it.each([true, false])('hides the account toggle with all group pricing enabled (saved=%s)', async (enabled) => {
+    authIsSimpleMode.value = false
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.group_ids = [1, 2]
+    account.extra = { openai_long_context_billing_enabled: enabled }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const groups = [1, 2].map(id => ({ id, long_context_pricing_enabled: true }) as AdminGroup)
+    const wrapper = mountModal(account, groups)
+    expect(wrapper.find('[data-testid="openai-long-context-billing-toggle"]').exists()).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_long_context_billing_enabled).toBe(enabled)
   })
 
   it('hides the Codex namespace flatten toggle for non-OAuth OpenAI accounts', async () => {

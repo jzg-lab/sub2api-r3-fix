@@ -607,6 +607,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.CyberPolicyUserAllowlist != after.CyberPolicyUserAllowlist {
 		changed = append(changed, "cyber_policy_user_allowlist")
 	}
+	if after.AntiBypassPolicy != nil && (before.AntiBypassPolicy == nil || *before.AntiBypassPolicy != *after.AntiBypassPolicy) {
+		changed = append(changed, "anti_bypass_policy")
+	}
 	if before.CyberSessionBlockEnabled != after.CyberSessionBlockEnabled {
 		changed = append(changed, "cyber_session_block_enabled")
 	}

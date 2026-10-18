@@ -86,6 +86,7 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 // it omitted, so in that case the caches are rebuilt from storage rather than
 // from the request struct.
 func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) {
+	s.invalidateCyberSessionBlockRuntime()
 	if len(omitted) == 0 {
 		s.refreshCachedSettings(settings)
 		return
@@ -99,6 +100,9 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
+	if int64(settings.CyberSessionBlockTTLSeconds) > int64((1<<63-1)/time.Second) {
+		return nil, infraerrors.BadRequest("INVALID_CYBER_SESSION_BLOCK_TTL", "Cyber session block TTL exceeds the supported duration")
+	}
 	if err := s.validateDefaultSubscriptionGroups(ctx, settings.DefaultSubscriptions); err != nil {
 		return nil, err
 	}
@@ -443,6 +447,16 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	// 风控中心功能开关
 	updates[SettingKeyRiskControlEnabled] = strconv.FormatBool(settings.RiskControlEnabled)
 	updates[SettingKeyAntiBypassEnabled] = strconv.FormatBool(settings.AntiBypassEnabled)
+	if settings.AntiBypassPolicy != nil {
+		if err := settings.AntiBypassPolicy.Validate(); err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(settings.AntiBypassPolicy)
+		if err != nil {
+			return nil, err
+		}
+		updates[SettingKeyAntiBypassPolicy] = string(raw)
+	}
 
 	// cyber 会话屏蔽开关 + TTL
 	updates[SettingKeyCyberSessionBlockEnabled] = strconv.FormatBool(settings.CyberSessionBlockEnabled)
@@ -484,6 +498,9 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
+	if version := strings.TrimSpace(settings.OpenAICodexClientVersion); version != "" && !IsVerifiedCodexClientVersion(version) {
+		return nil, fmt.Errorf("openai_codex_client_version requires a verified native transport capture")
+	}
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)
 	updates[SettingKeyOpenAICodexVersionAutoSyncEnabled] = strconv.FormatBool(settings.OpenAICodexVersionAutoSyncEnabled)
 	// SettingKeyOpenAICodexClientVersionSynced 由自动同步任务独占写入，此处不得覆盖，

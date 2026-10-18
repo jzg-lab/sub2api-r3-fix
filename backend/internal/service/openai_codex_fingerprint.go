@@ -54,13 +54,19 @@ func applyStagedCodexFingerprintHeaders(c *gin.Context, account *Account, h http
 }
 
 func applyStagedCodexFingerprintClientMetadata(c *gin.Context, account *Account, reqBody map[string]any) bool {
-	return applyCodexFingerprintClientMetadata(reqBody, stagedCodexFingerprintIDs(c, account))
+	cleaned := sanitizeCodexClientEnvironmentMap(reqBody, account)
+	return applyCodexFingerprintClientMetadata(reqBody, stagedCodexFingerprintIDs(c, account)) || cleaned
 }
 
 // applyStagedCodexFingerprintClientMetadataRaw 是 raw 字节版的 staged body sink，供客户端 WS
 // 入口的 response.create 帧使用（帧是原始 JSON 字节，与透传 HTTP 一样禁全量 Unmarshal）。
 func applyStagedCodexFingerprintClientMetadataRaw(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
-	return applyCodexFingerprintClientMetadataRaw(body, stagedCodexFingerprintIDs(c, account))
+	body, cleaned, err := sanitizeCodexClientEnvironmentRaw(body, account)
+	if err != nil {
+		return nil, false, err
+	}
+	next, changed, err := applyCodexFingerprintClientMetadataRaw(body, stagedCodexFingerprintIDs(c, account))
+	return next, cleaned || changed, err
 }
 
 // stageCodexMachineFingerprintIDsForWSIngress 在客户端 WS 入口（ProxyResponsesWebSocketFromClient）
@@ -83,7 +89,7 @@ func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForWSIngress(c *gi
 	if c.Request != nil {
 		clientHeaders = c.Request.Header
 	}
-	fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+	fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
 	// machine：按 WS 握手终态出站 UA（buildOpenAIWSHeaders 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
 	stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
 	stageCodexFingerprintIDs(c, fpIDs)
@@ -98,6 +104,10 @@ func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForWSIngress(c *gi
 //   - 无条件先清空：与 Forward 阶段一致，避免同一 gin context 上一次 attempt（其他账号）的残留。
 func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForCompatBridge(c *gin.Context, account *Account, body []byte) ([]byte, error) {
 	stageCodexFingerprintIDs(c, nil)
+	body, _, err := sanitizeCodexClientEnvironmentRaw(body, account)
+	if err != nil {
+		return nil, err
+	}
 	if activeCodexFingerprintMode(account) != codexFingerprintMachine {
 		return body, nil
 	}
@@ -105,7 +115,7 @@ func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForCompatBridge(c 
 	if c != nil && c.Request != nil {
 		clientHeaders = c.Request.Header
 	}
-	fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+	fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
 	if fpIDs == nil {
 		return body, nil
 	}
@@ -433,7 +443,7 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
-	// pseudonymKey 仅 machine 模式使用：假名函数 P 的 HMAC 密钥（= 账号 seed 的字节）。
+	// pseudonymKey scopes client sessions to the account and authenticated API key.
 	pseudonymKey []byte
 	// pseudonymIssued 仅 machine 模式使用：本请求内已签发的假名集合，使 sink 对同一
 	// ids 重复应用幂等（WS 链路对共享 body map 会应用两次：openai_gateway_forward.go
@@ -450,6 +460,10 @@ type codexFingerprintIDs struct {
 // 返回 nil 表示 off 模式或无合法 seed（等价 off，不需要改写）。
 // 注意：包含随机生成的 turn_id，调用方必须只调用一次并共享结果给头改写和体改写。
 func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode codexFingerprintMode) *codexFingerprintIDs {
+	return resolveCodexFingerprintIDsWithAPIKey(account, clientSessionID, mode, 0)
+}
+
+func resolveCodexFingerprintIDsWithAPIKey(account *Account, clientSessionID string, mode codexFingerprintMode, apiKeyID int64) *codexFingerprintIDs {
 	if account == nil || mode == codexFingerprintOff {
 		return nil
 	}
@@ -468,6 +482,10 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 	if ids.installationID == "" {
 		return nil
 	}
+
+	// Keep the account's device identity stable while isolating all derived
+	// session/cache identities between authenticated gateway clients.
+	seed = codexClientSessionSeed(seed, apiKeyID)
 
 	switch mode {
 	case codexFingerprintDevice:
@@ -520,6 +538,10 @@ func extractClientSessionID(h http.Header) string {
 // 结合账号配置一次性解析收敛 ID 集合。调用方应将返回的 ids 同时传给
 // applyCodexFingerprintHeaders 和 applyCodexFingerprintClientMetadata。
 func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.Header) *codexFingerprintIDs {
+	return resolveCodexFingerprintIDsForClient(nil, account, clientHeaders)
+}
+
+func resolveCodexFingerprintIDsForClient(c *gin.Context, account *Account, clientHeaders http.Header) *codexFingerprintIDs {
 	if account == nil {
 		return nil
 	}
@@ -531,7 +553,7 @@ func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.
 	if clientHeaders != nil {
 		clientSessionID = extractClientSessionID(clientHeaders)
 	}
-	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	return resolveCodexFingerprintIDsWithAPIKey(account, clientSessionID, mode, getAPIKeyIDFromContext(c))
 }
 
 // applyCodexFingerprintHeaders 按预计算的收敛 ID 改写出站 HTTP 头中的设备指纹。

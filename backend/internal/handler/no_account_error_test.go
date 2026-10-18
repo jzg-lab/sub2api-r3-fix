@@ -197,6 +197,7 @@ func TestClassifyNoAccountError_ModelSupportedOnlyByRateLimitedAccount_Returns50
 	require.Equal(t, http.StatusServiceUnavailable, cls.Status)
 	require.Equal(t, "api_error", cls.ErrType)
 	require.False(t, cls.ModelNotFound, "temporary account cooldown must remain retryable")
+	require.Equal(t, "No available accounts in this pool. Check account status and usage limits.", cls.Message)
 }
 
 func TestClassifyNoAccountError_NoAccountsInPool_Stays503(t *testing.T) {
@@ -208,6 +209,7 @@ func TestClassifyNoAccountError_NoAccountsInPool_Stays503(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, cls.Status, "empty pool is a service-availability issue, not a model issue")
 	require.False(t, cls.ModelNotFound)
+	require.Equal(t, "No available accounts in this pool. Check account status and usage limits.", cls.Message)
 }
 
 func TestClassifyNoAccountError_DisplayModelOverridesRoutingForMessage(t *testing.T) {

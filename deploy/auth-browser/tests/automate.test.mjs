@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -11,6 +12,40 @@ const state = 'a'.repeat(64)
 const redirect = 'http://localhost:1455/auth/callback'
 const authURL = 'https://auth.openai.com/oauth/authorize?' + new URLSearchParams({ state, redirect_uri: redirect })
 const callback = (query) => `${redirect}?${new URLSearchParams(query)}`
+
+test('Wei Seat workspace selection binds the persisted workspace and exact callback', async () => {
+  for (const continuation of [callback({ state, code: 'fixture' }), 'https://example.invalid/steal']) {
+    const assigned = []
+    const calls = []
+    const context = {
+      URL,
+      location: {
+        origin: 'https://auth.openai.com', pathname: '/codex/consent',
+        href: 'https://auth.openai.com/codex/consent', assign: value => assigned.push(value),
+      },
+      document: { body: { innerText: 'Continue' }, querySelectorAll: () => [] },
+      fetch: async (url, options) => {
+        calls.push({ url, options })
+        return { ok: true, json: async () => ({ continue_url: continuation }) }
+      },
+    }
+    const step = runInNewContext(`(${loginStep.toString()})`, context)
+    const target = await step(null, [], null)
+    assert.equal(target.kind, 'consent')
+    const input = { workspace_id: 'workspace-fixture', callback: redirect }
+    if (continuation.startsWith(redirect)) {
+      await step(input, [], target.key)
+      assert.deepEqual(assigned, [continuation])
+      assert.equal(calls[0].url, '/api/accounts/workspace/select')
+      assert.deepEqual(JSON.parse(calls[0].options.body), { workspace_id: 'workspace-fixture' })
+      assert.equal(calls[0].options.redirect, 'error')
+    } else {
+      await assert.rejects(step(input, [], target.key), /AUTH_WORKSPACE_CONTINUATION/)
+      assert.deepEqual(assigned, [])
+    }
+  }
+})
+
 
 test('callback requires the exact loopback target, unique state and a single bounded code', () => {
   const binding = authorizationBinding(authURL)

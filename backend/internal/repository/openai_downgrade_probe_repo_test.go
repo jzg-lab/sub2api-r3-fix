@@ -19,35 +19,33 @@ func downgradeDueColumns() []string {
 		astra_consecutive_successes astra_next_probe_at updated_at consecutive_429s`)
 }
 
-func TestProbeAnswerVerdictPersistence(t *testing.T) {
-	for _, tc := range []struct {
-		name                             string
-		transport, inconclusive, correct bool
-		want                             any
-	}{
-		{"ambiguous", true, true, false, nil},
-		{"transport", false, false, false, nil},
-		{"wrong", true, false, false, false},
-		{"correct", true, false, true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			db, mock, err := sqlmock.New()
-			require.NoError(t, err)
-			defer db.Close()
-			tokens := 300
-			mock.ExpectBegin()
-			mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
-				WithArgs(int64(7), nil, "normal", tc.transport, tc.want, tokens, nil, int64(0), 200, "", 0).
-				WillReturnResult(sqlmock.NewResult(1, 1))
-			mock.ExpectCommit()
-			repo := &openAIDowngradeProbeRepository{db: db}
-			require.NoError(t, repo.RecordOpenAIDowngradeProbe(context.Background(), &service.OpenAIDowngradeProbeResult{
-				AccountID: 7, Mode: "normal", TransportOK: tc.transport,
-				AnswerCorrect: tc.correct, AnswerInconclusive: tc.inconclusive, ReasoningTokens: &tokens, HTTPStatus: 200,
-			}))
-			require.NoError(t, mock.ExpectationsWereMet())
-		})
-	}
+func TestProbeAccountBatchMatchesSingleAccountControls(t *testing.T) {
+	var predicates []string
+	matcher := sqlmock.QueryMatcherFunc(func(_, actual string) error {
+		q := strings.Join(strings.Fields(actual), " ")
+		start := strings.Index(q, "AND a.deleted_at")
+		require.Greater(t, start, 0)
+		predicate := strings.TrimSuffix(q[start:], " )")
+		predicates = append(predicates, predicate)
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	require.NoError(t, err)
+	defer db.Close()
+	r := &openAIDowngradeProbeRepository{db: db}
+	mock.ExpectQuery("single").WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	allowed, err := r.CanRunOpenAIDowngradeProbe(t.Context(), 42)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	mock.ExpectQuery("batch").WithArgs("{42,43}").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(42)).RowsWillBeClosed()
+	accounts, err := r.AllowedOpenAIProbeAccounts(t.Context(), []int64{42, 43})
+	require.NoError(t, err)
+	require.Equal(t, map[int64]bool{42: true}, accounts)
+	require.Len(t, predicates, 2)
+	require.Equal(t, predicates[0], predicates[1], "batch must retain manual pause, expiry and owned-error controls")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
@@ -85,8 +83,8 @@ func TestDowngradeDueQueryFiltersBeforeIPRank(t *testing.T) {
 		require.Equal(t, 2, strings.Count(dueQuery, "'proxy:' || a.proxy_id::text"))
 		require.Contains(t, dueQuery, "recent.proxy_id = a.proxy_id")
 		require.NotContains(t, dueQuery, "p.id = s.current_proxy_id")
-		require.Contains(t, query, "ORDER BY first_qualification DESC, next_probe_at, account_id LIMIT $2")
-		require.Equal(t, 2, strings.Count(query, "AND recent.http_status <> 429 THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END"))
+		require.Contains(t, query, "ORDER BY qualification DESC, next_probe_at, account_id LIMIT $2")
+		require.Equal(t, 2, strings.Count(query, "(CASE WHEN (s.probe_mode = 'qualification') AND ( (s.last_probe_at IS NULL AND recent.http_status IS DISTINCT FROM 429) OR (recent.transport_ok IS FALSE AND recent.http_status IS NULL)) THEN INTERVAL '1 minute' ELSE INTERVAL '10 minutes' END)"))
 		return nil
 	})
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
@@ -193,6 +191,37 @@ func TestRecordOpenAIDowngradeProbeIsAtomicWithDerivedStats(t *testing.T) {
 			} else {
 				require.ErrorIs(t, recordErr, injected)
 			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestProbeAnswerVerdictPersistence(t *testing.T) {
+	for _, tc := range []struct {
+		name                             string
+		transport, inconclusive, correct bool
+		want                             any
+	}{
+		{"ambiguous", true, true, false, nil},
+		{"transport", false, false, false, nil},
+		{"wrong", true, false, false, false},
+		{"correct", true, false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			tokens := 300
+			mock.ExpectBegin()
+			mock.ExpectExec("INSERT INTO openai_downgrade_probe_results").
+				WithArgs(int64(7), nil, "normal", tc.transport, tc.want, tokens, nil, int64(0), 200, "", 0).
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			mock.ExpectCommit()
+			repo := &openAIDowngradeProbeRepository{db: db}
+			require.NoError(t, repo.RecordOpenAIDowngradeProbe(context.Background(), &service.OpenAIDowngradeProbeResult{
+				AccountID: 7, Mode: "normal", TransportOK: tc.transport,
+				AnswerCorrect: tc.correct, AnswerInconclusive: tc.inconclusive, ReasoningTokens: &tokens, HTTPStatus: 200,
+			}))
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

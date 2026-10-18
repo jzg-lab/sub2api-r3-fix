@@ -149,13 +149,15 @@ type cachedCodexRestrictionPolicy struct {
 	expiresAt int64 // unix nano
 }
 
-// cachedCyberSessionBlockRuntime cyber 会话屏蔽开关、TTL 与用户白名单缓存（60s TTL）。
+// cachedCyberSessionBlockRuntime cyber 会话屏蔽开关+TTL 进程内缓存（60s TTL）。
 // GetCyberSessionBlockRuntime 在网关请求热路径上被调用，避免每次访问 DB。
 type cachedCyberSessionBlockRuntime struct {
 	allowlistedUsers map[int64]struct{}
 	enabled          bool
 	ttl              time.Duration
+	err              error
 	expiresAt        int64 // unix nano
+	generation       uint64
 }
 
 const cyberSessionBlockRuntimeCacheTTL = 60 * time.Second
@@ -168,71 +170,118 @@ const openAIQuotaAutoPauseSettingsDBTimeout = 5 * time.Second
 
 const openAIQuotaAutoPauseSettingsRefreshKey = "openai_quota_auto_pause_settings"
 
-// GetCyberSessionBlockRuntime 返回 (开关, TTL)，进程内缓存 ~60s，
-// 供网关热路径读取时避免 DB 往返。
-// 屏蔽设置与用户白名单在单次 singleflight 中一起读取。
-// 默认值：开关 false，TTL 1h（与粘性会话对齐）。
-func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool, time.Duration) {
-	if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
-		if time.Now().UnixNano() < cached.expiresAt {
-			return cached.enabled, cached.ttl
-		}
+// GetCyberSessionBlockRuntime distinguishes a confirmed disabled policy from
+// unavailable settings. Refreshes are shared, but callers retain their deadlines.
+func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool, time.Duration, error) {
+	if s == nil || s.settingRepo == nil || ctx == nil || ctx.Err() != nil {
+		return false, time.Hour, ErrCyberSessionProtectionUnavailable
 	}
-	result, _, _ := s.cyberSessionBlockRuntimeSF.Do("cyber_session_block_runtime", func() (any, error) {
+	s.cyberSessionBlockRuntimeMu.Lock()
+	generation := s.cyberSessionBlockRuntimeGen
+	cached, _ := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime)
+	s.cyberSessionBlockRuntimeMu.Unlock()
+	if cached != nil && cached.generation == generation && time.Now().UnixNano() < cached.expiresAt {
+		return cached.enabled, cached.ttl, cached.err
+	}
+	refreshKey := "cyber_session_block_runtime:" + strconv.FormatUint(generation, 10)
+	result := s.cyberSessionBlockRuntimeSF.DoChan(refreshKey, func() (any, error) {
 		s.cyberSessionBlockRuntimeMu.Lock()
-		defer s.cyberSessionBlockRuntimeMu.Unlock()
-		if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
-			if time.Now().UnixNano() < cached.expiresAt {
-				return cached, nil
-			}
+		currentGeneration := s.cyberSessionBlockRuntimeGen
+		cached, _ := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime)
+		s.cyberSessionBlockRuntimeMu.Unlock()
+		if currentGeneration != generation {
+			return nil, ErrCyberSessionProtectionUnavailable
+		}
+		if cached != nil && cached.generation == generation && time.Now().UnixNano() < cached.expiresAt {
+			return cached, nil
 		}
 		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cyberSessionBlockRuntimeDBTimeout)
 		defer cancel()
 
-		enabledVal, enabledErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockEnabled)
-		ttlVal, ttlErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockTTLSeconds)
-
-		previous, _ := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime)
-		cacheTTL := cyberSessionBlockRuntimeCacheTTL
-		if enabledErr != nil && !errors.Is(enabledErr, ErrSettingNotFound) {
-			slog.Warn("failed to get cyber_session_block_enabled setting", "error", enabledErr)
-			cacheTTL = cyberSessionBlockRuntimeErrorTTL
-		}
-
-		enabled := enabledErr == nil && strings.TrimSpace(enabledVal) == "true"
-
-		ttl := time.Hour
-		if ttlErr == nil {
-			if n, perr := strconv.Atoi(strings.TrimSpace(ttlVal)); perr == nil && n > 0 {
-				ttl = time.Duration(n) * time.Second
-			}
-		}
-
+		entry := &cachedCyberSessionBlockRuntime{ttl: time.Hour, generation: generation}
 		allowlistVal, allowlistErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberPolicyUserAllowlist)
-		var allowlistedUsers map[int64]struct{}
 		if allowlistErr == nil {
-			allowlistedUsers, allowlistErr = ParseCyberPolicyUserAllowlist(allowlistVal)
+			entry.allowlistedUsers, allowlistErr = ParseCyberPolicyUserAllowlist(allowlistVal)
 		}
 		if allowlistErr != nil && !errors.Is(allowlistErr, ErrSettingNotFound) {
-			slog.Warn("failed to load risk control user allowlist", "error", allowlistErr)
-			cacheTTL = cyberSessionBlockRuntimeErrorTTL
-			if previous != nil {
-				allowlistedUsers = previous.allowlistedUsers
+			slog.Warn("cyber session protection allowlist unavailable", "setting", SettingKeyCyberPolicyUserAllowlist)
+			if cached != nil {
+				entry.allowlistedUsers = cached.allowlistedUsers
+			}
+			entry.err = ErrCyberSessionProtectionUnavailable
+		}
+		enabledVal, enabledErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockEnabled)
+		if enabledErr != nil && !errors.Is(enabledErr, ErrSettingNotFound) {
+			slog.Warn("cyber session protection settings unavailable", "setting", SettingKeyCyberSessionBlockEnabled)
+			entry.err = ErrCyberSessionProtectionUnavailable
+		} else if enabledErr == nil {
+			switch strings.TrimSpace(enabledVal) {
+			case "true":
+				entry.enabled = true
+			case "false":
+			default:
+				slog.Warn("cyber session protection setting invalid", "setting", SettingKeyCyberSessionBlockEnabled)
+				entry.err = ErrCyberSessionProtectionUnavailable
 			}
 		}
-		entry := &cachedCyberSessionBlockRuntime{
-			allowlistedUsers: allowlistedUsers,
-			enabled:          enabled,
-			ttl:              ttl,
-			expiresAt:        time.Now().Add(cacheTTL).UnixNano(),
+		if entry.err == nil && entry.enabled {
+			ttlVal, ttlErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockTTLSeconds)
+			switch {
+			case errors.Is(ttlErr, ErrSettingNotFound):
+				// An absent TTL has a defined default; a failed read does not.
+			case ttlErr != nil:
+				slog.Warn("cyber session protection settings unavailable", "setting", SettingKeyCyberSessionBlockTTLSeconds)
+				entry.err = ErrCyberSessionProtectionUnavailable
+			default:
+				n, parseErr := strconv.ParseInt(strings.TrimSpace(ttlVal), 10, 64)
+				if parseErr != nil || n <= 0 || n > int64((1<<63-1)/time.Second) {
+					slog.Warn("cyber session protection setting invalid", "setting", SettingKeyCyberSessionBlockTTLSeconds)
+					entry.err = ErrCyberSessionProtectionUnavailable
+				} else {
+					entry.ttl = time.Duration(n) * time.Second
+				}
+			}
+		}
+		if dbCtx.Err() != nil {
+			entry.err = ErrCyberSessionProtectionUnavailable
+		}
+		cacheTTL := cyberSessionBlockRuntimeCacheTTL
+		if entry.err != nil {
+			cacheTTL = cyberSessionBlockRuntimeErrorTTL
+		}
+		entry.expiresAt = time.Now().Add(cacheTTL).UnixNano()
+		s.cyberSessionBlockRuntimeMu.Lock()
+		defer s.cyberSessionBlockRuntimeMu.Unlock()
+		if s.cyberSessionBlockRuntimeGen != generation {
+			return nil, ErrCyberSessionProtectionUnavailable
 		}
 		s.cyberSessionBlockRuntimeCache.Store(entry)
 		return entry, nil
 	})
-	if entry, ok := result.(*cachedCyberSessionBlockRuntime); ok && entry != nil {
-		return entry.enabled, entry.ttl
+	select {
+	case <-ctx.Done():
+		return false, time.Hour, ErrCyberSessionProtectionUnavailable
+	case refreshed := <-result:
+		if ctx.Err() == nil && refreshed.Err == nil {
+			if entry, ok := refreshed.Val.(*cachedCyberSessionBlockRuntime); ok && entry != nil {
+				s.cyberSessionBlockRuntimeMu.Lock()
+				currentGeneration := s.cyberSessionBlockRuntimeGen
+				s.cyberSessionBlockRuntimeMu.Unlock()
+				if entry.generation == currentGeneration {
+					return entry.enabled, entry.ttl, entry.err
+				}
+			}
+		}
+		return false, time.Hour, ErrCyberSessionProtectionUnavailable
 	}
-	return false, time.Hour
+}
+
+func (s *SettingService) invalidateCyberSessionBlockRuntime() {
+	s.cyberSessionBlockRuntimeMu.Lock()
+	defer s.cyberSessionBlockRuntimeMu.Unlock()
+	// A late pre-save refresh must neither republish nor join the new policy.
+	s.cyberSessionBlockRuntimeGen++
+	s.cyberSessionBlockRuntimeCache.Store((*cachedCyberSessionBlockRuntime)(nil))
 }
 
 // GetAntigravityUserAgentVersion 返回 Antigravity 上游请求使用的版本号。
@@ -334,9 +383,8 @@ func (s *SettingService) GetOpenAICodexUserAgent(ctx context.Context) string {
 }
 
 // GetOpenAICodexClientVersion 返回出站声明的 Codex 客户端版本号。
-// 优先级：管理员在面板覆写的版本 → 自动同步到的官方最新稳定版 → 内置常量。
-// 上游在容量紧张时按客户端身份分优先级降载，陈旧版本会被优先丢弃，故该值需保持跟随官方发布；
-// 自动同步让运维不必为了跟版本而发新版本。
+// Priority: verified manual version, captured synchronized version, built-in capture.
+// A release tag alone must not advance headers beyond the validated transport.
 func (s *SettingService) GetOpenAICodexClientVersion(ctx context.Context) string {
 	fallback := codexCLIVersion
 	if s == nil || s.settingRepo == nil {
@@ -372,8 +420,14 @@ func (s *SettingService) GetOpenAICodexClientVersion(ctx context.Context) string
 			return fallback, nil
 		}
 		version := NormalizeCodexClientVersion(values[SettingKeyOpenAICodexClientVersion])
+		if !IsVerifiedCodexClientVersion(version) {
+			version = ""
+		}
 		if version == "" {
 			version = NormalizeCodexClientVersion(values[SettingKeyOpenAICodexClientVersionSynced])
+			if version != codexCLIVersion {
+				version = ""
+			}
 		}
 		if version == "" {
 			version = fallback

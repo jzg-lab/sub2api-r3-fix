@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,27 +63,33 @@ func (r openAIImagesFailoverAccountRepo) accountsForPlatform(platform string) []
 
 type openAIImagesFailoverHTTPUpstream struct {
 	service.HTTPUpstream
-	mu         sync.Mutex
-	accountIDs []int64
+	mu           sync.Mutex
+	accountIDs   []int64
+	requestPaths []string
 }
 
 func (u *openAIImagesFailoverHTTPUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.Do(req, proxyURL, accountID, concurrency)
 }
 
-func (u *openAIImagesFailoverHTTPUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+func (u *openAIImagesFailoverHTTPUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.accountIDs = append(u.accountIDs, accountID)
+	u.requestPaths = append(u.requestPaths, req.URL.Path)
 	u.mu.Unlock()
+	contentType := "text/event-stream"
+	payload := "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"image backend unavailable\"}}\n\n"
+	if strings.HasSuffix(req.URL.Path, "/images/generations") {
+		contentType = "application/json"
+		payload = `{"error":{"type":"server_error","code":"server_error","message":"image backend unavailable"}}`
+	}
 	return &http.Response{
-		StatusCode: http.StatusBadGateway,
+		StatusCode: http.StatusOK,
 		Header: http.Header{
-			"Content-Type": []string{"application/json"},
+			"Content-Type": []string{contentType},
 			"X-Request-Id": []string{"req_img_failover"},
 		},
-		Body: io.NopCloser(bytes.NewBufferString(
-			`{"error":{"type":"server_error","code":"server_error","message":"image backend unavailable"}}`,
-		)),
+		Body: io.NopCloser(strings.NewReader(payload)),
 	}, nil
 }
 
@@ -93,6 +100,21 @@ func (u *openAIImagesFailoverHTTPUpstream) calls() []int64 {
 }
 
 func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhenExhausted(t *testing.T) {
+	for _, tc := range []struct {
+		model    string
+		endpoint string
+	}{
+		{"gpt-image-2", "/images/generations"},
+		{"gpt-image-1", "/responses"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			testOpenAIImagesServerErrorFailover(t, tc.model, tc.endpoint)
+		})
+	}
+}
+
+func testOpenAIImagesServerErrorFailover(t *testing.T, model, endpoint string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	groupID := int64(3130)
 	// OAuth 出网硬闸（r15 起）：非 PAT 的 openai oauth 账号选号即校验代理路由，
@@ -172,7 +194,7 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 	)
 	handler.maxAccountSwitches = 10
 
-	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","quality":"high","size":"1536x1024"}`)
+	body := []byte(`{"model":"` + model + `","prompt":"draw a cat","quality":"high","size":"1536x1024"}`)
 	core, observedLogs := observer.New(zap.DebugLevel)
 	requestCtx := logger.IntoContext(context.Background(), zap.New(core))
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body)).WithContext(requestCtx)
@@ -204,6 +226,13 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 	require.NotContains(t, loggedFields, "prompt")
 
 	require.Equal(t, []int64{1, 2}, upstream.calls())
+	upstream.mu.Lock()
+	requestPaths := append([]string(nil), upstream.requestPaths...)
+	upstream.mu.Unlock()
+	require.Len(t, requestPaths, 2)
+	for _, requestPath := range requestPaths {
+		require.True(t, strings.HasSuffix(requestPath, endpoint), "unexpected endpoint: %s", requestPath)
+	}
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
 	require.Equal(t, "Upstream service temporarily unavailable", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())

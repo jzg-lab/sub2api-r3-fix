@@ -91,8 +91,8 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	require.Equal(t, "Bearer oauth-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "chatgpt-account", upstream.lastReq.Header.Get("chatgpt-account-id"))
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"))
-	require.Equal(t, "0.144.1", upstream.lastReq.Header.Get("Version"),
-		"客户端自带且高于门槛的 version 原样透传，网关不增不减")
+	require.Equal(t, CodexCanonicalClientVersion(), upstream.lastReq.Header.Get("Version"),
+		"optional version must describe the same server-owned client as User-Agent")
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "session", "search-session"),
@@ -165,8 +165,8 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Content-Type"))
 	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"))
 	require.Equal(t, "responses=experimental", upstream.lastReq.Header.Get("OpenAI-Beta"))
-	require.Equal(t, "0.144.1", upstream.lastReq.Header.Get("Version"),
-		"客户端自带且高于门槛的 version 原样透传，网关不增不减")
+	require.Equal(t, CodexCanonicalClientVersion(), upstream.lastReq.Header.Get("Version"),
+		"optional version must describe the same server-owned client as User-Agent")
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "turn", "turn-1"),
 		gjson.Get(upstream.lastReq.Header.Get("X-Codex-Turn-Metadata"), "turn_id").String(),

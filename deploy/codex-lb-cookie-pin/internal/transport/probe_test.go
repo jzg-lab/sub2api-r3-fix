@@ -467,6 +467,43 @@ func TestStatusJSONExposesRescueFields(t *testing.T) {
 	}
 }
 
+func TestStatusJSONMissingAndExpiredSign(t *testing.T) {
+	store := cookiestore.New()
+	srv := New(store)
+	now := time.Now()
+	srv.probeMu.Lock()
+	srv.states[321] = prober.NewState(321)
+	srv.probeMu.Unlock()
+	for _, capture := range []bool{false, true} {
+		if capture {
+			store.Capture(321, []string{"__cflb=fixture; Max-Age=1"}, now.Add(-2*time.Second))
+		}
+		raw, err := json.Marshal(srv.snapshotProber(now, store.Config()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status struct {
+			Accounts []struct {
+				Captured  *time.Time `json:"sign_captured_at"`
+				Remaining int64      `json:"estimated_remaining_seconds"`
+				Basis     string     `json:"estimate_basis"`
+			} `json:"accounts"`
+		}
+		if err := json.Unmarshal(raw, &status); err != nil {
+			t.Fatal(err)
+		}
+		if len(status.Accounts) != 1 || status.Accounts[0].Captured != nil ||
+			status.Accounts[0].Remaining != -1 || status.Accounts[0].Basis != "none" {
+			t.Fatalf("missing/expired sign must remain unknown: %s", raw)
+		}
+		for _, account := range store.Status(now).Accounts {
+			if account.SignCapturedAt != nil || account.Fresh || account.Names != "" {
+				t.Fatal("cookie and prober snapshots disagree about missing sign")
+			}
+		}
+	}
+}
+
 // TestNewStartsProbeLoop（v0.3.1 回归）：官方宿主的 TransportPlugin 方法集
 // 没有 InitHostServices（只有 GetInfo/Health/ValidateConfig/ApplyConfig/
 // TestConfig/Forward），0.3.0 把探针回路挂在该 RPC 里，生产上从未启动——

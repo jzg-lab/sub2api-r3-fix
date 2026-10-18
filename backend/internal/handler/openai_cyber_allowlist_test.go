@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,7 @@ func TestCyberAllowlistedUserBypassesExistingBlocksAndContinuesWebSocket(t *test
 		_, _, _ = conn.Read(ctx)
 	}))
 	defer upstream.Close()
-	harness := newOpenAIWSPassthroughHandlerHarness(t, upstream.URL, map[string]string{
+	harness := newOpenAIWSHandlerHarnessWithSettings(t, upstream.URL, testutil.NewRedisGatewayCache(t), map[string]string{
 		service.SettingKeyCyberPolicyUserAllowlist: "1751",
 	})
 	payload := []byte(`{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"trusted-session","input":"test"}`)

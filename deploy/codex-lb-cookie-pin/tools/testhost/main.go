@@ -6,9 +6,9 @@
 //
 //	go run ./tools/testhost -plugin ./dist/darwin-arm64/cookiepin            # 协议冒烟
 //	go run ./tools/testhost -plugin ... -mock                                # 本地假上游全链路
-//	go run ./tools/testhost -plugin ... -forward -url https://chatgpt.com/... \
-//	    -token $CODEX_TOKEN -proxy http://u:p@127.0.0.1:17922 -account 1210 \
-//	    -state-dir /absolute/private/state                                # 真实上游单发
+//
+// Real upstream verification must use the native host, including its TLS
+// profile, assigned proxy and account controls. This tool is loopback-only.
 package main
 
 import (
@@ -42,13 +42,13 @@ func run(args []string) error {
 	pluginPath := flags.String("plugin", "", "插件二进制路径（必填）")
 	configJSON := flags.String("config", `{"enabled":true}`, "ApplyConfig 用的配置 JSON")
 	doMock := flags.Bool("mock", false, "本地假上游全链路：验证捕获→注入→信号重摇")
-	doForward := flags.Bool("forward", false, "真实上游单发（-url/-token/-proxy/-account）")
-	targetURL := flags.String("url", "https://chatgpt.com/backend-api/codex/responses", "真实上游 URL")
-	token := flags.String("token", "", "Authorization Bearer（真实上游模式）")
-	proxy := flags.String("proxy", "", "代理 URL（真实上游模式，可选）")
-	account := flags.Int64("account", 1, "账号 ID（真实上游模式 / mock 模式共用）")
+	doForward := flags.Bool("forward", false, "Deprecated: real upstream verification requires the native host")
+	flags.String("url", "", "Deprecated: use native host verification")
+	flags.String("token", "", "Deprecated: use native host verification")
+	flags.String("proxy", "", "Deprecated: use native host verification")
+	account := flags.Int64("account", 1, "本地模拟账号 ID")
 	timeout := flags.Duration("timeout", time.Minute, "整个验证流程的超时")
-	stateDir := flags.String("state-dir", "", "Private persistent state directory; required for real upstream mode")
+	stateDir := flags.String("state-dir", "", "Private test state directory; defaults to an isolated temporary directory")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func run(args []string) error {
 	}
 
 	if *pluginPath == "" {
-		return fmt.Errorf("用法: testhost -plugin <插件二进制> [-mock | -forward ...]")
+		return fmt.Errorf("用法: testhost -plugin <插件二进制> [-mock]")
 	}
 	if info, err := os.Stat(*pluginPath); err != nil || info.IsDir() {
 		return fmt.Errorf("插件不存在或不是文件: %s", *pluginPath)
@@ -65,11 +65,8 @@ func run(args []string) error {
 	if *doMock && *doForward {
 		return fmt.Errorf("-mock 与 -forward 不能同时使用")
 	}
-	if *doForward && *token == "" {
-		return fmt.Errorf("-forward 需要 -token")
-	}
-	if *doForward && *stateDir == "" {
-		return fmt.Errorf("-forward requires -state-dir to retain outbound evidence")
+	if *doForward {
+		return fmt.Errorf("-forward requires native host verification; standalone TLS/account controls are unavailable")
 	}
 	if *stateDir == "" {
 		dir, err := os.MkdirTemp("", "cookiepin-test-state-")
@@ -119,6 +116,7 @@ func run(args []string) error {
 	}
 
 	// ---- 生命周期：GetInfo → ValidateConfig → ApplyConfig → TestConfig → Health ----
+	var mockHost *fixtureHostHTTP
 	if err := step("GetInfo", func() error {
 		info, err := transport.GetInfo(ctx, &pluginv1.GetInfoRequest{})
 		if err != nil {
@@ -130,9 +128,21 @@ func run(args []string) error {
 		if info.GetPluginId() == "" {
 			return fmt.Errorf("plugin_id 为空")
 		}
+		for _, capability := range info.Capabilities {
+			if capability == pluginv1.HostHTTPCapability {
+				mockHost, err = startFixtureHostHTTP(ctx, transport)
+				if err != nil {
+					return err
+				}
+				break
+			}
+		}
 		return nil
 	}); err != nil {
 		return err
+	}
+	if mockHost != nil {
+		defer mockHost.server.Stop()
 	}
 	configBytes := []byte(*configJSON)
 	if err := step("ValidateConfig", func() error {
@@ -187,12 +197,7 @@ func run(args []string) error {
 	}
 
 	if *doMock {
-		if err := runMock(ctx, transport, *account); err != nil {
-			return err
-		}
-	}
-	if *doForward {
-		if err := runForward(ctx, transport, *targetURL, *token, *proxy, *account); err != nil {
+		if err := runMock(ctx, transport, *account, mockHost); err != nil {
 			return err
 		}
 	}
@@ -215,7 +220,7 @@ func run(args []string) error {
 //	2笔: 注入 mocklb-1 → 上游再发 mocklb-2 → 罐更新
 //	3笔: 注入 mocklb-2 → 上游回 Faster-Model 信号 → 插件当场丢罐重摇
 //	4笔: 罐空直通（重摇生效的证据）
-func runMock(ctx context.Context, transport *pluginv1.TransportClient, accountID int64) error {
+func runMock(ctx context.Context, transport *pluginv1.TransportClient, accountID int64, host *fixtureHostHTTP) error {
 	var hits []http.Header
 	var hitsMu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,10 +231,17 @@ func runMock(ctx context.Context, transport *pluginv1.TransportClient, accountID
 		if len(hits) == 3 {
 			w.Header().Set("Faster-Model", "gpt-5.2-codex-faster") // 模拟弱后端的模型替换信号
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"object":"response","status":"completed","output":[]}`))
 	}))
 	defer upstream.Close()
+	if host != nil {
+		host.mu.Lock()
+		host.target, host.account = upstream.URL+"/backend-api/codex/responses", accountID
+		host.mu.Unlock()
+		ctx = pluginv1.WithHostHTTPBinding(ctx, host.binding)
+	}
 
 	round := func(label, wantCookie string) error {
 		hitsMu.Lock()
@@ -265,11 +277,11 @@ func runMock(ctx context.Context, transport *pluginv1.TransportClient, accountID
 		case wantCookie == "" && got == "":
 			fmt.Printf("✓ mock#%s: 无 Cookie 直通（状态 %d）\n", label, status)
 		case wantCookie == "":
-			return fmt.Errorf("mock#%s: 预期无 Cookie，实际 %q", label, got)
+			return fmt.Errorf("mock#%s: unexpected cookie present", label)
 		case strings.Contains(got, wantCookie):
-			fmt.Printf("✓ mock#%s: 注入生效 Cookie=%q（状态 %d）\n", label, got, status)
+			fmt.Printf("✓ mock#%s: cookie injection verified (status %d)\n", label, status)
 		default:
-			return fmt.Errorf("mock#%s: 预期含 %q，实际 %q", label, wantCookie, got)
+			return fmt.Errorf("mock#%s: cookie injection mismatch", label)
 		}
 		return nil
 	}
@@ -294,28 +306,6 @@ func runMock(ctx context.Context, transport *pluginv1.TransportClient, accountID
 }
 
 const mockBody = `{"ping":1}`
-
-// runForward 对真实上游发一笔请求并回显响应元数据与 SSE 原文。
-func runForward(ctx context.Context, transport *pluginv1.TransportClient, rawURL, token, proxyURL string, accountID int64) error {
-	body := []byte(`{"model":"gpt-5","input":[]}`)
-	start := &pluginv1.ForwardRequest{
-		Frame: &pluginv1.ForwardRequest_Start{Start: &pluginv1.ForwardRequestStart{
-			RequestId: "real-1", Method: http.MethodPost, Url: rawURL, Host: hostOf(rawURL),
-			Headers: map[string]*pluginv1.HeaderValues{
-				"Authorization": {Values: []string{"Bearer " + token}},
-				"Content-Type":  {Values: []string{"application/json"}},
-				"Accept":        {Values: []string{"text/event-stream"}},
-			},
-			ProxyUrl: proxyURL, AccountId: accountID, Platform: "codex",
-			ContentLength: int64(len(body)), HasBody: true,
-		}},
-	}
-	fmt.Printf("→ POST (account=%d proxy_configured=%t)\n", accountID, proxyURL != "")
-	if err := forwardPrint(ctx, transport, start, body); err != nil {
-		return fmt.Errorf("Forward 失败: %w", err)
-	}
-	return nil
-}
 
 // forwardOnce 走一遍 Forward 双向流（同一条流先 Send 后 Recv），返回上游状态码。
 func forwardOnce(ctx context.Context, transport *pluginv1.TransportClient, start *pluginv1.ForwardRequest, body []byte) (int, error) {
@@ -350,59 +340,6 @@ func forwardOnce(ctx context.Context, transport *pluginv1.TransportClient, start
 			return status, nil
 		}
 	}
-}
-
-// forwardPrint 同 forwardOnce，但打印响应元数据与正文（真实上游调试用）。
-func forwardPrint(ctx context.Context, transport *pluginv1.TransportClient, start *pluginv1.ForwardRequest, body []byte) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stream, err := transport.Forward(ctx)
-	if err != nil {
-		return err
-	}
-	if err := stream.Send(start); err != nil {
-		return err
-	}
-	if err := stream.Send(&pluginv1.ForwardRequest{Frame: &pluginv1.ForwardRequest_BodyChunk{BodyChunk: body}}); err != nil {
-		return err
-	}
-	if err := stream.Send(&pluginv1.ForwardRequest{Frame: &pluginv1.ForwardRequest_BodyEnd{BodyEnd: true}}); err != nil {
-		return err
-	}
-	var total int64
-	for {
-		frame, err := stream.Recv()
-		if err != nil {
-			return err
-		}
-		if s := frame.GetStart(); s != nil {
-			fmt.Printf("← %d %s (headers=%d)\n", s.GetStatusCode(), s.GetStatus(), len(s.GetHeaders()))
-			for name, values := range s.GetHeaders() {
-				if strings.EqualFold(name, "set-cookie") || strings.EqualFold(name, "faster-model") {
-					fmt.Printf("   %s: %v\n", name, values.GetValues())
-				}
-			}
-		}
-		if chunk := frame.GetBodyChunk(); len(chunk) > 0 {
-			total += int64(len(chunk))
-			os.Stdout.Write(chunk)
-		}
-		if e := frame.GetError(); e != nil {
-			return fmt.Errorf("插件错误帧 [%s] %s (request_sent=%v)", e.GetCode(), e.GetMessage(), e.GetRequestSent())
-		}
-		if frame.GetEnd() != nil {
-			fmt.Printf("\n← 完成 %d bytes / %dms\n", total, frame.GetEnd().GetDurationMs())
-			return nil
-		}
-	}
-}
-
-func hostOf(rawURL string) string {
-	rawURL = strings.TrimPrefix(strings.TrimPrefix(rawURL, "http://"), "https://")
-	if idx := strings.IndexByte(rawURL, '/'); idx >= 0 {
-		return rawURL[:idx]
-	}
-	return rawURL
 }
 
 func step(name string, fn func() error) error {

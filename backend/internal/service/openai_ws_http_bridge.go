@@ -664,6 +664,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, fmt.Errorf("upstream http bridge error: status=%d message=%s", resp.StatusCode, upstreamMsg)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	settlementBody := resp.Body
+	if wrapped, ok := settlementBody.(*openAIRequestContextReadCloser); ok {
+		settlementBody = wrapped.ReadCloser
+	}
+	pluginBody, _ := settlementBody.(*pluginResponseBody)
 	stopCancelBody := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
 	defer stopCancelBody()
 	if account.Platform == PlatformGrok {
@@ -893,7 +898,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				if account.Platform == PlatformGrok {
 					return nil, newOpenAIUpstreamFailoverError(statusCode, resp.Header, upstreamMessage, errMessage, false)
 				}
-				return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, true, resp.Header.Get("x-request-id"), upstreamMessage, errMessage, mappedModel, resp.Header)
+				return nil, stopOpenAIReplayAfterUsage(
+					s.newOpenAIStreamFailoverErrorWithModel(c, account, true, resp.Header.Get("x-request-id"), upstreamMessage, errMessage, mappedModel, resp.Header), &usage)
 			}
 			if account.Platform != PlatformGrok && !failureAccountSideEffectsApplied {
 				if eventType == "response.failed" || (!officialOpenAIResponses && shouldFailover && !requestScopedCapacity) {
@@ -931,7 +937,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				isOpenAIWSTerminalEvent(eventType)
 			if stageBeforeSemanticOutput && !commitStagedMessages {
 				if pendingClientMessageBytes+int64(len(clientMessage)) > openAIFirstOutputStageMaxBytes {
-					return nil, s.newOpenAIStreamFailoverError(
+					return nil, stopOpenAIReplayAfterUsage(s.newOpenAIStreamFailoverError(
 						c,
 						account,
 						true,
@@ -939,7 +945,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 						nil,
 						"OpenAI WS HTTP bridge first-output staging limit exceeded",
 						resp.Header,
-					)
+					), &usage)
 				}
 				pendingClientMessages = append(pendingClientMessages, append([]byte(nil), clientMessage...))
 				pendingClientMessageBytes += int64(len(clientMessage))
@@ -1004,6 +1010,13 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				firstTokenMsValue,
 				clientDisconnected,
 			)
+			if pluginBody != nil {
+				// A semantic terminal precedes the plugin's durable settlement.
+				// Drain only that bounded tail; never replay an emitted response.
+				if err := drainPluginResponseSettlement(pluginBody, pluginResponseSettlementTimeout); err != nil {
+					return resultWithUsage(), fmt.Errorf("settle upstream http bridge stream: %w", err)
+				}
+			}
 			return resultWithUsage(), nil
 		}
 	}

@@ -1,6 +1,6 @@
 <template>
   <form class="space-y-3 border-b border-gray-200 pb-4 dark:border-dark-600" @submit.prevent="submit">
-    <h3 class="text-sm font-semibold">自动重新授权</h3>
+    <h3 class="text-sm font-semibold">重新登录账号</h3>
     <label class="block">
       <span class="input-label">账号邮箱</span>
       <input v-model="email" class="input w-full" type="email" autocomplete="off"
@@ -12,7 +12,7 @@
         maxlength="4096" required :disabled="busy" />
     </label>
     <label class="block">
-      <span class="input-label">2FA 秘密（可选）</span>
+      <span class="input-label">2FA 密钥（已开启两步验证时填写）</span>
       <input v-model="totpSecret" class="input w-full" type="password" autocomplete="new-password"
         maxlength="256" :disabled="busy || useStoredTOTP" />
     </label>
@@ -25,7 +25,7 @@
     <p v-if="running" role="status" class="text-sm">正在等待授权浏览器，最长 5 分钟</p>
     <div class="flex flex-wrap gap-2">
       <button type="submit" class="btn btn-primary" :disabled="busy || !email.trim() || !password">
-        自动重新授权并覆盖
+        重新登录并覆盖
       </button>
       <button v-if="running" type="button" class="btn btn-secondary" @click="$emit('cancel')">取消自动授权</button>
     </div>

@@ -27,18 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type drainHTTPUpstream struct{ service.HTTPUpstream }
 type drainAntiBypassSettings struct{}
 
 func (drainAntiBypassSettings) IsAntiBypassEnabled(context.Context) (bool, error) {
 	return true, nil
-}
-
-func (u *drainHTTPUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	return http.DefaultClient.Do(req)
-}
-func (u *drainHTTPUpstream) DoWithTLS(req *http.Request, proxy string, id int64, count int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.Do(req, proxy, id, count)
 }
 
 type terminalGateListener struct {

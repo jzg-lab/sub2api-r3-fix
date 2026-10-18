@@ -59,6 +59,14 @@ func TestOpenAIUnauthorizedRecoveryBoundaries(t *testing.T) {
 		{name: "invalidated", body: `{"error":{"code":"token_invalidated"}}`},
 		{name: "generic", body: `{"detail":"Unauthorized"}`},
 		{name: "unknown", body: `{"error":{"code":"other"}}`},
+		{name: "unknown_expiry", mutate: func(a *Account, r *unauthorizedRecoveryRepo, _ *unauthorizedRecoveryExecutor, _ *OpenAIGatewayService, _ *http.Request) {
+			delete(a.Credentials, "expires_at")
+			delete(r.account.Credentials, "expires_at")
+		}},
+		{name: "invalid_token_before_expiry", body: `{"error":{"code":"invalid_token"}}`, mutate: func(a *Account, r *unauthorizedRecoveryRepo, _ *unauthorizedRecoveryExecutor, _ *OpenAIGatewayService, _ *http.Request) {
+			a.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
+			r.account.Credentials["expires_at"] = a.Credentials["expires_at"]
+		}},
 		{name: "permanent_message", body: `{"error":{"code":"invalid_token","message":"account disabled"}}`},
 		{name: "html", body: "<h1>Unauthorized</h1>"},
 		{name: "oversized", body: strings.Repeat("x", openAIUnauthorizedBodyLimit+20)},
@@ -480,11 +488,15 @@ func TestOpenAIUnauthorizedRecoveryQualificationConsumer(t *testing.T) {
 	a, repo, executor, gateway := newUnauthorizedRecoveryFixture()
 	a.Schedulable = false
 	a.Extra = map[string]any{openAIDowngradeQualificationExtraKey: true}
+	a.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	repo.account = snapshotOAuthRefreshAccount(a)
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		if attempts.Add(1) == 1 {
+			repo.mu.Lock()
+			repo.account.Credentials["expires_at"] = time.Now().Add(-time.Second).Unix()
+			repo.mu.Unlock()
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = io.WriteString(w, `{"error":{"code":"token_expired"}}`)
 			return
@@ -520,7 +532,9 @@ func (r *unauthorizedRecoveryProxyRepo) GetByID(context.Context, int64) (*Proxy,
 func TestOpenAIUnauthorizedRecoveryQualificationIDOnlyProxy(t *testing.T) {
 	for _, mode := range []string{"available", "unavailable", "inactive", "mismatched"} {
 		t.Run(mode, func(t *testing.T) {
-			a, _, _, gateway := newUnauthorizedRecoveryFixture()
+			a, repo, _, gateway := newUnauthorizedRecoveryFixture()
+			a.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
+			repo.account.Credentials["expires_at"] = a.Credentials["expires_at"]
 			proxy := *a.Proxy
 			route := proxy.URL()
 			a.Proxy = nil
@@ -645,7 +659,7 @@ func newUnauthorizedRecoveryFixture() (*Account, *unauthorizedRecoveryRepo, *una
 		Proxy: &Proxy{ID: proxyID, Protocol: "http", Host: "127.0.0.1", Port: 19023, Status: StatusActive},
 		Credentials: map[string]any{
 			"access_token": "local-before", "refresh_token": "local-refresh",
-			"expires_at": strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+			"expires_at": strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10),
 			"email":      "fixture@example.invalid",
 		},
 	}
@@ -658,6 +672,8 @@ func newUnauthorizedRecoveryFixture() (*Account, *unauthorizedRecoveryRepo, *una
 
 func TestOpenAIUnauthorizedRecoveryFutureExpiry(t *testing.T) {
 	a, repo, executor, gateway := newUnauthorizedRecoveryFixture()
+	a.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
+	repo.account.Credentials["expires_at"] = a.Credentials["expires_at"]
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts.Add(1)
@@ -681,9 +697,9 @@ func TestOpenAIUnauthorizedRecoveryFutureExpiry(t *testing.T) {
 	resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.EqualValues(t, 2, attempts.Load())
-	require.EqualValues(t, 1, executor.calls.Load())
-	require.Equal(t, 1, repo.writes)
-	require.Equal(t, []string{a.Proxy.URL(), a.Proxy.URL()}, upstream.routes)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.EqualValues(t, 1, attempts.Load())
+	require.Zero(t, executor.calls.Load())
+	require.Zero(t, repo.writes)
+	require.Equal(t, []string{a.Proxy.URL()}, upstream.routes)
 }

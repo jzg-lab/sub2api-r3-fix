@@ -275,11 +275,51 @@ const (
 	cyberSessionRedisCommandMaxKeys = 128
 )
 
-// SetCyberSessionBlocked writes exact blocks in bounded transactions. The
-// coarse scope is activated only after all exact blocks have been stored.
+var extendCyberSessionBlocksScript = redis.NewScript(`
+local requested = tonumber(ARGV[1])
+local exactCount = #KEYS - tonumber(ARGV[2])
+local scopeTTL = requested
+for i = 1, exactCount do
+    local remaining = redis.call('PTTL', KEYS[i])
+    if remaining == -2 or (remaining >= 0 and remaining < requested) then
+        redis.call('SET', KEYS[i], '1', 'PX', requested)
+        remaining = requested
+    end
+    if remaining == -1 then
+        scopeTTL = -1
+    elseif scopeTTL ~= -1 and remaining > scopeTTL then
+        scopeTTL = remaining
+    end
+end
+if exactCount < #KEYS then
+    local scope = KEYS[#KEYS]
+    local remaining = redis.call('PTTL', scope)
+    if scopeTTL == -1 then
+        if remaining ~= -1 then
+            redis.call('SET', scope, '1')
+        end
+    elseif remaining == -2 or (remaining >= 0 and remaining < scopeTTL) then
+        redis.call('SET', scope, '1', 'PX', scopeTTL)
+    end
+end
+return 0
+`)
+
+// SetCyberSessionBlocked publishes each bounded set of exact blocks with its
+// lookup hint in the same transaction. A later batch failure must not hide
+// blocks that have already committed. Repeated writes cannot shorten existing
+// blocks, and even a new hint covers their retained TTLs. A hint alone never
+// blocks a request.
 func (c *gatewayCache) SetCyberSessionBlocked(ctx context.Context, scopeKey string, keys []string, ttl time.Duration) error {
 	if len(keys) == 0 {
 		return nil
+	}
+	if ttl <= 0 {
+		return errors.New("cyber session block TTL must be positive")
+	}
+	ttlMillis := ttl.Milliseconds()
+	if ttlMillis == 0 {
+		ttlMillis = 1
 	}
 	exactKeys := make([]string, 0, cyberSessionRedisCommandMaxKeys)
 	flush := func() error {
@@ -287,9 +327,16 @@ func (c *gatewayCache) SetCyberSessionBlocked(ctx context.Context, scopeKey stri
 			return nil
 		}
 		pipe := c.rdb.TxPipeline()
+		redisKeys := make([]string, 0, len(exactKeys)+1)
 		for _, key := range exactKeys {
-			pipe.Set(ctx, cyberSessionBlockPrefix+key, "1", ttl)
+			redisKeys = append(redisKeys, cyberSessionBlockPrefix+key)
 		}
+		hasScope := 0
+		if scopeKey != "" {
+			redisKeys = append(redisKeys, cyberSessionScopePrefix+scopeKey)
+			hasScope = 1
+		}
+		extendCyberSessionBlocksScript.Eval(ctx, pipe, redisKeys, ttlMillis, hasScope)
 		_, err := pipe.Exec(ctx)
 		exactKeys = exactKeys[:0]
 		return err
@@ -306,9 +353,6 @@ func (c *gatewayCache) SetCyberSessionBlocked(ctx context.Context, scopeKey stri
 	}
 	if err := flush(); err != nil {
 		return err
-	}
-	if scopeKey != "" {
-		return c.rdb.Set(ctx, cyberSessionScopePrefix+scopeKey, "1", ttl).Err()
 	}
 	return nil
 }

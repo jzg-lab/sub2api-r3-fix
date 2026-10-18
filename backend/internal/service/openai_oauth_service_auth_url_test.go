@@ -25,15 +25,8 @@ func (s *openaiOAuthClientAuthURLStub) RefreshTokenWithClientID(ctx context.Cont
 }
 
 func TestOpenAIOAuthService_GenerateAuthURL_OpenAIKeepsCodexFlow(t *testing.T) {
-	proxyID := int64(7)
-	proxyRepo := &mockProxyRepoForOAuth{
-		getByIDFunc: func(context.Context, int64) (*Proxy, error) {
-			return &Proxy{ID: proxyID, Status: StatusActive, Protocol: "http", Host: "127.0.0.1", Port: 8080}, nil
-		},
-	}
-	svc := NewOpenAIOAuthService(proxyRepo, &openaiOAuthClientAuthURLStub{})
-	svc.SetSessionStore(newTestOpenAIOAuthSessionStore())
-	defer svc.Stop()
+	svc, _, proxy, _ := oauthRouteFixture(t)
+	proxyID := proxy.ID
 
 	result, err := svc.GenerateAuthURL(context.Background(), &proxyID, "", PlatformOpenAI)
 	require.NoError(t, err)

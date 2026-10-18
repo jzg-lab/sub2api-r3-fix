@@ -1,11 +1,17 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -124,10 +130,8 @@ func TestBuildCyberSessionBlockedOpsEntry(t *testing.T) {
 	require.Equal(t, "session_block_key=abc123", entryWithKey.ErrorBody)
 }
 
-// TestRejectIfCyberSessionBlocked_FailOpen verifies fail-open paths: nil handler
-// services, no explicit session signal, and (implicitly) disabled switch all
-// pass the request through.
-func TestRejectIfCyberSessionBlocked_FailOpen(t *testing.T) {
+// Disabled/unconfigured protection does not require a store.
+func TestRejectIfCyberSessionBlocked_Unconfigured(t *testing.T) {
 	c := newTestGinContext()
 	c.Request = httptest.NewRequest("POST", "/openai/v1/responses", strings.NewReader(`{}`))
 
@@ -137,6 +141,119 @@ func TestRejectIfCyberSessionBlocked_FailOpen(t *testing.T) {
 	h2 := &OpenAIGatewayHandler{gatewayService: nil}
 	key := &service.APIKey{ID: 1}
 	require.False(t, h2.rejectIfCyberSessionBlocked(c, key, []byte(`{}`), "gpt-5", cyberBlockFormatResponses), "nil gateway service → pass")
+}
+
+func TestCyberSessionProtectionUnavailableHTTP(t *testing.T) {
+	for _, format := range []cyberSessionBlockFormat{cyberBlockFormatResponses, cyberBlockFormatChat, cyberBlockFormatAnthropic} {
+		t.Run(map[cyberSessionBlockFormat]string{
+			cyberBlockFormatResponses: "responses", cyberBlockFormatChat: "chat", cyberBlockFormatAnthropic: "anthropic",
+		}[format], func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			writeCyberSessionProtectionUnavailable(c, format)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			errBody, ok := body["error"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "api_error", errBody["type"])
+			require.Equal(t, cyberSessionProtectionUnavailableMsg, errBody["message"])
+			if format == cyberBlockFormatAnthropic {
+				require.Equal(t, "error", body["type"])
+			} else {
+				require.Equal(t, "session_protection_unavailable", errBody["code"])
+			}
+			require.False(t, c.GetBool(opsDedicatedErrorRecordedKey))
+			require.Nil(t, service.GetOpsCyberPolicy(c))
+			require.NotContains(t, rec.Body.String(), "session_blocked_by_cyber_policy")
+		})
+	}
+}
+
+type cyberKeepaliveRecorder struct {
+	*httptest.ResponseRecorder
+	committed chan struct{}
+	once      sync.Once
+}
+
+func (r *cyberKeepaliveRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.once.Do(func() { close(r.committed) })
+}
+
+func TestCyberSessionProtectionUnavailableCommittedSSE(t *testing.T) {
+	rec := &cyberKeepaliveRecorder{ResponseRecorder: httptest.NewRecorder(), committed: make(chan struct{})}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	service.MarkOpenAICompactClientStream(c)
+	stop := service.StartOpenAICompactSSEKeepalive(c, time.Millisecond)
+	defer stop()
+	select {
+	case <-rec.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("compact heartbeat did not commit")
+	}
+	// Stopping before reading establishes synchronization with the heartbeat.
+	require.True(t, service.StopOpenAICompactSSEKeepaliveCommitted(c))
+
+	writeCyberSessionProtectionUnavailable(c, cyberBlockFormatResponses)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "event: response.failed\n")
+	require.Equal(t, 1, strings.Count(rec.Body.String(), "event: response.failed\n"))
+	require.NotContains(t, rec.Body.String(), "event: response.completed")
+	require.NotContains(t, rec.Body.String(), "permission_error")
+	failure, ok := service.GetOpsStreamError(c)
+	require.True(t, ok)
+	require.Equal(t, http.StatusServiceUnavailable, failure.IntendedStatus)
+	require.Equal(t, "session_protection_unavailable", failure.Code)
+	require.True(t, failure.CountTowardsSLA)
+	require.False(t, c.GetBool(opsDedicatedErrorRecordedKey))
+	require.Nil(t, service.GetOpsCyberPolicy(c))
+}
+
+func TestCyberSessionProtectionUnavailableWebSocket(t *testing.T) {
+	done := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, nil)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.CloseNow()
+		writeCyberSessionProtectionUnavailableWSError(r.Context(), conn)
+		done <- conn.Close(coderws.StatusInternalError, "session protection unavailable")
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.CloseNow()
+	kind, payload, err := conn.Read(ctx)
+	require.NoError(t, err)
+	require.Equal(t, coderws.MessageText, kind)
+	var frame struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &frame))
+	require.Equal(t, "error", frame.Type)
+	require.Equal(t, "api_error", frame.Error.Type)
+	require.Equal(t, "session_protection_unavailable", frame.Error.Code)
+	require.Equal(t, cyberSessionProtectionUnavailableMsg, frame.Error.Message)
+	_, _, err = conn.Read(ctx)
+	require.Equal(t, coderws.StatusInternalError, coderws.CloseStatus(err))
+	select {
+	case err = <-done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("websocket error path did not close")
+	}
 }
 
 func TestBuildCyberSessionBlockWritePlanCombinesExplicitAndTranscriptKeys(t *testing.T) {
@@ -154,6 +271,25 @@ func TestBuildCyberSessionBlockWritePlanCombinesExplicitAndTranscriptKeys(t *tes
 	plan = buildCyberSessionBlockWritePlan(7, c, body)
 	require.Len(t, plan.keys, 3)
 	require.NotEmpty(t, plan.scopeKey)
+}
+
+func TestBuildCyberSessionBlockWritePlansBindUserAndKeepLegacyRollbackKeys(t *testing.T) {
+	body := []byte(`{"input":"trigger","user_id":999}`)
+	c := newTestGinContext()
+	c.Request = httptest.NewRequest("POST", "/openai/v1/responses", strings.NewReader(string(body)))
+	c.Request.Header.Set("session_id", "same-session")
+	apiKey := &service.APIKey{ID: 7, UserID: 42}
+	plans := buildCyberSessionBlockWritePlans(apiKey, c, body)
+	require.Len(t, plans, 2)
+	require.Equal(t, service.CyberSessionUserScopeKey(42), plans[0].scopeKey)
+	require.Contains(t, plans[0].keys, service.CyberSessionUserExplicitBlockKey(42, c, body))
+	require.NotContains(t, plans[0].keys, service.CyberSessionUserExplicitBlockKey(999, c, body))
+	require.Equal(t, buildCyberSessionBlockWritePlan(7, c, body), plans[1])
+	rotated := buildCyberSessionBlockWritePlans(&service.APIKey{ID: 8, UserID: 42}, c, body)
+	require.Equal(t, plans[0], rotated[0])
+	require.NotEqual(t, plans[1], rotated[1])
+	require.Len(t, buildCyberSessionBlockWritePlans(&service.APIKey{ID: 7}, c, body), 1)
+	require.Empty(t, buildCyberSessionBlockWritePlans(nil, c, body))
 }
 
 // TestRecordCyberPolicyIfMarked_BlockKeyPlumbed verifies the 6th param is

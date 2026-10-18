@@ -2201,114 +2201,6 @@ func (p *openAIWSTurnPricing) currentOr(fallback time.Time) time.Time {
 	return fallback
 }
 
-// openAIWSTurnAPIKeyLookup 是后续 turn 重取 API Key 认证快照的入口
-// （APIKeyService.GetByKey：经 L1/L2 认证缓存，未命中才回源）。
-type openAIWSTurnAPIKeyLookup interface {
-	GetByKey(ctx context.Context, key string) (*service.APIKey, error)
-}
-
-// openAIWSTurnBillingAPIKeys 按 turn 号保存每个 turn 计费用的 API Key 快照。
-//
-// API Key 认证快照只在建连时取一次。若连接内所有 turn 共用它，分组定价（倍率、
-// 高峰、图片定价、利润门参数）会停留在建连时刻：管理员调价后，已打开的长连接
-// 在客户端重连前一直按旧价计费、按旧售价过利润门，而 HTTP 请求每次都经认证缓存
-// 取快照，缓存失效后即生效。
-//
-// 因此后续 turn 在 BeforeTurn（与 HTTP 请求进入认证中间件同位）经同一认证缓存
-// 重取快照，只采用其中的分组，作为该 turn 利润门准入与用量计费共同的分组；用户、
-// Key 限额、订阅仍沿用建连快照。只在同一把 Key、同一分组且平台与订阅类型未变时
-// 采用：Key 换组或分组改平台/订阅类型不是调价，该连接按建连分组调度，继续按建连
-// 快照计费；重取失败同样保留建连快照，不断连。
-//
-// 首轮沿用刚经认证中间件取得的建连快照；没有经过 BeforeTurn 的 turn 回退建连
-// 快照。只保留当前与上一个 turn：下一 turn 的 BeforeTurn 先于上一 turn 的
-// AfterTurn 执行时，上一 turn 仍取到自己的快照。
-type openAIWSTurnBillingAPIKeys struct {
-	mu   sync.Mutex
-	keys map[int]*service.APIKey
-}
-
-// begin 在 BeforeTurn 重装利润门前调用：后续 turn 重取计费分组并按 turn 记下，
-// 返回换入该分组的上下文供本 turn 的利润门使用。
-func (k *openAIWSTurnBillingAPIKeys) begin(ctx context.Context, apiKeyService *service.APIKeyService, turn int, conn *service.APIKey) context.Context {
-	turnKey := conn
-	if turn > 1 && apiKeyService != nil {
-		turnKey = refreshOpenAIWSTurnBillingAPIKey(ctx, apiKeyService, conn)
-	}
-	k.set(turn, turnKey)
-	return withOpenAIWSTurnBillingGroup(ctx, turnKey)
-}
-
-func (k *openAIWSTurnBillingAPIKeys) set(turn int, key *service.APIKey) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.keys == nil {
-		k.keys = make(map[int]*service.APIKey, 2)
-	}
-	for t := range k.keys {
-		if t < turn-1 {
-			delete(k.keys, t)
-		}
-	}
-	k.keys[turn] = key
-}
-
-func (k *openAIWSTurnBillingAPIKeys) forTurn(turn int, conn *service.APIKey) *service.APIKey {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if key := k.keys[turn]; key != nil {
-		return key
-	}
-	return conn
-}
-
-// refreshOpenAIWSTurnBillingAPIKey 返回本 turn 计费用的 API Key：分组取当前认证
-// 快照，其余字段与建连快照共享。不满足采用条件时原样返回建连快照。
-func refreshOpenAIWSTurnBillingAPIKey(ctx context.Context, lookup openAIWSTurnAPIKeyLookup, conn *service.APIKey) *service.APIKey {
-	if lookup == nil || conn == nil || conn.Key == "" || conn.GroupID == nil || conn.Group == nil {
-		return conn
-	}
-	latest, err := lookup.GetByKey(ctx, conn.Key)
-	if err != nil || latest == nil || latest.ID != conn.ID || latest.GroupID == nil {
-		return conn
-	}
-	if *latest.GroupID != *conn.GroupID {
-		// A smart-routed connection keeps billing its bound customer package.
-		routes, ok := lookup.(interface {
-			APIKeyForRoute(context.Context, *service.APIKey, int64) (*service.APIKey, error)
-		})
-		if !ok || !latest.HasSmartRoutes() {
-			return conn
-		}
-		latest, err = routes.APIKeyForRoute(ctx, latest, *conn.GroupID)
-		if err != nil || latest == nil {
-			return conn
-		}
-	}
-	group := latest.Group
-	if group == nil || group.ID != conn.Group.ID ||
-		group.Platform != conn.Group.Platform ||
-		group.SubscriptionType != conn.Group.SubscriptionType {
-		return conn
-	}
-	turnKey := *conn
-	turnKey.Group = group
-	return &turnKey
-}
-
-// withOpenAIWSTurnBillingGroup 把本 turn 的计费分组换进认证分组上下文，使利润门
-// 的售价与本 turn 计费同源。上下文里没有同 ID 的认证分组时不改动。
-func withOpenAIWSTurnBillingGroup(ctx context.Context, turnKey *service.APIKey) context.Context {
-	if turnKey == nil || turnKey.Group == nil {
-		return ctx
-	}
-	current, ok := ctx.Value(ctxkey.Group).(*service.Group)
-	if !ok || current == nil || current == turnKey.Group || current.ID != turnKey.Group.ID {
-		return ctx
-	}
-	return context.WithValue(ctx, ctxkey.Group, turnKey.Group)
-}
-
 // recordOpenAIProfitVeto 记录 OpenAI 侧选号循环的一次利润门终检否决：把账号
 // 加入本请求排除集并递增否决计数。返回 false 表示否决次数已达
 // maxProfitVetoAttempts，调用方必须停止重选并按「无可用账号」终止。
@@ -2760,6 +2652,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id must be a response.id (resp_*), not a message id")
 		return
 	}
+	continuationGroupID := int64(0)
+	if apiKey.GroupID != nil {
+		continuationGroupID = *apiKey.GroupID
+	}
+	if err := h.gatewayService.ValidateOpenAIWSContinuation(ctx, continuationGroupID, firstMessage, subject.UserID, apiKey.ID); err != nil {
+		var closeErr *service.OpenAIWSClientCloseError
+		if errors.As(err, &closeErr) {
+			closeOpenAIClientWS(wsConn, closeErr.StatusCode(), closeErr.Reason())
+		} else {
+			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "continuation ownership unavailable")
+		}
+		return
+	}
+	service.SetOpenAIHTTPResponseOwner(c, subject.UserID, apiKey.ID)
 	firstMessageToolCoverage := service.AnalyzeToolCallOutputContextCoverageBytes(firstMessage)
 	previousResponseCanMove := !firstMessageToolCoverage.HasFunctionCallOutput || firstMessageToolCoverage.ContextCoversAllCallIDs
 	reqLog = reqLog.With(
@@ -2785,7 +2691,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 
 	// The first response.create frame is available here, so explicit IDs are
 	// checked directly and body-derived sessions use the coarse scope gate.
-	if cyberBlockKey := h.findBlockedCyberSessionForAPIKey(c, apiKey, firstMessage); cyberBlockKey != "" {
+	cyberBlockKey, cyberBlockErr := h.findBlockedCyberSessionForAPIKey(c, apiKey, firstMessage)
+	if cyberBlockErr != nil {
+		service.MarkOpsStreamFailure(c, "api_error", "session_protection_unavailable", cyberSessionProtectionUnavailableMsg, http.StatusServiceUnavailable)
+		writeCyberSessionProtectionUnavailableWSError(c.Request.Context(), wsConn)
+		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "session protection unavailable")
+		return
+	}
+	if cyberBlockKey != "" {
 		writeCyberSessionBlockedWSError(c.Request.Context(), wsConn)
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "session blocked by cyber-security policy")
 		h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, reqModel, cyberBlockKey)
@@ -3189,8 +3102,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		// turn 级定价：BeforeTurn 重新冻结 pricingAt 并按最新门复核当前账号；
 		// passthrough 没有 BeforeTurn 时，AfterTurn 回退到 TurnStarted 的所属 turn 时刻。
 		var turnPricing openAIWSTurnPricing
-		var turnBillingAPIKeys openAIWSTurnBillingAPIKeys
 		var wsFailureObserved atomic.Bool
+		var turnBilling openAIWSTurnBillingAPIKeys
+		var turnKeyLookup openAIWSTurnAPIKeyLookup
+		if h.apiKeyService != nil {
+			turnKeyLookup = h.apiKeyService
+		}
 		hooks := &service.OpenAIWSIngressHooks{
 			ClientLifecycleContext:      clientLifecycleCtx,
 			InitialRequestModel:         reqModel,
@@ -3210,7 +3127,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
-				turnBillingCtx := turnBillingAPIKeys.begin(ctx, h.apiKeyService, turn, apiKey)
+				turnBillingKey := turnBilling.begin(ctx, turnKeyLookup, turn, apiKey)
+				turnBillingCtx := withOpenAIWSTurnBillingGroup(ctx, turnBillingKey)
 				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
 				// 无法中途换号）。本 turn 的准入与计费共用同一 pricingAt。
@@ -3228,6 +3146,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				}
 				if !gjson.ValidBytes(payload) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
+				}
+				if err := h.gatewayService.ValidateOpenAIWSContinuation(ctx, continuationGroupID, payload, subject.UserID, apiKey.ID); err != nil {
+					return err
 				}
 				model := strings.TrimSpace(originalModel)
 				if model == "" {
@@ -3250,6 +3171,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
 					return service.NewOpenAIWSClientCloseError(securityAuditWSCloseStatus(decision), securityAuditWSCloseReason(decision), nil)
+				}
+				key, lookupErr := h.findBlockedCyberSessionForAPIKey(c, apiKey, payload)
+				if lookupErr != nil {
+					service.MarkOpsStreamFailure(c, "api_error", "session_protection_unavailable", cyberSessionProtectionUnavailableMsg, http.StatusServiceUnavailable)
+					writeCyberSessionProtectionUnavailableWSError(ctx, wsConn)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "session protection unavailable", lookupErr)
+				}
+				if key != "" {
+					cyberBlockedThisConn = true
+					writeCyberSessionBlockedWSError(ctx, wsConn)
+					h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, model, key)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
 				return nil
 			},
@@ -3287,7 +3220,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
-
+				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
+				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
+				// 无法中途换号）。本 turn 的准入与计费共用同一 pricingAt。
+				turnKey := turnBilling.begin(ctx, turnKeyLookup, turn, apiKey)
+				turnCtx, turnAt := h.gatewayService.WithOpenAITurnPricingContext(withOpenAIWSTurnBillingGroup(ctx, turnKey), apiKey.GroupID)
+				if _, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(turnCtx, account); vetoed {
+					reqLog.Info("openai.websocket_turn_profit_vetoed",
+						zap.Int("turn", turn),
+						zap.Int64("account_id", account.ID),
+						zap.String("reason", reason))
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is no longer eligible for this connection, please reconnect", nil)
+				}
+				turnPricing.freeze(turnAt)
 				if turn == 1 {
 					return nil
 				}
@@ -3402,12 +3347,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 				sessionID := service.ExtractClientSessionID(c)
 				turnRecordPricingAt := turnPricing.currentOr(turnStart)
-				turnBillingAPIKey := turnBillingAPIKeys.forTurn(turn, apiKey)
+				turnBillingKey := turnBilling.forTurn(turn, apiKey)
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 				h.submitOpenAIUsageRecordTask(ctx, result, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             result,
-						APIKey:             turnBillingAPIKey,
+						APIKey:             turnBillingKey,
 						User:               apiKey.User,
 						Account:            account,
 						Subscription:       subscription,
@@ -4333,6 +4278,32 @@ func writeCyberSessionBlockedWSError(ctx context.Context, conn *coderws.Conn) {
 	_ = conn.Write(writeCtx, coderws.MessageText, payload)
 }
 
+const cyberSessionProtectionUnavailableMsg = "Session protection is temporarily unavailable; this request was not forwarded."
+
+func writeCyberSessionProtectionUnavailableWSError(ctx context.Context, conn *coderws.Conn) {
+	if conn == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := json.Marshal(gin.H{
+		"event_id": "evt_session_protection_unavailable",
+		"type":     "error",
+		"error": gin.H{
+			"type":    "api_error",
+			"code":    "session_protection_unavailable",
+			"message": cyberSessionProtectionUnavailableMsg,
+		},
+	})
+	if err != nil {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = conn.Write(writeCtx, coderws.MessageText, payload)
+}
+
 // cyberPolicyRecordedKey guards against double-firing recordCyberPolicyIfMarked
 // within one request (e.g. in a retry/failover loop).
 const cyberPolicyRecordedKey = "ops_cyber_recorded"
@@ -4461,17 +4432,16 @@ const (
 
 // rejectIfCyberSessionBlocked checks the session-block table BEFORE account
 // selection. Returns true when the request was rejected (response already
-// written + ops entry enqueued). Fail-open: disabled switch / empty key /
-// store error → false.
+// written). Store failures reject with 503, not a cyber-policy violation.
 func (h *OpenAIGatewayHandler) rejectIfCyberSessionBlocked(c *gin.Context, apiKey *service.APIKey, body []byte, model string, format cyberSessionBlockFormat) bool {
 	if h == nil || h.gatewayService == nil || apiKey == nil {
 		return false
 	}
-	// 开关默认关：先走 ~ns 级缓存开关检查，再付出 key 派生(gjson+sha256)成本。
-	if enabled, _ := h.gatewayService.CyberSessionBlockRuntime(c.Request.Context()); !enabled {
-		return false
+	key, err := h.findBlockedCyberSessionForAPIKey(c, apiKey, body)
+	if err != nil {
+		writeCyberSessionProtectionUnavailable(c, format)
+		return true
 	}
-	key := h.findBlockedCyberSessionForAPIKey(c, apiKey, body)
 	if key == "" {
 		return false
 	}
@@ -4502,6 +4472,24 @@ func (h *OpenAIGatewayHandler) rejectIfCyberSessionBlocked(c *gin.Context, apiKe
 	return true
 }
 
+func writeCyberSessionProtectionUnavailable(c *gin.Context, format cyberSessionBlockFormat) {
+	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
+		service.MarkOpsStreamFailure(c, "api_error", "session_protection_unavailable", cyberSessionProtectionUnavailableMsg, http.StatusServiceUnavailable)
+		writeResponsesFailedSSE(c, "api_error", cyberSessionProtectionUnavailableMsg)
+		return
+	}
+	errBody := gin.H{
+		"type":    "api_error",
+		"message": cyberSessionProtectionUnavailableMsg,
+	}
+	if format == cyberBlockFormatAnthropic {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": errBody})
+		return
+	}
+	errBody["code"] = "session_protection_unavailable"
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBody})
+}
+
 type cyberSessionBlockWritePlan struct {
 	scopeKey string
 	keys     []string
@@ -4524,16 +4512,45 @@ func buildCyberSessionBlockWritePlan(apiKeyID int64, c *gin.Context, body []byte
 	return plan
 }
 
-func findBlockedCyberSessionKey(ctx context.Context, gatewayService *service.OpenAIGatewayService, apiKeyID int64, c *gin.Context, body []byte) string {
+func buildCyberSessionBlockWritePlans(apiKey *service.APIKey, c *gin.Context, body []byte) []cyberSessionBlockWritePlan {
+	if apiKey == nil {
+		return nil
+	}
+	plans := make([]cyberSessionBlockWritePlan, 0, 2)
+	if apiKey.UserID > 0 {
+		userPlan := cyberSessionBlockWritePlan{}
+		if key := service.CyberSessionUserExplicitBlockKey(apiKey.UserID, c, body); key != "" {
+			userPlan.keys = append(userPlan.keys, key)
+		}
+		transcriptKeys := service.CyberSessionUserTranscriptBlockKeys(apiKey.UserID, body)
+		userPlan.keys = append(userPlan.keys, transcriptKeys...)
+		if len(transcriptKeys) > 0 {
+			userPlan.scopeKey = service.CyberSessionUserScopeKey(apiKey.UserID)
+		}
+		if len(userPlan.keys) > 0 {
+			plans = append(plans, userPlan)
+		}
+	}
+	legacyPlan := buildCyberSessionBlockWritePlan(apiKey.ID, c, body)
+	if len(legacyPlan.keys) > 0 {
+		plans = append(plans, legacyPlan)
+	}
+	return plans
+}
+
+func findBlockedCyberSessionKey(ctx context.Context, gatewayService *service.OpenAIGatewayService, apiKey *service.APIKey, c *gin.Context, body []byte) (string, error) {
 	if gatewayService == nil {
-		return ""
+		return "", nil
+	}
+	if apiKey == nil {
+		return "", service.ErrCyberSessionProtectionUnavailable
 	}
 	clientIP, userAgent := "", ""
 	if c != nil {
 		clientIP = strings.TrimSpace(ip.GetClientIP(c))
 		userAgent = c.GetHeader("User-Agent")
 	}
-	return gatewayService.FindCyberSessionBlockedForRequest(ctx, apiKeyID, c, body, clientIP, userAgent)
+	return gatewayService.FindCyberSessionBlockedForUserRequest(ctx, apiKey.ID, apiKey.UserID, c, body, clientIP, userAgent)
 }
 
 func cyberSessionScopeKey(apiKeyID int64, c *gin.Context) string {
@@ -4678,10 +4695,16 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 	}
 	cyberLogOnly := h.cyberPolicyLogOnly(c, apiKey)
 	if gwSvc != nil && apiKey != nil && !cyberLogOnly {
-		plan := buildCyberSessionBlockWritePlan(apiKey.ID, c, cyberBlockBody)
-		if len(plan.keys) > 0 {
+		plans := buildCyberSessionBlockWritePlans(apiKey, c, cyberBlockBody)
+		if len(plans) > 0 {
 			blockCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			gwSvc.MarkCyberSessionBlocked(blockCtx, plan.scopeKey, plan.keys)
+			for _, plan := range plans {
+				if blockErr := gwSvc.MarkCyberSessionBlocked(blockCtx, plan.scopeKey, plan.keys); blockErr != nil {
+					logger.L().Warn("openai.cyber_session_block_not_persisted",
+						zap.String("request_id", requestID), zap.Int64("api_key_id", apiKeyID))
+					break
+				}
+			}
 			cancel()
 		}
 	}

@@ -217,24 +217,40 @@ func enforceCodexIdentityHeaders(h http.Header) {
 // 强制统一被 gateway.disable_codex_identity_enforcement 关闭时，退回「按最终 User-Agent 配对
 // originator + version 门槛校正」的收口语义，供上游策略变动时回滚。
 //
-// 仅对携带 originator 的请求生效：compat 桥接等非 ChatGPT 内部接口路径会显式删除 originator，
-// 不应被补回。需要从缺失身份头恢复的调用方应先调用 ensureCodexIdentityHeaders。
+// compat 桥接不补回 originator，但仍清理下游网络环境并使用服务端 UA。
+// 需要从缺失身份头恢复的调用方应先调用 ensureCodexIdentityHeaders。
 // 必须在所有 User-Agent 改写之后调用。
 func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
-	if h == nil || h.Get("originator") == "" {
+	if h == nil {
 		return
 	}
+	// These describe the downstream connection, never the account's upstream
+	// environment. Keep them absent rather than inventing geography or locale.
+	for name := range h {
+		switch strings.ToLower(name) {
+		case "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
+			"x-real-ip", "true-client-ip", "cf-connecting-ip", "cf-ipcountry",
+			"x-client-ip", "x-client-timezone", "x-timezone", "accept-language",
+			"origin", "referer":
+			delete(h, name)
+		}
+	}
+	hasOriginator := h.Get("originator") != ""
 	if !codexIdentityEnforcement.Load() {
-		pairCodexIdentityHeaders(h)
+		if hasOriginator {
+			pairCodexIdentityHeaders(h)
+		}
 		return
 	}
 	identity := resolveCodexOutboundIdentity(overrideUA)
 	h.Set("user-agent", identity.userAgent)
-	h.Set("originator", identity.originator)
-	// 已携带 version 的请求（真实 codex 不带，见上）只做门槛纠正：
-	// 低于上游最低可接受版本（404，issue #3901）时抬到生效版本，不新增。
-	if v := strings.TrimSpace(h.Get("version")); v != "" && CompareVersions(v, codexUpstreamMinVersion) < 0 {
+	// An optional version header describes the same server-owned client as UA.
+	// Never retain a downstream version merely because it clears the minimum.
+	if h.Get("version") != "" {
 		h.Set("version", identity.version)
+	}
+	if hasOriginator {
+		h.Set("originator", identity.originator)
 	}
 }
 

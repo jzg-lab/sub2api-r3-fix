@@ -320,6 +320,12 @@ func (s *OpenAIOperationsService) runRecovery(ctx context.Context, cfg OpenAIRec
 		} else if account.IsRateLimited() {
 			record.Classification, record.Outcome = "rate_limit", "cooling"
 			record.NextAttemptAt = *account.RateLimitResetAt
+		} else if !openAIAccessTokenExpired(account, now) {
+			record.Classification, record.Outcome = "expiry_unconfirmed", "skipped"
+			if expiresAt := account.GetCredentialAsTime("expires_at"); expiresAt != nil {
+				record.Classification, record.Outcome = "token_unexpired", "deferred"
+				record.NextAttemptAt = *expiresAt
+			}
 		} else {
 			action = "oauth_refresh"
 			attemptCtx, stop := context.WithTimeout(ctx, 45*time.Second)

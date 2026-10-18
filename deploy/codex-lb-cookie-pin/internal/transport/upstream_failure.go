@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	pluginv1 "github.com/liyunlong/sub2api-cookie-plugin/pkg/pluginapi/v1"
 )
 
 type upstreamFailureTrace struct {
@@ -57,6 +59,12 @@ func (trace *upstreamFailureTrace) definitelyNotConnected(err error) bool {
 	if connected {
 		return false
 	}
+	// Host diagnostics do not observe this process's connection trace.
+	// Only the separately checked host RequestSent flag can prove no dispatch.
+	var hostFailure *hostHTTPError
+	if errors.As(err, &hostFailure) {
+		return false
+	}
 	_, phase := classifyUpstreamFailure(err, nil)
 	return phase == "dns" || phase == "connect" || phase == "proxy_connect"
 }
@@ -78,6 +86,13 @@ func (trace *upstreamFailureTrace) classify(err, contextErr error) (class, phase
 // Preserve only finite classifications. Raw transport errors can contain
 // credential-bearing proxy URLs, upstream URLs and private certificate names.
 func classifyUpstreamFailure(err, contextErr error) (class, phase string) {
+	var hostFailure *hostHTTPError
+	if errors.As(err, &hostFailure) {
+		if class, phase, ok := pluginv1.DecodeHostHTTPFailureCode(hostFailure.code); ok {
+			return class, phase
+		}
+		return "connection_error", "unknown"
+	}
 	phase = "unknown"
 	var op *net.OpError
 	if errors.As(err, &op) {

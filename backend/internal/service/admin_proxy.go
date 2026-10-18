@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -200,6 +201,26 @@ func (s *adminServiceImpl) CheckProxyExists(ctx context.Context, host string, po
 	return s.proxyRepo.ExistsByHostPortAuth(ctx, host, port, username, password)
 }
 
+func (s *adminServiceImpl) probeProxyExit(ctx context.Context, proxyURL string) (*ProxyExitInfo, int64, error) {
+	if s.proxyProber == nil {
+		return nil, 0, fmt.Errorf("proxy exit probe unavailable")
+	}
+	info, latency, err := s.proxyProber.ProbeProxy(ctx, proxyURL)
+	if err != nil {
+		return nil, latency, err
+	}
+	if info == nil {
+		return nil, latency, fmt.Errorf("proxy exit IP unknown")
+	}
+	ip, err := netip.ParseAddr(info.IP)
+	if err != nil || ip.Zone() != "" || ip.IsUnspecified() {
+		return nil, latency, fmt.Errorf("proxy exit IP unknown")
+	}
+	observed := *info
+	observed.IP = ip.Unmap().String()
+	return &observed, latency, nil
+}
+
 func (s *adminServiceImpl) TestProxy(ctx context.Context, id int64) (*ProxyTestResult, error) {
 	proxy, err := s.proxyRepo.GetByID(ctx, id)
 	if err != nil {
@@ -207,7 +228,7 @@ func (s *adminServiceImpl) TestProxy(ctx context.Context, id int64) (*ProxyTestR
 	}
 
 	proxyURL := proxy.URL()
-	exitInfo, latencyMs, err := s.proxyProber.ProbeProxy(ctx, proxyURL)
+	exitInfo, latencyMs, err := s.probeProxyExit(ctx, proxyURL)
 	if err != nil {
 		s.saveProxyLatency(ctx, id, &ProxyLatencyInfo{
 			Success:   false,
@@ -271,7 +292,7 @@ func (s *adminServiceImpl) CheckProxyQuality(ctx context.Context, id int64) (*Pr
 		return result, nil
 	}
 
-	exitInfo, latencyMs, err := s.proxyProber.ProbeProxy(ctx, proxyURL)
+	exitInfo, latencyMs, err := s.probeProxyExit(ctx, proxyURL)
 	if err != nil {
 		result.Items = append(result.Items, ProxyQualityCheckItem{
 			Target:    "base_connectivity",
@@ -513,7 +534,7 @@ func (s *adminServiceImpl) probeProxyLatency(ctx context.Context, proxy *Proxy) 
 	if s.proxyProber == nil || proxy == nil {
 		return
 	}
-	exitInfo, latencyMs, err := s.proxyProber.ProbeProxy(ctx, proxy.URL())
+	exitInfo, latencyMs, err := s.probeProxyExit(ctx, proxy.URL())
 	if err != nil {
 		s.saveProxyLatency(ctx, proxy.ID, &ProxyLatencyInfo{
 			Success:   false,

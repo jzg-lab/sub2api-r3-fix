@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
-import { mkdir, mkdtemp, open, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -79,7 +79,7 @@ export function parseCallback(value, binding) {
 
 // Executed in the top-level page. Never fill third-party identity providers,
 // payment forms, email/SMS verification, or CAPTCHA/security challenges.
-export function loginStep(input, submitted, targetKey) {
+export async function loginStep(input, submitted, targetKey) {
   if (location.origin !== 'https://auth.openai.com') return { kind: 'manual' }
   const changesAccount = pathname =>
     /(?:^|\/)(?:create-account|signup|sign-up|reset-password|forgot-password)(?:\/|$)/i.test(pathname)
@@ -100,7 +100,7 @@ export function loginStep(input, submitted, targetKey) {
   if (find('input[autocomplete="new-password"]')) return { kind: 'manual' }
   const password = find('input[type="password"][autocomplete="current-password"], input[type="password"][name="password"]')
   const email = find('input[type="email"], input[autocomplete="username"], input[name="username"]')
-  const otp = /authenticator|authentication app/i.test(text)
+  const otp = /authenticator|authentication app|验证码|身份验证器/i.test(text) || /\/mfa(?:\/|$)/.test(location.pathname)
     ? find('input[autocomplete="one-time-code"], input[name="code"], input[name="otp"]') : null
   const field = password || otp || email
   const kind = password ? 'password' : otp ? 'totp' : email ? 'email' : 'consent'
@@ -108,6 +108,31 @@ export function loginStep(input, submitted, targetKey) {
   if (submitted.includes(key)) return { kind: 'waiting' }
   if (kind === 'consent') {
     if (!/\/consent(?:\/|$)/.test(location.pathname)) return { kind: 'manual' }
+    if (!input && /\/codex\/consent(?:\/|$)/.test(location.pathname)) return { kind, key }
+    if (input?.workspace_id && /\/codex\/consent(?:\/|$)/.test(location.pathname)) {
+      if (targetKey !== key || !/^[a-zA-Z0-9_-]{1,200}$/.test(input.workspace_id)) return { kind: 'manual' }
+      // Wei Seat uses this account-bound selection after password and TOTP.
+      // Keep the request in the authenticated browser and require its exact
+      // first-party continuation or the already-intercepted OAuth callback.
+      const response = await fetch('/api/accounts/workspace/select', {
+        method: 'POST', credentials: 'same-origin', redirect: 'error',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_id: input.workspace_id }),
+      })
+      if (!response.ok) throw new Error('AUTH_WORKSPACE_REJECTED')
+      const result = await response.json()
+      const continuation = result.continue_url
+      if (typeof continuation !== 'string') throw new Error('AUTH_WORKSPACE_CONTINUATION')
+      const destination = new URL(continuation, location.href)
+      const callback = new URL(input.callback)
+      if (destination.username || destination.password ||
+          !(safeDestination(destination.href) ||
+            (destination.origin === callback.origin && destination.pathname === callback.pathname))) {
+        throw new Error('AUTH_WORKSPACE_CONTINUATION')
+      }
+      location.assign(destination.href)
+      return { kind, key }
+    }
     const button = [...document.querySelectorAll('button')].find((element) =>
       visible(element) && /^(allow|authorize|continue)$/i.test(element.textContent.trim()))
     if (!button || !safeSubmit(button, button.form)) return { kind: 'manual' }
@@ -193,12 +218,13 @@ export class BrowserPipe {
   }
 }
 
-export async function advanceLogin(pipe, sessionId, login, submitted) {
+export async function advanceLogin(pipe, sessionId, login, submitted, binding) {
   const evaluate = async (input, targetKey) => {
     try {
       const response = await pipe.call('Runtime.evaluate', {
         expression: `(${loginStep.toString()})(${JSON.stringify(input)},${JSON.stringify(input ? [] : [...submitted])},${JSON.stringify(targetKey ?? null)})`,
         returnByValue: true,
+        awaitPromise: true,
       }, sessionId)
       if (response.exceptionDetails) fail('AUTH_PAGE_SCRIPT_FAILED')
       return response.result?.value
@@ -211,6 +237,10 @@ export async function advanceLogin(pipe, sessionId, login, submitted) {
   if (!next?.key || !['email', 'password', 'totp', 'consent'].includes(next.kind)) return
   if (submitted.has(next.key)) return
   const input = {}
+  if (next.kind === 'consent' && login.workspace_id && binding) {
+    input.workspace_id = login.workspace_id
+    input.callback = `${binding.redirect.origin}${binding.redirect.pathname}`
+  }
   if (next.kind === 'email') input.email = login.email
   if (next.kind === 'password') input.password = login.password
   if (next.kind === 'totp') {
@@ -248,6 +278,11 @@ export async function automate({ chrome, profileRoot, profileTag, authURL, proxy
   let watchdog
   const stop = () => child?.kill('SIGTERM')
   try {
+    await mkdir(join(profile, 'Default'), { mode: 0o700 })
+    await writeFile(join(profile, 'Default', 'Preferences'), JSON.stringify({
+      dns_over_https: { mode: 'off' },
+      profile: { default_content_setting_values: { geolocation: 2 } },
+    }), { flag: 'wx', mode: 0o600 })
     child = spawn(chrome, [
       `--user-data-dir=${profile}`,
       ...(proxy === 'direct' ? ['--no-proxy-server'] : [`--proxy-server=${proxy}`]),
@@ -266,6 +301,7 @@ export async function automate({ chrome, profileRoot, profileTag, authURL, proxy
     const { targetId } = await pipe.call('Target.createTarget', { url: 'about:blank' })
     const { sessionId } = await pipe.call('Target.attachToTarget', { targetId, flatten: true })
     await pipe.call('Page.enable', {}, sessionId)
+    await pipe.call('Browser.setPermission', { permission: { name: 'geolocation' }, setting: 'denied' })
     let callback
     let callbackError
     pipe.onEvent = (message) => {
@@ -285,7 +321,7 @@ export async function automate({ chrome, profileRoot, profileTag, authURL, proxy
     while (!callback && !callbackError && Date.now() < deadline) {
       signal?.throwIfAborted()
       if (pipe.closed) fail('AUTH_BROWSER_CLOSED')
-      await advanceLogin(pipe, sessionId, login, submitted)
+      await advanceLogin(pipe, sessionId, login, submitted, binding)
       if (!callback) await sleep(400, undefined, { signal })
     }
     if (callbackError) throw callbackError

@@ -81,6 +81,9 @@ func (r *accountRepository) ApplyOAuthCredentials(
 		mergedExtra[key] = value
 	}
 	// Clear derived failures after merging, so a stale form cannot restore them.
+	if err := service.RecordOpenAIOAuthReloginEvidence(txCtx, current, credentials, mergedExtra); err != nil {
+		return nil, err
+	}
 	delete(mergedExtra, "antigravity_quota_scopes")
 	delete(mergedExtra, "model_rate_limits")
 	if current.Platform == service.PlatformGrok {

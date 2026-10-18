@@ -16,15 +16,16 @@ import (
 
 type tokenRefreshCandidateRepo struct {
 	AccountRepository
-	mu                    sync.Mutex
-	accounts              []Account
-	updatedCredentialIDs  []int64
-	setErrorCalls         int
-	conditionalErrorCalls int
-	setTempUnschedCalls   int
-	clearTempCalls        int
-	lastTempUnschedReason string
-	listActiveCalls       int
+	mu                       sync.Mutex
+	accounts                 []Account
+	updatedCredentialIDs     []int64
+	setErrorCalls            int
+	conditionalErrorCalls    int
+	conditionalCooldownCalls int
+	setTempUnschedCalls      int
+	clearTempCalls           int
+	lastTempUnschedReason    string
+	listActiveCalls          int
 }
 
 func (r *tokenRefreshCandidateRepo) ListActive(context.Context) ([]Account, error) {
@@ -91,7 +92,6 @@ func (r *tokenRefreshCandidateRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	r.conditionalErrorCalls++
 	for i := range r.accounts {
 		account := &r.accounts[i]
 		if account.ID != before.ID || account.Status != before.Status || account.Schedulable != before.Schedulable ||
@@ -99,16 +99,19 @@ func (r *tokenRefreshCandidateRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.
 			continue
 		}
 		if change.ErrorMessage != nil {
+			r.conditionalErrorCalls++
 			account.Status = StatusError
 			account.ErrorMessage = *change.ErrorMessage
+			return true, nil
 		}
 		if change.CooldownUntil != nil {
-			account.TempUnschedulableUntil = change.CooldownUntil
+			r.conditionalCooldownCalls++
+			until := *change.CooldownUntil
+			account.TempUnschedulableUntil = &until
 			account.TempUnschedulableReason = change.CooldownReason
-			r.setTempUnschedCalls++
 			r.lastTempUnschedReason = change.CooldownReason
+			return true, nil
 		}
-		return true, nil
 	}
 	return false, nil
 }
@@ -272,8 +275,13 @@ func TestTokenRefreshService_RefreshFailureDoesNotCallPrivacy(t *testing.T) {
 				require.Zero(t, repo.setTempUnschedCalls)
 			} else {
 				require.Zero(t, repo.setErrorCalls)
-				require.Equal(t, 1, repo.setTempUnschedCalls)
+				require.Zero(t, repo.conditionalErrorCalls)
+				require.Zero(t, repo.setTempUnschedCalls)
+				require.Equal(t, 1, repo.conditionalCooldownCalls)
+				require.NotNil(t, repo.accounts[0].TempUnschedulableUntil)
+				require.True(t, repo.accounts[0].TempUnschedulableUntil.After(time.Now()))
 				require.True(t, strings.HasPrefix(repo.lastTempUnschedReason, "token refresh retry exhausted:"))
+				require.Equal(t, repo.lastTempUnschedReason, repo.accounts[0].TempUnschedulableReason)
 			}
 		})
 	}

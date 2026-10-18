@@ -1029,7 +1029,12 @@ func TestAPIContracts(t *testing.T) {
 					"wechat_connect_frontend_redirect_url": "/auth/wechat/callback",
 					"wechat_connect_scopes": "snsapi_login",
 					"allow_user_view_error_requests": false,
-					"anti_bypass_enabled": false
+					"anti_bypass_enabled": false,
+                    "anti_bypass_policy": {
+                        "window_seconds": 300, "replay_window_seconds": 30,
+                        "rpm_limit": 120, "max_concurrent": 32, "max_distinct_keys": 8,
+                        "max_distinct_ips": 8, "max_distinct_fingerprints": 8, "max_client_request_attempts": 3
+                    }
 				}
 			}`,
 		},
@@ -1386,7 +1391,12 @@ func TestAPIContracts(t *testing.T) {
 					"auth_source_default_dingtalk_grant_on_first_bind": false,
 					"force_email_on_third_party_signup": false,
 					"allow_user_view_error_requests": false,
-					"anti_bypass_enabled": false
+					"anti_bypass_enabled": false,
+                    "anti_bypass_policy": {
+                        "window_seconds": 300, "replay_window_seconds": 30,
+                        "rpm_limit": 120, "max_concurrent": 32, "max_distinct_keys": 8,
+                        "max_distinct_ips": 8, "max_distinct_fingerprints": 8, "max_client_request_attempts": 3
+                    }
 				}
 			}`,
 		},

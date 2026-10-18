@@ -7435,6 +7435,25 @@
               />
             </div>
 
+            <div v-if="form.anti_bypass_enabled" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div v-for="field in antiBypassPolicyFields" :key="field.key">
+                <label :for="`anti-bypass-${field.key}`" class="input-label">
+                  {{ t(`admin.settings.features.riskControl.policy.${field.key}`) }}
+                </label>
+                <input
+                  :id="`anti-bypass-${field.key}`"
+                  v-model.number="form.anti_bypass_policy[field.key]"
+                  :data-testid="`anti-bypass-${field.key}`"
+                  type="number"
+                  min="1"
+                  :max="field.max"
+                  step="1"
+                  required
+                  class="input"
+                />
+              </div>
+            </div>
+
             <div class="flex items-center justify-between">
               <div>
                 <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -8958,6 +8977,7 @@ import type {
   AuthSourceDefaultsState,
   AuthSourceType,
   SystemSettings,
+  AntiBypassPolicy,
   UpdateSettingsRequest,
   DefaultSubscriptionSetting,
   DefaultPlatformQuotasMap,
@@ -9671,6 +9691,7 @@ type SettingsForm = Omit<
   | "wechat_connect_mp_enabled"
   | "wechat_connect_mobile_enabled"
 > & {
+  anti_bypass_policy: AntiBypassPolicy;
   /** Form always binds a concrete boolean (SystemSettings marks this optional). */
   channel_monitor_hide_throughput: boolean;
   channel_monitor_show_quota: boolean;
@@ -9725,6 +9746,16 @@ const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] {
   return listPlatformIds().filter((platform) => !!map?.[platform]);
 }
+const antiBypassPolicyFields: Array<{ key: keyof AntiBypassPolicy; max: number }> = [
+  { key: "rpm_limit", max: 60000 },
+  { key: "max_concurrent", max: 4096 },
+  { key: "max_distinct_keys", max: 1024 },
+  { key: "max_distinct_ips", max: 1024 },
+  { key: "max_distinct_fingerprints", max: 1024 },
+  { key: "window_seconds", max: 3600 },
+  { key: "replay_window_seconds", max: 300 },
+  { key: "max_client_request_attempts", max: 10 },
+];
 
 const form = reactive<SettingsForm>({
   registration_enabled: true,
@@ -9773,6 +9804,16 @@ const form = reactive<SettingsForm>({
   risk_control_enabled: false,
   anti_bypass_enabled: false,
   cyber_policy_user_allowlist: "",
+  anti_bypass_policy: {
+    window_seconds: 300,
+    replay_window_seconds: 30,
+    rpm_limit: 120,
+    max_concurrent: 32,
+    max_distinct_keys: 8,
+    max_distinct_ips: 8,
+    max_distinct_fingerprints: 8,
+    max_client_request_attempts: 3,
+  },
   cyber_session_block_enabled: false,
   cyber_session_block_ttl_seconds: 3600,
   payment_min_amount: 1,
@@ -11618,6 +11659,7 @@ async function saveSettings() {
       risk_control_enabled: form.risk_control_enabled,
       anti_bypass_enabled: form.anti_bypass_enabled,
       cyber_policy_user_allowlist: form.cyber_policy_user_allowlist,
+      anti_bypass_policy: { ...form.anti_bypass_policy },
       cyber_session_block_enabled: form.cyber_session_block_enabled,
       cyber_session_block_ttl_seconds:
         Number(form.cyber_session_block_ttl_seconds) || 3600,

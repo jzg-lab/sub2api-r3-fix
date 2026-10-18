@@ -113,7 +113,7 @@ func TestLabelOpenAIAccountHealth(t *testing.T) {
 		},
 		{
 			name:   "限流中: 优先于问题号",
-			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, RateLimitedAt: timePtr(time.Now().UTC())},
+			snap:   OpenAIProbeHealthSnapshot{State: OpenAIDowngradeStatePendingReplace, RateLimitResetAt: timePtr(time.Now().Add(time.Hour))},
 			label:  OpenAIHealthLabelRateLimited,
 			color:  OpenAIHealthColorGray,
 			reason: "rate_limited",

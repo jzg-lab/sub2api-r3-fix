@@ -3776,7 +3776,7 @@ func TestHandleSSEToJSON_ReconstructsImageGenerationOutputItemDone(t *testing.T)
 	require.Equal(t, "draw a cat", gjson.Get(rec.Body.String(), "output.0.revised_prompt").String())
 }
 
-func TestHandleSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
+func TestHandleSSEToJSON_NoFinalResponseRejectsTruncatedResponses(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
@@ -3792,11 +3792,11 @@ func TestHandleSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
 	}, "\n"))
 
 	usage, err := svc.handleSSEToJSON(resp, c, nil, body, "gpt-4o", "gpt-4o")
-	require.NoError(t, err)
-	require.NotNil(t, usage)
-	require.Equal(t, 0, usage.InputTokens)
-	require.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
-	require.Contains(t, rec.Body.String(), `data: {"type":"response.in_progress"`)
+	require.ErrorContains(t, err, "missing terminal event")
+	require.Nil(t, usage)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	require.NotContains(t, rec.Body.String(), `data: {"type":"response.in_progress"`)
 }
 
 // 无账号时没有可换的对象：newOpenAIStreamFailoverError 要拿 account 记录 ops 归属与

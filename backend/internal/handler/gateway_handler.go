@@ -999,7 +999,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Bool("fallback_used", fallbackUsed),
 					)
 					if !fallbackUsed && fallbackGroupID != nil && *fallbackGroupID > 0 {
-						fallbackGroup, err := h.gatewayService.ResolveGroupByID(c.Request.Context(), *fallbackGroupID)
+						fallbackGroup, err := h.gatewayService.ResolveFallbackGroupByID(c.Request.Context(), *fallbackGroupID)
 						if err != nil {
 							reqLog.Warn("gateway.resolve_fallback_group_failed", zap.Int64("fallback_group_id", *fallbackGroupID), zap.Error(err))
 							_ = h.antigravityGatewayService.WriteMappedClaudeError(c, account, promptTooLongErr.StatusCode, promptTooLongErr.RequestID, promptTooLongErr.Body)

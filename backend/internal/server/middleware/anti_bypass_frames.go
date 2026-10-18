@@ -30,6 +30,10 @@ type antiBypassFrameSession struct {
 }
 
 func (s *antiBypassFrameSession) Inspect(ctx context.Context, payload []byte, enabled bool) (antibypass.Detection, error) {
+	return s.InspectWithConfig(ctx, payload, enabled, s.config)
+}
+
+func (s *antiBypassFrameSession) InspectWithConfig(ctx context.Context, payload []byte, enabled bool, config antibypass.Config) (antibypass.Detection, error) {
 	var frame struct {
 		Type    string `json:"type"`
 		EventID string `json:"event_id"`
@@ -61,7 +65,7 @@ func (s *antiBypassFrameSession) Inspect(ctx context.Context, payload []byte, en
 	request.ClientRequestID = frame.EventID
 	request.IdempotencyKey = ""
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	decision, err := s.guard.Check(ctx, s.config, request)
+	decision, err := s.guard.Check(ctx, config, request)
 	cancel()
 	if err != nil {
 		return antibypass.Detection{Reason: antibypass.ReasonStorageUnavailable}, err
