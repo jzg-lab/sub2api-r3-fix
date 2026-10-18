@@ -190,6 +190,7 @@ func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {
 		{"cyber", ChannelMonitorV2ErrorInput{ErrorType: "cyber_policy", StatusCode: 200}, "content_policy"},
 		{"auth before forbidden", ChannelMonitorV2ErrorInput{StatusCode: 403, Message: "invalid API key"}, "authentication"},
 		{"context", ChannelMonitorV2ErrorInput{Message: "maximum prompt length exceeded"}, "context_limit"},
+		{"customer balance", ChannelMonitorV2ErrorInput{StatusCode: 403, Message: "Insufficient account balance"}, "quota_or_balance"},
 		{"unsupported", ChannelMonitorV2ErrorInput{Message: "not supported by any configured account"}, "model_unsupported"},
 		{"pool", ChannelMonitorV2ErrorInput{Message: "No available accounts"}, "account_pool_unavailable"},
 		{"timeout", ChannelMonitorV2ErrorInput{Message: "error code: 524"}, "timeout"},
@@ -351,12 +352,12 @@ func TestApplyIgnoredErrorsAdjustsRateOnly(t *testing.T) {
 	require.Equal(t, int64(100), m.RequestCount)
 }
 
-func TestErrorsForViewerStripsDetailsAndCountsForNonAdmin(t *testing.T) {
+func TestErrorsForViewerHidesIgnoredCategoriesForAllAndStripsNonAdminDetails(t *testing.T) {
 	fixture := &ChannelMonitorV2List[ChannelMonitorV2ErrorRow]{
 		Items: []ChannelMonitorV2ErrorRow{{
 			Category: "timeout",
 			Count:    42,
-			Rate:     0.4,
+			Rate:     0.42,
 			Details: []ChannelMonitorV2ErrorDetail{{
 				Platform:           "anthropic",
 				Model:              "claude",
@@ -366,23 +367,42 @@ func TestErrorsForViewerStripsDetailsAndCountsForNonAdmin(t *testing.T) {
 				Message:            "gateway timeout sk-secret",
 				Count:              12,
 			}},
+		}, {
+			Category: "internal",
+			Count:    18,
+			Rate:     0.18,
+		}, {
+			Category: "quota_or_balance",
+			Count:    40,
+			Rate:     0.4,
+			Ignored:  false,
 		}},
 	}
-	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: true}, errors: fixture}
+	repo := &channelMonitorV2RepoStub{
+		config: ChannelMonitorV2Config{Enabled: true, IgnoredErrorCategories: []string{"quota_or_balance"}},
+		errors: fixture,
+	}
 	svc := NewChannelMonitorV2Service(repo)
 
 	userList, err := svc.ErrorsForViewer(context.Background(), ChannelMonitorV2Filter{}, false)
 	require.NoError(t, err)
 	require.False(t, repo.admin)
-	require.Len(t, userList.Items, 1)
+	require.Len(t, userList.Items, 2)
+	require.Equal(t, "timeout", userList.Items[0].Category)
 	require.Zero(t, userList.Items[0].Count)
 	require.Empty(t, userList.Items[0].Details)
-	require.InDelta(t, 0.4, userList.Items[0].Rate, 0.0001)
+	require.InDelta(t, 0.42, userList.Items[0].Rate, 0.0001)
+	require.Equal(t, "internal", userList.Items[1].Category)
+	require.InDelta(t, 0.18, userList.Items[1].Rate, 0.0001)
 
 	adminList, err := svc.ErrorsForViewer(context.Background(), ChannelMonitorV2Filter{}, true)
 	require.NoError(t, err)
 	require.True(t, repo.admin)
+	require.Len(t, adminList.Items, 2)
+	require.Equal(t, "timeout", adminList.Items[0].Category)
 	require.Equal(t, int64(42), adminList.Items[0].Count)
+	require.InDelta(t, 0.42, adminList.Items[0].Rate, 0.0001)
+	require.InDelta(t, 0.18, adminList.Items[1].Rate, 0.0001)
 	require.Len(t, adminList.Items[0].Details, 1)
 	require.Contains(t, adminList.Items[0].Details[0].Message, "gateway timeout")
 }

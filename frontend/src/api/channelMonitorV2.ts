@@ -117,7 +117,7 @@ export interface MonitorConfig {
     ttft_weight: number
     cache_weight: number
   }
-  /** Categories excluded from error_rate / health; still listed in error breakdown. */
+  /** Categories excluded from error_rate / health and hidden from channel status. */
   ignored_error_categories?: string[]
 }
 

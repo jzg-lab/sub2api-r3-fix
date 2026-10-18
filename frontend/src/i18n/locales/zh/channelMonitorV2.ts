@@ -120,7 +120,7 @@ export default {
       groupsEmpty: '没有可选择的分组',
       errorsTitle: '错误分类与忽略',
       errorsHint:
-        '勾选「忽略」的类别不计入错误率与健康分，仍在错误原因列表中以灰色显示并标记忽略。未匹配的错误归入「其他」。',
+        '勾选「忽略」的类别不计入错误率与健康分，也会从渠道状态错误列表隐藏；需排查时可取消忽略，或查看运维错误日志。未匹配的错误归入「其他」。',
       ignoredSummary: '已忽略 {ignored} 类 · 计入错误率 {counted} 类',
       healthTitle: '健康阈值',
       healthHint: '控制用户端健康色和综合评分。',

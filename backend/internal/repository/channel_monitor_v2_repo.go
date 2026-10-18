@@ -687,7 +687,8 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 	}
 	filter = channelMonitorV2CommonCoverageFilter(filter, *coverage)
 	where, args, _ := channelMonitorV2WhereWithRollup(filter, cfg, "e")
-	rows, err := r.db.QueryContext(ctx, `SELECT e.platform,e.model,e.error_category,SUM(e.error_requests) FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e `+where+` AND e.taxonomy_version = `+fmt.Sprint(service.ChannelMonitorV2TaxonomyVersion)+` GROUP BY e.platform,e.model,e.error_category`, args...)
+	// Older buckets keep their original category version until recomputed.
+	rows, err := r.db.QueryContext(ctx, `SELECT e.platform,e.model,e.error_category,SUM(e.error_requests) FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e `+where+` AND e.taxonomy_version <= `+fmt.Sprint(service.ChannelMonitorV2TaxonomyVersion)+` GROUP BY e.platform,e.model,e.error_category`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -733,7 +734,7 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 		}
 		items = append(items, row)
 	}
-	// Stable: counted categories first (by count), then ignored (grey in UI).
+	// Stable: non-ignored categories first (by count) before service filtering.
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Ignored != items[j].Ignored {
 			return !items[i].Ignored && items[j].Ignored
@@ -1453,7 +1454,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCounts(
 	query := fmt.Sprintf(
 		`SELECT %s, e.platform, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
 		 GROUP BY %s`,
 		bucketExpr, where, catIdx, taxIdx, groupBy,
 	)
@@ -1496,7 +1497,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByPlatformModel(
 	query := fmt.Sprintf(
 		`SELECT e.platform, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
 		 GROUP BY e.platform, e.model`,
 		where, catIdx, taxIdx,
 	)
@@ -1549,7 +1550,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 	query := fmt.Sprintf(
 		`SELECT %s, e.platform, e.group_id, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
 		 GROUP BY %s`,
 		bucketExpr, where, catIdx, taxIdx, groupSQL,
 	)

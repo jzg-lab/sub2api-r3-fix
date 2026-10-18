@@ -122,7 +122,7 @@ export default {
       groupsEmpty: 'No groups available',
       errorsTitle: 'Error categories and ignores',
       errorsHint:
-        'Checked “ignore” categories are excluded from error rate and health score, but still appear greyed in the error breakdown. Unmatched errors roll into “Other”.',
+        'Checked “ignore” categories are excluded from error rate and health score and hidden from channel status; uncheck a category to inspect it there, or use the operations error log. Unmatched errors roll into “Other”.',
       ignoredSummary: 'Ignored {ignored} categories · counted in error rate {counted} categories',
       healthTitle: 'Health thresholds',
       healthHint: 'Controls user-facing health colors and the overall score.',

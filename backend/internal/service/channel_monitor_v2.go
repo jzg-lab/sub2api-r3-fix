@@ -11,7 +11,7 @@ import (
 
 const (
 	ChannelMonitorV2OtherModel      = "__other__"
-	ChannelMonitorV2TaxonomyVersion = 1
+	ChannelMonitorV2TaxonomyVersion = 2
 )
 
 var (
@@ -44,7 +44,7 @@ type ChannelMonitorV2Config struct {
 	GroupIDs               []int64                          `json:"group_ids"`
 	HealthThresholds       ChannelMonitorV2HealthThresholds `json:"health_thresholds"`
 	// IgnoredErrorCategories are excluded from error_rate / health scoring.
-	// They still appear in the error breakdown with ignored=true (greyed in UI).
+	// They are hidden from the channel status error breakdown.
 	// Unknown categories always roll into "other" via the taxonomy classifier.
 	IgnoredErrorCategories []string  `json:"ignored_error_categories"`
 	UpdatedAt              time.Time `json:"updated_at"`
@@ -264,7 +264,8 @@ type ChannelMonitorV2ErrorRow struct {
 	Rate     float64                       `json:"rate"`
 	Details  []ChannelMonitorV2ErrorDetail `json:"details,omitempty"`
 	// Ignored is true when this category is excluded from error_rate scoring
-	// via config.ignored_error_categories. Still shown in breakdown (UI greys it).
+	// via config.ignored_error_categories. Ignored rows are removed from the
+	// channel-status breakdown before it is returned to viewers.
 	Ignored bool `json:"ignored"`
 }
 
@@ -553,9 +554,8 @@ func (s *ChannelMonitorV2Service) Errors(ctx context.Context, filter ChannelMoni
 	return s.ErrorsForViewer(ctx, filter, false)
 }
 
-// ErrorsForViewer returns the error breakdown.
-// Non-admin callers receive category rates + ignored flags only: absolute Count
-// is zeroed and Details (upstream messages / status codes / volume) are omitted.
+// ErrorsForViewer returns the error breakdown. Non-admin callers do not see
+// configured ignored categories, absolute counts, or upstream error details.
 func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
@@ -565,11 +565,20 @@ func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter Ch
 	if err != nil {
 		return nil, err
 	}
-	if !admin && list != nil {
-		for i := range list.Items {
-			list.Items[i].Count = 0
-			list.Items[i].Details = nil
+	if list != nil {
+		ignored := ChannelMonitorV2IgnoredCategorySet(*cfg)
+		visible := list.Items[:0]
+		for _, row := range list.Items {
+			if _, ok := ignored[row.Category]; ok {
+				continue
+			}
+			if !admin {
+				row.Count = 0
+				row.Details = nil
+			}
+			visible = append(visible, row)
 		}
+		list.Items = visible
 	}
 	return list, nil
 }
@@ -763,7 +772,8 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 }
 
 // DefaultChannelMonitorV2IgnoredErrorCategories are factory defaults for
-// ignored_error_categories: excluded from error_rate / health scoring only.
+// ignored_error_categories: excluded from health scoring and hidden from the
+// channel-status error breakdown.
 // Operators can clear or extend via admin config.
 var DefaultChannelMonitorV2IgnoredErrorCategories = []string{
 	"authentication",

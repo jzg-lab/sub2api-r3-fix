@@ -377,6 +377,8 @@ func TestChannelMonitorV2SQLTaxonomyContainsGoNeedles(t *testing.T) {
 		"invalid_request",
 		"model not supported",
 		"billing hard limit",
+		"insufficient account balance",
+		"insufficient_balance",
 		"no healthy upstream account",
 		"rate_limit",
 		"gateway timeout",
@@ -386,6 +388,8 @@ func TestChannelMonitorV2SQLTaxonomyContainsGoNeedles(t *testing.T) {
 	for _, needle := range needles {
 		require.Containsf(t, strings.ToLower(sql), strings.ToLower(needle), "SQL taxonomy missing Go needle %q", needle)
 	}
+	require.Equal(t, 2, service.ChannelMonitorV2TaxonomyVersion)
+	require.Contains(t, sql, "category, $3, COUNT(*)")
 }
 
 func TestApplyIgnoredErrorsAdjustsRatesKeepsAbsoluteVolume(t *testing.T) {
