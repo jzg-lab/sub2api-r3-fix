@@ -105,6 +105,13 @@ OAuth 取消额外缓存同时覆盖 Codex 清单与普通 `/v1/models`；API Ke
 父提交为上述 `048c2b02e2ba1b43f3447f208d56c5d35f314410`。
 本条提交号由后续纯文档提交记录，不改变程序身份；未推送、发布或部署。
 
+
+2026-10-19，用户追加授权合入主分支并推送。核对改动已在本地 `main`，远端没有新增分叉，
+已将本轮四个提交快进推送至 GitHub `origin/main`：
+`ea40183038b1d9c2e713879e7dcfb9fbb9dc52d4` → `d011e11ae5b7753a542ab2dc027281c6d6d3b6d9`。
+`git ls-remote origin refs/heads/main` 已核实远端完整 SHA 与本地一致；程序结果仍为
+`62c3d05339f858e60561da90ac0994aaa79811f7`，后续仅补充文档。本次没有部署或发布操作。
+
 ## 官方 v0.2.17 整合（2026-10-17，本地实施）
 
 用户指定 [官方 v0.2.17 release](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.17)，
