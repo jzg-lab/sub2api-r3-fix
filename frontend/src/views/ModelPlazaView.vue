@@ -1,48 +1,133 @@
 <template>
-  <!-- 后台内嵌形态:?embedded=1 且已登录,套完整后台布局 -->
-  <AppLayout v-if="isEmbedded">
-    <ModelPlazaContent :response="data" :loading="loading" :error="loadFailed" embedded />
-  </AppLayout>
-
-  <!-- 独立形态:自带导航条(logo/站名 + 登录/回后台) -->
-  <div v-else class="console-page console-grid public-page min-h-screen">
-    <PlazaNavBar />
-    <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-      <ModelPlazaContent :response="data" :loading="loading" :error="loadFailed" />
-    </main>
+  <div class="plaza-page">
+    <div class="plaza-shell">
+      <PlazaNavBar />
+      <main>
+        <ModelPlazaContent :response="data" :loading="loading" :error="loadFailed"
+          :updated-at="updatedAt" :monitor="monitor" :monitor-unavailable="monitorUnavailable"
+          @retry="refresh" />
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
-import AppLayout from '@/components/layout/AppLayout.vue'
+import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import PlazaNavBar from '@/components/modelPlaza/PlazaNavBar.vue'
 import ModelPlazaContent from '@/components/modelPlaza/ModelPlazaContent.vue'
-import { getModelPlaza, type ModelPlazaResponse } from '@/api/modelPlaza'
+import { refreshModelPlaza, type ModelPlazaResponse } from '@/api/modelPlaza'
+import { getMatrix, getSnapshot, type MonitorMatrixResponse } from '@/api/channelMonitorV2'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import '@/components/modelPlaza/plaza.css'
 
-const route = useRoute()
 const appStore = useAppStore()
-const authStore = useAuthStore()
-
-// embedded=1 但未登录(如转发的链接)自动降级为独立形态。
-const isEmbedded = computed(() => route.query.embedded === '1' && authStore.isAuthenticated)
-
+const auth = useAuthStore()
+const { locale } = useI18n()
 const data = ref<ModelPlazaResponse | null>(null)
 const loading = ref(true)
 const loadFailed = ref(false)
+const updatedAt = ref<Date | null>(null)
+const monitor = ref<MonitorMatrixResponse | null>(null)
+const monitorUnavailable = ref(false)
+let etag: string | undefined
+let controller: AbortController | undefined
+let monitorController: AbortController | undefined
+let timer: ReturnType<typeof setInterval> | undefined
+let monitorDue = 0
+let disposed = false
 
-onMounted(async () => {
-  // 独立形态导航条需要站点名/Logo;有 __APP_CONFIG__ 注入时同步命中缓存。
-  void appStore.fetchPublicSettings()
+async function refresh() {
+  if (disposed || document.hidden || controller) return
+  const request = new AbortController()
+  controller = request
   try {
-    data.value = await getModelPlaza()
-  } catch {
+    const next = await refreshModelPlaza(etag, request.signal)
+    if (request.signal.aborted) return
+    if (next.data) data.value = next.data
+    etag = next.etag
+    updatedAt.value = new Date()
+    loadFailed.value = false
+  } catch (error) {
+    if (request.signal.aborted) return
     loadFailed.value = true
+    const status = (error as { status?: number }).status
+    // Permission changes must also remove previously visible groups and prices.
+    if (status === 401 || status === 403 || status === 404) {
+      data.value = null
+      etag = undefined
+      monitor.value = null
+    }
   } finally {
-    loading.value = false
+    if (controller === request) {
+      controller = undefined
+      loading.value = false
+    }
   }
+}
+
+async function refreshMonitor() {
+  if (disposed || document.hidden || monitorController || Date.now() < monitorDue) return
+  if (!auth.isAuthenticated || appStore.cachedPublicSettings?.channel_monitor_enabled === false) {
+    monitor.value = null
+    monitorUnavailable.value = true
+    return
+  }
+  const request = new AbortController()
+  monitorController = request
+  monitorDue = Date.now() + 60_000
+  try {
+    const filter = { range: '24h' as const, platforms: [], groupIds: [], models: [] }
+    const [snapshot, matrix] = await Promise.all([
+      getSnapshot(filter, false, request.signal),
+      getMatrix(filter, 'platform_group_model', false, request.signal, true)
+    ])
+    if (request.signal.aborted) return
+    monitor.value = matrix
+    monitorUnavailable.value = false
+    monitorDue = Date.now() + Math.max(60, snapshot.config.refresh_interval_seconds) * 1000
+  } catch {
+    if (!request.signal.aborted) {
+      monitor.value = null
+      monitorUnavailable.value = true
+    }
+  } finally {
+    if (monitorController === request) monitorController = undefined
+  }
+}
+function resume() {
+  if (document.hidden) return
+  monitorDue = 0
+  void refresh()
+  void refreshMonitor()
+}
+watch([() => auth.user?.id, locale], () => {
+  controller?.abort()
+  monitorController?.abort()
+  controller = undefined
+  monitorController = undefined
+  etag = undefined
+  data.value = null
+  monitor.value = null
+  loading.value = true
+  resume()
+})
+onMounted(() => {
+  void appStore.fetchPublicSettings()
+  resume()
+  timer = setInterval(() => { void refresh(); void refreshMonitor() }, 3000)
+  window.addEventListener('focus', resume)
+  window.addEventListener('online', resume)
+  document.addEventListener('visibilitychange', resume)
+})
+onBeforeUnmount(() => {
+  disposed = true
+  clearInterval(timer)
+  controller?.abort()
+  monitorController?.abort()
+  window.removeEventListener('focus', resume)
+  window.removeEventListener('online', resume)
+  document.removeEventListener('visibilitychange', resume)
 })
 </script>

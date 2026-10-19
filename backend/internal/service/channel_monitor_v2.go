@@ -74,9 +74,10 @@ var ChannelMonitorV2ErrorCategories = []string{
 }
 
 type ChannelMonitorV2Filter struct {
-	Range     string
-	Platforms []string
-	GroupIDs  []int64
+	IncludeOutputTPS bool
+	Range            string
+	Platforms        []string
+	GroupIDs         []int64
 	// AllowedGroupIDs is the authenticated viewer's server-derived group scope.
 	// RestrictGroups distinguishes an ordinary user with no allowed groups from
 	// the unrestricted admin/configured scope represented by an empty slice.
@@ -243,6 +244,7 @@ type ChannelMonitorV2ModelRow struct {
 }
 
 type ChannelMonitorV2MatrixRow struct {
+	OutputTPS *float64                     `json:"output_tps,omitempty"`
 	Platform  string                       `json:"platform"`
 	GroupID   *int64                       `json:"group_id,omitempty"`
 	GroupName string                       `json:"group_name,omitempty"`
@@ -513,13 +515,17 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
+	hideTP := s.hideThroughputForViewer(ctx, admin)
+	filter.IncludeOutputTPS = filter.IncludeOutputTPS && !hideTP && groupBy == ChannelMonitorV2GroupByPlatformGroupModel && filter.End.Sub(filter.Start) <= 24*time.Hour
 	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
 	if err != nil {
 		return nil, err
 	}
 	if !admin && matrix != nil {
-		hideTP := s.hideThroughputForViewer(ctx, admin)
 		for i := range matrix.Items {
+			if hideTP {
+				matrix.Items[i].OutputTPS = nil
+			}
 			redactChannelMonitorV2Metric(&matrix.Items[i].Metrics, hideTP)
 			for j := range matrix.Items[i].Buckets {
 				redactChannelMonitorV2Metric(&matrix.Items[i].Buckets[j].Metrics, hideTP)

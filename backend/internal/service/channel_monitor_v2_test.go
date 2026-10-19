@@ -10,6 +10,7 @@ import (
 )
 
 type channelMonitorV2RepoStub struct {
+	filter ChannelMonitorV2Filter
 	config serviceChannelMonitorV2ConfigAlias
 	users  *ChannelMonitorV2List[ChannelMonitorV2UserRow]
 	matrix *ChannelMonitorV2Matrix
@@ -52,8 +53,8 @@ func (s *channelMonitorV2RepoStub) GetSnapshot(_ context.Context, _ ChannelMonit
 func (s *channelMonitorV2RepoStub) GetModels(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config, bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
 	return nil, nil
 }
-func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
-	s.group, s.admin = groupBy, admin
+func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, filter ChannelMonitorV2Filter, _ ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
+	s.group, s.admin, s.filter = groupBy, admin, filter
 	return s.matrix, nil
 }
 func (s *channelMonitorV2RepoStub) GetErrors(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
@@ -504,4 +505,23 @@ func TestChannelMonitorV2HealthScoresAvailableMetricsOnFirstRequest(t *testing.T
 	noRequests := ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{}, thresholds)
 	require.Equal(t, "unknown", noRequests.Overall)
 	require.Nil(t, noRequests.Score)
+}
+
+func TestChannelMonitorV2OutputTPSRespectsPrivacyAndQueryWindow(t *testing.T) {
+	start := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+	speed := 100.0
+	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: true}, matrix: &ChannelMonitorV2Matrix{Items: []ChannelMonitorV2MatrixRow{{OutputTPS: &speed}}}}
+	filter := ChannelMonitorV2Filter{IncludeOutputTPS: true, Start: start, End: start.Add(time.Hour)}
+	svc := NewChannelMonitorV2Service(repo)
+	result, err := svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
+	require.NoError(t, err)
+	require.Nil(t, result.Items[0].OutputTPS, "missing privacy settings fail closed")
+	require.False(t, repo.filter.IncludeOutputTPS)
+	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, true)
+	require.NoError(t, err)
+	require.True(t, repo.filter.IncludeOutputTPS)
+	filter.End = start.Add(7 * 24 * time.Hour)
+	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, true)
+	require.NoError(t, err)
+	require.False(t, repo.filter.IncludeOutputTPS, "long windows must not scan raw usage logs")
 }

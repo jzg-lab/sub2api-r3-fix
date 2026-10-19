@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 )
 
 // PlazaOfficialPricing 模型广场展示用的官方参考价（USD per token），与计费同源：
@@ -29,6 +32,8 @@ type PlazaModel struct {
 	LongContextBasis ContextPricingBasis
 	// TimePricing 计费会生效的分时倍率时段；无分时为 nil。
 	TimePricing *TimePricingSchedule
+	// CurrentTimeMultiplier is evaluated by the billing resolver, never by browser time.
+	CurrentTimeMultiplier float64
 }
 
 // PlazaGroup 模型广场中以分组为顶层的条目。
@@ -53,6 +58,8 @@ type PlazaGroup struct {
 	// = 档位价 × ImageRateMultiplier，不乘分组/用户专属倍率（与计费口径一致）。
 	ImageRateIndependent bool
 	ImageRateMultiplier  float64
+	VideoRateIndependent bool
+	VideoRateMultiplier  float64
 	// LongContextPricingEnabled 分组是否按上下文长度应用阶梯价；关闭时模型展示的是最低档。
 	LongContextPricingEnabled bool
 	Models                    []PlazaModel
@@ -110,6 +117,18 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		return nil, fmt.Errorf("list active groups: %w", err)
 	}
 
+	// Build a request-local snapshot from the same fresh rows used to enumerate models.
+	// Reuse the billing lookup implementation without its ten-minute process cache.
+	displayService := *s
+	if s.resolver != nil && s.billingService != nil {
+		platforms := make(map[int64]string, len(groups))
+		for i := range groups {
+			platforms[groups[i].ID] = groups[i].Platform
+		}
+		snapshot := &ChannelService{}
+		snapshot.cache.Store(populateChannelCache(append([]Channel(nil), channels...), platforms))
+		displayService.resolver = NewModelPricingResolver(snapshot, s.billingService)
+	}
 	sort.SliceStable(channels, func(i, j int) bool {
 		return strings.ToLower(channels[i].Name) < strings.ToLower(channels[j].Name)
 	})
@@ -134,6 +153,8 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			IsExclusive:               g.IsExclusive,
 			ImageRateIndependent:      g.ImageRateIndependent,
 			ImageRateMultiplier:       g.ImageRateMultiplier,
+			VideoRateIndependent:      g.VideoRateIndependent,
+			VideoRateMultiplier:       g.VideoRateMultiplier,
 			LongContextPricingEnabled: g.LongContextPricingEnabled,
 		}
 		groupEnt[g.ID] = g
@@ -207,7 +228,7 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		})
 		g := groupEnt[gid]
 		for j := range pg.Models {
-			s.fillDisplayPricing(ctx, &pg.Models[j], g)
+			displayService.fillDisplayPricing(ctx, &pg.Models[j], g)
 			pg.Models[j].OfficialPricing = s.lookupOfficialPricing(ctx, pg.Models[j].Name, officialMemo)
 		}
 		out = append(out, *pg)
@@ -229,13 +250,21 @@ func (s *ModelPlazaService) fillDisplayPricing(ctx context.Context, m *PlazaMode
 	if groupPricing := matchGroupModelPricing(g, m.Name); groupPricing != nil {
 		m.Pricing = groupPricing
 	}
+	m.CurrentTimeMultiplier = 1
 	if s.billingService != nil && s.resolver != nil {
+		pricingCtx := WithResolvedTargetPlatform(ctx, m.Platform)
+		resolved := s.resolver.Resolve(pricingCtx, PricingInput{Model: m.Name, Group: g, GroupID: &g.ID})
+		m.CurrentTimeMultiplier = resolvedChannelTimeMultiplier(resolved, timezone.Now())
 		sched, err := s.billingService.ResolveContextPricingSchedule(ctx, s.resolver, ContextPricingScheduleInput{
 			Model:    m.Name,
 			Group:    g,
 			Platform: m.Platform,
 		})
-		if err == nil && sched != nil && len(sched.Tiers) > 0 {
+		if err != nil {
+			m.Pricing = nil
+			return
+		}
+		if sched != nil && len(sched.Tiers) > 0 {
 			m.Pricing = plazaPricingFromSchedule(m.Pricing, sched)
 			if len(sched.Tiers) > 1 {
 				m.LongContextBasis = sched.Basis
@@ -245,6 +274,7 @@ func (s *ModelPlazaService) fillDisplayPricing(ctx context.Context, m *PlazaMode
 		}
 	}
 	m.Pricing = plazaImageDisplayPricing(m.Pricing, g)
+	m.Pricing = plazaVideoDisplayPricing(m.Pricing, g, m.Name)
 }
 
 // plazaPricingFromSchedule 把阶梯表压成展示用的 ChannelModelPricing：
@@ -261,6 +291,7 @@ func plazaPricingFromSchedule(raw *ChannelModelPricing, sched *ContextPricingSch
 	out.InputPrice = first.Input
 	out.OutputPrice = first.Output
 	out.CacheWritePrice = first.CacheWrite
+	out.CacheWrite1hPrice = first.CacheWrite1h
 	out.CacheReadPrice = first.CacheRead
 	if len(sched.Tiers) > 1 {
 		out.Intervals = plazaIntervalsFromTiers(sched.Tiers)
@@ -272,14 +303,15 @@ func plazaIntervalsFromTiers(tiers []ContextPricingTier) []PricingInterval {
 	intervals := make([]PricingInterval, 0, len(tiers))
 	for i, t := range tiers {
 		intervals = append(intervals, PricingInterval{
-			MinTokens:       t.MinTokens,
-			MaxTokens:       t.MaxTokens,
-			TierLabel:       t.Label,
-			InputPrice:      t.Input,
-			OutputPrice:     t.Output,
-			CacheWritePrice: t.CacheWrite,
-			CacheReadPrice:  t.CacheRead,
-			SortOrder:       i,
+			MinTokens:         t.MinTokens,
+			MaxTokens:         t.MaxTokens,
+			TierLabel:         t.Label,
+			InputPrice:        t.Input,
+			OutputPrice:       t.Output,
+			CacheWritePrice:   t.CacheWrite,
+			CacheWrite1hPrice: t.CacheWrite1h,
+			CacheReadPrice:    t.CacheRead,
+			SortOrder:         i,
 		})
 	}
 	return intervals
@@ -367,4 +399,65 @@ func (s *ModelPlazaService) lookupOfficialPricing(ctx context.Context, modelName
 	}
 	memo[modelName] = result
 	return result
+}
+
+// CurrentRateFor shares peak/image precedence with request billing. Token base prices
+// already include the directory's current policy; only channel time is added here.
+func (g *PlazaGroup) CurrentRateFor(m *PlazaModel, base float64, at time.Time) float64 {
+	if base < 0 {
+		base = 0
+	}
+	group := &Group{SubscriptionType: g.SubscriptionType, PeakRateEnabled: g.PeakRateEnabled,
+		PeakStart: g.PeakStart, PeakEnd: g.PeakEnd, PeakRateMultiplier: g.PeakRateMultiplier,
+		ImageRateIndependent: g.ImageRateIndependent, ImageRateMultiplier: g.ImageRateMultiplier,
+		VideoRateIndependent: g.VideoRateIndependent, VideoRateMultiplier: g.VideoRateMultiplier}
+	if m.Pricing != nil && m.Pricing.BillingMode == BillingModeVideo {
+		return resolveVideoRateMultiplier(&APIKey{Group: group}, base)
+	}
+	tokenRate, imageRate := computePeakAwareMultipliers(&APIKey{Group: group}, base, at)
+	if m.Pricing != nil && m.Pricing.BillingMode == BillingModeImage {
+		return imageRate
+	}
+	if m.Pricing == nil || m.Pricing.BillingMode == "" || m.Pricing.BillingMode == BillingModeToken {
+		factor := m.CurrentTimeMultiplier
+		if factor == 0 {
+			factor = 1
+		} // Channel time configuration only accepts positive factors.
+		return tokenRate * factor
+	}
+	return tokenRate
+}
+
+// Legacy per-resolution video prices apply after a group model card and before channel prices.
+func plazaVideoDisplayPricing(p *ChannelModelPricing, g *Group, model string) *ChannelModelPricing {
+	if p == nil || g == nil || p.BillingMode != BillingModeVideo || matchGroupModelPricing(g, model) != nil {
+		return p
+	}
+	labels := []string{VideoBillingResolution480P, VideoBillingResolution720P, VideoBillingResolution1080P}
+	configured := false
+	for _, label := range labels {
+		configured = configured || g.GetVideoPriceForModel(model, label) != nil
+	}
+	if !configured {
+		return p
+	}
+	clone := *p
+	clone.Intervals = nil
+	for i, label := range labels {
+		price := g.GetVideoPriceForModel(model, label)
+		if price == nil {
+			price = p.PerRequestPrice
+			for j := range p.Intervals {
+				if p.Intervals[j].TierLabel == label && p.Intervals[j].PerRequestPrice != nil {
+					price = p.Intervals[j].PerRequestPrice
+					break
+				}
+			}
+		}
+		if price != nil {
+			v := *price
+			clone.Intervals = append(clone.Intervals, PricingInterval{TierLabel: label, PerRequestPrice: &v, SortOrder: i})
+		}
+	}
+	return &clone
 }

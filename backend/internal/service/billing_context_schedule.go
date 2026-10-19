@@ -21,13 +21,14 @@ const ContextPricingBasisWholeRequest ContextPricingBasis = "whole_request"
 // ContextPricingTier (MinTokens, MaxTokens] 区间内的有效 per-token 单价（USD）。
 // nil 表示该项无价/不计费；MaxTokens 为 nil 表示无上限。
 type ContextPricingTier struct {
-	MinTokens  int
-	MaxTokens  *int
-	Label      string
-	Input      *float64
-	Output     *float64
-	CacheWrite *float64
-	CacheRead  *float64
+	MinTokens    int
+	MaxTokens    *int
+	Label        string
+	Input        *float64
+	Output       *float64
+	CacheWrite   *float64
+	CacheWrite1h *float64
+	CacheRead    *float64
 }
 
 // TimePricingPeriod 分时倍率时段：配置时区当天 [StartTime, EndTime) 内整单费用乘 Multiplier。
@@ -293,6 +294,19 @@ func probeContextTier(seg contextSegment, resolved *ResolvedPricing, probe func(
 	if err != nil {
 		return tier, err
 	}
+	if resolved.SupportsCacheBreakdown {
+		tier.CacheWrite1h, err = probeComponentPrice(func(n int) UsageTokens {
+			return UsageTokens{CacheCreationTokens: n, CacheCreation1hTokens: n}
+		}, c, delta, probe)
+		if err != nil {
+			return tier, err
+		}
+		explicit1h := resolved.channelPricing != nil && resolved.channelPricing.CacheWrite1hPrice != nil
+		if iv := FindMatchingInterval(resolved.Intervals, c); iv != nil {
+			explicit1h = explicit1h || iv.CacheWrite1hPrice != nil
+		}
+		tier.CacheWrite1h = contextPricePtr(tier.CacheWrite1h, explicit1h)
+	}
 	// 输出价只随上下文所在档变化：固定上下文 c，对输出 token 数做差商（固定部分相减抵消）。
 	tier.Output, err = probeComponentPrice(func(n int) UsageTokens { return UsageTokens{InputTokens: c, OutputTokens: n} }, 0, contextProbeDelta, probe)
 	if err != nil {
@@ -398,7 +412,7 @@ func mergeEqualContextTiers(tiers []ContextPricingTier) []ContextPricingTier {
 
 func sameContextPrices(a, b ContextPricingTier) bool {
 	return samePricePtr(a.Input, b.Input) && samePricePtr(a.Output, b.Output) &&
-		samePricePtr(a.CacheWrite, b.CacheWrite) && samePricePtr(a.CacheRead, b.CacheRead)
+		samePricePtr(a.CacheWrite, b.CacheWrite) && samePricePtr(a.CacheWrite1h, b.CacheWrite1h) && samePricePtr(a.CacheRead, b.CacheRead)
 }
 
 func samePricePtr(a, b *float64) bool {

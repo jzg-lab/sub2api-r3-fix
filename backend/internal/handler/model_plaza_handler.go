@@ -1,7 +1,11 @@
 package handler
 
 import (
-	"log/slog"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -18,9 +22,10 @@ import (
 //   - 登录：非专属分组 + user_allowed_groups 授权的专属分组（不检查订阅有效性）；
 //     若该用户开启了公开分组限制，则公开分组同样需要落在授权集合内。
 type ModelPlazaHandler struct {
-	plazaService   *service.ModelPlazaService
-	apiKeyService  *service.APIKeyService
-	settingService *service.SettingService
+	plazaService         *service.ModelPlazaService
+	apiKeyService        *service.APIKeyService
+	settingService       *service.SettingService
+	paymentConfigService *service.PaymentConfigService
 }
 
 // NewModelPlazaHandler 创建模型广场 handler。
@@ -28,11 +33,13 @@ func NewModelPlazaHandler(
 	plazaService *service.ModelPlazaService,
 	apiKeyService *service.APIKeyService,
 	settingService *service.SettingService,
+	paymentConfigService *service.PaymentConfigService,
 ) *ModelPlazaHandler {
 	return &ModelPlazaHandler{
-		plazaService:   plazaService,
-		apiKeyService:  apiKeyService,
-		settingService: settingService,
+		plazaService:         plazaService,
+		apiKeyService:        apiKeyService,
+		settingService:       settingService,
+		paymentConfigService: paymentConfigService,
 	}
 }
 
@@ -64,10 +71,11 @@ type modelPlazaTimePricing struct {
 
 // modelPlazaModel 广场模型条目：实收口径展示定价（白名单形态）+ 官方参考价。
 type modelPlazaModel struct {
-	Name            string                     `json:"name"`
-	Platform        string                     `json:"platform"`
-	Pricing         *userSupportedModelPricing `json:"pricing"`
-	OfficialPricing *modelPlazaOfficialPricing `json:"official_pricing"`
+	Name                  string                     `json:"name"`
+	CurrentRateMultiplier float64                    `json:"current_rate_multiplier"`
+	Platform              string                     `json:"platform"`
+	Pricing               *userSupportedModelPricing `json:"pricing"`
+	OfficialPricing       *modelPlazaOfficialPricing `json:"official_pricing"`
 	// LongContextBasis 多档时的计价基准："whole_request"（整单按档）| "marginal"（仅超出部分）。
 	LongContextBasis string `json:"long_context_basis,omitempty"`
 	// TimePricing 分时倍率时段，落在时段内的请求整单乘倍率；无分时省略。
@@ -99,13 +107,16 @@ type modelPlazaGroup struct {
 
 // modelPlazaResponse 广场页响应。
 type modelPlazaResponse struct {
-	Description string            `json:"description"`
-	Groups      []modelPlazaGroup `json:"groups"`
+	Description               string            `json:"description"`
+	BalanceRechargeMultiplier float64           `json:"balance_recharge_multiplier"`
+	Groups                    []modelPlazaGroup `json:"groups"`
 }
 
 // Get 返回模型广场数据。
 // GET /api/v1/model-plaza
 func (h *ModelPlazaHandler) Get(c *gin.Context) {
+	c.Header("Cache-Control", "private, no-cache")
+	c.Writer.Header().Add("Vary", "Authorization")
 	if h.settingService == nil {
 		response.NotFound(c, "Model plaza is not enabled")
 		return
@@ -141,9 +152,9 @@ func (h *ModelPlazaHandler) Get(c *gin.Context) {
 		}
 		userRates, err = h.apiKeyService.GetUserGroupRates(c.Request.Context(), subject.UserID)
 		if err != nil {
-			// 专属倍率仅是展示增强，失败降级为分组默认倍率。
-			slog.Warn("model_plaza_user_rates_failed", "error", err, "user_id", subject.UserID)
-			userRates = nil
+			// A failed rate lookup must not show a different price as the user's current price.
+			response.ErrorFrom(c, err)
+			return
 		}
 	}
 
@@ -153,9 +164,15 @@ func (h *ModelPlazaHandler) Get(c *gin.Context) {
 	// 追加而非覆盖：CORS 中间件已为具体来源写入 Vary: Origin。
 	c.Writer.Header().Add("Vary", "Accept-Language")
 	out := toLocalizedModelPlazaGroups(visible, userRates, c.GetHeader("Accept-Language"))
-	response.Success(c, modelPlazaResponse{
-		Description: rt.Description,
-		Groups:      out,
+	conversion, err := h.paymentConfigService.GetBalanceRechargeMultiplier(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	writeModelPlazaResponse(c, modelPlazaResponse{
+		Description:               rt.Description,
+		Groups:                    out,
+		BalanceRechargeMultiplier: conversion,
 	})
 }
 
@@ -196,16 +213,22 @@ func toLocalizedModelPlazaGroups(visible []service.PlazaGroup, userRates map[int
 
 // toModelPlazaGroupDTO 将 service 层广场分组映射为白名单 DTO,并合并用户专属倍率。
 func toModelPlazaGroupDTO(g *service.PlazaGroup, userRates map[int64]float64) modelPlazaGroup {
+	base := g.RateMultiplier
+	if rate, ok := userRates[g.ID]; ok {
+		base = rate
+	}
+	at := time.Now()
 	models := make([]modelPlazaModel, 0, len(g.Models))
 	for i := range g.Models {
 		m := &g.Models[i]
 		models = append(models, modelPlazaModel{
-			Name:             m.Name,
-			Platform:         m.Platform,
-			Pricing:          toUserPricing(m.Pricing),
-			OfficialPricing:  toModelPlazaOfficialPricing(m.OfficialPricing),
-			LongContextBasis: string(m.LongContextBasis),
-			TimePricing:      toModelPlazaTimePricing(m.TimePricing),
+			Name:                  m.Name,
+			CurrentRateMultiplier: g.CurrentRateFor(m, base, at),
+			Platform:              m.Platform,
+			Pricing:               toUserPricing(m.Pricing),
+			OfficialPricing:       toModelPlazaOfficialPricing(m.OfficialPricing),
+			LongContextBasis:      string(m.LongContextBasis),
+			TimePricing:           toModelPlazaTimePricing(m.TimePricing),
 		})
 	}
 	dto := modelPlazaGroup{
@@ -260,4 +283,21 @@ func toModelPlazaOfficialPricing(p *service.PlazaOfficialPricing) *modelPlazaOff
 		CacheReadPrice:    p.CacheReadPrice,
 		Intervals:         toUserPricingIntervals(p.Intervals),
 	}
+}
+
+// Revalidate the authorized, localized response, including timed prices and recharge
+// conversion. No shared cache can reuse one user's rates or group visibility.
+func writeModelPlazaResponse(c *gin.Context, payload modelPlazaResponse) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
+	c.Header("ETag", etag)
+	if c.GetHeader("If-None-Match") == etag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	response.Success(c, payload)
 }

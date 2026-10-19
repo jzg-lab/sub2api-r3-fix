@@ -44,6 +44,8 @@ export interface PlazaTimePricing {
 }
 
 export interface PlazaModel {
+  /** Current billing rate, including user/group, peak and channel time rules. */
+  current_rate_multiplier?: number
   name: string
   platform: string
   /** 实收口径的展示定价：多档时 intervals 为各档绝对单价（已由计费服务折算）；均为标准时段价。 */
@@ -79,6 +81,7 @@ export interface ModelPlazaGroup {
 }
 
 export interface ModelPlazaResponse {
+  balance_recharge_multiplier?: number
   /** 管理员配置的全局价格说明（Markdown）。 */
   description: string
   groups: ModelPlazaGroup[]
@@ -95,3 +98,15 @@ export async function getModelPlaza(options?: { signal?: AbortSignal }): Promise
 export const modelPlazaAPI = { getModelPlaza }
 
 export default modelPlazaAPI
+
+/** Conditional refresh is scoped to this page/session; never cache personalized data globally. */
+export async function refreshModelPlaza(etag?: string, signal?: AbortSignal) {
+  const response = await apiClient.get<ModelPlazaResponse>('/model-plaza', {
+    signal,
+    // 3s poll + <2s request budget keeps normal foreground updates within 5s.
+    timeout: 1800,
+    headers: etag ? { 'If-None-Match': etag } : undefined,
+    validateStatus: status => status === 200 || status === 304
+  })
+  return { data: response.status === 304 ? null : response.data, etag: response.headers.etag as string | undefined }
+}

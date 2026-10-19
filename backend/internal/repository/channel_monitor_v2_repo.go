@@ -479,6 +479,20 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 		}
 		result.Items = append(result.Items, row)
 	}
+	if filter.IncludeOutputTPS {
+		rates, err := r.loadModelOutputTPS(ctx, effectiveFilter, cfg)
+		if err != nil {
+			return nil, err
+		}
+		for i := range result.Items {
+			row := &result.Items[i]
+			if row.GroupID != nil {
+				if rate, ok := rates[channelMonitorV2MatrixKey{platform: row.Platform, groupID: *row.GroupID, model: row.Model}]; ok {
+					row.OutputTPS = &rate
+				}
+			}
+		}
+	}
 	sort.Slice(result.Items, func(i, j int) bool {
 		a, b := result.Items[i], result.Items[j]
 		if a.Platform != b.Platform {
@@ -1578,4 +1592,70 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 		byDimBucket[key][bucketKey] += count
 	}
 	return byDimBucket, byDim, rows.Err()
+}
+
+// Model speed uses valid text request timings, not fleet TPM. Reuse monitor scope
+// and model keys so a card can never pick up another group's/model's measurements.
+func (r *channelMonitorV2Repository) loadModelOutputTPS(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) (map[channelMonitorV2MatrixKey]float64, error) {
+	result := make(map[channelMonitorV2MatrixKey]float64)
+	if !filter.End.After(filter.Start) || filter.End.Sub(filter.Start) > 24*time.Hour || channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
+		return result, nil
+	}
+	where, args := channelMonitorV2Where(filter, cfg, "m")
+	query := `SELECT m.platform, m.group_id, m.model, SUM(m.output_tps), COUNT(*) FROM (
+ SELECT ul.created_at AS bucket_start, ` + channelMonitorV2PlatformSQL + ` AS platform,
+ ul.group_id, ` + channelMonitorV2ModelSQL + ` AS model,
+ ul.output_tokens * 1000.0 / NULLIF(ul.duration_ms::double precision - ul.first_token_ms, 0) AS output_tps
+ FROM usage_logs ul
+ LEFT JOIN groups g ON g.id = ul.group_id LEFT JOIN accounts a ON a.id = ul.account_id
+ WHERE ul.created_at >= $1 AND ul.created_at < $2
+ AND ul.output_tokens > 0 AND ul.first_token_ms >= 0 AND ul.duration_ms > ul.first_token_ms
+ AND ul.image_count = 0 AND ul.image_output_tokens = 0 AND ul.group_id > 0
+ AND COALESCE(ul.billing_mode, '') NOT IN ('image', 'video', 'audio')
+ AND ul.request_type IN (1, 2, 3) AND ` + usageLogSuccessFilterUL + `
+ ) m ` + where + ` GROUP BY 1, 2, 3`
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	rows, err := r.db.QueryContext(queryCtx, query, args...)
+	if err != nil {
+		// shortcut: TPS scans at most 24h with a 2s budget; add rollup columns if production volume outgrows this query.
+		if queryCtx.Err() != nil && ctx.Err() == nil {
+			return result, nil
+		}
+		return nil, fmt.Errorf("model output TPS: %w", err)
+	}
+	defer rows.Close()
+	type total struct {
+		sum   float64
+		count int64
+	}
+	totals := make(map[channelMonitorV2MatrixKey]total)
+	for rows.Next() {
+		var platform, model string
+		var gid, count int64
+		var sum float64
+		if err := rows.Scan(&platform, &gid, &model, &sum, &count); err != nil {
+			return nil, err
+		}
+		if !channelMonitorV2ModelSelected(filter, cfg, platform, model) {
+			continue
+		}
+		key := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByPlatformGroupModel, cfg, platform, gid, model)
+		acc := totals[key]
+		acc.sum += sum
+		acc.count += count
+		totals[key] = acc
+	}
+	if err := rows.Err(); err != nil {
+		if queryCtx.Err() != nil && ctx.Err() == nil {
+			return result, nil
+		}
+		return nil, err
+	}
+	for key, acc := range totals {
+		if acc.count > 0 {
+			result[key] = acc.sum / float64(acc.count)
+		}
+	}
+	return result, nil
 }

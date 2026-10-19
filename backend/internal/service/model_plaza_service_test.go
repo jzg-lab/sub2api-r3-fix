@@ -5,7 +5,9 @@ package service
 import (
 	"context"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -165,7 +167,7 @@ func TestListPlazaGroups_CompositeAndOrdinaryGroupsDoNotLeakPlatforms(t *testing
 	}
 	require.Len(t, byName["anthropic-only"].Models, 1)
 	require.Equal(t, []PlazaModel{{
-		Name: "claude-sonnet", Platform: PlatformAnthropic, Pricing: byName["anthropic-only"].Models[0].Pricing,
+		Name: "claude-sonnet", Platform: PlatformAnthropic, Pricing: byName["anthropic-only"].Models[0].Pricing, CurrentTimeMultiplier: 1,
 	}}, byName["anthropic-only"].Models)
 	require.Len(t, byName["composite"].Models, 2)
 	require.Equal(t, []string{"claude-sonnet", "gpt-5"}, []string{
@@ -504,4 +506,80 @@ func TestListGroups_TimePricingPassthrough(t *testing.T) {
 	require.InDelta(t, 0.5, m.TimePricing.Periods[0].Multiplier, 1e-12)
 	// 展示单价为标准时段价
 	require.InDelta(t, 0.28e-6, *m.Pricing.InputPrice, 1e-15)
+}
+
+func TestPlazaCurrentRateMatchesBillingPeakAndMediaRules(t *testing.T) {
+	at := time.Date(2026, 10, 19, 12, 0, 0, 0, timezone.Location())
+	g := PlazaGroup{SubscriptionType: SubscriptionTypeSubscription, RateMultiplier: 2,
+		PeakRateEnabled: true, PeakStart: "12:00", PeakEnd: "13:00", PeakRateMultiplier: 3,
+		ImageRateIndependent: true, ImageRateMultiplier: 0.2, VideoRateIndependent: true, VideoRateMultiplier: 0.4}
+	model := PlazaModel{Pricing: &ChannelModelPricing{BillingMode: BillingModeToken}, CurrentTimeMultiplier: 1.25}
+	require.InDelta(t, 0.5*3*1.25, g.CurrentRateFor(&model, 0.5, at), 1e-12)
+	require.InDelta(t, 0.5*1.25, g.CurrentRateFor(&model, 0.5, at.Add(time.Hour)), 1e-12)
+	require.Zero(t, g.CurrentRateFor(&model, 0, at))
+	model.Pricing.BillingMode = BillingModeImage
+	require.InDelta(t, 0.2, g.CurrentRateFor(&model, 0.5, at), 1e-12)
+	model.Pricing.BillingMode = BillingModeVideo
+	require.InDelta(t, 0.4, g.CurrentRateFor(&model, 0.5, at), 1e-12)
+}
+
+func TestPlazaOneHourCachePriceMatchesBillingTierFallback(t *testing.T) {
+	group := enabledGroup(PlatformAnthropic)
+	channel := sonnetChannel(PricingInterval{MinTokens: 100000, CacheWrite1hPrice: testPtrFloat64(0)})
+	channel[0].CacheWrite1hPrice = testPtrFloat64(7e-6)
+	bs, resolver := newTokenCostTestEnv(t, PlatformAnthropic, channel, nil)
+	schedule, err := bs.ResolveContextPricingSchedule(context.Background(), resolver, ContextPricingScheduleInput{Model: "claude-sonnet-4", Group: group, Platform: PlatformAnthropic})
+	require.NoError(t, err)
+	require.Len(t, schedule.Tiers, 2)
+	requirePrice(t, testPtrFloat64(7e-6), schedule.Tiers[0].CacheWrite1h, "1h base")
+	requirePrice(t, testPtrFloat64(3.75e-6), schedule.Tiers[1].CacheWrite1h, "billing policy fallback for zero 1h price")
+	display := plazaPricingFromSchedule(nil, schedule)
+	requirePrice(t, schedule.Tiers[0].CacheWrite1h, display.CacheWrite1hPrice, "base DTO")
+	requirePrice(t, schedule.Tiers[1].CacheWrite1h, display.Intervals[1].CacheWrite1hPrice, "tier DTO")
+}
+
+func TestPlazaRefreshUsesSavedChannelPriceWithoutProcessCache(t *testing.T) {
+	ch := plazaPricedChannel(1, "channel", []int64{100}, PlatformAnthropic, "claude-sonnet-4")
+	svc := newPlazaService([]Channel{ch}, []Group{{ID: 100, Platform: PlatformAnthropic, RateMultiplier: 1}}, nil)
+	svc.billingService, svc.resolver = newTokenCostTestEnv(t, PlatformAnthropic, ch.ModelPricing, nil)
+	first, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	requirePrice(t, testPtrFloat64(3e-6), first[0].Models[0].Pricing.InputPrice, "before save")
+	// Only change the repository row; the old gateway process cache still holds 3e-6.
+	ch.ModelPricing = append([]ChannelModelPricing(nil), ch.ModelPricing...)
+	ch.ModelPricing[0].InputPrice = testPtrFloat64(9e-6)
+	svc.channelRepo = &mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return []Channel{ch}, nil }}
+	next, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	requirePrice(t, testPtrFloat64(9e-6), next[0].Models[0].Pricing.InputPrice, "after save")
+}
+
+func TestPlazaCurrentTokenPriceEqualsRequestBilling(t *testing.T) {
+	ch := plazaPricedChannel(1, "channel", []int64{100}, PlatformAnthropic, "claude-sonnet-4")
+	ch.ModelPricing[0].TimePricing = &ChannelTimePricing{Timezone: "UTC", Periods: []ChannelTimePricingPeriod{{StartTime: "00:00", EndTime: "12:00", Multiplier: 1.25}, {StartTime: "12:00", EndTime: "00:00", Multiplier: 1.25}}}
+	group := Group{ID: 100, Platform: PlatformAnthropic, RateMultiplier: 0.4, LongContextPricingEnabled: true}
+	svc := newPlazaServiceWithBilling([]Channel{ch}, []Group{group}, map[int64]string{100: PlatformAnthropic}, nil)
+	groups, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	model := groups[0].Models[0]
+	at := timezone.Now()
+	rate := groups[0].CurrentRateFor(&model, 0.4, at)
+	cost, err := svc.billingService.CalculateTokenCostForRequest(TokenCostRequest{Ctx: context.Background(), Model: model.Name, Group: &group,
+		Tokens: UsageTokens{InputTokens: 1000000}, RateMultiplier: 0.4, PricingAt: at, Resolver: svc.resolver})
+	require.NoError(t, err)
+	require.InDelta(t, cost.ActualCost, *model.Pricing.InputPrice*1_000_000*rate, 1e-9)
+	require.InDelta(t, 0.5, rate, 1e-12)
+}
+
+func TestPlazaVideoPricingKeepsGroupCardPrecedence(t *testing.T) {
+	p := &ChannelModelPricing{BillingMode: BillingModeVideo, PerRequestPrice: testPtrFloat64(0.1)}
+	g := &Group{VideoPrice480P: testPtrFloat64(0.2), VideoPrice720P: testPtrFloat64(0)}
+	display := plazaVideoDisplayPricing(p, g, "grok-imagine-video")
+	require.Len(t, display.Intervals, 3)
+	require.InDelta(t, 0.2, *display.Intervals[0].PerRequestPrice, 1e-12)
+	require.Zero(t, *display.Intervals[1].PerRequestPrice)
+	require.InDelta(t, 0.1, *display.Intervals[2].PerRequestPrice, 1e-12)
+	require.Empty(t, p.Intervals, "shared source must not be mutated")
+	g.ModelPricing = []ChannelModelPricing{{Models: []string{"grok-imagine-video"}, BillingMode: BillingModeVideo}}
+	require.Same(t, p, plazaVideoDisplayPricing(p, g, "grok-imagine-video"))
 }

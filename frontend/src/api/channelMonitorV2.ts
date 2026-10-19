@@ -34,6 +34,7 @@ export interface LatencyMetric {
 }
 
 export interface MonitorMetric {
+  success_rate?: number
   success_requests: number
   error_requests: number
   request_count: number
@@ -159,6 +160,7 @@ export interface MonitorMatrixBucket {
 }
 
 export interface MonitorMatrixRow {
+  output_tps?: number | null
   platform: string
   group_id?: number
   group_name?: string
@@ -245,8 +247,8 @@ export async function getSnapshot(filter: MonitorFilter, admin = false, signal?:
   const { data } = await apiClient.get<MonitorSnapshot>(`${base(admin)}/snapshot`, requestConfig(filter, signal))
   return data
 }
-export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy }))
+export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal, includeOutputTPS = false) {
+  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy, ...(includeOutputTPS ? { include_output_tps: true } : {}) }))
   return data
 }
 export async function getModels(filter: MonitorFilter, admin = false, signal?: AbortSignal) {

@@ -244,3 +244,29 @@ func TestToModelPlazaGroupDTO_TimePricing(t *testing.T) {
 	weekdaysTP := weekdaysModel["time_pricing"].(map[string]any)
 	require.Equal(t, true, weekdaysTP["weekdays_only"])
 }
+
+func TestModelPlazaConditionalResponseChangesWithPriceCurrencyAndViewer(t *testing.T) {
+	payload := modelPlazaResponse{Description: "price", BalanceRechargeMultiplier: 10,
+		Groups: toLocalizedModelPlazaGroups(plazaGroups(), nil, "zh-CN")}
+	request := func(etag string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/model-plaza", nil)
+		c.Request.Header.Set("If-None-Match", etag)
+		writeModelPlazaResponse(c, payload)
+		c.Writer.WriteHeaderNow()
+		return w
+	}
+	first := request("")
+	require.Equal(t, http.StatusOK, first.Code)
+	etag := first.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+	require.Equal(t, http.StatusNotModified, request(etag).Code)
+	payload.BalanceRechargeMultiplier = 20
+	require.Equal(t, http.StatusOK, request(etag).Code)
+	payload.BalanceRechargeMultiplier = 10
+	payload.Groups[0].RateMultiplier = 0.3
+	require.Equal(t, http.StatusOK, request(etag).Code)
+	payload.Groups = toLocalizedModelPlazaGroups(plazaGroups()[:1], map[int64]float64{1: 0.2}, "zh-CN")
+	require.Equal(t, http.StatusOK, request(etag).Code)
+}

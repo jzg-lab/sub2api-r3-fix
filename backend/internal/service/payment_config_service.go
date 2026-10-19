@@ -619,3 +619,12 @@ func visibleMethodShouldBeExposed(method string, vals map[string]string, availab
 	source := NormalizeVisibleMethodSource(method, vals[sourceKey])
 	return source != "" && available[source]
 }
+
+// GetBalanceRechargeMultiplier reads only the conversion used by balance recharge.
+func (s *PaymentConfigService) GetBalanceRechargeMultiplier(ctx context.Context) (float64, error) {
+	vals, err := s.settingRepo.GetMultiple(ctx, []string{SettingBalanceRechargeMult})
+	if err != nil {
+		return 0, fmt.Errorf("get balance conversion: %w", err)
+	}
+	return normalizeBalanceRechargeMultiplier(pcParseFloat(vals[SettingBalanceRechargeMult], defaultBalanceRechargeMultiplier)), nil
+}

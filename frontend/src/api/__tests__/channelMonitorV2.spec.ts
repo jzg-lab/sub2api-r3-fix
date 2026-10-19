@@ -36,3 +36,9 @@ describe('channel monitor V2 query serialization', () => {
     }))
   })
 })
+
+it('requests model output speed only when explicitly requested', async () => {
+  const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [] } })
+  await getMatrix({ range: '24h', platforms: [], groupIds: [], models: [] }, 'platform_group_model', false, undefined, true)
+  expect(get).toHaveBeenCalledWith('/channel-monitor-v2/matrix', expect.objectContaining({ params: expect.objectContaining({ include_output_tps: true }) }))
+})
