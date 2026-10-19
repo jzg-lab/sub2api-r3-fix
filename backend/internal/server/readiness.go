@@ -47,22 +47,35 @@ func (r *Readiness) check(ctx context.Context) bool {
 	if !r.started.Load() || !r.mu.TryLock() {
 		return false
 	}
-	defer r.mu.Unlock()
 	if time.Since(r.checked) < time.Second {
-		return r.ready && r.started.Load()
+		ready := r.ready
+		r.mu.Unlock()
+		return ready && r.started.Load()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	r.ready = len(r.checks) > 0
-	for _, check := range r.checks {
-		if err := check(ctx); err != nil {
-			r.ready = false
-			break
+	done := make(chan bool, 1)
+	go func() {
+		// Keep the lock until the driver returns: one stalled dependency must not
+		// hold the HTTP response open or accumulate background checks.
+		ready := len(r.checks) > 0
+		for _, check := range r.checks {
+			if err := check(ctx); err != nil {
+				ready = false
+				break
+			}
 		}
+		ready = ready && ctx.Err() == nil
+		r.ready, r.checked = ready, time.Now()
+		r.mu.Unlock()
+		done <- ready
+	}()
+	select {
+	case ready := <-done:
+		return ready && r.started.Load() && ctx.Err() == nil
+	case <-ctx.Done():
+		return false
 	}
-	r.ready = r.ready && ctx.Err() == nil
-	r.checked = time.Now()
-	return r.ready && r.started.Load()
 }
 
 func (r *Readiness) Handler(next http.Handler) http.Handler {

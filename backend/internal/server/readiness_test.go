@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +65,30 @@ func TestReadinessDoesNotQueueConcurrentChecks(t *testing.T) {
 	require.False(t, r.check(context.Background()))
 	r.mu.Unlock()
 	require.False(t, r.check(context.Background()), "no checks is not ready")
+}
+
+func TestReadinessBoundsUnresponsiveDependency(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	r := &Readiness{checks: []func(context.Context) error{func(context.Context) error {
+		calls.Add(1)
+		<-release // Some database drivers do not return promptly when their context expires.
+		return nil
+	}}}
+	r.SetReady(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- r.check(ctx) }()
+	select {
+	case ready := <-done:
+		require.False(t, ready)
+	case <-time.After(time.Second):
+		t.Fatal("readiness HTTP deadline was held by a stalled dependency")
+	}
+	require.False(t, r.check(context.Background()), "do not start another blocked check")
+	require.Equal(t, int32(1), calls.Load())
 }
 
 func TestReadinessCanceledCheckDoesNotCacheSuccess(t *testing.T) {
