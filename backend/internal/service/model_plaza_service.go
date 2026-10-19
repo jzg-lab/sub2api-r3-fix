@@ -117,27 +117,12 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		return nil, fmt.Errorf("list active groups: %w", err)
 	}
 
-	// Build a request-local snapshot from the same fresh rows used to enumerate models.
-	// Reuse the billing lookup implementation without its ten-minute process cache.
-	displayService := *s
 	platforms := make(map[int64]string, len(groups))
-	for i := range groups {
-		platforms[groups[i].ID] = groups[i].Platform
-	}
-	snapshot := &ChannelService{}
-	snapshot.cache.Store(populateChannelCache(append([]Channel(nil), channels...), platforms))
-	if s.resolver != nil && s.billingService != nil {
-		displayService.resolver = NewModelPricingResolver(snapshot, s.billingService)
-	}
-	sort.SliceStable(channels, func(i, j int) bool {
-		return strings.ToLower(channels[i].Name) < strings.ToLower(channels[j].Name)
-	})
-
 	byGroup := make(map[int64]*PlazaGroup, len(groups))
 	groupEnt := make(map[int64]*Group, len(groups))
-	order := make([]int64, 0, len(groups))
 	for i := range groups {
 		g := &groups[i]
+		platforms[g.ID] = g.Platform
 		byGroup[g.ID] = &PlazaGroup{
 			ID:                        g.ID,
 			Name:                      g.Name,
@@ -158,8 +143,19 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			LongContextPricingEnabled: g.LongContextPricingEnabled,
 		}
 		groupEnt[g.ID] = g
-		order = append(order, g.ID)
 	}
+
+	// Build a request-local snapshot from the same fresh rows used to enumerate models.
+	// Reuse the billing lookup implementation without its ten-minute process cache.
+	displayService := *s
+	snapshot := &ChannelService{}
+	snapshot.cache.Store(populateChannelCache(append([]Channel(nil), channels...), platforms))
+	if s.resolver != nil && s.billingService != nil {
+		displayService.resolver = NewModelPricingResolver(snapshot, s.billingService)
+	}
+	sort.SliceStable(channels, func(i, j int) bool {
+		return strings.ToLower(channels[i].Name) < strings.ToLower(channels[j].Name)
+	})
 
 	type modelKey struct {
 		platform string
@@ -215,6 +211,11 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 				if strings.Contains(name, "*") {
 					continue
 				}
+				key := modelKey{platform: a.Platform, name: strings.ToLower(name)}
+				// One eligible supplier is enough; failed checks must still try later accounts.
+				if _, exists := available[gid][key]; exists {
+					continue
+				}
 				mapping := snapshot.ResolveChannelMapping(modelCtx, gid, name)
 				if !a.IsModelSupported(mapping.MappedModel) {
 					continue
@@ -225,10 +226,7 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 				if available[gid] == nil {
 					available[gid] = make(map[modelKey]string)
 				}
-				key := modelKey{platform: a.Platform, name: strings.ToLower(name)}
-				if _, exists := available[gid][key]; !exists {
-					available[gid][key] = name
-				}
+				available[gid][key] = name
 			}
 		}
 	}
@@ -298,9 +296,10 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 	}
 
 	officialMemo := make(map[string]*PlazaOfficialPricing)
-	out := make([]PlazaGroup, 0, len(order))
-	for _, gid := range order {
-		pg := byGroup[gid]
+	out := make([]PlazaGroup, 0, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		pg := byGroup[g.ID]
 		if len(pg.Models) == 0 {
 			continue
 		}
@@ -310,7 +309,6 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			}
 			return pg.Models[i].Platform < pg.Models[j].Platform
 		})
-		g := groupEnt[gid]
 		for j := range pg.Models {
 			displayService.fillDisplayPricing(ctx, &pg.Models[j], g)
 			pg.Models[j].OfficialPricing = s.lookupOfficialPricing(ctx, pg.Models[j].Name, officialMemo)

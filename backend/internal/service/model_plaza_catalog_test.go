@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -341,4 +342,50 @@ func TestListPlazaGroups_MissingAccountRepositoryDoesNotReturnPrices(t *testing.
 	out, err := svc.ListGroups(context.Background())
 	require.Error(t, err)
 	require.Nil(t, out)
+}
+
+func TestListPlazaGroups_SharedModelsNeedOneEligibleSupplier(t *testing.T) {
+	ch := plazaPricedChannel(1, "restricted", []int64{1}, PlatformOpenAI, "allowed-target")
+	ch.RestrictModels = true
+	ch.BillingModelSource = BillingModelSourceUpstream
+	groups := []Group{{ID: 1, Platform: PlatformOpenAI}, {ID: 2, Platform: PlatformOpenAI}}
+	blocked := plazaAccount(PlatformOpenAI, []int64{1, 2}, map[string]any{"public-model": "blocked-target"})
+	allowed := plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"public-model": "allowed-target"})
+	for _, accounts := range [][]Account{{blocked, allowed}, {allowed, blocked}} {
+		svc := newPlazaService([]Channel{ch}, groups, nil)
+		svc.accountRepo = &plazaAccountRepository{accounts: accounts}
+		out, err := svc.ListGroups(context.Background())
+		require.NoError(t, err)
+		require.Len(t, out, 2, "a failed account check must not suppress a later eligible supplier")
+		for _, g := range out {
+			require.Len(t, g.Models, 1, "supplier overlap must not duplicate models")
+			require.Equal(t, "public-model", g.Models[0].Name)
+		}
+	}
+}
+
+func BenchmarkModelPlazaSharedAccountModels(b *testing.B) {
+	for _, accountCount := range []int{1, 200} {
+		b.Run(fmt.Sprintf("%d_accounts", accountCount), func(b *testing.B) {
+			mapping := make(map[string]any, 40)
+			for i := 0; i < 40; i++ {
+				model := fmt.Sprintf("gpt-plaza-bench-%02d", i)
+				mapping[model] = model
+			}
+			repo := &plazaAccountRepository{}
+			for i := 0; i < accountCount; i++ {
+				repo.accounts = append(repo.accounts, plazaAccount(PlatformOpenAI, []int64{1, 2}, mapping))
+			}
+			svc := newPlazaService(nil, []Group{{ID: 1, Platform: PlatformOpenAI}, {ID: 2, Platform: PlatformOpenAI}}, nil)
+			svc.accountRepo = repo
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				out, err := svc.ListGroups(context.Background())
+				if err != nil || len(out) != 2 || len(out[0].Models) != 40 || len(out[1].Models) != 40 {
+					b.Fatalf("unexpected catalog: groups=%d err=%v", len(out), err)
+				}
+			}
+		})
+	}
 }
