@@ -2,6 +2,9 @@
 ARG BUILDER
 ARG RUNTIME
 FROM ${BUILDER} AS built
+# Existing backend tests use repository fixtures and /usr/bin/true (Alpine has /bin/true).
+COPY deploy/client-identity/ /app/deploy/client-identity/
+RUN test -x /usr/bin/true || ln -s /bin/true /usr/bin/true
 RUN --network=none \
     --mount=type=cache,id=sub2api-gomod,target=/go/pkg/mod \
     --mount=type=cache,id=sub2api-gobuild,target=/root/.cache/go-build \
