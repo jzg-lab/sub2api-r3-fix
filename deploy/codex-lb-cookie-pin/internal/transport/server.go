@@ -807,8 +807,8 @@ func (s *Server) runReservedProbeCycle(ctx context.Context, cancel context.Cance
 // 明确失败保留账号退避与 Retry-After，不记 Authorization/Cookie 到日志或答案摘要。
 // v0.3.4：①401/403 当场丢模板（模板 Authorization 已死，留着只会无限空转——
 // 1227 实证；下一笔真实 Forward 自动用新鲜 token 重stash）；②判过钉推理门槛
-// （答对但 reasoning_tokens 低于 probe_min_reasoning_tokens 不计连过）。
-// v0.3.10：低 rt 单信号及不明确的最终答案只作中性观察。v0.3.8：答对但命中 518n-2 指纹只记中性观察，
+// （答对但 reasoning_tokens 低于 probe_min_reasoning_tokens 判 Fail 触发重摇）。
+// v0.3.8：答对但命中 518n-2 指纹只记中性观察，
 // 不计质量失败、不触发重摇，也不计入连续通过证据。
 func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemplate, q prober.Question, cfg pluginconfig.Config) (verdict prober.Verdict, answer string, reasoning int) {
 	model := cfg.ProbeModel
@@ -1057,9 +1057,6 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 			return prober.VerdictError, "parse:no-text", 0
 		}
 		reasoningTokens, usageKnown := extractUsageFromSSE(raw)
-		if _, known := prober.ExtractFinalAnswer(answer); !known {
-			return prober.VerdictError, "parse:ambiguous-answer", reasoningTokens
-		}
 		if q.Grade(answer) {
 			if cfg.ProbeMinReasoningTokens > 0 && !usageKnown {
 				return prober.VerdictError, "parse:missing-usage", 0
@@ -1070,8 +1067,12 @@ func (s *Server) sendProbe(ctx context.Context, accountID int64, tmpl *probeTemp
 				return prober.VerdictError, "trunc-fp:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
 			}
 			if min := cfg.ProbeMinReasoningTokens; usageKnown && min > 0 && reasoningTokens < min {
-				// A token threshold is not proof of an incorrect answer.
-				return prober.VerdictError, "low-rt:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
+				// 答对但推理预算低于毕业门槛（v0.3.4）：宿主资格针要求
+				// 答对 + rt≥800，这样的节点救不回号——判 Fail 触发重摇，把
+				// 搜索方向对准「宿主针真能考过」的节点。答案摘要前缀带
+				// low-rt 标记（截断保前缀，面板可见原因）。缺失 usage
+				// 已在上方判为 error，不能作为通过证据。
+				return prober.VerdictFail, "low-rt:" + strconv.Itoa(reasoningTokens) + " | " + answer, reasoningTokens
 			}
 			result = "pass"
 			return prober.VerdictPass, answer, reasoningTokens

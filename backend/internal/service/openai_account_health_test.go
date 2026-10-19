@@ -397,13 +397,13 @@ func TestOpenAIProbeEvidenceDegraded(t *testing.T) {
 	}
 	for _, tokens := range []int{300, 516} {
 		ev.ReasoningTokens = rtPtr(tokens)
-		if OpenAIProbeEvidenceDegraded(ev) {
-			t.Fatal("correct low-token answers are neutral")
+		if !OpenAIProbeEvidenceDegraded(ev) {
+			t.Fatal("correct low-token answers are suspect evidence")
 		}
 	}
 	ev.AnswerCorrect = nil
 	if OpenAIProbeEvidenceDegraded(ev) {
-		t.Fatal("ambiguous completed answers are neutral")
+		t.Fatal("historical unknown answers remain neutral")
 	}
 	// 断流没有可判定答案，即使 HTTP 状态已经是 200，也不能挂成降智。
 	ev = &OpenAIProbeLastEvidence{HTTPStatus: 200, AnswerCorrect: nil}

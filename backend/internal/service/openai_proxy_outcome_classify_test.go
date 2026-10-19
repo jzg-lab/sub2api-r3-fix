@@ -39,9 +39,9 @@ func TestClassifyOpenAIDowngradeProxyOutcome(t *testing.T) {
 			OpenAIProxyOutcomeDegraded,
 		},
 		{
-			"correct answer with starved reasoning is inconclusive",
+			"correct answer with starved reasoning is degraded",
 			&OpenAIDowngradeProbeResult{TransportOK: true, AnswerCorrect: true, ReasoningTokens: downgradeProbeIntPtr(600)},
-			OpenAIProxyOutcomeInconclusive,
+			OpenAIProxyOutcomeDegraded,
 		},
 		{
 			"recovered probe is a success",

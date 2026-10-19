@@ -16,8 +16,10 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
   Linux 和无代理直连保留，不依赖历史登录 IP、地理信息或出口时区。
 - Cookie Pin 源码更新至 0.3.20，宿主提供受账号/路由/灰度限制的 HTTP 通道与短期探针许可。
   新批量准入保留手动终止保护；保留旧暂停同步及 HostService broker 兼容。流结束与持久结算配套，
-  已有用量不重放；正确低 token 和最终答案模糊保持中性。
-- Codex 模型清单沿用 OAuth/API Key 共用缓存、白名单与固定排序、500k context 和实时元数据，
+  已有用量不重放。判分按用户后续选择完整对齐老板：全文数字匹配，宿主正确低 token 先快速复检，
+  再次失败按两次证据处理；插件低 token 判失败，保留新版截断指纹中性例外。
+- Codex 模型清单 OAuth 直接向上游请求（包括条件请求），API Key 保留账号级缓存；
+  两类账号保留权限、白名单与固定排序、500k context 和实时元数据，
   新增 simple mode 目录范围对齐、null service_tiers 规范化及规范化后 ETag。
 - 保留无数据终态和缺失终态的协议错误处理改进、连接池/上传超时与启动队列隔离、环境诊断界面，
   健康限流标签以 reset 截止时间为准。原首输出期限、空白流判断与计费模型回写继续保留。
@@ -26,7 +28,8 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 
 新增回归主要在 `openai_codex_models_service_tiers_test.go`、`openai_oauth_relogin_test.go`、
 `plugin_host_http_test.go`、`plugin_probe_policy_test.go`、`plugin_bridge_settlement_test.go`、
-`openai_ws_turn_billing_test.go`、Cookie Pin transport 测试及环境审计前端测试。
+`openai_ws_turn_billing_test.go`、Cookie Pin transport 测试及环境审计前端测试。追加对齐回归包含 `openai_downgrade_answer_veto_test.go`、
+`openai_probe_grading_test.go`、`openai_probe_verdict_postgres_test.go`、OAuth 直接请求/ETag 与 API Key 缓存测试。
 
 ## 官方 v0.2.17 本地适配
 
@@ -82,7 +85,7 @@ Vertex 共享容量不足单请求退避和 Antigravity Hub UA；已确认的本
 | --- | --- | --- |
 | LOCAL-001 | 无代理 OpenAI OAuth 保留直连；显式代理无效时拒绝，不静默直连 | [授权、代理和导入](upstream-integration-policy.md#授权代理和导入)；保留身份绑定及令牌并发保护 |
 | LOCAL-002 | 救治期间保护分组，保留人工暂停、手动终止、原子毕业与旧轮次隔离 | [救治规则](upstream-integration-policy.md#救治)；普通设置不能重新启用停调账号 |
-| LOCAL-003 | 质量检测以最终答案判分；模糊答案、正确但 reasoning token 低的答案不单独判失败 | [Cookie Pin](../deploy/codex-lb-cookie-pin/README.md)；中性结果不算恢复通过 |
+| LOCAL-003 | 质量判分采用老板 e3cad515 全文匹配；宿主正确低 token 先复检，插件低 token 判失败 | [Cookie Pin](../deploy/codex-lb-cookie-pin/README.md)；中性结果不算恢复通过 |
 | LOCAL-004 | Cookie Pin 按账号隔离，合并白名单 Cookie，隔离身份变化及迟到响应 | [Cookie Pin](../deploy/codex-lb-cookie-pin/README.md)；保留暂停及代理保护，不保证模型质量改善 |
 | LOCAL-005 | 健康列消费宿主健康信封及插件桥状态 | `backend/internal/service/openai_account_health.go`、`frontend/src/views/admin/AccountsView.vue`；前后端资源须配套 |
 | LOCAL-006 | Workspace 显示短 ID、颜色分组及完整 ID 提示 | `frontend/src/views/admin/AccountsView.vue`；颜色来自 ID 哈希，同色不保证同 Workspace，也不是健康等级 |
@@ -382,7 +385,8 @@ OpenAI 代理临时隔离沿用 r17bm：候选耗尽不提前放行隔离代理�
 本轮使用老板 `a84149c1fcb22b9ce120c84240164185a455fbd3` 的严格冷却/到期恢复，
 取消旧每日提前复查和 8 天排期上限；人工暂停、救治终止、质量范围及联合毕业证据继续保留。
 账号并发仍默认 5、优先级默认 2，优先级 0 有效；省略并发的后台写入不覆盖显式更新。
-插件采用老板 Cookie 续期、过期模板处理和配置加载保护，并保留本地最终答案及中性判分。
+插件采用老板 Cookie 续期、过期模板处理和配置加载保护；判分已按用户后续要求对齐 e3cad515，
+不再保留本地最终答案解析及低 token 中性规则。
 
 账号绑定的重新授权使用凭据身份版本；普通健康状态变化不使其失效，身份/代理变化会拒绝旧结果。
 手动 OAuth 和令牌导入继续支持无代理；不要求历史 IP、固定出口或浏览器启动证明。

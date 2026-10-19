@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,8 +59,8 @@ func TestFetchOpenAIModelsListUsesStandardRequestAndIsolatesCodexCache(t *testin
 	require.EqualValues(t, 3, calls.Load(), "credentials must participate in the cache key")
 }
 
-func TestFetchOpenAIModelsListOAuthSharesManifestCache(t *testing.T) {
-	_, calls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"special-oauth-model","display_name":"Special OAuth Model","description":"manifest only"},{"slug":"gpt-image-1"}]}`)
+func TestFetchOpenAIModelsListOAuthFetchesManifestEachTime(t *testing.T) {
+	_, calls := newCodexModelsOAuthServer(t, `{"models":[{"slug":"special-oauth-model","display_name":"Special OAuth Model","description":"manifest only"},{"slug":"gpt-image-1"}]}`)
 	s := &OpenAIGatewayService{}
 	account := newCodexModelsTestAccount()
 	response, err := s.FetchOpenAIModelsList(context.Background(), account)
@@ -69,10 +70,10 @@ func TestFetchOpenAIModelsListOAuthSharesManifestCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(manifest.Body), `"slug":"special-oauth-model"`)
 	require.NotContains(t, string(manifest.Body), `"data"`)
-	require.EqualValues(t, 1, calls.Load())
+	require.EqualValues(t, 2, calls.Load())
 	_, err = s.FetchOpenAIModelsList(context.Background(), account)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, calls.Load())
+	require.EqualValues(t, 3, calls.Load())
 }
 
 func TestFetchOpenAIModelsListCacheWindowsAndSingleflight(t *testing.T) {
@@ -232,8 +233,8 @@ func TestFetchOpenAIModelsListEmptyAndMalformedResponses(t *testing.T) {
 	}
 }
 
-func TestPinnedOpenAIModelsListMixedAccountsShareColdCacheAcrossGroups(t *testing.T) {
-	_, oauthCalls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"shared-model"},{"slug":"oauth-special"}]}`)
+func TestPinnedOpenAIModelsListMixedAccountsOnlyCacheAPIKey(t *testing.T) {
+	_, oauthCalls := newCodexModelsOAuthServer(t, `{"models":[{"slug":"shared-model"},{"slug":"oauth-special"}]}`)
 	var apiCalls atomic.Int32
 	s := newCodexModelsAPIKeyTestService(&codexModelsHTTPUpstreamStub{do: func(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
 		apiCalls.Add(1)
@@ -290,11 +291,11 @@ func TestPinnedOpenAIModelsListMixedAccountsShareColdCacheAcrossGroups(t *testin
 		}
 	}
 	require.EqualValues(t, 1, apiCalls.Load())
-	require.EqualValues(t, 1, oauthCalls.Load())
+	require.EqualValues(t, 2, oauthCalls.Load())
 }
 
 func TestFetchOpenAIModelsListResolvesShadowOAuthCredentials(t *testing.T) {
-	_, calls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"parent-model"}]}`)
+	_, calls := newCodexModelsOAuthServer(t, `{"models":[{"slug":"parent-model"}]}`)
 	parent := newCodexModelsTestAccount()
 	shadow := &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parent.ID}
 	s := &OpenAIGatewayService{accountRepo: newStubCredRepo(parent)}
@@ -361,4 +362,29 @@ func TestApplyCodexModelsMappingPreservesUnchangedBodyAndETag(t *testing.T) {
 			require.Equal(t, `W/"upstream-validator"`, response.ETag)
 		})
 	}
+}
+
+func newCodexModelsOAuthServer(t *testing.T, body string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	original := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	t.Cleanup(func() { chatgptCodexModelsURL = original })
+	return server, calls
+}
+
+func expireCodexModelsManifestCache(s *OpenAIGatewayService, age time.Duration) {
+	s.openAIModelsCache.mu.Lock()
+	for key, entry := range s.openAIModelsCache.entries {
+		entry.expiresAt = time.Now().Add(-age)
+		entry.staleUntil = time.Now().Add(openAIModelsCacheStaleTTL - age)
+		s.openAIModelsCache.entries[key] = entry
+	}
+	s.openAIModelsCache.mu.Unlock()
 }

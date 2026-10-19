@@ -116,7 +116,7 @@ func TestApplyHardEvidenceSingleShotRegression(t *testing.T) {
 	}
 	require.True(t, ApplyOpenAIDowngradeProbeResult(onDuty, lowRTWrong, time.Now()).Circuit)
 
-	// 正确低 rt 仅中性观察，不单独熔断。
+	// 正确低 rt 是嫌疑，首次复检而非立即熔断。
 	lowRTCorrect := lowRTWrong
 	lowRTCorrect.AnswerCorrect = true
 	lowRTCorrect.ReasoningTokens = downgradeProbeIntPtr(516)

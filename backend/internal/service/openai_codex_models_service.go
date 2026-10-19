@@ -34,7 +34,7 @@ var chatgptCodexModelsURL = "https://chatgpt.com/backend-api/codex/models"
 const (
 	openAIModelsCacheBodyLimit = 1 << 20
 	// openAIModelsCacheMaxEntries 上限按「账号数 × 客户端版本数 × 代理形态」
-	// 估算：缓存同时覆盖 OAuth 与 API Key 账号，且缓存键含 Authorization 与
+	// 估算：缓存用于 API Key 上游，且缓存键含 Authorization 与
 	// Version 头，不同客户端版本各自占一条；64 条在大规模部署下会被淘汰导致
 	// 额外上游请求。单条清单通常几十 KB，512 条最坏内存占用在几十 MB 量级。
 	openAIModelsCacheMaxEntries = 512
@@ -1809,33 +1809,28 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	if useAPIKeyUpstream {
 		return s.fetchCachedOpenAIModels(ctx, request, s.fetchCodexModelsManifestUpstreamForRequest(request), ifNoneMatch)
 	}
-	// OAuth 账号同样经过账号级缓存；闭包保留 agent identity 任务恢复逻辑，
-	// 错误时仍交给 handleCodexModelsManifestAccountAuthError 处理账号状态。
-	oauthFetch := func(fetchCtx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error) {
-		manifest, fetchErr := s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
-		if !credAccount.IsOpenAIAgentIdentity() || !isAgentIdentityTaskInvalidCodexModelsError(fetchErr) {
-			s.handleCodexModelsManifestAccountAuthError(fetchCtx, account, credAccount, fetchErr)
-			return manifest, fetchErr
-		}
-		expectedTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
-		if recoverErr := s.recoverAgentIdentityTask(fetchCtx, credAccount, expectedTaskID); recoverErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "agent identity task recovery failed: %v", recoverErr)
-		}
-		authHeaders, authErr := s.buildOpenAIAuthenticationHeaders(fetchCtx, credAccount, "")
-		if authErr != nil {
-			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication after task recovery: %v", authErr)
-		}
-		request.headers.Del("Authorization")
-		request.headers.Del("ChatGPT-Account-ID")
-		for key, values := range authHeaders {
-			for _, value := range values {
-				request.headers.Add(key, value)
-			}
-		}
-		setOpenAIChatGPTAccountHeaders(request.headers, credAccount)
-		return s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
+	manifest, fetchErr := s.fetchCodexModelsManifestUpstream(ctx, request, ifNoneMatch)
+	if !credAccount.IsOpenAIAgentIdentity() || !isAgentIdentityTaskInvalidCodexModelsError(fetchErr) {
+		s.handleCodexModelsManifestAccountAuthError(ctx, account, credAccount, fetchErr)
+		return manifest, fetchErr
 	}
-	return s.fetchCachedOpenAIModels(ctx, request, oauthFetch, ifNoneMatch)
+	expectedTaskID := strings.TrimSpace(credAccount.GetCredential("task_id"))
+	if recoverErr := s.recoverAgentIdentityTask(ctx, credAccount, expectedTaskID); recoverErr != nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "agent identity task recovery failed: %v", recoverErr)
+	}
+	authHeaders, authErr := s.buildOpenAIAuthenticationHeaders(ctx, credAccount, "")
+	if authErr != nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_AUTH_FAILED", "build Codex models authentication after task recovery: %v", authErr)
+	}
+	request.headers.Del("Authorization")
+	request.headers.Del("ChatGPT-Account-ID")
+	for key, values := range authHeaders {
+		for _, value := range values {
+			request.headers.Add(key, value)
+		}
+	}
+	setOpenAIChatGPTAccountHeaders(request.headers, credAccount)
+	return s.fetchCodexModelsManifestUpstream(ctx, request, ifNoneMatch)
 }
 
 func isAgentIdentityTaskInvalidCodexModelsError(err error) bool {

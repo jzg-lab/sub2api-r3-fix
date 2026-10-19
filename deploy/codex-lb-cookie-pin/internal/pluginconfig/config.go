@@ -74,7 +74,7 @@ type Config struct {
 	// 未配置时缺省 medium（对齐宿主资格针）。
 	ProbeReasoningEffort string `json:"probe_reasoning_effort"`
 	// ProbeMinReasoningTokens 判过钉推理门槛（v0.3.4）：答对且 completed 带
-	// usage.reasoning_tokens 低于该值的针只作中性观察，不重摇、不计连过。
+	// usage.reasoning_tokens 低于该值且未命中截断指纹的针判失败，触发重摇、不计连过。
 	// 开启门槛时缺失 usage 也为中性；配 1 允许任何已知正 token 用量。
 	// 未配置时缺省 800。
 	ProbeMinReasoningTokens int `json:"probe_min_reasoning_tokens"`

@@ -2014,9 +2014,13 @@ func TestFetchCodexModelsManifestDefaultClientVersion(t *testing.T) {
 func TestFetchCodexModelsManifestNotModified(t *testing.T) {
 	manifestBody := `{"models":[{"slug":"gpt-5.5"}]}`
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("ETag", `W/"abc123"`)
+		if r.Header.Get("If-None-Match") == `W/"abc123"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		_, _ = w.Write([]byte(manifestBody))
 	}))
 	defer server.Close()
@@ -2038,20 +2042,19 @@ func TestFetchCodexModelsManifestNotModified(t *testing.T) {
 		t.Errorf("etag not passed through: got %q", first.ETag)
 	}
 
-	// OAuth 路径接入缓存后，客户端 If-None-Match 与缓存内容 ETag 比较，不再透传上游：
-	// 新鲜期内命中缓存且匹配直接 304，零上游请求。
+	// OAuth forwards the client condition and returns the upstream 304.
 	second, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", `W/"abc123"`)
 	if err != nil {
-		t.Fatalf("cached fetch returned error: %v", err)
+		t.Fatalf("conditional fetch returned error: %v", err)
 	}
 	if !second.NotModified {
-		t.Fatal("matching cached ETag must return NotModified")
+		t.Fatal("upstream 304 must return NotModified")
 	}
 	if second.ETag != `W/"abc123"` {
 		t.Errorf("NotModified etag: got %q", second.ETag)
 	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("upstream calls: got %d, want 1", got)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("upstream calls: got %d, want 2", got)
 	}
 }
 
@@ -3604,201 +3607,36 @@ func (u *codexModelsHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL
 	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }
 
-// --- OAuth manifest 账号级缓存（统一缓存策略） ---
-
-// newCodexModelsOAuthCacheServer 返回一个记录调用次数、返回给定 manifest 的
-// ChatGPT Codex models 测试上游。
-func newCodexModelsOAuthCacheServer(t *testing.T, body string) (*httptest.Server, *atomic.Int32) {
-	t.Helper()
-	calls := &atomic.Int32{}
+func TestFetchCodexModelsManifestOAuthAlwaysFetchesCurrentUpstream(t *testing.T) {
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(server.Close)
-	original := chatgptCodexModelsURL
-	chatgptCodexModelsURL = server.URL
-	t.Cleanup(func() { chatgptCodexModelsURL = original })
-	return server, calls
-}
-
-func expireCodexModelsManifestCache(s *OpenAIGatewayService, age time.Duration) {
-	s.openAIModelsCache.mu.Lock()
-	for key, entry := range s.openAIModelsCache.entries {
-		entry.expiresAt = time.Now().Add(-age)
-		entry.staleUntil = time.Now().Add(openAIModelsCacheStaleTTL - age)
-		s.openAIModelsCache.entries[key] = entry
-	}
-	s.openAIModelsCache.mu.Unlock()
-}
-
-func TestFetchCodexModelsManifestOAuthFreshWindowZeroUpstreamRequests(t *testing.T) {
-	_, calls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"gpt-5.5"}]}`)
-	s := &OpenAIGatewayService{}
-	account := newCodexModelsTestAccount()
-
-	for i := 0; i < 10; i++ {
-		manifest, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.NoError(t, err)
-		require.False(t, manifest.NotModified)
-		require.JSONEq(t, `{"models":[{"slug":"gpt-5.5"}]}`, string(manifest.Body))
-	}
-	require.EqualValues(t, 1, calls.Load(), "新鲜期内重复请求不得打到 chatgpt.com")
-}
-
-func TestFetchCodexModelsManifestOAuthStaleServesOldValueAndRefreshesInBackground(t *testing.T) {
-	calls := &atomic.Int32{}
-	refreshStarted := make(chan struct{})
-	var refreshOnce sync.Once
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if calls.Add(1) == 2 {
-			refreshOnce.Do(func() { close(refreshStarted) })
-			<-release
+		call := calls.Add(1)
+		if call == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"slug":"new"}]}`))
+		_, _ = fmt.Fprintf(w, `{"models":[{"slug":"model-%d"}]}`, call)
 	}))
-	t.Cleanup(server.Close)
+	defer server.Close()
 	original := chatgptCodexModelsURL
 	chatgptCodexModelsURL = server.URL
 	t.Cleanup(func() { chatgptCodexModelsURL = original })
-
 	s := &OpenAIGatewayService{}
 	account := newCodexModelsTestAccount()
 	first, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
 	require.NoError(t, err)
-	require.Contains(t, string(first.Body), `"new"`)
-
-	expireCodexModelsManifestCache(s, 2*time.Minute)
-
-	resultCh := make(chan *OpenAIModelsResponse, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		manifest, fetchErr := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		resultCh <- manifest
-		errCh <- fetchErr
-	}()
-	select {
-	case <-refreshStarted:
-	case <-time.After(time.Second):
-		t.Fatal("乐观期后台刷新未触发")
-	}
-
-	// 乐观期：立即返回旧值，不同步等待刷新。
-	select {
-	case manifest := <-resultCh:
-		require.NoError(t, <-errCh)
-		require.Contains(t, string(manifest.Body), `"new"`)
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("乐观期必须立即返回缓存旧值")
-	}
-	require.EqualValues(t, 2, calls.Load())
-
-	close(release)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		manifest, fetchErr := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		if fetchErr == nil && manifest != nil && !manifest.NotModified {
-			require.Contains(t, string(manifest.Body), `"new"`)
-		}
-		s.openAIModelsCache.mu.Lock()
-		fresh := len(s.openAIModelsCache.entries) > 0
-		s.openAIModelsCache.mu.Unlock()
-		if fresh {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	require.EqualValues(t, 2, calls.Load(), "后台刷新必须单飞")
-}
-
-func TestFetchCodexModelsManifestOAuthOverdueSynchronousRefreshAndFailure(t *testing.T) {
-	t.Run("overdue refresh waits and re-caches", func(t *testing.T) {
-		calls := &atomic.Int32{}
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if calls.Add(1) == 2 {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"models":[{"slug":"refreshed"}]}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"models":[{"slug":"stale"}]}`))
-		}))
-		t.Cleanup(server.Close)
-		original := chatgptCodexModelsURL
-		chatgptCodexModelsURL = server.URL
-		t.Cleanup(func() { chatgptCodexModelsURL = original })
-
-		s := &OpenAIGatewayService{}
-		account := newCodexModelsTestAccount()
-		_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.NoError(t, err)
-
-		// 超过 5 分钟：缓存条目被丢弃，同步等待上游刷新。
-		expireCodexModelsManifestCache(s, 6*time.Minute)
-
-		manifest, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.NoError(t, err)
-		require.Contains(t, string(manifest.Body), `"refreshed"`)
-		require.EqualValues(t, 2, calls.Load())
-
-		// 新内容写回缓存并重新开始新鲜期。
-		again, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.NoError(t, err)
-		require.Contains(t, string(again.Body), `"refreshed"`)
-		require.EqualValues(t, 2, calls.Load())
-	})
-
-	t.Run("overdue upstream failure returns error not stale cache", func(t *testing.T) {
-		fail := &atomic.Bool{}
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if fail.Load() {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"detail":"boom"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"models":[{"slug":"stale"}]}`))
-		}))
-		t.Cleanup(server.Close)
-		original := chatgptCodexModelsURL
-		chatgptCodexModelsURL = server.URL
-		t.Cleanup(func() { chatgptCodexModelsURL = original })
-
-		s := &OpenAIGatewayService{}
-		account := newCodexModelsTestAccount()
-		_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.NoError(t, err)
-
-		fail.Store(true)
-		expireCodexModelsManifestCache(s, 6*time.Minute)
-
-		_, err = s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-		require.Error(t, err, "超期后上游失败必须返回错误而非旧缓存")
-		require.Equal(t, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", infraerrors.Reason(err))
-	})
-}
-
-func TestFetchCodexModelsManifestOAuthTokenChangeCacheMiss(t *testing.T) {
-	_, calls := newCodexModelsOAuthCacheServer(t, `{"models":[]}`)
-	s := &OpenAIGatewayService{}
-	account := newCodexModelsTestAccount()
-
-	_, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
+	require.Contains(t, string(first.Body), "model-1")
+	failed, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
+	require.Error(t, err)
+	require.Nil(t, failed, "an upstream failure must not serve the previous manifest")
+	latest, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
 	require.NoError(t, err)
-	require.EqualValues(t, 1, calls.Load())
-
-	// 令牌刷新后缓存键变化，下一次拉取视为未命中并同步请求上游。
-	account.Credentials["access_token"] = "rotated-access-token"
-	manifest, err := s.FetchCodexModelsManifest(context.Background(), account, "0.137.0", "")
-	require.NoError(t, err)
-	require.Contains(t, string(manifest.Body), `"models"`)
-	require.EqualValues(t, 2, calls.Load())
+	require.Contains(t, string(latest.Body), "model-3")
+	require.EqualValues(t, 3, calls.Load())
 }
 
-func TestFetchCodexModelsManifestOAuthSharedAcrossGroupsWithIndependentFiltering(t *testing.T) {
+func TestFetchCodexModelsManifestOAuthGroupsKeepIndependentFiltering(t *testing.T) {
 	started := make(chan struct{})
 	var startedOnce sync.Once
 	release := make(chan struct{})
@@ -3869,7 +3707,7 @@ func TestFetchCodexModelsManifestOAuthSharedAcrossGroupsWithIndependentFiltering
 	}
 	require.Equal(t, []string{"model-a"}, got[91])
 	require.Equal(t, []string{"model-b"}, got[92])
-	require.EqualValues(t, 1, calls.Load(), "同一账号两个分组同时请求时只发一次上游请求")
+	require.EqualValues(t, 2, calls.Load(), "OAuth manifests are fetched per request before group filtering")
 }
 
 // Scenario: 非 OpenAI GPT 模型的 Codex 提示词不声称自己是 GPT。

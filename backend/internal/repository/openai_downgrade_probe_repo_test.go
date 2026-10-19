@@ -198,14 +198,13 @@ func TestRecordOpenAIDowngradeProbeIsAtomicWithDerivedStats(t *testing.T) {
 
 func TestProbeAnswerVerdictPersistence(t *testing.T) {
 	for _, tc := range []struct {
-		name                             string
-		transport, inconclusive, correct bool
-		want                             any
+		name               string
+		transport, correct bool
+		want               any
 	}{
-		{"ambiguous", true, true, false, nil},
-		{"transport", false, false, false, nil},
-		{"wrong", true, false, false, false},
-		{"correct", true, false, true, true},
+		{"transport", false, false, nil},
+		{"wrong", true, false, false},
+		{"correct", true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -220,7 +219,7 @@ func TestProbeAnswerVerdictPersistence(t *testing.T) {
 			repo := &openAIDowngradeProbeRepository{db: db}
 			require.NoError(t, repo.RecordOpenAIDowngradeProbe(context.Background(), &service.OpenAIDowngradeProbeResult{
 				AccountID: 7, Mode: "normal", TransportOK: tc.transport,
-				AnswerCorrect: tc.correct, AnswerInconclusive: tc.inconclusive, ReasoningTokens: &tokens, HTTPStatus: 200,
+				AnswerCorrect: tc.correct, ReasoningTokens: &tokens, HTTPStatus: 200,
 			}))
 			require.NoError(t, mock.ExpectationsWereMet())
 		})

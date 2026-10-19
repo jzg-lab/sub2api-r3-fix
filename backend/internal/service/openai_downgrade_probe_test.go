@@ -367,8 +367,7 @@ func TestOpenAIDowngradeProbeResultThresholdsAreStrict(t *testing.T) {
 		ReasoningTokens: downgradeProbeIntPtr(OpenAIDowngradeRecoveryReasoningMinimum),
 	}
 
-	require.False(t, low.IsDegraded())
-	require.False(t, low.IsQualificationPass())
+	require.True(t, low.IsDegraded())
 	require.False(t, boundary.IsDegraded())
 	require.False(t, boundary.IsRecovered())
 	require.True(t, recovered.IsRecovered())
@@ -376,7 +375,8 @@ func TestOpenAIDowngradeProbeResultThresholdsAreStrict(t *testing.T) {
 
 func TestOpenAIDowngradeProbeTruncationFingerprintsSplitByAnswer(t *testing.T) {
 	// 2026-09-15 用户裁定：指纹+答对=中性（预算截断未伤结论，1034/1035 实测
-	// rt 恒落 1552 且答案正确）；指纹+答错=降智。正确低 token 同样中性。
+	// rt 恒落 1552 且答案正确）；指纹+答错=降智。深截断（<800，如 516）即使
+	// 答对也仍判负——低到及格线下的推理量不可能支撑可信结论。
 	for _, tokens := range []int{508, 516, 524, 1026, 1034, 1042, 1544, 1552, 1560} {
 		wrong := OpenAIDowngradeProbeResult{
 			TransportOK:     true,
@@ -392,7 +392,11 @@ func TestOpenAIDowngradeProbeTruncationFingerprintsSplitByAnswer(t *testing.T) {
 			ReasoningTokens: downgradeProbeIntPtr(tokens),
 		}
 		require.Falsef(t, correct.IsRecovered(), "tokens=%d fingerprint never counts as recovery", tokens)
-		require.Falsef(t, correct.IsDegraded(), "tokens=%d correct answer should be neutral", tokens)
+		if tokens < OpenAIDowngradeFailureReasoningThreshold {
+			require.Truef(t, correct.IsDegraded(), "tokens=%d below failure threshold stays degraded even when correct", tokens)
+		} else {
+			require.Falsef(t, correct.IsDegraded(), "tokens=%d correct answer should be neutral", tokens)
+		}
 	}
 }
 
@@ -626,7 +630,8 @@ func TestApplyResponseGradedTextAndArchiveAnswerText(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &entry))
 	require.Equal(t, int64(1194), entry.AccountID)
 	require.Equal(t, "错答 7\n", entry.AnswerText)
-	require.Nil(t, entry.AnswerCorrect)
+	require.NotNil(t, entry.AnswerCorrect)
+	require.False(t, *entry.AnswerCorrect)
 	require.Contains(t, entry.ResponseTail, "response.completed")
 
 	// 超长答案保尾截断（结论在末段）。
