@@ -171,10 +171,16 @@ Vertex 共享容量不足单请求退避和 Antigravity Hub UA；已确认的本
 吞吐隐藏规则。可选 `include_output_tps=true` 只在分组模型维度、≤24 小时范围读取有效文本请求
 的首字后平均 TPS；查询限时 2 秒，超时或无样本为空，未来高流量需改为预聚合。
 监控不通时显示未知，不影响价格同步；指标统计不是向上游发起主动探测。
+模型卡片和详情的成功率时间线复用 `monitorBucketStarts`，按后端 `bucket_seconds` 与请求区间
+生成格子；当前 24 小时对应 24 个小时格，不再把 24 个桶投到固定 30 格而制造灰色空档。
+颜色和成功率是否显示统一使用 `monitorAvailabilityState`：有请求即按可用率着色，无请求才灰色，
+不受最小样本数、综合健康分、缓存率或首字延迟是否缺失影响；普通用户隐藏请求数时保留有效状态。
+此修订尚未部署；本地 7 文件/74 项定向回归、类型检查、定向 lint、前端构建和内嵌资源测试通过，
+配套内嵌资源已同步；未执行生产浏览器验收。
 
 回归入口：`model_plaza_service_test.go`、`model_plaza_handler_test.go`、
 `billing_context_schedule_test.go`、`payment_config_service_test.go`、`channel_monitor_v2_test.go`、
-`channel_monitor_v2_repo_test.go`，以及前端 `PlazaCatalog.spec.ts`、`ModelPlazaView.spec.ts`。
+`channel_monitor_v2_repo_test.go`，以及前端 `PlazaCatalog.spec.ts`、`PlazaStatus.spec.ts`、`ModelPlazaView.spec.ts`。
 本次本地类型检查、全仓 lint、前端生产构建、后端编译与定向测试通过；前端全量 335 文件/2693 项通过，
 随后补充的接口条件刷新测试在 7 文件/49 项定向回归中通过。币种与原价替换修订后，
 目录交互 9 项、页面刷新 3 项及类型检查、定向 lint、构建通过。提交主分支前已同步配套内嵌前端，

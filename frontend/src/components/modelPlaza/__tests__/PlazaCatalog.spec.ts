@@ -5,7 +5,10 @@ import PlazaPriceGrid from '../PlazaPriceGrid.vue'
 import PlazaStatus from '../PlazaStatus.vue'
 import { catalogue, displayPrice, formatPrice, monitorKey } from '../plazaPricing'
 import { plazaFixture } from './plazaFixture'
-vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
+vi.mock('vue-i18n', async (importOriginal) => ({
+  ...await importOriginal<typeof import('vue-i18n')>(),
+  useI18n: () => ({ t: (key: string) => key }),
+}))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 
 describe('plaza billing display', () => {
@@ -148,7 +151,7 @@ describe('plaza interactions', () => {
   })
   it('does not fabricate a healthy status or TPS without monitor data', () => {
     const wrapper = mount(PlazaStatus)
-    expect(wrapper.findAll('.plaza-timeline .unknown')).toHaveLength(30)
+    expect(wrapper.findAll('.plaza-timeline .unknown')).toHaveLength(24)
     expect(wrapper.find('.plaza-status-label b').text()).toBe('—')
     expect(wrapper.findAll('.plaza-metric strong').map(node => node.text())).toEqual(['—', '—'])
     wrapper.unmount()

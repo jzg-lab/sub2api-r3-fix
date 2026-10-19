@@ -10,7 +10,10 @@ vi.mock('@/api/modelPlaza', () => ({ refreshModelPlaza: vi.fn() }))
 vi.mock('@/api/channelMonitorV2', () => ({ getMatrix: vi.fn(), getSnapshot: vi.fn() }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ fetchPublicSettings: vi.fn(), cachedPublicSettings: { channel_monitor_enabled: false } }) }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))
-vi.mock('vue-i18n', () => ({ useI18n: () => ({ locale: state.locale, t: (key: string) => key }) }))
+vi.mock('vue-i18n', async (importOriginal) => ({
+  ...await importOriginal<typeof import('vue-i18n')>(),
+  useI18n: () => ({ locale: state.locale, t: (key: string) => key }),
+}))
 const api = vi.mocked(refreshModelPlaza)
 beforeEach(() => {
   vi.useFakeTimers()
