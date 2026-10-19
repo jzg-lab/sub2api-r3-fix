@@ -1,0 +1,38 @@
+{
+  "deploy_dir": "/opt/sub2api-deploy",
+  "compose_file": "/opt/sub2api-deploy/docker-compose.yml",
+  "env_file": "/opt/sub2api-deploy/.env",
+  "app_service": "sub2api",
+  "app_container": "sub2api",
+  "postgres_container": "sub2api-postgres",
+  "redis_container": "sub2api-redis",
+  "database_user": "sub2api",
+  "database_name": "sub2api",
+  "local_url": "http://127.0.0.1:8080",
+  "app_port": 8080,
+  "public_urls": ["https://ciyuan.fast"],
+  "guard_checks": [{"url": "http://127.0.0.1:18080/health", "open_status": 403}],
+  "admin_header_file": "/opt/sub2api-private/admin-header.txt",
+  "maintenance_file": "/opt/sub2api-deploy/.fast-deploy-maintenance",
+  "snapshot_files": [
+    "/opt/sub2api-deploy/data/config.yaml",
+    "/etc/nginx/conf.d/sub2api.conf",
+    "/etc/nginx/conf.d/sub2api-chat-direct.conf"
+  ],
+  "pause_services": ["account-manager.service"],
+  "drain_seconds": 8,
+  "ready_seconds": 45,
+  "backup_max_age_seconds": 7200,
+  "previous_has_readyz": false,
+  "migration_aliases": {
+    "238_scheduler_account_revisions.sql": "r3_0238_scheduler_account_revisions.sql",
+    "239_openai_probe_ownership.sql": "r3_0239_openai_probe_ownership.sql",
+    "240_openai_probe_rate_limit_streak.sql": "r3_0240_openai_probe_rate_limit_streak.sql",
+    "241_openai_probe_turn_state_len.sql": "r3_0241_openai_probe_turn_state_len.sql",
+    "242_openai_codex_tickets.sql": "r3_0242_openai_codex_tickets.sql",
+    "243_openai_probe_retention_indexes.sql": "r3_0243_openai_probe_retention_indexes.sql",
+    "244_openai_probe_harvest_mode.sql": "r3_0244_openai_probe_harvest_mode.sql",
+    "245_openai_codex_ticket_cookie_pair.sql": "r3_0245_openai_codex_ticket_cookie_pair.sql",
+    "246_openai_probe_nullable_verdict.sql": "r3_0246_openai_probe_nullable_verdict.sql"
+  }
+}

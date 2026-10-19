@@ -347,6 +347,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	antiBypassMiddleware := middleware.NewAntiBypassMiddleware(guard, antiBypassSettings, configConfig)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient, antiBypassMiddleware)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
+	readiness := server.NewReadiness(db, redisClient, pluginManager)
 	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
@@ -372,6 +373,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		Server:        httpServer,
 		PromptAudit:   promptService,
 		PluginManager: pluginManager,
+		Readiness:     readiness,
 		Cleanup:       v,
 	}
 	return application, nil
@@ -383,6 +385,7 @@ type Application struct {
 	Server        *http.Server
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
+	Readiness     *server.Readiness
 	Cleanup       func()
 }
 

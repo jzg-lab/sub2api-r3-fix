@@ -1,0 +1,13 @@
+# Include at server scope in EVERY ingress virtual host, not inside a location.
+# Install/reload/test once with separate approval. Do not reload on every deploy.
+# Keep this path identical to fast-deploy.json's maintenance_file.
+open_file_cache off;
+if (-f /opt/sub2api-deploy/.fast-deploy-maintenance) {
+    return 503;
+}
+# Only add this location to public HTTPS servers. Restricted direct servers
+# keep their existing ACLs; check an existing path with guard_checks instead.
+location = /__deploy_guard {
+    add_header Cache-Control "no-store" always;
+    return 204;
+}

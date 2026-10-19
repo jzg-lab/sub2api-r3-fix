@@ -18,6 +18,11 @@ import (
 // State is outside versioned installations, whose replacement deletes assets.
 // The host supplies only this path, not its environment or credentials.
 func pluginEvidenceDir(socketDir, key string) (string, error) {
+	// Preserve the existing directory while satisfying the plugin's absolute-path contract.
+	socketDir, err := filepath.Abs(socketDir)
+	if err != nil {
+		return "", err
+	}
 	hash := sha256.Sum256([]byte(key))
 	base := filepath.Join(filepath.Dir(socketDir), "state")
 	for _, dir := range []string{base, filepath.Join(base, hex.EncodeToString(hash[:]))} {

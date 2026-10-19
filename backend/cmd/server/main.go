@@ -160,7 +160,7 @@ func runMainServer() {
 	}
 	defer app.Cleanup()
 	webSockets := wsdrain.New()
-	app.Server.Handler = webSockets.Handler(app.Server.Handler)
+	app.Server.Handler = app.Readiness.Handler(webSockets.Handler(app.Server.Handler))
 	if app.PluginManager != nil {
 		if err := app.PluginManager.Start(context.Background()); err != nil {
 			log.Printf("Plugin manager started in degraded state: %v", err)
@@ -176,6 +176,7 @@ func runMainServer() {
 		}
 	}
 
+	app.Readiness.SetReady(true)
 	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -189,6 +190,7 @@ func runMainServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	app.Readiness.SetReady(false)
 
 	log.Println("Shutting down server...")
 
