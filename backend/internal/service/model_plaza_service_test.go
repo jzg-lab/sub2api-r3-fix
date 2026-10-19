@@ -18,7 +18,26 @@ func newPlazaService(channels []Channel, groups []Group, pricing *PricingService
 	repo := &mockChannelRepository{
 		listAllFn: func(ctx context.Context) ([]Channel, error) { return channels, nil },
 	}
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, nil, pricing, nil, nil)
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaPricingAccounts(channels), pricing, nil, nil)
+}
+
+// Pricing tests supply the models they price. Catalog tests replace this fixture
+// with independent account configurations to exercise missing/unsupported models.
+func plazaPricingAccounts(channels []Channel) *plazaAccountRepository {
+	repo := &plazaAccountRepository{}
+	for _, ch := range channels {
+		if ch.Status != StatusActive {
+			continue
+		}
+		for _, m := range ch.SupportedModels() {
+			mapping := map[string]any{m.Name: m.Name}
+			if target := ch.ModelMapping[m.Platform][m.Name]; target != "" {
+				mapping[target] = target
+			}
+			repo.accounts = append(repo.accounts, plazaAccount(m.Platform, ch.GroupIDs, mapping))
+		}
+	}
+	return repo
 }
 
 func plazaPricedChannel(id int64, name string, groupIDs []int64, platform string, models ...string) Channel {
@@ -353,7 +372,7 @@ func newPlazaServiceWithBilling(channels []Channel, groups []Group, groupPlatfor
 	}
 	cs := NewChannelService(repo, nil, nil, nil)
 	bs := NewBillingService(&config.Config{}, catalog)
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, nil, catalog, bs, NewModelPricingResolver(cs, bs))
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaPricingAccounts(channels), catalog, bs, NewModelPricingResolver(cs, bs))
 }
 
 func plazaModelsByName(models []PlazaModel) map[string]PlazaModel {

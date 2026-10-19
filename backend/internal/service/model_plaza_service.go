@@ -38,7 +38,7 @@ type PlazaModel struct {
 
 // PlazaGroup 模型广场中以分组为顶层的条目。
 //
-// Models 汇总分组价格卡、渠道配置和账号支持的模型目录，按具体平台隔离。
+// Models 只展示分组明确配置且有启用账号支持的模型，按具体平台隔离。
 type PlazaGroup struct {
 	ID                 int64
 	Name               string
@@ -97,7 +97,7 @@ func NewModelPlazaService(
 
 // ListGroups 返回模型广场数据：每个活跃分组附带其可用模型与定价。
 //
-// 枚举渠道、分组价格卡和账号目录，遵守分组白名单及渠道模型限制：
+// 从分组的账号映射、已启用白名单和渠道别名获取模型，价格目录不扩充名单：
 //   - 渠道按 lower(name) 排序后遍历，保证同名模型去重结果确定；
 //   - 同分组同名模型「先见者胜」，仅当已存条目无定价而新条目有定价时升级替换；
 //   - token 模型的单价与阶梯按实收口径合成（见 ResolveContextPricingSchedule），
@@ -165,12 +165,83 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		platform string
 		name     string
 	}
+	// Exact channel aliases are public names; price cards and wildcard patterns
+	// alone cannot establish which models a group offers.
+	aliases := make(map[int64]map[string][]string)
+	for i := range channels {
+		ch := &channels[i]
+		if ch.Status != StatusActive {
+			continue
+		}
+		for _, gid := range ch.GroupIDs {
+			if aliases[gid] == nil {
+				aliases[gid] = make(map[string][]string)
+			}
+			for platform, mapping := range ch.ModelMapping {
+				for name, target := range mapping {
+					if strings.TrimSpace(target) != "" && !strings.Contains(name, "*") {
+						aliases[gid][platform] = append(aliases[gid][platform], name)
+					}
+				}
+			}
+		}
+	}
+	if s.accountRepo == nil {
+		return nil, fmt.Errorf("model plaza account repository is unavailable")
+	}
+	// One fresh read for all groups; transient limits must not remove price cards.
+	accounts, err := s.accountRepo.ListActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list plaza accounts: %w", err)
+	}
+	available := make(map[int64]map[modelKey]string)
+	for i := range accounts {
+		a := &accounts[i]
+		if a.Status != StatusActive || !a.Schedulable {
+			continue
+		}
+		models := plazaAccountModelNames(a)
+		for _, gid := range a.GroupIDs {
+			g := groupEnt[gid]
+			if g == nil || !isPlatformPricingMatch(g.Platform, a.Platform) {
+				continue
+			}
+			candidates := append(append([]string(nil), models...), aliases[gid][a.Platform]...)
+			if g.ModelAllowlist.Enabled {
+				candidates = append(candidates, g.ModelAllowlist.Models...)
+			}
+			modelCtx := WithResolvedTargetPlatform(ctx, a.Platform)
+			for _, name := range dedupeAndSortModelIDs(candidates) {
+				if strings.Contains(name, "*") {
+					continue
+				}
+				mapping := snapshot.ResolveChannelMapping(modelCtx, gid, name)
+				if !a.IsModelSupported(mapping.MappedModel) {
+					continue
+				}
+				if mapping.BillingModelSource == BillingModelSourceUpstream && snapshot.IsModelRestricted(modelCtx, gid, a.GetMappedModel(mapping.MappedModel)) {
+					continue
+				}
+				if available[gid] == nil {
+					available[gid] = make(map[modelKey]string)
+				}
+				key := modelKey{platform: a.Platform, name: strings.ToLower(name)}
+				if _, exists := available[gid][key]; !exists {
+					available[gid][key] = name
+				}
+			}
+		}
+	}
 	// modelIdx[groupID][platform+modelName] = index into byGroup[groupID].Models
 	modelIdx := make(map[int64]map[modelKey]int, len(groups))
 	addModel := func(gid int64, m SupportedModel) {
 		pg, ok := byGroup[gid]
 		m.Name = strings.TrimSpace(m.Name)
 		if !ok || m.Name == "" || strings.Contains(m.Name, "*") || !isPlatformPricingMatch(pg.Platform, m.Platform) {
+			return
+		}
+		key := modelKey{platform: m.Platform, name: strings.ToLower(m.Name)}
+		if _, supplied := available[gid][key]; !supplied {
 			return
 		}
 		modelCtx := WithResolvedTargetPlatform(ctx, m.Platform)
@@ -184,7 +255,6 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			idx = make(map[modelKey]int)
 			modelIdx[gid] = idx
 		}
-		key := modelKey{platform: m.Platform, name: strings.ToLower(m.Name)}
 		if at, seen := idx[key]; seen {
 			if pg.Models[at].Pricing == nil && m.Pricing != nil {
 				pg.Models[at].Pricing = m.Pricing
@@ -221,40 +291,9 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			}
 		}
 	}
-	if s.accountRepo != nil {
-		// One fresh read for all groups; transient limits must not remove price cards.
-		accounts, err := s.accountRepo.ListActive(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list plaza accounts: %w", err)
-		}
-		catalogs := make(map[string][]string)
-		for i := range accounts {
-			a := &accounts[i]
-			if a.Status != StatusActive || !a.Schedulable {
-				continue
-			}
-			models := s.plazaAccountModelNames(a, catalogs)
-			for _, gid := range a.GroupIDs {
-				g := groupEnt[gid]
-				if g == nil {
-					continue
-				}
-				candidates := append([]string(nil), models...)
-				if g.ModelAllowlist.Enabled {
-					candidates = append(candidates, g.ModelAllowlist.Models...)
-				}
-				for _, name := range candidates {
-					modelCtx := WithResolvedTargetPlatform(ctx, a.Platform)
-					mapping := snapshot.ResolveChannelMapping(modelCtx, gid, name)
-					if !a.IsModelSupported(mapping.MappedModel) {
-						continue
-					}
-					if mapping.BillingModelSource == BillingModelSourceUpstream && snapshot.IsModelRestricted(modelCtx, gid, a.GetMappedModel(mapping.MappedModel)) {
-						continue
-					}
-					addModel(gid, SupportedModel{Name: name, Platform: a.Platform})
-				}
-			}
+	for gid, models := range available {
+		for key, name := range models {
+			addModel(gid, SupportedModel{Name: name, Platform: key.platform})
 		}
 	}
 

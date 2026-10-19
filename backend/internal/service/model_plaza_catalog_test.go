@@ -66,6 +66,9 @@ func TestListPlazaGroups_AccountModelsWithoutChannelPrices(t *testing.T) {
 		require.Contains(t, byID[id], name)
 		require.NotNil(t, byID[id][name].Pricing, name)
 	}
+	require.Len(t, byID[1], 1, "channel pricing does not advertise unsupported models")
+	require.NotContains(t, byID[1], "gpt-6-astra")
+	require.Len(t, byID[5], 1, "Grok's built-in aliases are not additional listed models")
 	require.NotContains(t, byID[3], "claude-opus-5-5")
 	require.Equal(t, 1, repo.reads, "one account query, not one per group")
 }
@@ -77,7 +80,10 @@ func TestListPlazaGroups_GroupCardsAndWildcardPricesRefresh(t *testing.T) {
 	channels := []Channel{{ID: 1, Status: StatusActive, GroupIDs: []int64{2}, ModelPricing: []ChannelModelPricing{{
 		Platform: PlatformOpenAI, Models: []string{"private-image-*"}, BillingMode: BillingModeImage, PerRequestPrice: testPtrFloat64(0.25),
 	}}}}
-	repo := &plazaAccountRepository{accounts: []Account{plazaAccount(PlatformOpenAI, []int64{2}, map[string]any{"private-image-v1": "private-image-v1"})}}
+	repo := &plazaAccountRepository{accounts: []Account{
+		plazaAccount(PlatformOpenAI, []int64{2}, map[string]any{"private-image-v1": "private-image-v1"}),
+		plazaAccount(PlatformGemini, []int64{1}, map[string]any{"deepseek-v4.1-flash": "deepseek-v4.1-flash"}),
+	}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{2: PlatformOpenAI}, nil)
 	svc.accountRepo = repo
 	for _, price := range []float64{0.08, 0.12} {
@@ -111,19 +117,21 @@ func TestListPlazaGroups_AccountCatalogRespectsConfiguration(t *testing.T) {
 		{ID: 3, Platform: PlatformOpenAI},
 		{ID: 4, Platform: PlatformComposite},
 	}
-	limited := plazaAccount(PlatformOpenAI, []int64{1, 3, 4}, nil)
+	limited := plazaAccount(PlatformOpenAI, []int64{1, 3, 4}, map[string]any{
+		"gpt-6.1-sol": "gpt-6.1-sol", "gpt-6-astra": "gpt-6-astra",
+	})
 	until := time.Now().Add(time.Hour)
 	limited.RateLimitResetAt = &until
 	limited.TempUnschedulableUntil = &until
-	paused := plazaAccount(PlatformAnthropic, []int64{2}, nil)
+	paused := plazaAccount(PlatformAnthropic, []int64{2}, map[string]any{"claude-opus-5-5": "claude-opus-5-5"})
 	paused.Schedulable = false
-	disabled := plazaAccount(PlatformAnthropic, []int64{2}, nil)
+	disabled := plazaAccount(PlatformAnthropic, []int64{2}, map[string]any{"claude-opus-5-5": "claude-opus-5-5"})
 	disabled.Status = StatusDisabled
 	channels := []Channel{plazaPricedChannel(1, "restricted", []int64{3}, PlatformOpenAI, "gpt-6-astra")}
 	channels[0].RestrictModels = true
 	svc := newPlazaService(channels, groups, nil)
 	svc.accountRepo = &plazaAccountRepository{accounts: []Account{limited, paused, disabled,
-		plazaAccount(PlatformOpenAI, []int64{2}, nil), // wrong platform for the group
+		plazaAccount(PlatformOpenAI, []int64{2}, map[string]any{"gpt-6.1-sol": "gpt-6.1-sol"}), // wrong platform for the group
 		plazaAccount(PlatformAnthropic, []int64{4}, map[string]any{"claude-opus-5-5": "claude-opus-5-5"}),
 	}}
 	out, err := svc.ListGroups(context.Background())
@@ -147,12 +155,12 @@ func TestListPlazaGroups_AccountCatalogRespectsConfiguration(t *testing.T) {
 	}
 }
 
-func TestListPlazaGroups_WildcardsMetadataAndPassthrough(t *testing.T) {
+func TestListPlazaGroups_WildcardsMetadataAndPassthroughDoNotListModels(t *testing.T) {
 	catalog := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
 		"gpt-custom-new": {LiteLLMProvider: "openai"},
 		"claude-custom":  {LiteLLMProvider: "anthropic"},
 	}}
-	a := plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"gpt-*": "gpt-*"})
+	a := plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"gpt-*": "gpt-6.1-sol"})
 	a.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Models: map[string]UpstreamModelMetadata{"gpt-synced": {}}})
 	b := plazaAccount(PlatformOpenAI, []int64{2}, map[string]any{"stale-alias": "retired"})
 	b.Extra = map[string]any{"openai_passthrough": true}
@@ -161,28 +169,19 @@ func TestListPlazaGroups_WildcardsMetadataAndPassthrough(t *testing.T) {
 	svc.accountRepo = repo
 	out, err := svc.ListGroups(context.Background())
 	require.NoError(t, err)
-	require.Len(t, out, 2)
-	for _, g := range out {
-		models := plazaModelsByName(g.Models)
-		require.Contains(t, models, "gpt-6.1-sol")
-		require.NotContains(t, models, "gpt-*")
-		require.NotContains(t, models, "claude-custom")
-		require.NotContains(t, models, "stale-alias")
-		if g.ID == 1 {
-			require.Contains(t, models, "gpt-custom-new")
-			require.Contains(t, models, "gpt-synced")
-		}
-	}
+	require.Empty(t, out, "neither reference prices, metadata nor unrestricted forwarding establish a listing")
 	// The next poll sees account edits instead of a long-lived discovery cache.
 	repo.accounts[0].Credentials["model_mapping"] = map[string]any{"only-new": "only-new"}
 	out, err = svc.ListGroups(context.Background())
 	require.NoError(t, err)
-	for _, g := range out {
-		if g.ID == 1 {
-			require.Len(t, g.Models, 1)
-			require.Equal(t, "only-new", g.Models[0].Name)
-		}
-	}
+	require.Len(t, out, 1)
+	require.Equal(t, int64(1), out[0].ID)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "only-new", out[0].Models[0].Name)
+	repo.accounts[0].Credentials["model_mapping"] = nil
+	out, err = svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, out, "removing the explicit models must not fall back to the built-in catalog")
 }
 
 func TestListPlazaGroups_AccountReadFailureDoesNotReturnPartialCatalog(t *testing.T) {
@@ -212,7 +211,7 @@ func TestListPlazaGroups_RestrictionsUseChannelBillingModel(t *testing.T) {
 }
 
 func TestListPlazaGroups_RetiredOAuthModelsStayHidden(t *testing.T) {
-	a := plazaAccount(PlatformOpenAI, []int64{1}, nil)
+	a := plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"gpt-6.1-sol": "gpt-6.1-sol", "gpt-5.5": "gpt-5.5"})
 	a.Type = AccountTypeOAuth
 	svc := newPlazaService(nil, []Group{{ID: 1, Platform: PlatformOpenAI}}, nil)
 	svc.accountRepo = &plazaAccountRepository{accounts: []Account{a}}
@@ -222,4 +221,124 @@ func TestListPlazaGroups_RetiredOAuthModelsStayHidden(t *testing.T) {
 	models := plazaModelsByName(out[0].Models)
 	require.Contains(t, models, "gpt-6.1-sol")
 	require.NotContains(t, models, "gpt-5.5")
+}
+
+func TestListPlazaGroups_PricesDoNotEstablishGroupSupply(t *testing.T) {
+	groups := []Group{
+		{ID: 1, Platform: PlatformOpenAI, ModelPricing: []ChannelModelPricing{{Models: []string{"group-price-only"}}}},
+		{ID: 2, Platform: PlatformOpenAI},
+		{ID: 3, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6.1-sol"}}},
+	}
+	ch := plazaPricedChannel(1, "priced", []int64{1, 2, 3}, PlatformOpenAI, "gpt-6.1-sol", "channel-price-only")
+	repo := &plazaAccountRepository{accounts: []Account{
+		plazaAccount(PlatformOpenAI, []int64{1}, nil),
+		plazaAccount(PlatformOpenAI, []int64{2}, map[string]any{"gpt-6.1-sol": "gpt-6.1-sol"}),
+	}}
+	svc := newPlazaService([]Channel{ch}, groups, nil)
+	svc.accountRepo = repo
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1, "prices, an unrestricted account, or an allowlist without accounts do not establish supply")
+	require.Equal(t, int64(2), out[0].ID)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "gpt-6.1-sol", out[0].Models[0].Name)
+
+	// A saved account move must immediately move its models to the new group.
+	repo.accounts[1].GroupIDs = []int64{1}
+	out, err = svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, int64(1), out[0].ID)
+	require.Len(t, out[0].Models, 1)
+	repo.accounts[1].Schedulable = false
+	out, err = svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, out, "prices cannot keep a model listed after its last supplier is paused")
+}
+
+func TestListPlazaGroups_EmptyMappingsDoNotExpandProviderDefaults(t *testing.T) {
+	for _, platform := range []string{PlatformOpenAI, PlatformAnthropic, PlatformGemini, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformMiniMax} {
+		t.Run(platform, func(t *testing.T) {
+			svc := newPlazaService(nil, []Group{{ID: 1, Platform: platform}}, nil)
+			svc.accountRepo = &plazaAccountRepository{accounts: []Account{plazaAccount(platform, []int64{1}, nil)}}
+			out, err := svc.ListGroups(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, out)
+		})
+	}
+}
+
+func TestListPlazaGroups_ChannelAliasesRequireSupportingAccount(t *testing.T) {
+	ch := plazaPricedChannel(1, "aliases", []int64{1}, PlatformOpenAI, "upstream-model", "unavailable-target")
+	ch.ModelMapping = map[string]map[string]string{PlatformOpenAI: {
+		"public-model": "account-model", "unsupported-alias": "unavailable-target", "wild-*": "account-model",
+	}}
+	svc := newPlazaServiceWithBilling([]Channel{ch}, []Group{{ID: 1, Platform: PlatformOpenAI}}, map[int64]string{1: PlatformOpenAI}, nil)
+	svc.accountRepo = &plazaAccountRepository{accounts: []Account{
+		plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"account-model": "upstream-model"}),
+	}}
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	models := plazaModelsByName(out[0].Models)
+	require.Len(t, models, 2)
+	require.Contains(t, models, "account-model")
+	require.Contains(t, models, "public-model")
+	require.NotContains(t, models, "upstream-model", "an upstream target is not automatically a public request name")
+	require.NotContains(t, models, "unsupported-alias")
+}
+
+func TestListPlazaGroups_ExplicitGroupModelsStillRequireAccountSupport(t *testing.T) {
+	groups := []Group{
+		{ID: 1, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"public-model", "unsupported", "wild-*"}}},
+		{ID: 2, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Models: []string{"stale-model"}}},
+		{ID: 3, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"listed-passthrough"}}},
+	}
+	passthrough := plazaAccount(PlatformOpenAI, []int64{3}, map[string]any{"stale-alias": "stale-target"})
+	passthrough.Extra = map[string]any{"openai_passthrough": true}
+	svc := newPlazaService(nil, groups, nil)
+	svc.accountRepo = &plazaAccountRepository{accounts: []Account{
+		plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"public-*": "upstream-model", "hidden-model": "hidden-model"}),
+		plazaAccount(PlatformOpenAI, []int64{2}, nil), passthrough,
+	}}
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	for _, g := range out {
+		require.Len(t, g.Models, 1)
+		if g.ID == 1 {
+			require.Equal(t, "public-model", g.Models[0].Name)
+		} else {
+			require.Equal(t, int64(3), g.ID)
+			require.Equal(t, "listed-passthrough", g.Models[0].Name)
+		}
+	}
+}
+
+func TestListPlazaGroups_UpstreamRestrictionsApplyToPricedModels(t *testing.T) {
+	ch := plazaPricedChannel(1, "restricted", []int64{1}, PlatformOpenAI, "public-model", "allowed-target")
+	ch.RestrictModels = true
+	ch.BillingModelSource = BillingModelSourceUpstream
+	svc := newPlazaService([]Channel{ch}, []Group{{ID: 1, Platform: PlatformOpenAI}}, nil)
+	repo := &plazaAccountRepository{accounts: []Account{
+		plazaAccount(PlatformOpenAI, []int64{1}, map[string]any{"public-model": "blocked-target"}),
+	}}
+	svc.accountRepo = repo
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, out, "a priced public model cannot bypass its upstream target restriction")
+	repo.accounts[0].Credentials["model_mapping"] = map[string]any{"public-model": "allowed-target"}
+	out, err = svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "public-model", out[0].Models[0].Name)
+}
+
+func TestListPlazaGroups_MissingAccountRepositoryDoesNotReturnPrices(t *testing.T) {
+	svc := newPlazaService([]Channel{plazaPricedChannel(1, "priced", []int64{1}, PlatformOpenAI, "gpt-6.1-sol")}, []Group{{ID: 1, Platform: PlatformOpenAI}}, nil)
+	svc.accountRepo = nil
+	out, err := svc.ListGroups(context.Background())
+	require.Error(t, err)
+	require.Nil(t, out)
 }
