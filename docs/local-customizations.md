@@ -139,6 +139,13 @@ Vertex 共享容量不足单请求退避和 Antigravity Hub UA；已确认的本
 回归入口为 `model_plaza_catalog_test.go` 与 `model_plaza_service_test.go`。本轮没有修改前端、
 实际调用准入、数据库迁移或生产配置，也未增加上游同步或收费探测。
 
+后续精简已在 `b3c33601e23e93890354b3af00f17b17a6ec5b05` 合入 `main`，尚未部署：
+同一分组、平台、模型找到首个合格供应账号后，不再对其他
+重复供应账号重新解析映射；失败检查仍继续尝试后续账号。合并分组初始化遍历，删除额外顺序数组，
+移除账号名单的预排序，合并渠道/分组候选时统一归一化和排序，不增加跨请求缓存。
+`BenchmarkModelPlazaSharedAccountModels` 对比单账号与 200 账号共享 40 模型、关联 2 分组；
+基准不含数据库、网络与完整计费服务，具体测量及验证边界见版本记录。
+
 价格仍使用 `ModelPricingResolver` 和 `ResolveContextPricingSchedule` 的实际扣费解析链。
 广场从本次查询的渠道和分组行构建请求内渠道快照，避免进程长缓存导致刚保存的价格仍展示旧值；
 不改变网关缓存或扣费规则。`current_rate_multiplier` 复用峰值、图片、视频倍率函数并包含当前
