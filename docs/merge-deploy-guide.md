@@ -345,6 +345,10 @@ python3 "$RELEASE/tools/fast_deploy.py" rollback --release "$RELEASE"
 
 ### 失败与重试
 
+- 公网预检出现 `curl: (28) Resolving timed out` 时，先核对失败阶段及旧应用/后台是否实际改变，
+  再以相同普通 curl、正常 DNS/TLS 复查入口和资源；不改 hosts、不跳过公网验收来消除报错。
+  即使 `PREFLIGHT_FAILED` 尚未进入维护，也保留原尝试，现场复核正常后用新目录重新准备；
+  镜像身份和隔离证据不变时可复用制品，不重放旧 `activate`，瞬时复查成功不等于 DNS 根因已查明。
 - 公网 403 先按预定检查区分路径、代理/WAF、鉴权与应用错误。本次 `urllib` 与 `curl` 结果不同，
   但具体命中策略未查明，不能直接写成“WAF 误封”；不因验收失败修改 WAF 或关闭 TLS 验证。
   本机证书检查失败时，另从外部以正常 TLS 核对公网。
