@@ -1148,11 +1148,18 @@ func (s *PricingService) lookupIdentifiedModelPricingLocked(lookupCandidates []s
 
 	// 3. 尝试模糊匹配（去掉版本号后缀）
 	// claude-opus-4-5-20251101 -> claude-opus-4.5
-	baseName := s.extractBaseName(lookupCandidates[0])
-	for key, pricing := range s.pricingData {
-		keyBase := s.extractBaseName(strings.ToLower(key))
-		if keyBase == baseName {
-			return pricing
+	for _, candidate := range lookupCandidates {
+		baseName := s.extractBaseName(candidate)
+		matchedKey := ""
+		for key := range s.pricingData {
+			keyBase := s.extractBaseName(strings.ToLower(key))
+			if keyBase == baseName && (matchedKey == "" || key < matchedKey) {
+				matchedKey = key
+			}
+		}
+		// A fixed key order keeps equivalent dated entries independent of map iteration.
+		if matchedKey != "" {
+			return s.pricingData[matchedKey]
 		}
 	}
 
@@ -1185,12 +1192,10 @@ func (s *PricingService) buildModelLookupCandidates(modelLower string) []string 
 	}
 	normalized := normalizeModelNameForPricing(modelLower)
 
-	// A tier-specific entry should take precedence when the pricing catalog gains
-	// one later. Today Antigravity's Gemini 3.6 Flash tiers share the base rate,
-	// so the normalized base remains the fallback after the exact aliases.
+	// Explicit thinking-tier prices win; otherwise use the normalized base model.
 	candidates := rawCandidates
 	if isAntigravityThinkingTierAlias(lastSegment(modelLower)) {
-		candidates = append(candidates, normalized)
+		candidates = append(candidates, normalized, normalizeModelNameForPricing(lastSegment(modelLower)))
 	} else {
 		// Prefer canonical model names for all other aliases (including models/xxx).
 		candidates = append([]string{normalized}, candidates...)
@@ -1266,6 +1271,9 @@ func normalizeGeminiThinkingTierAlias(model string) string {
 // normalizeAntigravityClaudeTierAlias maps Antigravity Claude thinking-tier
 // IDs to the priced public base model.
 func normalizeAntigravityClaudeTierAlias(model string) string {
+	if strings.HasPrefix(model, "claude-") && strings.HasSuffix(model, "-thinking") {
+		return strings.TrimSuffix(model, "-thinking")
+	}
 	for _, baseModel := range []string{"claude-opus-5-5", "claude-sonnet-5-5"} {
 		for _, tier := range []string{"-high", "-low", "-medium"} {
 			if model == baseModel+tier {
@@ -1425,15 +1433,22 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 		lookups = matched.match
 	}
 	for _, pattern := range lookups {
-		for key, pricing := range s.pricingData {
+		if pricing, ok := s.pricingData[pattern]; ok {
+			return pricing
+		}
+		matchedKey := ""
+		for key := range s.pricingData {
 			keyLower := strings.ToLower(key)
 			if matched.name == "opus-5" && claude.IsOpus55(keyLower) {
 				continue
 			}
-			if strings.Contains(keyLower, pattern) {
-				logger.LegacyPrintf("service.pricing", "[Pricing] Fuzzy matched %s -> %s", model, key)
-				return pricing
+			if strings.Contains(keyLower, pattern) && (matchedKey == "" || key < matchedKey) {
+				matchedKey = key
 			}
+		}
+		if matchedKey != "" {
+			logger.LegacyPrintf("service.pricing", "[Pricing] Fuzzy matched %s -> %s", model, matchedKey)
+			return s.pricingData[matchedKey]
 		}
 	}
 

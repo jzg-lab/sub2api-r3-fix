@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -36,6 +37,13 @@ func (s *BillingService) CalculateTokenCostForRequest(req TokenCostRequest) (*Co
 	}
 	if req.ReasoningEffort != "" {
 		return s.CalculateCostUnified(s.tokenCostInput(req, resolved))
+	}
+	if resolved != nil {
+		if resolved.BasePricing == nil {
+			return nil, fmt.Errorf("no pricing available for model: %s: %w", req.Model, ErrModelPricingUnavailable)
+		}
+		// Keep all catalog probes on the resolved snapshot, including across refreshes.
+		return s.computeTokenBreakdown(resolved.BasePricing, req.Tokens, req.RateMultiplier, "", true), nil
 	}
 	return s.CalculateCost(req.Model, req.Tokens, req.RateMultiplier)
 }
