@@ -538,6 +538,18 @@ class BuildBudgetTests(unittest.TestCase):
 
 
 class FixtureIsolationTests(unittest.TestCase):
+    def test_caller_inventory_ignores_transient_deployment_jobs_only(self):
+        host = Mock(c={"pause_services": ["caller.service"]})
+        persistent = b"caller.service enabled -\nother.timer enabled -\n"
+
+        def inventory(units):
+            with patch.object(d, "run", side_effect=[units, b"FragmentPath=/etc/systemd/system/caller.service\n"]):
+                return v.caller_inventory(host)
+
+        baseline = inventory(persistent)
+        self.assertEqual(inventory(persistent + b"sub2api-prepare-123.service transient -\n"), baseline)
+        self.assertNotEqual(inventory(persistent + b"new-caller.timer enabled -\n"), baseline)
+
     def test_runtime_uid_uses_the_application_process_not_docker_exec(self):
         with patch.object(d, "run", return_value=b"Name:\tsub2api\nUid:\t1000\t1000\t1000\t1000\n") as run:
             v.check_runtime_uid("fixture")

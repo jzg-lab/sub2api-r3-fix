@@ -11,7 +11,9 @@ import fast_deploy as d
 
 
 def caller_inventory(host):
-    units = d.run("systemctl", "list-unit-files", "--type=service", "--type=timer", "--no-legend", "--no-pager")
+    listed = d.run("systemctl", "list-unit-files", "--type=service", "--type=timer", "--no-legend", "--no-pager")
+    units = b"\n".join(line for line in listed.splitlines()
+                       if len(line.split()) < 2 or line.split()[1] != b"transient")
     details = [d.run("systemctl", "show", name, "--property=FragmentPath,DropInPaths,ExecStart,Restart,Triggers,TriggeredBy")
                for name in host.c["pause_services"]]
     return hashlib.sha256(units + b"\n".join(details)).hexdigest()
