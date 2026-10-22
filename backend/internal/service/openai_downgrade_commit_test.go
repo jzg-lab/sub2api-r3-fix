@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/stretchr/testify/require"
 )
 
@@ -347,6 +348,50 @@ func errorTestName(err error) string {
 		return "success"
 	}
 	return err.Error()
+}
+
+func TestDeploymentHandoffWaitsForDetachedProbeChild(t *testing.T) {
+	t.Setenv("DEPLOYMENT_SOCKET", "/unused/test.sock")
+	deployment.Background.SetOpen(true)
+	t.Cleanup(func() { deployment.Background.SetOpen(false) })
+	block, release := runtimeBarrier(t)
+	started := make(chan struct{})
+	now := time.Now()
+	proxyID := int64(3)
+	account := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+		Status: StatusActive, ProxyID: &proxyID, UpdatedAt: now.Add(-time.Hour)}
+	repo := &downgradeProbeAccountRepoStub{account: account}
+	state := OpenAIDowngradeProbeState{AccountID: 7, State: OpenAIDowngradeStateOnDuty,
+		ProbeMode: "qualification", OriginalProxyID: &proxyID, CurrentProxyID: &proxyID,
+		UpdatedAt: now.Add(-time.Minute)}
+	store := &downgradeAtomicStoreStub{downgradeProbeStoreStub: &downgradeProbeStoreStub{due: []OpenAIDowngradeProbeState{state}}, accountRepo: repo}
+	store.afterCommit = func() { store.observed.State.State = OpenAIDowngradeStatePendingReplace }
+	runner := NewOpenAIDowngradeProbeRunner(store, repo, nil, nil, nil, nil)
+	runner.probeFn = func(context.Context, *Account, string) OpenAIDowngradeProbeResult {
+		return OpenAIDowngradeProbeResult{AccountID: 7, ProxyID: &proxyID, HTTPStatus: http.StatusOK,
+			TransportOK: true, AnswerCorrect: true, ReasoningTokens: downgradeProbeIntPtr(1500)}
+	}
+	runner.rescueLane = NewOpenAIRescueLane(nil, nil, func() OpenAIRescueLaneConfig {
+		close(started)
+		<-block
+		return OpenAIRescueLaneConfig{} // Stop at configuration; no account or upstream work.
+	}, nil)
+	t.Cleanup(func() {
+		release()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, WaitDeploymentAsync(ctx))
+	})
+	require.NoError(t, runner.RunOnce(t.Context()))
+	waitRuntimeSignal(t, started)
+	require.Zero(t, deployment.Background.Pending(), "the parent scan has finished")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, WaitDeploymentAsync(ctx), context.DeadlineExceeded)
+	release()
+	ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	require.NoError(t, WaitDeploymentAsync(ctx))
 }
 
 func TestOpenAIProbeManualPauseBlocksEveryRecoveryTrack(t *testing.T) {

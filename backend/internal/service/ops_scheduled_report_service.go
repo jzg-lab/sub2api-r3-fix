@@ -144,6 +144,11 @@ func (s *OpsScheduledReportService) run() {
 }
 
 func (s *OpsScheduledReportService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s == nil || s.opsService == nil || s.emailService == nil {
 		return
 	}

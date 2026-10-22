@@ -101,6 +101,11 @@ func (s *ClaudeCodeVersionSyncService) syncedWithinInterval() bool {
 }
 
 func (s *ClaudeCodeVersionSyncService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeVersionSyncTimeout)
 	defer cancel()
 

@@ -18,8 +18,9 @@ import (
 
 // SystemHandler handles system-related operations
 type SystemHandler struct {
-	updateSvc systemUpdateService
-	lockSvc   *service.SystemOperationLockService
+	updateSvc     systemUpdateService
+	lockSvc       *service.SystemOperationLockService
+	deploymentSvc *service.ManagedDeploymentService
 }
 
 // systemUpdateTimeout bounds a full in-place update or rollback: the release
@@ -83,6 +84,9 @@ func (h *SystemHandler) CheckUpdates(c *gin.Context) {
 // PerformUpdate downloads and applies the update
 // POST /api/v1/admin/system/update
 func (h *SystemHandler) PerformUpdate(c *gin.Context) {
+	if h.rejectUnmanagedOperation(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "update")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.update", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {
@@ -131,6 +135,9 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 // GetRollbackVersions lists versions available for rollback
 // GET /api/v1/admin/system/rollback-versions
 func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
+	if h.rejectUnmanagedOperation(c) {
+		return
+	}
 	versions, err := h.updateSvc.ListRollbackVersions(c.Request.Context())
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
@@ -147,6 +154,9 @@ func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
 // installs that specific release (must be one of the recent rollback versions).
 // POST /api/v1/admin/system/rollback
 func (h *SystemHandler) Rollback(c *gin.Context) {
+	if h.rejectUnmanagedOperation(c) {
+		return
+	}
 	var req struct {
 		Version string `json:"version"`
 	}
@@ -201,6 +211,9 @@ func (h *SystemHandler) Rollback(c *gin.Context) {
 // RestartService restarts the systemd service
 // POST /api/v1/admin/system/restart
 func (h *SystemHandler) RestartService(c *gin.Context) {
+	if h.rejectUnmanagedOperation(c) {
+		return
+	}
 	operationID := buildSystemOperationID(c, "restart")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.restart", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {

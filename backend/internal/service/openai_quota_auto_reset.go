@@ -214,6 +214,11 @@ func (s *OpenAIQuotaAutoResetService) runScanner() {
 }
 
 func (s *OpenAIQuotaAutoResetService) scanEnabledAccounts(ctx context.Context) {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return
+	}
+	defer done()
 	release, scan := s.tryAcquireScanLock(ctx)
 	if !scan {
 		return
@@ -273,6 +278,11 @@ type openAIAutoResetAssessment struct {
 }
 
 func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accountID int64) error {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return nil
+	}
+	defer done()
 	ctx = withOpenAIAutoResetContext(ctx)
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil || account == nil {

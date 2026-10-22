@@ -104,6 +104,11 @@ func (s *SubscriptionExpiryService) Stop() {
 }
 
 func (s *SubscriptionExpiryService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

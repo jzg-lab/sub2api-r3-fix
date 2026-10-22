@@ -1191,7 +1191,9 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 		return
 	}
 
+	done := beginDeploymentAsync()
 	go func() {
+		defer done()
 		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.accountRepo.UpdateExtra(updateCtx, accountID, updates); err == nil {

@@ -147,6 +147,11 @@ func (s *OpsAggregationService) dailyLoop() {
 }
 
 func (s *OpsAggregationService) aggregateHourly() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s == nil || s.opsRepo == nil {
 		return
 	}
@@ -247,6 +252,11 @@ func (s *OpsAggregationService) aggregateHourly() {
 }
 
 func (s *OpsAggregationService) aggregateDaily() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s == nil || s.opsRepo == nil {
 		return
 	}

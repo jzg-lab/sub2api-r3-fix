@@ -629,10 +629,11 @@ type GeminiCachedContentService struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 func NewGeminiCachedContentService(repo GeminiCachedContentRepository, compat *GeminiMessagesCompatService, cfg *config.Config) *GeminiCachedContentService {
-	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now, stopCh: make(chan struct{})}
+	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 }
 
 // Start 启动后台回滚恢复：定期处理租约已过期仍未清除的修改意图。
@@ -640,7 +641,7 @@ func (s *GeminiCachedContentService) Start() {
 	if s == nil || s.repo == nil {
 		return
 	}
-	s.startOnce.Do(func() { go s.runMutationRecovery() })
+	s.startOnce.Do(func() { go func() { defer close(s.doneCh); s.runMutationRecovery() }() })
 }
 
 // Stop 停止后台回滚恢复。
@@ -648,7 +649,19 @@ func (s *GeminiCachedContentService) Stop() {
 	if s == nil {
 		return
 	}
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
+	})
+	s.startOnce.Do(func() {
+		if s.doneCh != nil {
+			close(s.doneCh)
+		}
+	})
+	if s.doneCh != nil {
+		<-s.doneCh
+	}
 }
 
 func (s *GeminiCachedContentService) runMutationRecovery() {
@@ -790,6 +803,11 @@ func (s *GeminiCachedContentService) ReleaseMutation(ctx context.Context, m *Gem
 
 // RecoverStaleMutations 回滚恢复一批租约已过期的修改意图，返回完成恢复的数量。
 func (s *GeminiCachedContentService) RecoverStaleMutations(ctx context.Context) (int, error) {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return 0, nil
+	}
+	defer deploymentDone()
 	listCtx, cancel := context.WithTimeout(ctx, geminiCachedContentMutationRecoveryTimeout)
 	ids, err := s.repo.ListStaleMutations(listCtx, geminiCachedContentMutationRecoveryBatch)
 	cancel()

@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"os"
+
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
@@ -164,7 +166,9 @@ func ProvideBatchImageHandler(
 
 // ProvideSystemHandler creates admin.SystemHandler with UpdateService
 func ProvideSystemHandler(updateService *service.UpdateService, lockService *service.SystemOperationLockService) *admin.SystemHandler {
-	return admin.NewSystemHandler(updateService, lockService)
+	h := admin.NewSystemHandler(updateService, lockService)
+	h.SetManagedDeploymentService(service.NewManagedDeploymentService(os.Getenv("MANAGED_DEPLOY_SOCKET")))
+	return h
 }
 
 // ProvideSettingHandler creates SettingHandler with version from BuildInfo

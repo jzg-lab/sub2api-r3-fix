@@ -26,6 +26,7 @@ type SystemOperationLock struct {
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
+	doneCh   chan struct{}
 }
 
 func (l *SystemOperationLock) OperationID() string {
@@ -131,6 +132,7 @@ func (s *SystemOperationLockService) Acquire(ctx context.Context, operationID st
 		recordID:    record.ID,
 		operationID: operationID,
 		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
 	}
 	go s.renewLoop(lock)
 
@@ -145,6 +147,9 @@ func (s *SystemOperationLockService) Release(ctx context.Context, lock *SystemOp
 	lock.stopOnce.Do(func() {
 		close(lock.stopCh)
 	})
+	if lock.doneCh != nil {
+		<-lock.doneCh
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -164,6 +169,9 @@ func (s *SystemOperationLockService) Release(ctx context.Context, lock *SystemOp
 }
 
 func (s *SystemOperationLockService) renewLoop(lock *SystemOperationLock) {
+	if lock.doneCh != nil {
+		defer close(lock.doneCh)
+	}
 	ticker := time.NewTicker(s.renewInterval)
 	defer ticker.Stop()
 

@@ -123,6 +123,7 @@ func startOpsErrorLogWorkers() {
 
 	workerCount, queueSize := opsErrorLogConfig()
 	opsErrorLogQueue = make(chan opsErrorLogJob, queueSize)
+	queue := opsErrorLogQueue
 	opsErrorLogQueueLen.Store(0)
 	opsErrorLogQueueBytes.Store(0)
 
@@ -131,7 +132,7 @@ func startOpsErrorLogWorkers() {
 		go func() {
 			defer opsErrorLogWorkersWg.Done()
 			for {
-				job, ok := <-opsErrorLogQueue
+				job, ok := <-queue
 				if !ok {
 					return
 				}
@@ -144,7 +145,7 @@ func startOpsErrorLogWorkers() {
 			batchLoop:
 				for len(batch) < opsErrorLogBatchSize {
 					select {
-					case nextJob, ok := <-opsErrorLogQueue:
+					case nextJob, ok := <-queue:
 						if !ok {
 							if !timer.Stop() {
 								select {

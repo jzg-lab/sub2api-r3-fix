@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
+
 	"github.com/spf13/viper"
 	"golang.org/x/net/http/httpguts"
 )
@@ -1978,6 +1980,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	// Auto-generate TOTP encryption key if not set (32 bytes = 64 hex chars for AES-256)
 	cfg.Totp.EncryptionKey = strings.TrimSpace(cfg.Totp.EncryptionKey)
 	if cfg.Totp.EncryptionKey == "" {
+		if deployment.Managed() {
+			return nil, fmt.Errorf("deployment requires the existing TOTP encryption key")
+		}
 		key, err := generateJWTSecret(32) // Reuse the same random generation function
 		if err != nil {
 			return nil, fmt.Errorf("generate totp encryption key error: %w", err)

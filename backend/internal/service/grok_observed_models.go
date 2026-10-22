@@ -41,14 +41,14 @@ func (s *GrokQuotaService) scheduleGrokObservedModelsSync(account *Account) {
 	}
 	// Copy credentials for background use.
 	acc := *account
-	go func() {
+	runDeploymentAsync(func() {
 		defer grokObservedModelsFlight.Delete(id)
 		ctx, cancel := context.WithTimeout(context.Background(), grokObservedModelsTimeout)
 		defer cancel()
 		if err := s.syncGrokObservedModels(ctx, &acc); err != nil {
 			slog.Debug("grok_observed_models_sync_failed", "account_id", id, "error", err)
 		}
-	}()
+	})
 }
 
 func (s *GrokQuotaService) syncGrokObservedModels(ctx context.Context, account *Account) error {

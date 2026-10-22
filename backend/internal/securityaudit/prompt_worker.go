@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 )
 
 type WorkerRuntime struct {
@@ -98,17 +100,24 @@ func (r *Runner) worker(ctx context.Context, workerID int) {
 				continue
 			}
 			for {
+				done, admitted := deployment.BeginBackground()
+				if !admitted {
+					break
+				}
 				job, claimed, err := r.repo.ClaimNextJob(ctx, r.clock.Now())
 				if err != nil {
+					done()
 					r.setLastError("claim_job_failed", err.Error())
 					break
 				}
 				if !claimed {
+					done()
 					break
 				}
 				r.runtime.active.Add(1)
 				r.processSafely(ctx, workerID, cfg, job)
 				r.runtime.active.Add(-1)
+				done()
 			}
 		}
 	}
@@ -266,8 +275,13 @@ func (r *Runner) reclaimer(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			done, admitted := deployment.BeginBackground()
+			if !admitted {
+				continue
+			}
 			now := r.clock.Now()
 			count, err := r.repo.ReclaimStale(ctx, now.Add(-2*time.Minute), now.Add(-90*time.Second), 100)
+			done()
 			if err != nil {
 				r.setLastError("reclaim_failed", err.Error())
 				continue

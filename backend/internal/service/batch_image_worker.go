@@ -130,6 +130,12 @@ func (w *BatchImageWorker) Run(ctx context.Context) {
 }
 
 func (w *BatchImageWorker) RunOnce(ctx context.Context) error {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		sleepOrDone(ctx, time.Second)
+		return nil
+	}
+	defer done()
 	if w == nil || w.queue == nil || w.processor == nil {
 		return nil
 	}
@@ -231,6 +237,11 @@ func (w *BatchImageWorker) runJobHeartbeat(ctx context.Context, batchID string, 
 }
 
 func (w *BatchImageWorker) MoveDueDelayedOnce(ctx context.Context) (int, error) {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return 0, nil
+	}
+	defer done()
 	if w == nil || w.queue == nil {
 		return 0, nil
 	}
@@ -254,6 +265,11 @@ func (w *BatchImageWorker) RunDelayedMover(ctx context.Context) {
 }
 
 func (w *BatchImageWorker) RecoverStaleActiveOnce(ctx context.Context) (int, error) {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return 0, nil
+	}
+	defer done()
 	if w == nil || w.queue == nil {
 		return 0, nil
 	}

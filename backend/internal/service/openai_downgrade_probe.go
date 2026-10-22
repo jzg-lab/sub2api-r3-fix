@@ -736,6 +736,14 @@ func (r *OpenAIDowngradeProbeRunner) Stop() {
 		case <-timer.C:
 			logger.LegacyPrintf("service.openai_downgrade_probe",
 				"[OpenAIDowngradeProbe] stop timed out waiting for scan shutdown")
+			runDeploymentAsync(func() {
+				if r.doneCh != nil {
+					<-r.doneCh
+				}
+				if runDone != nil {
+					<-runDone
+				}
+			})
 			return
 		}
 	}
@@ -820,6 +828,11 @@ func (r *OpenAIDowngradeProbeRunner) maybePurgeHistory(ctx context.Context, now 
 // RunOnce performs one bounded scan. It is public to make startup/acceptance
 // checks deterministic without waiting for the background ticker.
 func (r *OpenAIDowngradeProbeRunner) RunOnce(ctx context.Context) error {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return nil
+	}
+	defer deploymentDone()
 	if r == nil || r.store == nil || r.accountRepo == nil {
 		return nil
 	}

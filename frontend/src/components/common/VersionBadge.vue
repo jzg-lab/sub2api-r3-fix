@@ -3,14 +3,14 @@
     <!-- Admin: Full version badge with dropdown -->
     <template v-if="isAdmin">
       <button
-        @click="toggleDropdown"
+        @click="openVersion"
         class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
         :class="[
           hasUpdate
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
             : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
         ]"
-        :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
+        :title="versionStatus"
       >
         <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
         <span
@@ -80,17 +80,17 @@
             <template v-else>
               <!-- Version display - centered and prominent -->
               <div class="mb-4 text-center">
-                <div class="inline-flex items-center gap-2">
+                <div class="flex min-w-0 items-center justify-center gap-2">
                   <span
                     v-if="currentVersion"
-                    class="text-2xl font-bold text-gray-900 dark:text-white"
+                    class="min-w-0 break-all text-lg font-bold text-gray-900 dark:text-white"
                     >v{{ currentVersion }}</span
                   >
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
-                    v-if="!hasUpdate"
-                    class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
+                    v-if="!hasUpdate && !versionWarning && appStore.versionLoaded"
+                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
                       class="h-3 w-3 text-green-600 dark:text-green-400"
@@ -105,17 +105,26 @@
                     </svg>
                   </span>
                 </div>
-                <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
+                <p class="mt-1 break-all text-xs text-gray-500 dark:text-dark-400">
                   {{
                     hasUpdate
                       ? t('version.latestVersion') + ': v' + latestVersion
-                      : t('version.upToDate')
+                      : versionStatus
                   }}
                 </p>
               </div>
 
-              <!-- Priority 1: Update error (must check before hasUpdate) -->
-              <div v-if="updateError" class="space-y-2">
+              <div v-if="versionWarning" class="space-y-2">
+                <p role="status" class="break-words text-xs text-amber-700 dark:text-amber-400">
+                  {{ versionWarning }}
+                </p>
+                <a :href="DEPLOYMENT_GUIDE" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-primary-600 dark:text-primary-400">
+                  {{ t('version.deploymentGuide') }}
+                  <Icon name="externalLink" size="xs" />
+                </a>
+              </div>
+              <!-- Update errors take precedence over available updates. -->
+              <div v-else-if="updateError" class="space-y-2">
                 <div
                   class="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800/50 dark:bg-red-900/20"
                 >
@@ -231,7 +240,7 @@
                 </button>
               </div>
 
-              <!-- Priority 3: Update available for source build - show git pull hint -->
+              <!-- Source builds are updated through the deployment workflow. -->
               <div v-else-if="hasUpdate && !isReleaseBuild" class="space-y-2">
                 <a
                   v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
@@ -289,6 +298,10 @@
                     {{ t('version.sourceModeHint') }}
                   </p>
                 </div>
+                <a :href="DEPLOYMENT_GUIDE" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-primary-600 dark:text-primary-400">
+                  {{ t('version.deploymentGuide') }}
+                  <Icon name="externalLink" size="xs" />
+                </a>
               </div>
 
               <!-- Priority 4: Update available for release build - show update button -->
@@ -395,7 +408,7 @@
 
                   <transition name="rollback">
                     <div v-if="rollbackPanelOpen" class="mt-2 space-y-2">
-                      <!-- Source build: online rollback unavailable, use git instead -->
+                      <!-- Source builds cannot use binary-only rollback. -->
                       <div
                         v-if="!isReleaseBuild"
                         class="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 p-2 dark:border-blue-800/50 dark:bg-blue-900/20"
@@ -413,9 +426,13 @@
                             d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                           />
                         </svg>
-                        <p class="min-w-0 flex-1 text-xs leading-4 text-blue-600 dark:text-blue-400">
-                          {{ t('version.rollbackSourceHint') }}
-                        </p>
+                        <div class="min-w-0 flex-1 text-xs leading-4 text-blue-600 dark:text-blue-400">
+                          <p>{{ t('version.rollbackSourceHint') }}</p>
+                          <a :href="DEPLOYMENT_GUIDE" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1">
+                            {{ t('version.deploymentGuide') }}
+                            <Icon name="externalLink" size="xs" />
+                          </a>
+                        </div>
                       </div>
 
                       <!-- Loading versions -->
@@ -514,55 +531,13 @@
                           </span>
                         </button>
 
-                        <!-- Selected version: manual command (per deploy method) + confirm -->
+                        <!-- Selected version: project guidance and confirmation. -->
                         <transition name="rollback">
                           <div v-if="selectedRollbackVersion" class="space-y-2">
-                            <p class="px-0.5 text-[11px] text-gray-400 dark:text-dark-500">
-                              {{ t('version.manualRollbackCommand') }}
-                            </p>
-
-                            <!-- Terminal-style block with deploy-method tabs -->
-                            <div
-                              class="overflow-hidden rounded-lg border border-gray-200 dark:border-dark-600"
-                            >
-                              <div
-                                class="flex items-center justify-between border-b border-gray-200 bg-gray-100 px-2 py-1.5 dark:border-dark-600 dark:bg-dark-700"
-                              >
-                                <div
-                                  class="flex items-center gap-0.5 rounded-md bg-gray-200/70 p-0.5 dark:bg-dark-600/70"
-                                >
-                                  <button
-                                    v-for="tab in manualTabs"
-                                    :key="tab.key"
-                                    @click="manualTab = tab.key"
-                                    class="rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
-                                    :class="
-                                      manualTab === tab.key
-                                        ? 'bg-white text-gray-700 shadow-sm dark:bg-dark-800 dark:text-dark-100'
-                                        : 'text-gray-400 hover:text-gray-600 dark:text-dark-400 dark:hover:text-dark-200'
-                                    "
-                                  >
-                                    {{ tab.label }}
-                                  </button>
-                                </div>
-                                <button
-                                  @click="copyToClipboard(activeManualCommand)"
-                                  class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600 dark:text-dark-400 dark:hover:bg-dark-600 dark:hover:text-dark-200"
-                                >
-                                  <Icon
-                                    :name="copied ? 'check' : 'copy'"
-                                    size="xs"
-                                    :stroke-width="2"
-                                    :class="copied ? 'text-green-500' : ''"
-                                  />
-                                  {{ copied ? t('version.copied') : t('version.copyCommand') }}
-                                </button>
-                              </div>
-                              <code
-                                class="block select-all whitespace-pre-wrap break-all bg-gray-50 p-2.5 font-mono text-[10px] leading-relaxed text-gray-600 dark:bg-dark-900 dark:text-dark-300"
-                                >{{ activeManualCommand }}</code
-                              >
-                            </div>
+                            <a :href="DEPLOYMENT_GUIDE" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-primary-600 dark:text-primary-400">
+                              {{ t('version.deploymentGuide') }}
+                              <Icon name="externalLink" size="xs" />
+                            </a>
 
                             <p
                               class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400"
@@ -628,6 +603,7 @@
           </div>
         </div>
       </transition>
+      <DeploymentDialog v-if="deploymentOpen" :show="deploymentOpen" @close="deploymentOpen = false" />
     </template>
 
     <!-- Non-admin: Simple static version text -->
@@ -648,12 +624,11 @@ import {
   rollback as rollbackAPI,
   type RollbackVersionInfo
 } from '@/api/admin/system'
-import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
+import DeploymentDialog from './DeploymentDialog.vue'
+import { getDeployment } from '@/api/admin/deployment'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+const DEPLOYMENT_GUIDE = 'https://github.com/jzg-lab/sub2api-r3-fix/blob/main/docs/merge-deploy-guide.md'
 
 const { t } = useI18n()
 
@@ -668,12 +643,36 @@ const isAdmin = computed(() => authStore.isAdmin)
 
 const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
+const deploymentOpen = ref(false)
+
+async function openVersion() {
+  if (deploymentOpen.value) return
+  try {
+    if ((await getDeployment()).enabled) {
+      dropdownOpen.value = false
+      deploymentOpen.value = true
+      return
+    }
+  } catch {
+    // Unknown executor state must not expose legacy in-place mutation controls.
+    dropdownOpen.value = false
+    deploymentOpen.value = true
+    return
+  }
+  toggleDropdown()
+}
 
 // Use store's cached version state
 const loading = computed(() => appStore.versionLoading)
 const currentVersion = computed(() => appStore.currentVersion || props.version || '')
 const latestVersion = computed(() => appStore.latestVersion)
-const hasUpdate = computed(() => appStore.hasUpdate)
+const versionWarning = computed(() => appStore.versionWarning)
+const hasUpdate = computed(() => appStore.hasUpdate && !versionWarning.value)
+const versionStatus = computed(() =>
+  versionWarning.value || !appStore.versionLoaded
+    ? t('version.checkUnavailable')
+    : hasUpdate.value ? t('version.updateAvailable') : t('version.upToDate')
+)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
 
@@ -695,38 +694,6 @@ const rollbackVersionsError = ref('')
 const selectedRollbackVersion = ref('')
 const rollingBack = ref(false)
 const rollbackError = ref('')
-
-const { copied, copyToClipboard } = useClipboard()
-
-// Manual rollback methods differ by deployment: script installs use install.sh,
-// docker deployments pin the image tag instead
-const manualTab = ref<'script' | 'docker'>('script')
-
-const manualTabs = computed(() => [
-  { key: 'script' as const, label: t('version.deployScript') },
-  { key: 'docker' as const, label: t('version.deployDocker') }
-])
-
-const scriptRollbackCommand = computed(() => {
-  if (!selectedRollbackVersion.value) return ''
-  const tag = `v${selectedRollbackVersion.value}`
-  return `curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo bash -s -- rollback ${tag}`
-})
-
-const dockerRollbackCommand = computed(() => {
-  if (!selectedRollbackVersion.value) return ''
-  return [
-    `# ${t('version.dockerEditCompose')}`,
-    `image: ${DOCKER_IMAGE}:${selectedRollbackVersion.value}`,
-    '',
-    `# ${t('version.dockerRecreate')}`,
-    'docker compose up -d'
-  ].join('\n')
-})
-
-const activeManualCommand = computed(() =>
-  manualTab.value === 'docker' ? dockerRollbackCommand.value : scriptRollbackCommand.value
-)
 
 // Only show update check for release builds (binary/docker deployment)
 const isReleaseBuild = computed(() => buildType.value === 'release')
@@ -779,7 +746,6 @@ function resetRollbackState() {
   rollbackVersionsError.value = ''
   selectedRollbackVersion.value = ''
   rollbackError.value = ''
-  manualTab.value = 'script'
 }
 
 async function toggleRollbackPanel() {

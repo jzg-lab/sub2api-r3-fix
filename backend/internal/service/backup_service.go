@@ -250,6 +250,11 @@ func (s *BackupService) Start() {
 
 // recoverStaleRecords 启动时将孤立的 running 记录标记为 failed，并清理已上传对象。
 func (s *BackupService) recoverStaleRecords() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	loadCtx, loadCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer loadCancel()
 
@@ -329,6 +334,7 @@ func (s *BackupService) Stop() {
 			logger.LegacyPrintf("service.backup", "[Backup] active operations cancelled and cleaned up")
 		case <-time.After(10 * time.Second):
 			logger.LegacyPrintf("service.backup", "[Backup] goroutine cleanup timed out")
+			runDeploymentAsync(func() { <-done })
 		}
 	}
 }
@@ -497,6 +503,11 @@ func (s *BackupService) removeCronSchedule() {
 }
 
 func (s *BackupService) runScheduledBackup() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	s.wg.Add(1)
 	defer s.wg.Done()
 

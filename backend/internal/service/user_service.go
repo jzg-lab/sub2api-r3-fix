@@ -1158,7 +1158,7 @@ func (s *UserService) UpdateBalance(ctx context.Context, userID int64, amount fl
 		s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
 	}
 	if s.billingCache != nil {
-		go func() {
+		runDeploymentAsync(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("panic in balance cache invalidation", "user_id", userID, "recover", r)
@@ -1169,7 +1169,7 @@ func (s *UserService) UpdateBalance(ctx context.Context, userID int64, amount fl
 			if err := s.billingCache.InvalidateUserBalance(cacheCtx, userID); err != nil {
 				slog.Error("invalidate user balance cache failed", "user_id", userID, "error", err)
 			}
-		}()
+		})
 	}
 	return nil
 }

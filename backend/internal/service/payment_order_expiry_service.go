@@ -87,6 +87,11 @@ func (s *PaymentOrderExpiryService) Stop() {
 }
 
 func (s *PaymentOrderExpiryService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	// Multi-instance guard: only the leader reconciles/expires orders per cycle,
 	// avoiding N× upstream payment-provider API calls and update races.
 	lockCtx, lockCancel := context.WithTimeout(context.Background(), 2*time.Second)

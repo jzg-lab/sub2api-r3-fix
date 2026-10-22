@@ -14,6 +14,9 @@ type DeferredService struct {
 	interval    time.Duration
 
 	lastUsedUpdates sync.Map
+	mu              sync.Mutex
+	flushMu         sync.Mutex
+	inflight        int
 }
 
 // NewDeferredService creates a new DeferredService instance
@@ -39,10 +42,39 @@ func (s *DeferredService) Stop() {
 }
 
 func (s *DeferredService) ScheduleLastUsedUpdate(accountID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastUsedUpdates.Store(accountID, time.Now())
 }
 
+func (s *DeferredService) Pending() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending := s.inflight
+	s.lastUsedUpdates.Range(func(_, _ any) bool { pending++; return true })
+	return pending
+}
+
 func (s *DeferredService) flushLastUsed() {
+	_ = s.Flush(context.Background())
+}
+
+// Flush persists accepted updates immediately without stopping the recurring job.
+func (s *DeferredService) Flush(ctx context.Context) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for !s.flushMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	defer s.flushMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
 	updates := make(map[int64]time.Time)
 	s.lastUsedUpdates.Range(func(key, value any) bool {
 		id, ok := key.(int64)
@@ -57,20 +89,30 @@ func (s *DeferredService) flushLastUsed() {
 		s.lastUsedUpdates.Delete(key)
 		return true
 	})
+	s.inflight = len(updates)
+	s.mu.Unlock()
 
 	if len(updates) == 0 {
-		return
+		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	if err := s.accountRepo.BatchUpdateLastUsed(ctx, updates); err != nil {
+	err := s.accountRepo.BatchUpdateLastUsed(ctx, updates)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inflight = 0
+	if err != nil {
 		log.Printf("[DeferredService] BatchUpdateLastUsed failed (%d accounts): %v", len(updates), err)
 		for id, ts := range updates {
-			s.lastUsedUpdates.Store(id, ts)
+			current, exists := s.lastUsedUpdates.Load(id)
+			if !exists || ts.After(current.(time.Time)) {
+				s.lastUsedUpdates.Store(id, ts)
+			}
 		}
 	} else {
 		log.Printf("[DeferredService] BatchUpdateLastUsed flushed %d accounts", len(updates))
 	}
+	return err
 }

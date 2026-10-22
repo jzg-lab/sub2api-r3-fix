@@ -1121,7 +1121,7 @@ func (s *adminServiceImpl) DeleteGroup(ctx context.Context, id int64) error {
 	// 事务成功后，异步失效受影响用户的订阅缓存
 	if len(affectedUserIDs) > 0 && s.billingCacheService != nil {
 		groupID := id
-		go func() {
+		runDeploymentAsync(func() {
 			cacheCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			for _, userID := range affectedUserIDs {
@@ -1129,7 +1129,7 @@ func (s *adminServiceImpl) DeleteGroup(ctx context.Context, id int64) error {
 					logger.LegacyPrintf("service.admin", "invalidate subscription cache failed: user_id=%d group_id=%d err=%v", userID, groupID, err)
 				}
 			}
-		}()
+		})
 	}
 	if s.authCacheInvalidator != nil {
 		for _, key := range groupKeys {

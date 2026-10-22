@@ -5,10 +5,8 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
 	"net/http"
-	"sync"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -29,7 +27,10 @@ type Application struct {
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
 	Readiness     *server.Readiness
-	Cleanup       func()
+	UsageWorkers  *service.UsageRecordWorkerPool
+	Deferred      *service.DeferredService
+	Billing       *service.BillingCacheService
+	Cleanup       func() error
 }
 
 func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
@@ -60,7 +61,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Readiness", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Readiness", "UsageWorkers", "Deferred", "Billing", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -84,6 +85,10 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 }
 
 func provideCleanup(
+	timingWheel *service.TimingWheelService,
+	deferred *service.DeferredService,
+	contentModeration *service.ContentModerationService,
+	userMessageQueue *service.UserMessageQueueService,
 	entClient *ent.Client,
 	rdb *redis.Client,
 	opsMetricsCollector *service.OpsMetricsCollector,
@@ -137,18 +142,44 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 	concurrencyService *service.ConcurrencyService,
-) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		type cleanupStep struct {
-			name string
-			fn   func() error
-		}
+) func() error {
+	return func() error {
+		ctx := context.Background()
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"OpsErrorLogWorkers", func() error {
+				if !handler.StopOpsErrorLogWorkers() {
+					return errors.New("operations error logs still draining")
+				}
+				return nil
+			}},
+			{"UserMessageQueueService", func() error {
+				if userMessageQueue != nil {
+					userMessageQueue.Stop()
+				}
+				return nil
+			}},
+			{"RequestSideEffectsBeforeQueues", func() error { return service.WaitDeploymentAsync(ctx) }},
+			{"ContentModerationService", func() error {
+				if contentModeration != nil {
+					contentModeration.Stop()
+				}
+				return nil
+			}},
+			{"TimingWheelService", func() error {
+				if timingWheel != nil {
+					timingWheel.Stop()
+				}
+				return nil
+			}},
+			{"DeferredService", func() error {
+				if deferred != nil {
+					deferred.Stop()
+				}
+				return nil
+			}},
+			{"RequestSideEffects", func() error { return service.WaitDeploymentAsync(ctx) }},
 			{"OpenAIDowngradeProbe", func() error {
 				if openAIDowngradeProbe != nil {
 					openAIDowngradeProbe.Stop()
@@ -446,43 +477,6 @@ func provideCleanup(
 			}},
 		}
 
-		runParallel := func(steps []cleanupStep) {
-			var wg sync.WaitGroup
-			for i := range steps {
-				step := steps[i]
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if err := step.fn(); err != nil {
-						log.Printf("[Cleanup] %s failed: %v", step.name, err)
-						return
-					}
-					log.Printf("[Cleanup] %s succeeded", step.name)
-				}()
-			}
-			wg.Wait()
-		}
-
-		runSequential := func(steps []cleanupStep) {
-			for i := range steps {
-				step := steps[i]
-				if err := step.fn(); err != nil {
-					log.Printf("[Cleanup] %s failed: %v", step.name, err)
-					continue
-				}
-				log.Printf("[Cleanup] %s succeeded", step.name)
-			}
-		}
-
-		runParallel(parallelSteps)
-		runSequential(infraSteps)
-
-		// Check if context timed out
-		select {
-		case <-ctx.Done():
-			log.Printf("[Cleanup] Warning: cleanup timed out after 10 seconds")
-		default:
-			log.Printf("[Cleanup] All cleanup steps completed")
-		}
+		return runCleanup(parallelSteps, infraSteps)
 	}
 }

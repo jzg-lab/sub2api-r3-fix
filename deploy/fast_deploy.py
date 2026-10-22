@@ -346,6 +346,22 @@ class Host:
                 image_env((Path(prepared["release"]) / "before.env").read_bytes(), "normalized"), "non-image .env changes")
 
 
+def deployment_host(config):
+    mode = config.get("mode", "single")
+    require(mode in ("single", "handoff"), "unknown deployment mode")
+    if mode == "handoff":
+        from handoff_deploy import Host as HandoffHost
+        return HandoffHost(config)
+    return Host(config)
+
+
+def deployment_switch(release, attempt):
+    if read(release / "config.json").get("mode") == "handoff":
+        from handoff_deploy import Switch as HandoffSwitch
+        return HandoffSwitch(release, attempt)
+    return Switch(release, attempt)
+
+
 def evidence(release, artifact, host):
     receipt = read(release / "evidence.json")
     require(receipt["status"] == "passed", "isolated rehearsal not passed")
@@ -353,25 +369,30 @@ def evidence(release, artifact, host):
         require(receipt[key] == artifact[key], "evidence belongs to another artifact: " + key)
     require(receipt["config_sha256"] == digest(release / "config.json"), "evidence configuration mismatch")
     require(receipt["plugins"] == host.plugins(), "evidence plugin mismatch")
-    for name in ("runtime_uid_paths", "plugin_rpc_existing_config", "startup_readiness", "compatible_rollback",
-                 "direct_callers_inventory", "nginx_guard"):
+    names = ["runtime_uid_paths", "plugin_rpc_existing_config", "startup_readiness", "compatible_rollback",
+             "direct_callers_inventory", "nginx_guard"]
+    if host.c.get("mode") == "handoff":
+        names.append("shared_database_handoff")
+    for name in names:
         item = receipt["checks"][name]
         path = (release / item["log"]).resolve()
         require(release in path.parents and path.is_file() and path.stat().st_size > 0, "missing rehearsal log: " + name)
         require(item["status"] == "passed" and digest(path) == item["sha256"], "invalid rehearsal evidence: " + name)
 
 
-def evidence_template(release, config_path, artifact_path):
+def evidence_template(release, config_path, artifact_path, host=None):
     require(release.is_dir() and release.stat().st_mode & 0o077 == 0, "pre-create private release directory (0700)")
     require(not (release / "evidence.json").exists() and not (release / "prepared.json").exists(), "refusing to overwrite evidence")
     c, artifact = read(config_path), read(artifact_path)
-    host = Host(c)
+    host = host or deployment_host(c)
     save(release / "config.json", c)
     receipt = {k: artifact[k] for k in ("source", "previous_source", "image_id", "base_image_id", "binary_sha256")}
     receipt.update(status="not_run", config_sha256=digest(release / "config.json"), plugins=host.plugins(), checks={
         name: {"status": "not_run", "log": name + ".log", "sha256": ""} for name in (
             "runtime_uid_paths", "plugin_rpc_existing_config", "startup_readiness", "compatible_rollback",
             "direct_callers_inventory", "nginx_guard")})
+    if c.get("mode") == "handoff":
+        receipt["checks"]["shared_database_handoff"] = {"status": "not_run", "log": "shared_database_handoff.log", "sha256": ""}
     save(release / "evidence.json", receipt)
     print("Evidence template only: run the isolated checks and record actual logs before prepare")
 
@@ -380,7 +401,8 @@ def prepare(release, config_path, artifact_path):
     require(release.is_dir() and release.stat().st_mode & 0o077 == 0, "pre-create private release directory (0700)")
     require(not (release / "prepared.json").exists(), "release already prepared; use a new directory")
     c, artifact = read(config_path), read(artifact_path)
-    host = Host(c)
+    host = deployment_host(c)
+    active = host.c
     with locked(c):
         require(not host.marker.exists() and not host.pending.exists(), "maintenance/recovery pending")
         require(not (release / "preparation-started.json").exists(), "preparation already attempted; preserve it and use a new directory")
@@ -391,20 +413,20 @@ def prepare(release, config_path, artifact_path):
         old = host.app_facts()
         require(old["image_id"] == artifact["base_image_id"] and artifact["previous_source"] in old["version"], "baseline differs from build")
         require(host.inspect(artifact["image"], image=True)["Id"] == artifact["image_id"], "candidate tag changed")
-        old_env = Path(c["env_file"]).read_bytes()
+        old_env = Path(active["env_file"]).read_bytes()
         image_env(old_env, "check")
         image = re.findall(rb"^SUB2API_IMAGE=([^\r\n]*)", old_env, re.M)[0].decode()
         require(host.inspect(image, image=True)["Id"] == old["image_id"], "old image binding mismatch")
         compose = json.loads(host.compose("config", "--format", "json"))
-        require(compose["services"][c["app_service"]]["image"] == image, "Compose does not use SUB2API_IMAGE")
-        require(host.compose("ps", "--all", "--quiet", c["app_service"]).decode().strip() ==
-                host.inspect(c["app_container"])["Id"], "Compose points at a different application")
+        require(compose["services"][active["app_service"]]["image"] == image, "Compose does not use SUB2API_IMAGE")
+        require(host.compose("ps", "--all", "--quiet", active["app_service"]).decode().strip() ==
+                host.inspect(active["app_container"])["Id"], "Compose points at a different application")
         host.check_applied_compose()
         migrations = host.migrations()
         for name, checksum in artifact["migrations"].items():
             recorded = name if name in migrations else c["migration_aliases"].get(name, name)
             require(migrations.get(recorded) == checksum, "pending or changed migration: " + name)
-        old.update(image=image, source=artifact["previous_source"], has_readyz=c["previous_has_readyz"], assets=host.assets(c["local_url"]))
+        old.update(image=image, source=artifact["previous_source"], has_readyz=c["previous_has_readyz"], assets=host.assets(active["local_url"]))
         new = {**artifact, "has_readyz": True}
         host.verify(old, public=True)
         host.gate(False)
@@ -416,6 +438,9 @@ def prepare(release, config_path, artifact_path):
         before = {"release": str(release), "previous": old, "candidate": new,
                   "config_hashes": hashes, "compose_sha256": host.compose_hash(), "nginx_sha256": host.nginx_hash(),
                   "data_identity": host.data_identity(), "migrations": migrations, "plugins": host.plugins()}
+        if c.get("mode") == "handoff":
+            host.verify_ingress()
+            before["handoff"] = {"original_slot": host.selected(), "env_hashes": host.env_hashes()}
         save(release / "preparation-started.json", {"started_at": time.time(), "source": artifact["source"]})
         with (release / "postgres.dump").open("wb") as dump:
             run("docker", "exec", c["postgres_container"], "pg_dump", "-Fc", "-U", c["database_user"],
@@ -430,9 +455,13 @@ def prepare(release, config_path, artifact_path):
         tools = release / "tools"
         tools.mkdir(mode=0o700)
         shutil.copyfile(Path(__file__), tools / "fast_deploy.py")
+        if c.get("mode") == "handoff":
+            shutil.copyfile(Path(__file__).with_name("handoff_deploy.py"), tools / "handoff_deploy.py")
         before["sealed_files"] = {str(p.relative_to(release)): digest(p) for p in
                                   [release / "config.json", release / "artifact.json", release / "evidence.json",
                                    release / "before.env", release / "backup-list.txt", tools / "fast_deploy.py"]}
+        if c.get("mode") == "handoff":
+            before["sealed_files"]["tools/handoff_deploy.py"] = digest(tools / "handoff_deploy.py")
         host.unchanged(before)
         save(release / "prepared.json", before)
     print("PREPARED: no maintenance, restart or deployment performed")
@@ -556,7 +585,7 @@ class Switch:
 def launch(release, mode):
     c = read(release / "config.json")
     with locked(c):
-        host = Host(c)
+        host = deployment_host(c)
         require(not host.pending.exists(), "previous task needs recovery")
         attempt = release / mode
         require(not attempt.exists(), "attempt already exists; inspect status, never replay")
@@ -599,9 +628,15 @@ def main():
     if args.command == "status":
         if (release / "prepared.json").exists():
             prepared = read(release / "prepared.json")
-            print("PREPARED source=" + prepared["candidate"]["source"] + " image=" + prepared["candidate"]["image_id"])
+            config = read(release / "config.json")
+            age = time.time() - prepared["backup_at"]
+            window = ("CLOCK_INVALID" if age < 0 else "CURRENT" if age <= config["backup_max_age_seconds"] else "EXPIRED")
+            expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(prepared["backup_at"] + config["backup_max_age_seconds"]))
+            print("PREPARATION_SNAPSHOT source=" + prepared["candidate"]["source"] + " image=" + prepared["candidate"]["image_id"])
+            print("BACKUP_WINDOW=" + window + " expires_at=" + expires)
         else:
             print("NOT_PREPARED")
+        print("LIVE_STATE_NOT_CHECKED: status is read-only; activation/rollback still require full preflight")
         for path in sorted(release.glob("*/state.json")):
             print(str(path) + "\n" + path.read_text())
         return
@@ -617,7 +652,7 @@ def main():
         # launch holds the same lock briefly; workers wait, other launches do not.
         with open(Path(c["deploy_dir"]) / ".deploy.lock", "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            switch = Switch(release, release / args.attempt)
+            switch = deployment_switch(release, release / args.attempt)
             if args.command == "_recover":
                 switch.recover()
             else:
@@ -627,4 +662,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Handoff imports this module; share its error log and command helpers.
+    sys.modules.setdefault("fast_deploy", sys.modules[__name__])
     main()

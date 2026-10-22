@@ -399,7 +399,9 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 				// 降级路径:flusher 未启用时保留原有异步直写 DB
 				dbCtx, dbCancel := detachUpstreamContext(ctx)
 				userID, platform, cost := p.User.ID, p.Platform, p.Cost.ActualCost
+				done := beginDeploymentAsync()
 				go func() {
+					defer done()
 					defer func() {
 						if r := recover(); r != nil {
 							logger.LegacyPrintf("service.gateway", "ALERT: panic in user platform quota incr goroutine user=%d platform=%s: %v", userID, platform, r)
@@ -421,8 +423,9 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 
 	// Notification checks run async — all parameters are already captured,
 	// no dependency on the request context or upstream connection.
-	go notifyBalanceLow(p, deps, result)
-	go notifyAccountQuota(p, deps, result)
+	balanceDone, quotaDone := beginDeploymentAsync(), beginDeploymentAsync()
+	go func() { defer balanceDone(); notifyBalanceLow(p, deps, result) }()
+	go func() { defer quotaDone(); notifyAccountQuota(p, deps, result) }()
 }
 
 func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {

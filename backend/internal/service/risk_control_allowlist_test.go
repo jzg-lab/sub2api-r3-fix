@@ -98,6 +98,7 @@ func TestRiskControlAllowlistAuditsWithoutLocalPenalties(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("expected an audit task")
 			}
+			defer task.deploymentDone()
 			if task.log != nil {
 				svc.persistContentModerationLog(context.Background(), task.config, task.log, task.inputHash, task.recordHash, task.applySideEffects)
 			} else {

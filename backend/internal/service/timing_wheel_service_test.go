@@ -2,10 +2,12 @@ package service
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zeromicro/go-zero/core/collection"
 )
 
@@ -23,6 +25,41 @@ func TestNewTimingWheelService_InitFail_NoPanicAndReturnError(t *testing.T) {
 	}
 	if svc != nil {
 		t.Fatalf("期望返回 nil svc，但得到非空")
+	}
+}
+
+func TestTimingWheelStopWaitsForAdmittedCallback(t *testing.T) {
+	original := newTimingWheel
+	t.Cleanup(func() { newTimingWheel = original })
+	var execute collection.Execute
+	newTimingWheel = func(interval time.Duration, slots int, callback collection.Execute) (*collection.TimingWheel, error) {
+		execute = callback
+		return original(interval, slots, callback)
+	}
+	svc, err := NewTimingWheelService()
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	finish := func() { releaseOnce.Do(func() { close(release) }) }
+	defer finish()
+	go execute("pending", func() { close(entered); <-release })
+	<-entered
+	done := make(chan struct{})
+	go func() { svc.Stop(); close(done) }()
+	require.Eventually(t, func() bool { svc.mu.Lock(); defer svc.mu.Unlock(); return svc.stopped }, time.Second, time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("Stop returned while the callback was still running")
+	default:
+	}
+	execute("late", func() { t.Error("callback admitted after Stop") })
+	svc.Schedule("late", time.Second, func() { t.Error("timer admitted after Stop") })
+	svc.Cancel("pending")
+	finish()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not join the callback")
 	}
 }
 

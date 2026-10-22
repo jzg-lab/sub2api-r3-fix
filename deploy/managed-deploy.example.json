@@ -1,0 +1,15 @@
+{
+  "mode": "handoff",
+  "state_dir": "/opt/sub2api-control/jobs",
+  "candidates_file": "/opt/sub2api-control/candidates.json",
+  "github_catalog": true,
+  "deployment_config": "/opt/sub2api-control/production-config.json",
+  "verification_manifest": "/opt/sub2api-control/verification-manifest.json",
+  "repo": "/opt/sub2api-source",
+  "socket_path": "/run/sub2api-deployment/control.sock",
+  "socket_gid": 1000,
+  "min_free_bytes": 21474836480,
+  "min_available_memory_bytes": 8589934592,
+  "node_image": "node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f",
+  "go_image": "golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d"
+}

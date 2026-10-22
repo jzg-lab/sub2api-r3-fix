@@ -85,7 +85,7 @@ func (s *grokImportProbeScheduler) schedule(prober grokImportProber, account *se
 		if s.workers > s.maxWorkers {
 			s.maxWorkers = s.workers
 		}
-		go s.worker()
+		service.RunDeploymentAsync(s.worker)
 	}
 	s.mu.Unlock()
 }

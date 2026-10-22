@@ -1070,14 +1070,14 @@ func (h *AccountHandler) scheduleOpenAIResponsesProbe(account *service.Account) 
 		return
 	}
 	accountID := account.ID
-	go func() {
+	service.RunDeploymentAsync(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("openai_responses_probe_panic", "account_id", accountID, "recover", r)
 			}
 		}()
 		h.accountTestService.ProbeOpenAIAPIKeyResponsesSupport(context.Background(), accountID)
-	}()
+	})
 }
 
 // Delete handles deleting an account
@@ -1995,7 +1995,7 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 		adminSvc := h.adminService
 		if len(antigravityPrivacyAccounts) > 0 {
 			accounts := antigravityPrivacyAccounts
-			go func() {
+			service.RunDeploymentAsync(func() {
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("batch_create_antigravity_privacy_panic", "recover", r)
@@ -2005,11 +2005,11 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				for _, acc := range accounts {
 					adminSvc.ForceAntigravityPrivacy(bgCtx, acc)
 				}
-			}()
+			})
 		}
 		if len(openaiPrivacyAccounts) > 0 {
 			accounts := openaiPrivacyAccounts
-			go func() {
+			service.RunDeploymentAsync(func() {
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("batch_create_openai_privacy_panic", "recover", r)
@@ -2019,7 +2019,7 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				for _, acc := range accounts {
 					adminSvc.ForceOpenAIPrivacy(bgCtx, acc)
 				}
-			}()
+			})
 		}
 
 		return gin.H{

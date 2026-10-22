@@ -1034,6 +1034,7 @@ func (l *OpenAIRescueLane) Stop() {
 	case <-l.doneCh:
 	case <-timer.C:
 		slog.Warn("openai_rescue_stop_timeout")
+		runDeploymentAsync(func() { <-l.doneCh })
 	}
 }
 
@@ -1091,6 +1092,11 @@ func (l *OpenAIRescueLane) sweepLoop() {
 //
 // healed 计数含转正（转正是把号送回原位的最终自愈动作）。
 func (l *OpenAIRescueLane) RunReconcileSweep(ctx context.Context) (entered, healed, withdrawn int, err error) {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return 0, 0, 0, nil
+	}
+	defer deploymentDone()
 	if l == nil {
 		return 0, 0, 0, nil
 	}

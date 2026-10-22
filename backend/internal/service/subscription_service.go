@@ -279,11 +279,11 @@ func (s *SubscriptionService) maybeInvalidateAssignmentCaches(userID, groupID in
 
 	s.InvalidateSubCache(userID, groupID)
 	if s.billingCacheService != nil {
-		go func() {
+		runDeploymentAsync(func() {
 			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+		})
 	}
 }
 
@@ -551,11 +551,11 @@ func (s *SubscriptionService) assignSubscriptionWithReuse(ctx context.Context, i
 	s.InvalidateSubCache(input.UserID, input.GroupID)
 	if s.billingCacheService != nil {
 		userID, groupID := input.UserID, input.GroupID
-		go func() {
+		runDeploymentAsync(func() {
 			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+		})
 	}
 
 	return sub, false, nil
@@ -707,11 +707,11 @@ func (s *SubscriptionService) ExtendSubscription(ctx context.Context, subscripti
 	s.InvalidateSubCache(sub.UserID, sub.GroupID)
 	if s.billingCacheService != nil {
 		userID, groupID := sub.UserID, sub.GroupID
-		go func() {
+		runDeploymentAsync(func() {
 			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+		})
 	}
 
 	return s.userSubRepo.GetByID(ctx, subscriptionID)

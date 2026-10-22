@@ -4717,7 +4717,7 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 			cancel()
 		}
 	}
-	go func() {
+	service.RunDeploymentAsync(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if cmSvc != nil {
@@ -4763,7 +4763,7 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 		if opsSvc != nil {
 			enqueueOpsErrorLog(opsSvc, buildCyberPolicyOpsErrorEntry(opsMeta, mark))
 		}
-	}()
+	})
 }
 
 // clearCyberPolicyTurnState resets the cyber mark and the per-request recorded

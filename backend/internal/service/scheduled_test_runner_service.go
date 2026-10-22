@@ -79,12 +79,18 @@ func (s *ScheduledTestRunnerService) Stop() {
 			case <-ctx.Done():
 			case <-time.After(3 * time.Second):
 				logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] cron stop timed out")
+				runDeploymentAsync(func() { <-ctx.Done() })
 			}
 		}
 	})
 }
 
 func (s *ScheduledTestRunnerService) runScheduled() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	// Delay 10s so execution lands at ~:10 of each minute instead of :00.
 	time.Sleep(10 * time.Second)
 

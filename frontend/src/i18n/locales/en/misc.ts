@@ -18,6 +18,46 @@ export default {
   },
 
   // Version Badge
+  deployment: {
+    currentTask: 'Current task', candidates: 'Available releases', source: 'Source commit', taskId: 'Task ID',
+    channels: { ordinary: 'Standard update', special: 'Special update' },
+    details: 'Technical details', reused: 'Reusing the verified image; backup and preflight run again',
+    rollbackAvailable: 'Rollback available', rollbackUnavailable: 'Rollback unavailable',
+    previousVersion: 'Previous version', targetCommit: 'Rollback target commit',
+    catalogUnavailable: 'Candidate verification is unavailable. New preparation and activation are blocked; existing task results remain available.',
+    title: 'Deployment', status: 'Release status', refresh: 'Refresh status', loading: 'Loading status',
+    disconnected: 'Connection interrupted. Checking the existing task.', unavailable: 'Deployment executor is not connected',
+    empty: 'No reviewed candidates', special: 'Special deployment: migration, plugin or runtime review required',
+    prepare: 'Prepare update', activate: 'Confirm deployment', rollback: 'Roll back application',
+    expires: 'Backup valid until {time}', checkFailed: 'Checks failed. Review the private task log before another attempt.',
+    actionUncertain: 'Request result is uncertain. Checking the existing task without resubmitting.',
+    activateConfirm: 'Brief maintenance will switch the application. PostgreSQL and Redis stay running. Busy requests defer the switch. Deploy now?',
+    handoffConfirm: 'Validate the standby, briefly pause plugins and tasks, switch traffic, then resume. Both instances share PostgreSQL and Redis. Busy requests cancel this update. Deploy now?',
+    rollbackConfirm: 'Brief maintenance will restore the previous application, not the database. Compatibility checks must pass. Roll back now?',
+    phases: {
+      BLOCKED: 'Deployment blocked',
+      QUEUED: 'Queued', FETCHING: 'Checking source', BUILDING: 'Building image', VERIFYING: 'Isolated verification', BACKUP: 'Backup and preflight',
+      PREPARED: 'Prepared, awaiting confirmation', EXPIRED: 'Preparation expired', PREPARATION_FAILED: 'Preparation failed, no switch',
+      SWITCHING: 'Submitting switch', PAUSING: 'Pausing direct callers', DRAINING: 'Draining requests', STOPPING: 'Stopping application',
+      STAGING: 'Checking standby', RESUMING: 'Resuming plugins and tasks',
+      STARTING: 'Starting target', PUBLIC_VERIFY: 'Public acceptance', ACCEPTED: 'Deployment accepted', DEFERRED: 'Deferred, previous version running',
+      RECOVERING: 'Recovering', RECOVERED: 'Original version restored', ROLLED_BACK: 'Rollback complete',
+      PREFLIGHT_FAILED: 'Preflight failed', LAUNCH_FAILED: 'Task launch failed', NEEDS_ATTENTION: 'Operator attention required'
+    },
+    errors: {
+      AUXILIARY_SERVICES_PENDING: 'The main application is available. Auxiliary services are retrying recovery; another switch is blocked until they recover.',
+      CANDIDATE_CHANGED: 'Candidate approval changed. Check available releases again.',
+      BASELINE_CHANGED: 'The running version differs from the reviewed baseline. Review the full update again.',
+      VERSION_MISMATCH: 'Release version does not match the fixed source commit.',
+      SPECIAL_DEPLOYMENT_REQUIRED: 'Migration, plugin, dependency, configuration or deployment-tool changes require a special deployment.',
+      INSUFFICIENT_RESOURCES: 'Insufficient available memory or disk. The existing service remains running.',
+      BUILD_BUDGET_UNAVAILABLE: 'Build resource limits are unavailable. Preparation stopped; contact the maintainer.',
+      FETCHING_FAILED: 'Source or candidate verification failed. No service switch occurred.',
+      BUILDING_FAILED: 'Image build or build tests failed. No service switch occurred.',
+      VERIFYING_FAILED: 'Isolated verification failed. No service switch occurred.',
+      BACKUP_FAILED: 'Backup or production preflight failed. No service switch occurred.'
+    }
+  },
   version: {
     currentVersion: 'Current Version',
     latestVersion: 'Latest Version',
@@ -30,7 +70,10 @@ export default {
     viewChangelog: 'View Changelog',
     refresh: 'Refresh',
     sourceMode: 'Source Build',
-    sourceModeHint: 'Source build, use git pull to update',
+    sourceModeHint: 'In-place updates are unavailable for source builds',
+    deploymentGuide: 'Deployment Guide',
+    checkUnavailable: 'Version status unconfirmed',
+    checkFailed: 'Unable to check for updates',
     updateNow: 'Update Now',
     updating: 'Updating...',
     updateComplete: 'Update Complete',

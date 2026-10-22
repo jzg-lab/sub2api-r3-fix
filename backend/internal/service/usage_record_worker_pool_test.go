@@ -62,6 +62,7 @@ func TestUsageRecordWorkerPool_OverflowDrop(t *testing.T) {
 		close(secondDone)
 	}))
 	require.Equal(t, UsageRecordSubmitModeDropped, pool.Submit(func(ctx context.Context) {}))
+	require.EqualValues(t, 2, pool.Pending(), "dropped overflow does not add pending work")
 
 	close(block)
 	select {
@@ -178,6 +179,7 @@ func TestUsageRecordWorkerPool_SubmitAfterStop(t *testing.T) {
 	mode := pool.Submit(func(ctx context.Context) {})
 	require.Equal(t, UsageRecordSubmitModeDroppedStopped, mode)
 	require.True(t, mode.Dropped())
+	require.Zero(t, pool.Pending())
 	require.True(t, UsageRecordSubmitModeDropped.Dropped())
 	require.False(t, UsageRecordSubmitModeEnqueued.Dropped())
 	require.False(t, UsageRecordSubmitModeSync.Dropped())

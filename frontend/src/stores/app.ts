@@ -41,6 +41,7 @@ export const useAppStore = defineStore('app', () => {
   const currentVersion = ref<string>('')
   const latestVersion = ref<string>('')
   const hasUpdate = ref<boolean>(false)
+  const versionWarning = ref<string>('')
   const buildType = ref<string>('source')
   const releaseInfo = ref<ReleaseInfo | null>(null)
 
@@ -249,6 +250,7 @@ export const useAppStore = defineStore('app', () => {
         has_update: hasUpdate.value,
         build_type: buildType.value,
         release_info: releaseInfo.value || undefined,
+        warning: versionWarning.value || undefined,
         cached: true
       }
     }
@@ -263,13 +265,18 @@ export const useAppStore = defineStore('app', () => {
       const data = await checkUpdatesAPI(force)
       currentVersion.value = data.current_version
       latestVersion.value = data.latest_version
-      hasUpdate.value = data.has_update
+      versionWarning.value = data.warning || ''
+      hasUpdate.value = data.has_update && !versionWarning.value
       buildType.value = data.build_type || 'source'
       releaseInfo.value = data.release_info || null
       versionLoaded.value = true
       return data
     } catch (error) {
       console.error('Failed to fetch version:', error)
+      versionWarning.value = i18n.global.t('version.checkFailed')
+      hasUpdate.value = false
+      versionLoaded.value = false
+      releaseInfo.value = null
       return null
     } finally {
       versionLoading.value = false
@@ -282,6 +289,7 @@ export const useAppStore = defineStore('app', () => {
   function clearVersionCache(): void {
     versionLoaded.value = false
     hasUpdate.value = false
+    versionWarning.value = ''
   }
 
   // ==================== Public Settings Management ====================
@@ -458,6 +466,7 @@ export const useAppStore = defineStore('app', () => {
     currentVersion,
     latestVersion,
     hasUpdate,
+    versionWarning,
     buildType,
     releaseInfo,
 

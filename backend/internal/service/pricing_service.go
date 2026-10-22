@@ -19,6 +19,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -304,6 +305,13 @@ func NewPricingService(cfg *config.Config, remoteClient PricingRemoteClient) *Pr
 
 // Initialize 初始化价格服务
 func (s *PricingService) Initialize() error {
+	if deployment.Managed() {
+		if err := s.loadPricingData(s.getPricingFilePath()); err != nil {
+			return fmt.Errorf("deployment requires existing pricing data: %w", err)
+		}
+		s.startUpdateScheduler()
+		return nil
+	}
 	// 确保数据目录存在
 	if err := os.MkdirAll(s.cfg.Pricing.DataDir, 0755); err != nil {
 		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to create data directory: %v", err)
@@ -432,6 +440,11 @@ func (s *PricingService) checkAndUpdatePricing() error {
 
 // syncWithRemote 与远程同步（基于哈希校验）
 func (s *PricingService) syncWithRemote() error {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return nil
+	}
+	defer deploymentDone()
 	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.Pricing.RemoteURL) == "" {
 		return nil
 	}

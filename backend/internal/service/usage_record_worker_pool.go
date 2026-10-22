@@ -92,6 +92,7 @@ type UsageRecordWorkerPoolStats struct {
 // 用于替代请求路径里的直接 goroutine，避免高并发时无界堆积。
 type UsageRecordWorkerPool struct {
 	pool                  pond.Pool
+	pending               atomic.Int64
 	taskTimeout           time.Duration
 	overflowPolicy        string
 	overflowSamplePercent int
@@ -161,11 +162,23 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 		p.logDrop("stopped")
 		return UsageRecordSubmitModeDroppedStopped
 	}
+	p.pending.Add(1)
+	done := beginDeploymentAsync()
+	queued := false
+	defer func() {
+		if !queued {
+			p.pending.Add(-1)
+			done()
+		}
+	}()
 
 	_, ok := p.pool.TrySubmit(func() {
+		defer done()
+		defer p.pending.Add(-1)
 		p.execute(task)
 	})
 	if ok {
+		queued = true
 		return UsageRecordSubmitModeEnqueued
 	}
 
@@ -192,6 +205,9 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 	p.logDrop("full")
 	return UsageRecordSubmitModeDropped
 }
+
+// Pending includes queued, running and synchronous overflow tasks.
+func (p *UsageRecordWorkerPool) Pending() int64 { return p.pending.Load() }
 
 // Stats 返回当前池状态与计数器。
 func (p *UsageRecordWorkerPool) Stats() UsageRecordWorkerPoolStats {

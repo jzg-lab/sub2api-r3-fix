@@ -233,6 +233,11 @@ func (s *UserPlatformQuotaUsageFlusher) flush() {
 
 // tick 是 TimingWheel 回调。若 flusher 已停止则直接返回。
 func (s *UserPlatformQuotaUsageFlusher) tick() {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return
+	}
+	defer done()
 	if s == nil || s.stopped.Load() {
 		return
 	}

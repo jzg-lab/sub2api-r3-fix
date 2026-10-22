@@ -339,6 +339,11 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 }
 
 func (s *SchedulerSnapshotService) runInitialRebuild() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s.cache == nil {
 		return
 	}
@@ -375,7 +380,13 @@ func (s *SchedulerSnapshotService) runFullRebuildWorker(interval time.Duration) 
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.triggerFullRebuild("interval"); err != nil {
+			deploymentDone, deploymentOK := beginDeploymentBackground()
+			if !deploymentOK {
+				continue
+			}
+			err := s.triggerFullRebuild("interval")
+			deploymentDone()
+			if err != nil {
 				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] full rebuild failed: %v", err)
 			}
 		case <-s.stopCh:
@@ -385,6 +396,11 @@ func (s *SchedulerSnapshotService) runFullRebuildWorker(interval time.Duration) 
 }
 
 func (s *SchedulerSnapshotService) pollOutbox() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s.outboxRepo == nil || s.cache == nil {
 		return
 	}

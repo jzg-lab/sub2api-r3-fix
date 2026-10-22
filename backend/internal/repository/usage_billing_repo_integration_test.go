@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,47 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
+
+func TestUsageBillingRepositoryApply_ConcurrentConnectionsDeduplicate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	client := testEntClient(t)
+	user := mustCreateUser(t, client, &service.User{Email: uuid.NewString() + "@example.com", PasswordHash: "hash", Balance: 100})
+	key := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, Key: "sk-test-" + uuid.NewString(), Name: "concurrent-billing", Quota: 100})
+	repos := []service.UsageBillingRepository{
+		NewUsageBillingRepository(client, integrationDB), NewUsageBillingRepository(client, integrationDB),
+	}
+	command := service.UsageBillingCommand{RequestID: uuid.NewString(), APIKeyID: key.ID, UserID: user.ID, BalanceCost: 1.25, APIKeyQuotaCost: 1.25}
+	const concurrent = 8
+	results, errs := make([]*service.UsageBillingApplyResult, concurrent), make([]error, concurrent)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range concurrent {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			copy := command // Apply normalizes its input; each caller owns its command.
+			results[i], errs[i] = repos[i%len(repos)].Apply(ctx, &copy)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	applied := 0
+	for i := range concurrent {
+		require.NoError(t, errs[i])
+		require.NotNil(t, results[i])
+		if results[i].Applied {
+			applied++
+		}
+	}
+	require.Equal(t, 1, applied)
+	var balance, quota float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id=$1", user.ID).Scan(&balance))
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT quota_used FROM api_keys WHERE id=$1", key.ID).Scan(&quota))
+	require.InDelta(t, 98.75, balance, 0.000001)
+	require.InDelta(t, 1.25, quota, 0.000001)
+}
 
 func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	ctx := context.Background()

@@ -1,0 +1,18 @@
+[Unit]
+Description=Sub2API managed deployment controller
+After=docker.service network-online.target sub2api-build.slice
+Requires=docker.service sub2api-build.slice
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 /opt/sub2api-control/tools/managed_deploy.py serve --config /opt/sub2api-control/config.json
+User=root
+UMask=0077
+RuntimeDirectory=sub2api-deployment
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

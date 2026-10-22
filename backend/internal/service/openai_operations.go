@@ -282,6 +282,11 @@ func classifyOpenAIRefreshRecovery(message string) string {
 }
 
 func (s *OpenAIOperationsService) runRecovery(ctx context.Context, cfg OpenAIRecoverySettings) error {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return nil
+	}
+	defer deploymentDone()
 	if !cfg.Enabled {
 		return nil
 	}

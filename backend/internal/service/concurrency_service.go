@@ -240,6 +240,7 @@ type ConcurrencyService struct {
 	// for range ticker.C 永不退出，进程关闭时 goroutine 泄漏。
 	slotStopMu sync.Mutex
 	slotStopCh chan struct{}
+	slotDoneCh chan struct{}
 }
 
 type cachedAccountLoadBatch struct {
@@ -732,6 +733,11 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 	}
 
 	runCleanup := func() {
+		deploymentDone, deploymentOK := beginDeploymentBackground()
+		if !deploymentOK {
+			return
+		}
+		defer deploymentDone()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := s.cache.CleanupExpiredAccountSlotKeys(cleanupCtx)
 		cancel()
@@ -742,15 +748,19 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 	}
 
 	slotStopCh := make(chan struct{})
+	slotDoneCh := make(chan struct{})
 	s.slotStopMu.Lock()
+	defer s.slotStopMu.Unlock()
 	// 重复启动时先停旧 worker,与 Stop 的语义保持一致(先关旧通道再换新)。
 	if s.slotStopCh != nil {
 		close(s.slotStopCh)
+		<-s.slotDoneCh
 	}
 	s.slotStopCh = slotStopCh
-	s.slotStopMu.Unlock()
+	s.slotDoneCh = slotDoneCh
 
 	go func() {
+		defer close(slotDoneCh)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -776,7 +786,9 @@ func (s *ConcurrencyService) StopSlotCleanupWorker() {
 	defer s.slotStopMu.Unlock()
 	if s.slotStopCh != nil {
 		close(s.slotStopCh)
+		<-s.slotDoneCh
 		s.slotStopCh = nil
+		s.slotDoneCh = nil
 	}
 }
 

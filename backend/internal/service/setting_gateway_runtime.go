@@ -184,7 +184,7 @@ func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool,
 		return cached.enabled, cached.ttl, cached.err
 	}
 	refreshKey := "cyber_session_block_runtime:" + strconv.FormatUint(generation, 10)
-	result := s.cyberSessionBlockRuntimeSF.DoChan(refreshKey, func() (any, error) {
+	result := deploymentDoChan(&s.cyberSessionBlockRuntimeSF, refreshKey, func() (any, error) {
 		s.cyberSessionBlockRuntimeMu.Lock()
 		currentGeneration := s.cyberSessionBlockRuntimeGen
 		cached, _ := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime)
@@ -1129,7 +1129,7 @@ func (s *SettingService) GetOpenAIQuotaAutoPauseSettings(ctx context.Context) Op
 	// Stale or unset: trigger background refresh without blocking this request.
 	// singleflight.DoChan dedupes concurrent refreshes; we deliberately ignore the
 	// returned channel — the result is observable via the atomic cache.
-	s.openAIQuotaAutoPauseSettingsSF.DoChan(openAIQuotaAutoPauseSettingsRefreshKey, func() (any, error) {
+	deploymentDoChan(&s.openAIQuotaAutoPauseSettingsSF, openAIQuotaAutoPauseSettingsRefreshKey, func() (any, error) {
 		s.refreshOpenAIQuotaAutoPauseSettings(context.Background())
 		return nil, nil
 	})

@@ -97,7 +97,7 @@ func (s *DashboardAggregationService) Start() {
 		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] 聚合作业已禁用")
 		return
 	}
-	go s.runStartupGroupUsageSync()
+	runDeploymentAsync(s.runStartupGroupUsageSync)
 
 	interval := time.Duration(s.cfg.IntervalSeconds) * time.Second
 	if interval <= 0 {
@@ -105,7 +105,14 @@ func (s *DashboardAggregationService) Start() {
 	}
 
 	if s.cfg.RecomputeDays > 0 {
-		go s.recomputeRecentDays()
+		runDeploymentAsync(func() {
+			done, ok := beginDeploymentBackground()
+			if !ok {
+				return
+			}
+			defer done()
+			s.recomputeRecentDays()
+		})
 	}
 
 	s.timingWheel.ScheduleRecurring("dashboard:aggregation", interval, func() {
@@ -136,13 +143,13 @@ func (s *DashboardAggregationService) TriggerBackfill(start, end time.Time) erro
 		}
 	}
 
-	go func() {
+	runDeploymentAsync(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultDashboardAggregationBackfillTimeout)
 		defer cancel()
 		if err := s.backfillRange(ctx, start, end); err != nil {
 			logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] 回填失败: %v", err)
 		}
-	}()
+	})
 	return nil
 }
 
@@ -161,7 +168,7 @@ func (s *DashboardAggregationService) TriggerRecomputeRange(start, end time.Time
 		return errors.New("重新计算时间范围无效")
 	}
 
-	go func() {
+	runDeploymentAsync(func() {
 		const maxRetries = 3
 		for i := 0; i < maxRetries; i++ {
 			ctx, cancel := context.WithTimeout(context.Background(), defaultDashboardAggregationBackfillTimeout)
@@ -177,7 +184,7 @@ func (s *DashboardAggregationService) TriggerRecomputeRange(start, end time.Time
 			time.Sleep(5 * time.Second)
 		}
 		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] 重新计算放弃: 聚合作业持续占用")
-	}()
+	})
 	return nil
 }
 
@@ -216,6 +223,11 @@ func (s *DashboardAggregationService) recomputeRange(ctx context.Context, start,
 }
 
 func (s *DashboardAggregationService) runScheduledAggregation() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if !atomic.CompareAndSwapInt32(&s.running, 0, 1) {
 		return
 	}
@@ -274,6 +286,11 @@ func (s *DashboardAggregationService) runScheduledAggregation() {
 }
 
 func (s *DashboardAggregationService) runScheduledGroupUsageSync() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDashboardAggregationTimeout)
 	defer cancel()
 	if err := s.syncGroupUsageRollups(ctx, time.Now().UTC()); err != nil {
@@ -282,6 +299,11 @@ func (s *DashboardAggregationService) runScheduledGroupUsageSync() {
 }
 
 func (s *DashboardAggregationService) runStartupGroupUsageSync() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDashboardAggregationBackfillTimeout)
 	defer cancel()
 	release, ok := tryAcquireSingletonLeaderLock(ctx, s.lockCache, s.db, dashboardAggregationGroupUsageBackfillLeaderLockKey, s.instanceID, dashboardAggregationGroupUsageBackfillLeaderLockTTL)

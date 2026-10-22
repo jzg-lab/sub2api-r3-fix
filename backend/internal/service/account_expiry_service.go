@@ -57,6 +57,11 @@ func (s *AccountExpiryService) Stop() {
 }
 
 func (s *AccountExpiryService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

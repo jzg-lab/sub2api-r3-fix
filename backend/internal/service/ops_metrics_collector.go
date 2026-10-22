@@ -160,6 +160,11 @@ func (c *OpsMetricsCollector) getInterval() time.Duration {
 }
 
 func (c *OpsMetricsCollector) collectOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if c == nil {
 		return
 	}

@@ -474,11 +474,11 @@ func (r *OpenAIDowngradeProbeRunner) processStateAtomic(ctx context.Context, sta
 				account = nil
 			}
 			lane := r.rescueLane
-			go func() {
+			runDeploymentAsync(func() {
 				hookCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				defer cancel()
 				lane.MaybeAutoEnterRescue(hookCtx, &mutation, account)
-			}()
+			})
 		}
 		// committed && err != nil 只剩快照刷新失败（ErrOpenAIProbeSnapshotRefresh）：
 		// 提交已生效，错误照常上抛，让位分支不得介入。

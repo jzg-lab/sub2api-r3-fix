@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +11,44 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
+
+type blockedSystemRenewalRepo struct {
+	*inMemoryIdempotencyRepo
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockedSystemRenewalRepo) ExtendProcessingLock(ctx context.Context, id int64, key string, locked, expires time.Time) (bool, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return r.inMemoryIdempotencyRepo.ExtendProcessingLock(ctx, id, key, locked, expires)
+}
+
+func TestSystemOperationLockReleaseJoinsInFlightRenewal(t *testing.T) {
+	repo := &blockedSystemRenewalRepo{inMemoryIdempotencyRepo: newInMemoryIdempotencyRepo(),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	svc := NewSystemOperationLockService(repo, DefaultIdempotencyConfig())
+	svc.renewInterval = time.Millisecond
+	lock, err := svc.Acquire(t.Context(), "shutdown-renewal")
+	require.NoError(t, err)
+	<-repo.entered
+	done := make(chan error, 1)
+	go func() { done <- svc.Release(t.Context(), lock, true, "") }()
+	<-lock.stopCh
+	select {
+	case <-done:
+		t.Error("release returned while database renewal was still running")
+	default:
+	}
+	close(repo.release)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("renewal did not join")
+	}
+}
 
 func TestSystemOperationLockService_AcquireBusyAndRelease(t *testing.T) {
 	repo := newInMemoryIdempotencyRepo()

@@ -24,6 +24,11 @@ type BatchImageBillingRecoveryService struct {
 }
 
 func (s *BatchImageBillingRecoveryService) ReleaseStaleUnsubmittedOnce(ctx context.Context) (int, error) {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return 0, nil
+	}
+	defer done()
 	if s == nil || s.Repo == nil || s.Billing == nil {
 		return 0, nil
 	}

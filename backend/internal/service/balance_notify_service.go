@@ -124,7 +124,9 @@ func (s *BalanceNotifyService) dispatchBalanceLowEmail(ctx context.Context, user
 	recipients := s.collectBalanceNotifyRecipients(user)
 	slog.Info("CheckBalanceAfterDeduction: sending notification",
 		"user_id", user.ID, "recipients", recipients, "new_balance", newBalance, "threshold", threshold)
+	done := beginDeploymentAsync()
 	go func() {
+		defer done()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("panic in balance notification", "recover", r)
@@ -239,7 +241,9 @@ func (s *BalanceNotifyService) checkQuotaDimCrossings(account *Account, dims []q
 
 // asyncSendQuotaAlert sends quota alert email in a goroutine with panic recovery.
 func (s *BalanceNotifyService) asyncSendQuotaAlert(adminEmails []string, accountID int64, accountName, platform string, dim quotaDim, newUsed, effectiveThreshold float64, siteName string) {
+	done := beginDeploymentAsync()
 	go func() {
+		defer done()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("panic in quota notification", "recover", r)

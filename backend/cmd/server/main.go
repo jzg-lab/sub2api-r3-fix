@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,13 +16,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
@@ -70,6 +74,9 @@ func main() {
 
 	// CLI setup mode
 	if *setupMode {
+		if deployment.Managed() {
+			log.Fatal("Setup is unavailable in managed deployment mode")
+		}
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
 		}
@@ -78,6 +85,9 @@ func main() {
 
 	// Check if setup is needed
 	if setup.NeedsSetup() {
+		if deployment.Managed() {
+			log.Fatal("Managed deployment requires an existing installation")
+		}
 		// Check if auto-setup is enabled (for Docker deployment)
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled...")
@@ -158,10 +168,14 @@ func runMainServer() {
 	if err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
-	defer app.Cleanup()
+	defer func() {
+		if err := app.Cleanup(); err != nil {
+			log.Fatalf("Application cleanup failed: %v", err)
+		}
+	}()
 	webSockets := wsdrain.New()
 	app.Server.Handler = app.Readiness.Handler(webSockets.Handler(app.Server.Handler))
-	if app.PluginManager != nil {
+	if app.PluginManager != nil && !deployment.Managed() {
 		if err := app.PluginManager.Start(context.Background()); err != nil {
 			log.Printf("Plugin manager started in degraded state: %v", err)
 		}
@@ -177,6 +191,16 @@ func runMainServer() {
 	}
 
 	app.Readiness.SetReady(true)
+	if deployment.Managed() {
+		handoff := server.NewHandoff(os.Getenv("DEPLOYMENT_OWNER_LOCK"), Commit, app.PluginManager,
+			app.Readiness.CoreReady, func(ctx context.Context) error { return app.waitForHandoff(ctx, webSockets) })
+		closeControl, err := handoff.Listen(os.Getenv("DEPLOYMENT_SOCKET"))
+		if err != nil {
+			log.Fatalf("Deployment control failed: %v", err)
+		}
+		defer closeControl()
+		app.Server.Handler = handoff.Handler(app.Server.Handler)
+	}
 	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -200,4 +224,22 @@ func runMainServer() {
 	}
 
 	log.Println("Server exited")
+}
+
+func (app *Application) waitForHandoff(ctx context.Context, webSockets *wsdrain.Registry) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for webSockets.Count() != 0 {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("websocket settlement pending=%d: %w", webSockets.Count(), ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	// Producers and both billing queues share a counter, including work submitted
+	// after HTTP returned. Last-used writes are flushed only after those finish.
+	if err := service.WaitDeploymentAsync(ctx); err != nil {
+		return fmt.Errorf("settlement pending: usage=%d billing=%d: %w", app.UsageWorkers.Pending(), app.Billing.PendingWrites(), err)
+	}
+	return app.Deferred.Flush(ctx)
 }

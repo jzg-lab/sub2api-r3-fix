@@ -261,7 +261,7 @@ func (s *DashboardService) refreshDashboardStatsAsync() {
 		return
 	}
 
-	go func() {
+	runDeploymentAsync(func() {
 		defer atomic.StoreInt32(&s.refreshing, 0)
 
 		ctx, cancel := context.WithTimeout(context.Background(), s.refreshTimeout)
@@ -276,7 +276,7 @@ func (s *DashboardService) refreshDashboardStatsAsync() {
 		cacheCtx, cancel := s.cacheOperationContext()
 		defer cancel()
 		s.saveDashboardStatsCache(cacheCtx, stats)
-	}()
+	})
 }
 
 func (s *DashboardService) fetchDashboardStats(ctx context.Context) (*usagestats.DashboardStats, error) {

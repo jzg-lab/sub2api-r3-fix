@@ -50,6 +50,11 @@ func (s *ProxyExpiryService) Stop() {
 }
 
 func (s *ProxyExpiryService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	changed, err := s.proxyRepo.SweepExpiredProxies(ctx, time.Now())

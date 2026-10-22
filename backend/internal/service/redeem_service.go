@@ -540,11 +540,11 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 		if s.billingCacheService == nil {
 			return
 		}
-		go func() {
+		runDeploymentAsync(func() {
 			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = s.billingCacheService.InvalidateUserBalance(cacheCtx, userID)
-		}()
+		})
 	case RedeemTypeConcurrency:
 		if s.authCacheInvalidator != nil {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
@@ -561,11 +561,11 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 		}
 		if redeemCode.GroupID != nil {
 			groupID := *redeemCode.GroupID
-			go func() {
+			runDeploymentAsync(func() {
 				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-			}()
+			})
 		}
 	}
 }

@@ -1645,7 +1645,8 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 
 	ids := make([]int64, 0, len(updates))
 	args := make([]any, 0, len(updates)*2+1)
-	caseSQL := "UPDATE accounts SET last_used_at = CASE id"
+	// Delayed batches from an older instance must not overwrite newer activity.
+	caseSQL := "UPDATE accounts SET last_used_at = GREATEST(last_used_at, CASE id"
 
 	idx := 1
 	for id, ts := range updates {
@@ -1655,7 +1656,7 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 		idx += 2
 	}
 
-	caseSQL += " END, updated_at = NOW() WHERE id = ANY($" + itoa(idx) + ") AND deleted_at IS NULL"
+	caseSQL += " END), updated_at = NOW() WHERE id = ANY($" + itoa(idx) + ") AND deleted_at IS NULL"
 	args = append(args, pq.Array(ids))
 
 	_, err := r.sql.ExecContext(ctx, caseSQL, args...)

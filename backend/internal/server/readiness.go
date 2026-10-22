@@ -21,10 +21,11 @@ type Readiness struct {
 	checked time.Time
 	ready   bool
 	checks  []func(context.Context) error
+	core    *Readiness
 }
 
 func NewReadiness(db *sql.DB, rdb *redis.Client, plugins *service.PluginManager) *Readiness {
-	return &Readiness{checks: []func(context.Context) error{
+	r := &Readiness{checks: []func(context.Context) error{
 		func(ctx context.Context) error {
 			if db == nil {
 				return errors.New("database unavailable")
@@ -39,9 +40,18 @@ func NewReadiness(db *sql.DB, rdb *redis.Client, plugins *service.PluginManager)
 		},
 		plugins.Ready,
 	}}
+	r.core = &Readiness{checks: r.checks[:2]}
+	return r
 }
 
-func (r *Readiness) SetReady(ready bool) { r.started.Store(ready) }
+func (r *Readiness) SetReady(ready bool) {
+	r.started.Store(ready)
+	if r.core != nil {
+		r.core.started.Store(ready)
+	}
+}
+
+func (r *Readiness) CoreReady(ctx context.Context) bool { return r.core != nil && r.core.check(ctx) }
 
 func (r *Readiness) check(ctx context.Context) bool {
 	if !r.started.Load() || !r.mu.TryLock() {

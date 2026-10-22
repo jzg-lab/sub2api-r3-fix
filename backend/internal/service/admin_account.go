@@ -658,23 +658,23 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if account.Type == AccountTypeOAuth {
 		switch account.Platform {
 		case PlatformOpenAI:
-			go func() {
+			runDeploymentAsync(func() {
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
 					}
 				}()
 				s.EnsureOpenAIPrivacy(context.Background(), account)
-			}()
+			})
 		case PlatformAntigravity:
-			go func() {
+			runDeploymentAsync(func() {
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
 					}
 				}()
 				s.EnsureAntigravityPrivacy(context.Background(), account)
-			}()
+			})
 		}
 	}
 

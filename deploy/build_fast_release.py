@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -40,12 +41,39 @@ def deployment_version(source_version, commit):
     return version + ("." if "+" in version else "+") + "fast." + commit[:12]
 
 
+BUILD_CGROUP = "/sub2api.slice/sub2api-build.slice"
+
+
+def limited_build_options(parent):
+    if not parent:
+        return []
+    require(parent == BUILD_CGROUP, "unexpected build cgroup")
+    require(not any(os.environ.get(k) for k in ("DOCKER_HOST", "DOCKER_CONTEXT", "BUILDX_BUILDER"))
+            and os.environ.get("DOCKER_BUILDKIT", "1") == "1", "managed build requires local default Docker")
+    endpoint = run("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").decode().strip()
+    info = json.loads(run("docker", "info", "--format", "{{json .}}"))
+    builder = json.loads(run("docker", "buildx", "inspect", "default", "--format", "{{json .}}"))
+    require(endpoint.startswith("unix://") and info["OSType"] == "linux" and info["CgroupVersion"] == "2"
+            and builder["Driver"] == "docker", "local cgroup v2 Docker builder required")
+    group = run("systemctl", "show", "sub2api-build.slice", "--property=ControlGroup", "--value").decode().strip()
+    require(group == parent, "build slice is not active")
+    path = Path("/sys/fs/cgroup" + group)
+    memory, swap = (path / "memory.max").read_text().strip(), (path / "memory.swap.max").read_text().strip()
+    cpu = (path / "cpu.max").read_text().split()
+    require(memory.isdigit() and 0 < int(memory) <= 6 * 1024**3 and swap == "0"
+            and len(cpu) == 2 and all(v.isdigit() for v in cpu) and 0 < int(cpu[0]) <= 2 * int(cpu[1]),
+            "build resource budget missing or too large")
+    # BuildKit RUN containers inherit this slice, not the Python client's cgroup.
+    return ["--builder", "default", "--cgroup-parent", parent]
+
+
 def build(args):
     repo, output = Path(args.repo).resolve(), Path(args.output).resolve()
     for ref in (args.commit, args.previous):
         require(re.fullmatch(r"[0-9a-f]{40}", ref), "full Git commit required")
         require(git(repo, "rev-parse", ref + "^{commit}") == ref, "commit not found")
     check_contract(repo, args.previous, args.commit)
+    limits = limited_build_options(getattr(args, "cgroup_parent", None))
     require(repo not in output.parents, "build artifacts belong outside the repository")
     for image in (args.node_image, args.go_image):
         require(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image), "pin build images by digest")
@@ -66,14 +94,14 @@ def build(args):
     run("docker", "tag", base["Id"], runtime)
     version = deployment_version((source / "backend/cmd/server/VERSION").read_text(), args.commit)
     with (output / "build.log").open("wb") as log:
-        run("docker", "build", "--progress=plain", "--target", "backend-builder",
+        run("docker", "build", *limits, "--progress=plain", "--target", "backend-builder",
             "--build-arg", "NODE_IMAGE=" + args.node_image, "--build-arg", "GOLANG_IMAGE=" + args.go_image,
             "--build-arg", "TARGETOS=linux", "--build-arg", "TARGETARCH=" + arch,
             "--build-arg", "VERSION=" + version, "--build-arg", "COMMIT=" + args.commit,
             "--build-arg", "DATE=" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "-t", builder, str(source), timeout=3600, stdout=log, merge_stderr=True)
         builder_id = json.loads(run("docker", "image", "inspect", builder))[0]["Id"]
-        run("docker", "build", "--progress=plain", "-f", str(Path(__file__).with_name("FastRuntime.Dockerfile")),
+        run("docker", "build", *limits, "--progress=plain", "-f", str(Path(__file__).with_name("FastRuntime.Dockerfile")),
             "--build-arg", "BUILDER=" + builder, "--build-arg", "RUNTIME=" + runtime,
             "--build-arg", "COMMIT=" + args.commit, "--build-arg", "VERSION=" + version,
             "-t", image, str(source), timeout=1800, stdout=log, merge_stderr=True)
@@ -114,4 +142,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("repo", "output", "commit", "previous", "runtime", "node-image", "go-image"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--cgroup-parent", choices=[BUILD_CGROUP])
     build(parser.parse_args())

@@ -154,6 +154,11 @@ func (s *OpsAlertEvaluatorService) getInterval() time.Duration {
 }
 
 func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s == nil || s.opsRepo == nil {
 		return
 	}

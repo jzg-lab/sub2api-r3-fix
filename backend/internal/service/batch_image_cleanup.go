@@ -94,6 +94,11 @@ func (s *BatchImageCleanupService) CleanupOutput(ctx context.Context, batchID st
 }
 
 func (s *BatchImageCleanupService) RunOnce(ctx context.Context, now time.Time) (BatchImageCleanupRunResult, error) {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return BatchImageCleanupRunResult{}, nil
+	}
+	defer deploymentDone()
 	if s == nil || s.Repo == nil {
 		return BatchImageCleanupRunResult{}, ErrBatchImageCleanupFailed
 	}

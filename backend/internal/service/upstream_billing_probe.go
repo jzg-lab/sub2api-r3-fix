@@ -355,6 +355,11 @@ func (s *UpstreamBillingProbeService) runLoop() {
 
 // RunDue executes at most one bounded batch of due accounts.
 func (s *UpstreamBillingProbeService) RunDue(ctx context.Context) error {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return nil
+	}
+	defer done()
 	if s == nil || s.accountRepo == nil {
 		return nil
 	}
@@ -594,7 +599,8 @@ func releaseUpstreamBillingProbeLeaderLock(release func(), releaseAt time.Time) 
 		release()
 		return
 	}
-	time.AfterFunc(delay, release)
+	done := beginDeploymentAsync()
+	time.AfterFunc(delay, func() { defer done(); release() })
 }
 
 func (s *UpstreamBillingProbeService) SetAccountEnabled(ctx context.Context, accountID int64, enabled bool) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -29,8 +30,10 @@ type EmailQueueService struct {
 	emailService *EmailService
 	taskChan     chan EmailTask
 	wg           sync.WaitGroup
-	stopChan     chan struct{}
 	workers      int
+	mu           sync.RWMutex
+	stopped      bool
+	pending      atomic.Int64
 }
 
 // NewEmailQueueService 创建邮件队列服务
@@ -42,7 +45,6 @@ func NewEmailQueueService(emailService *EmailService, workers int) *EmailQueueSe
 	service := &EmailQueueService{
 		emailService: emailService,
 		taskChan:     make(chan EmailTask, 100), // 缓冲100个任务
-		stopChan:     make(chan struct{}),
 		workers:      workers,
 	}
 
@@ -65,14 +67,12 @@ func (s *EmailQueueService) start() {
 func (s *EmailQueueService) worker(id int) {
 	defer s.wg.Done()
 
-	for {
-		select {
-		case task := <-s.taskChan:
+	for task := range s.taskChan {
+		func() {
+			defer deploymentAsyncTasks.Add(-1)
+			defer s.pending.Add(-1)
 			s.processTask(id, task)
-		case <-s.stopChan:
-			logger.LegacyPrintf("service.email_queue", "[EmailQueue] Worker %d stopping", id)
-			return
-		}
+		}()
 	}
 }
 
@@ -108,13 +108,7 @@ func (s *EmailQueueService) EnqueueVerifyCode(email, siteName string, locale ...
 		Locale:   firstEmailLocale(locale),
 	}
 
-	select {
-	case s.taskChan <- task:
-		logger.LegacyPrintf("service.email_queue", "[EmailQueue] Enqueued verify code task for %s", email)
-		return nil
-	default:
-		return fmt.Errorf("email queue is full")
-	}
+	return s.enqueue(task)
 }
 
 // EnqueuePasswordReset 将密码重置邮件任务加入队列
@@ -127,18 +121,37 @@ func (s *EmailQueueService) EnqueuePasswordReset(email, siteName, resetURL strin
 		Locale:   firstEmailLocale(locale),
 	}
 
+	return s.enqueue(task)
+}
+
+func (s *EmailQueueService) enqueue(task EmailTask) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stopped {
+		return fmt.Errorf("email queue is stopped")
+	}
+	s.pending.Add(1)
+	deploymentAsyncTasks.Add(1)
 	select {
 	case s.taskChan <- task:
-		logger.LegacyPrintf("service.email_queue", "[EmailQueue] Enqueued password reset task for %s", email)
 		return nil
 	default:
+		deploymentAsyncTasks.Add(-1)
+		s.pending.Add(-1)
 		return fmt.Errorf("email queue is full")
 	}
 }
 
+func (s *EmailQueueService) Pending() int64 { return s.pending.Load() }
+
 // Stop 停止队列服务
 func (s *EmailQueueService) Stop() {
-	close(s.stopChan)
+	s.mu.Lock()
+	if !s.stopped {
+		s.stopped = true
+		close(s.taskChan)
+	}
+	s.mu.Unlock()
 	s.wg.Wait()
 	logger.LegacyPrintf("service.email_queue", "%s", "[EmailQueue] All workers stopped")
 }

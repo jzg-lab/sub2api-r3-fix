@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 )
 
 // stubMonitorSvc 实现 monitorRunnerSvc，用于隔离 runner 与真实 service/repo。
@@ -341,6 +343,32 @@ func TestInFlight_AcquireReleaseSymmetric(t *testing.T) {
 		t.Fatal("acquire after release should succeed")
 	}
 	r.releaseInFlight(42)
+}
+
+func TestInFlight_StandbySkipAllowsFireAfterResume(t *testing.T) {
+	t.Setenv("DEPLOYMENT_SOCKET", "/unused/test.sock")
+	deployment.Background.SetOpen(false)
+	t.Cleanup(func() { deployment.Background.SetOpen(false) })
+	svc := &stubMonitorSvc{}
+	r := newRunnerForTest(svc)
+	t.Cleanup(r.Stop)
+	task := &scheduledMonitor{id: 42, name: "standby-monitor"}
+	wantRuns := int64(0)
+	for _, active := range []bool{false, true, false, true} {
+		deployment.Background.SetOpen(active)
+		r.fire(context.Background(), task)
+		waitFor(t, time.Second, "fire releases in-flight slot even in standby", func() bool {
+			r.inFlightMu.Lock()
+			defer r.inFlightMu.Unlock()
+			return len(r.inFlight) == 0
+		})
+		if active {
+			wantRuns++
+		}
+		if got := svc.runCount.Load(); got != wantRuns {
+			t.Fatalf("active=%v: got %d checks, want %d", active, got, wantRuns)
+		}
+	}
 }
 
 // stoppedWithin 在 timeout 内并行调用 Stop，超时则 Fatal。验证 Stop 不会阻塞。

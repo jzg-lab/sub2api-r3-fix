@@ -270,6 +270,11 @@ func (l *OpenAIRescueLane) maybeConfirm(ctx context.Context, account *Account, p
 // Poll only bridge candidates. No full roster scan, reseeding or rebind belongs
 // in this fast path; all writes retain the existing revision-bound transactions.
 func (l *OpenAIRescueLane) runConfirmationSweep(ctx context.Context) error {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return nil
+	}
+	defer deploymentDone()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

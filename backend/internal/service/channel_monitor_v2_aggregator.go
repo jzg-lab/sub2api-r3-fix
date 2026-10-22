@@ -214,6 +214,11 @@ func (s *ChannelMonitorV2Aggregator) wait(interval time.Duration) bool {
 }
 
 func (s *ChannelMonitorV2Aggregator) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	s.mu.Lock()
 	parent := s.ctx
 	s.mu.Unlock()

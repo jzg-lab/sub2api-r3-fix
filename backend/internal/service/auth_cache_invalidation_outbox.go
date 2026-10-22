@@ -150,6 +150,11 @@ func (w *AuthCacheInvalidationWorker) run() {
 }
 
 func (w *AuthCacheInvalidationWorker) processBatch(ctx context.Context) error {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return nil
+	}
+	defer deploymentDone()
 	events, err := w.repo.Claim(ctx, w.workerID, authInvalidationBatchSize, authInvalidationLease)
 	if err != nil {
 		return fmt.Errorf("claim auth cache invalidations: %w", err)

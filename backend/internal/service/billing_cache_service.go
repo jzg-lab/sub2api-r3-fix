@@ -117,6 +117,7 @@ type BillingCacheService struct {
 	cacheWriteChan     chan cacheWriteTask
 	cacheWriteWg       sync.WaitGroup
 	cacheWriteStopOnce sync.Once
+	cacheWritePending  atomic.Int64
 	cacheWriteMu       sync.RWMutex
 	stopped            atomic.Bool
 	balanceLoadSF      singleflight.Group
@@ -190,23 +191,23 @@ func (s *BillingCacheService) startCacheWriteWorkers() {
 
 // enqueueCacheWrite 尝试将任务入队，队列满时返回 false（并记录告警）。
 func (s *BillingCacheService) enqueueCacheWrite(task cacheWriteTask) (enqueued bool) {
-	if s.stopped.Load() {
-		s.logCacheWriteDrop(task, "closed")
-		return false
-	}
-
 	s.cacheWriteMu.RLock()
 	defer s.cacheWriteMu.RUnlock()
 
-	if s.cacheWriteChan == nil {
+	if s.stopped.Load() || s.cacheWriteChan == nil {
 		s.logCacheWriteDrop(task, "closed")
 		return false
 	}
 
+	s.cacheWritePending.Add(1)
+	// Queue ownership must overlap its producer until the write actually finishes.
+	deploymentAsyncTasks.Add(1)
 	select {
 	case s.cacheWriteChan <- task:
 		return true
 	default:
+		s.cacheWritePending.Add(-1)
+		deploymentAsyncTasks.Add(-1)
 		// 队列满时不阻塞主流程，交由调用方决定是否同步回退。
 		s.logCacheWriteDrop(task, "full")
 		return false
@@ -242,8 +243,12 @@ func (s *BillingCacheService) cacheWriteWorker(ch <-chan cacheWriteTask) {
 			}
 		}
 		cancel()
+		s.cacheWritePending.Add(-1)
+		deploymentAsyncTasks.Add(-1)
 	}
 }
+
+func (s *BillingCacheService) PendingWrites() int64 { return s.cacheWritePending.Load() }
 
 // cacheWriteKindName 用于日志中的任务类型标识，便于排查丢弃原因。
 func cacheWriteKindName(kind cacheWriteKind) string {
@@ -657,7 +662,9 @@ func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *AP
 	// Trigger async DB reset if any window expired
 	if needsReset {
 		keyID := apiKey.ID
+		done := beginDeploymentAsync()
 		go func() {
+			defer done()
 			resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
 			defer cancel()
 			if s.apiKeyRateLimitLoader != nil {
@@ -1217,7 +1224,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 	// 使用 DoChan 而非 Do：avoid sharing the first caller's ctx among all dedupe followers.
 	// 若第一个 caller 的 ctx 被取消（客户端断连），后续 caller 不受影响，仍由各自 ctx 控制超时。
 	sfKey := strconv.FormatInt(userID, 10) + ":" + platform
-	ch := s.quotaLoadSF.DoChan(sfKey, func() (any, error) {
+	ch := deploymentDoChan(&s.quotaLoadSF, sfKey, func() (any, error) {
 		// 子查询用 detached context + 短超时，独立于任何 caller 的请求 ctx，
 		// 防止"第一个 caller ctx 取消"使所有 follower 一起 fail。
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 3*time.Second)

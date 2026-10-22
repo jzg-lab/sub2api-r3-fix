@@ -132,6 +132,7 @@ func (s *OpsCleanupService) stopCronLocked() {
 	case <-ctx.Done():
 	case <-time.After(opsCleanupCronStopTimeout):
 		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] cron stop timed out")
+		runDeploymentAsync(func() { <-ctx.Done() })
 	}
 	s.cron = nil
 }
@@ -258,6 +259,11 @@ func (s *OpsCleanupService) refreshEffectiveBeforeRun(ctx context.Context) {
 }
 
 func (s *OpsCleanupService) runScheduled() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	if s == nil || s.db == nil || s.opsRepo == nil {
 		return
 	}

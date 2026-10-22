@@ -20,17 +20,19 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"golang.org/x/mod/semver"
 )
 
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrInPlaceUpdateUnsupported  = infraerrors.Conflict("IN_PLACE_UPDATE_UNSUPPORTED", "source builds require the deployment workflow for updates and rollbacks")
 )
 
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	githubRepo     = "jzg-lab/sub2api-r3-fix"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -72,7 +74,7 @@ func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, versi
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
-		currentVersion: version,
+		currentVersion: strings.TrimPrefix(strings.TrimSpace(version), "v"),
 		buildType:      buildType,
 	}
 }
@@ -163,9 +165,15 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.buildType != "release" {
+		return ErrInPlaceUpdateUnsupported
+	}
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
+	}
+	if info.Warning != "" {
+		return fmt.Errorf("update check failed: %s", info.Warning)
 	}
 
 	if !info.HasUpdate {
@@ -281,6 +289,9 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
+	if s.buildType != "release" {
+		return ErrInPlaceUpdateUnsupported
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
@@ -327,6 +338,9 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.buildType != "release" {
+		return ErrInPlaceUpdateUnsupported
+	}
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -363,6 +377,9 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 // fetchRollbackCandidates fetches recent releases and keeps the newest
 // maxRollbackVersions entries strictly older than the current version.
 func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubRelease, error) {
+	if s.buildType != "release" {
+		return nil, ErrInPlaceUpdateUnsupported
+	}
 	releases, err := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
 	if err != nil {
 		return nil, err
@@ -379,7 +396,8 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 			continue
 		}
 		// Only versions strictly older than current (also excludes current itself)
-		if compareVersions(v, s.currentVersion) >= 0 {
+		comparison, err := compareVersions(v, s.currentVersion)
+		if err != nil || comparison >= 0 {
 			continue
 		}
 		seen[v] = true
@@ -387,10 +405,11 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {
-		return compareVersions(
+		comparison, _ := compareVersions(
 			strings.TrimPrefix(candidates[i].TagName, "v"),
 			strings.TrimPrefix(candidates[j].TagName, "v"),
-		) > 0
+		)
+		return comparison > 0
 	})
 
 	if len(candidates) > maxRollbackVersions {
@@ -404,8 +423,15 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 	if err != nil {
 		return nil, err
 	}
+	if release == nil {
+		return nil, fmt.Errorf("release information unavailable")
+	}
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	comparison, err := compareVersions(s.currentVersion, latestVersion)
+	if err != nil {
+		return nil, err
+	}
 
 	assets := make([]Asset, len(release.Assets))
 	for i, a := range release.Assets {
@@ -419,7 +445,7 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 	return &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  latestVersion,
-		HasUpdate:      compareVersions(s.currentVersion, latestVersion) < 0,
+		HasUpdate:      comparison < 0,
 		ReleaseInfo: &ReleaseInfo{
 			Name:        release.Name,
 			Body:        release.Body,
@@ -600,6 +626,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	var cached struct {
+		Repository  string       `json:"repository"`
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
@@ -607,15 +634,25 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
 	}
+	if cached.Repository != githubRepo {
+		return nil, fmt.Errorf("update cache repository mismatch")
+	}
 
 	if time.Now().Unix()-cached.Timestamp > updateCacheTTL {
 		return nil, fmt.Errorf("cache expired")
+	}
+	comparison, err := compareVersions(s.currentVersion, cached.Latest)
+	if err != nil {
+		return nil, err
+	}
+	if cached.ReleaseInfo == nil {
+		return nil, fmt.Errorf("update cache missing release information")
 	}
 
 	return &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  cached.Latest,
-		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
+		HasUpdate:      comparison < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
 		BuildType:      s.buildType,
@@ -624,10 +661,12 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 
 func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	cacheData := struct {
+		Repository  string       `json:"repository"`
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
 	}{
+		Repository:  githubRepo,
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
 		Timestamp:   time.Now().Unix(),
@@ -637,33 +676,56 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
 }
 
-// compareVersions compares two semantic versions
-func compareVersions(current, latest string) int {
-	currentParts := parseVersion(current)
-	latestParts := parseVersion(latest)
-
-	for i := 0; i < 3; i++ {
-		if currentParts[i] < latestParts[i] {
-			return -1
-		}
-		if currentParts[i] > latestParts[i] {
-			return 1
-		}
+// Project release sequences order updates; plugin compatibility still uses SemVer.
+func compareVersions(current, latest string) (int, error) {
+	current = "v" + strings.TrimPrefix(current, "v")
+	latest = "v" + strings.TrimPrefix(latest, "v")
+	if !semver.IsValid(current) || !semver.IsValid(latest) {
+		return 0, fmt.Errorf("invalid release version; use the deployment workflow")
 	}
-	return 0
+	currentSequence, err := projectReleaseSequence(current)
+	if err != nil {
+		return 0, err
+	}
+	latestSequence, err := projectReleaseSequence(latest)
+	if err != nil {
+		return 0, err
+	}
+	if currentSequence == 0 && latestSequence == 0 {
+		return semver.Compare(current, latest), nil
+	}
+	if currentSequence == 0 || latestSequence == 0 {
+		return 0, fmt.Errorf("legacy release identity requires verification through the deployment workflow")
+	}
+	if currentSequence < latestSequence {
+		return -1, nil
+	}
+	if currentSequence > latestSequence {
+		return 1, nil
+	}
+	if semver.Canonical(current) != semver.Canonical(latest) {
+		return 0, fmt.Errorf("release sequence has conflicting upstream versions")
+	}
+	return 0, nil
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	if idx := strings.IndexByte(v, '-'); idx != -1 {
-		v = v[:idx]
+func projectReleaseSequence(version string) (uint64, error) {
+	metadata := semver.Build(version)
+	if !strings.HasPrefix(metadata, "+r17.") {
+		return 0, nil
 	}
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
-		if parsed, err := strconv.Atoi(parts[i]); err == nil {
-			result[i] = parsed
+	parts := strings.Split(strings.TrimPrefix(metadata, "+"), ".")
+	sequence, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || sequence == 0 || strconv.FormatUint(sequence, 10) != parts[1] {
+		return 0, fmt.Errorf("invalid project release sequence")
+	}
+	if len(parts) == 2 {
+		return sequence, nil
+	}
+	if len(parts) == 4 && parts[2] == "fast" && len(parts[3]) == 12 {
+		if _, err := hex.DecodeString(parts[3]); err == nil && parts[3] == strings.ToLower(parts[3]) {
+			return sequence, nil
 		}
 	}
-	return result
+	return 0, fmt.Errorf("unrecognized project release metadata")
 }

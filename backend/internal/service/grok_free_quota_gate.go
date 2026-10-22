@@ -223,7 +223,7 @@ func scheduleGrokFreeQuotaStatsRefresh(
 	gateTokens := settings.gateTokens
 	limitTokens := settings.limitTokens
 	cacheTTL := settings.cacheTTL
-	go func() {
+	runDeploymentAsync(func() {
 		defer func() {
 			for _, id := range toFetch {
 				inFlight.Delete(id)
@@ -262,7 +262,7 @@ func scheduleGrokFreeQuotaStatsRefresh(
 			}
 		}
 		sweepGrokFreeQuotaGateCache(cache, now, cacheTTL)
-	}()
+	})
 }
 
 // grokFreeQuotaGateCacheMinSweepAge floors the eviction age so a tiny cacheTTL

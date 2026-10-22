@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
+import { checkUpdates } from '@/api/admin/system'
+import { i18n } from '@/i18n'
 import type { PublicSettings } from '@/types'
 
 function createDeferred<T>() {
@@ -68,6 +70,48 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
 vi.mock('@/api/admin/system', () => ({
   checkUpdates: vi.fn(),
 }))
+
+describe('Version check warnings', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(checkUpdates).mockReset()
+  })
+
+  it('keeps backend warnings in the store and cached response', async () => {
+    vi.mocked(checkUpdates).mockResolvedValue({
+      current_version: '0.3.0+r17bi', latest_version: '0.3.0+r17bi',
+      has_update: false, build_type: 'source', cached: false,
+      warning: 'Release identity requires verification'
+    })
+    const store = useAppStore()
+    await store.fetchVersion()
+    expect(store.versionWarning).toBe('Release identity requires verification')
+    expect((await store.fetchVersion())?.warning).toBe(store.versionWarning)
+    expect(checkUpdates).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalidates stale update actions on request failure and clears the warning on success', async () => {
+    const store = useAppStore()
+    store.hasUpdate = true
+    store.versionLoaded = true
+    vi.mocked(checkUpdates).mockRejectedValueOnce(new Error('offline'))
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const translate = vi.spyOn(i18n.global, 't').mockReturnValue('Unable to check for updates')
+    await store.fetchVersion(true)
+    log.mockRestore()
+    expect(translate).toHaveBeenCalledWith('version.checkFailed')
+    translate.mockRestore()
+    expect(store.hasUpdate).toBe(false)
+    expect(store.versionLoaded).toBe(false)
+    expect(store.versionWarning).toBe('Unable to check for updates')
+    vi.mocked(checkUpdates).mockResolvedValueOnce({
+      current_version: '0.2.17+r17.1', latest_version: '0.2.17+r17.1',
+      has_update: false, build_type: 'release', cached: false
+    })
+    await store.fetchVersion(true)
+    expect(store.versionWarning).toBe('')
+  })
+})
 
 vi.mock('@/api/auth', () => ({
   getPublicSettings: vi.fn(),

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Sub2API handoff recovery
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+Unit=sub2api-handoff-reconcile.service
+
+[Install]
+WantedBy=timers.target

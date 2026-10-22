@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 )
 
 const (
@@ -33,6 +34,20 @@ func ensureBootstrapSecrets(ctx context.Context, client *ent.Client, cfg *config
 	}
 
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
+	if deployment.Managed() {
+		stored, err := querySecuritySecretWithRetry(ctx, client, securitySecretKeyJWT)
+		if err != nil {
+			return fmt.Errorf("deployment requires persisted JWT secret: %w", err)
+		}
+		if len([]byte(strings.TrimSpace(stored.Value))) < 32 {
+			return fmt.Errorf("invalid persisted JWT secret")
+		}
+		if cfg.JWT.Secret != "" && cfg.JWT.Secret != stored.Value {
+			return fmt.Errorf("deployment JWT secret differs from persisted secret")
+		}
+		cfg.JWT.Secret = stored.Value
+		return nil
+	}
 	if cfg.JWT.Secret != "" {
 		storedSecret, err := createSecuritySecretIfAbsent(ctx, client, securitySecretKeyJWT, cfg.JWT.Secret)
 		if err != nil {

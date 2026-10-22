@@ -18,6 +18,7 @@ type IdempotencyCleanupService struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config) *IdempotencyCleanupService {
@@ -36,6 +37,7 @@ func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config
 		interval: interval,
 		batch:    batch,
 		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
 	}
 }
 
@@ -45,7 +47,7 @@ func (s *IdempotencyCleanupService) Start() {
 	}
 	s.startOnce.Do(func() {
 		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] started interval=%s batch=%d", s.interval, s.batch)
-		go s.runLoop()
+		go func() { defer close(s.doneCh); s.runLoop() }()
 	})
 }
 
@@ -54,9 +56,19 @@ func (s *IdempotencyCleanupService) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
-		close(s.stopCh)
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
 		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] stopped")
 	})
+	s.startOnce.Do(func() {
+		if s.doneCh != nil {
+			close(s.doneCh)
+		}
+	})
+	if s.doneCh != nil {
+		<-s.doneCh
+	}
 }
 
 func (s *IdempotencyCleanupService) runLoop() {
@@ -77,6 +89,11 @@ func (s *IdempotencyCleanupService) runLoop() {
 }
 
 func (s *IdempotencyCleanupService) cleanupOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

@@ -99,6 +99,11 @@ func (s *CNProviderBalanceCheckService) Stop() {
 }
 
 func (s *CNProviderBalanceCheckService) runOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	// 收集 coding 探测目标（kimi/deepseek + 智谱）与 payg 检查队列。
 	// coding 探测统一在收集完成后按 4 并发执行：单账号探测 15-20s，串行 ×
 	// 多账号会耗尽整体预算（120s 上限），排在后面的账号快照会饥饿，

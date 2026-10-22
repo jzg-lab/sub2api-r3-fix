@@ -1,4 +1,6 @@
 """No Docker, systemd, credentials or production connections used by this suite."""
+from contextlib import redirect_stdout
+import io
 import os
 import time
 from pathlib import Path
@@ -395,6 +397,65 @@ class UtilityTests(unittest.TestCase):
             d.save(root / "evidence.json", receipt)
             with self.assertRaises(RuntimeError):
                 d.evidence(root, artifact, host)
+
+
+class StatusTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        d.save(self.root / "config.json", {"backup_max_age_seconds": 7200})
+        d.save(self.root / "prepared.json", {
+            "candidate": {"source": "a" * 40, "image_id": "sha256:candidate"}, "backup_at": 10000,
+        })
+
+    def status(self, now):
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["fast_deploy.py", "status", "--release", str(self.root)]), \
+             patch.object(d.time, "time", return_value=now), patch.object(d.os, "umask"), \
+             patch.object(d, "run", side_effect=AssertionError("status must not run commands")), \
+             patch.object(d, "Host", side_effect=AssertionError("status must not inspect production")), \
+             redirect_stdout(output):
+            d.main()
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        return output.getvalue()
+
+    def test_expired_material_is_not_reported_as_ready(self):
+        result = self.status(17201)
+        self.assertIn("BACKUP_WINDOW=EXPIRED", result)
+        self.assertNotIn("PREPARED source=", result)
+
+    def test_current_window_is_only_a_local_snapshot(self):
+        result = self.status(10001)
+        self.assertIn("PREPARATION_SNAPSHOT source=" + "a" * 40, result)
+        self.assertIn("BACKUP_WINDOW=CURRENT", result)
+        self.assertIn("expires_at=1970-01-01T04:46:40Z", result)
+        self.assertIn("LIVE_STATE_NOT_CHECKED", result)
+
+    def test_future_backup_timestamp_requires_clock_review(self):
+        self.assertIn("BACKUP_WINDOW=CLOCK_INVALID", self.status(9999))
+
+    def test_exact_expiry_matches_switch_preflight(self):
+        self.assertIn("BACKUP_WINDOW=CURRENT", self.status(17200))
+
+    def test_uses_configured_window(self):
+        d.save(self.root / "config.json", {"backup_max_age_seconds": 60})
+        self.assertIn("BACKUP_WINDOW=EXPIRED", self.status(10061))
+
+    def test_historical_attempt_results_survive_backup_expiry(self):
+        for mode, phase in (("activate", "ACCEPTED"), ("rollback", "ROLLED_BACK")):
+            (self.root / mode).mkdir()
+            d.save(self.root / mode / "state.json", {"mode": mode, "phase": phase})
+        result = self.status(17201)
+        for expected in ("BACKUP_WINDOW=EXPIRED", "ACCEPTED", "ROLLED_BACK"):
+            self.assertIn(expected, result)
+
+    def test_unprepared_release_has_no_backup_window(self):
+        (self.root / "prepared.json").unlink()
+        result = self.status(10001)
+        self.assertIn("NOT_PREPARED", result)
+        self.assertNotIn("BACKUP_WINDOW=", result)
 
 
 class PreflightTests(unittest.TestCase):

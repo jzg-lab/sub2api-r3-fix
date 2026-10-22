@@ -86,7 +86,7 @@ func RegisterAdminRoutes(
 		registerOpsRoutes(admin, h)
 
 		// 系统管理
-		registerSystemRoutes(admin, h)
+		registerSystemRoutes(admin, h, stepUpAuth)
 
 		// 订阅管理
 		registerSubscriptionRoutes(admin, h)
@@ -686,10 +686,14 @@ func registerBackupRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 	}
 }
 
-func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	system := admin.Group("/system")
 	{
 		system.GET("/version", h.Admin.System.GetVersion)
+		system.GET("/deployment", h.Admin.System.GetDeployment)
+		system.POST("/deployment/prepare", gin.HandlerFunc(stepUpAuth), h.Admin.System.PrepareDeployment)
+		system.POST("/deployment/activate", gin.HandlerFunc(stepUpAuth), h.Admin.System.ActivateDeployment)
+		system.POST("/deployment/rollback", gin.HandlerFunc(stepUpAuth), h.Admin.System.RollbackDeployment)
 		system.GET("/check-updates", h.Admin.System.CheckUpdates)
 		system.GET("/rollback-versions", h.Admin.System.GetRollbackVersions)
 		system.POST("/update", h.Admin.System.PerformUpdate)

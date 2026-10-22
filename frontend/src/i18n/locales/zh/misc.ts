@@ -18,6 +18,46 @@ export default {
   },
 
   // Version Badge
+  deployment: {
+    currentTask: '当前任务', candidates: '可用版本', source: '源码提交', taskId: '任务编号',
+    channels: { ordinary: '普通更新', special: '专项更新' },
+    details: '技术详情', reused: '复用已验收镜像，备份与预检仍重新执行',
+    rollbackAvailable: '可回退', rollbackUnavailable: '当前不可回退',
+    previousVersion: '上一版本', targetCommit: '回退目标提交',
+    catalogUnavailable: '候选版本暂时无法核验，已暂停新的准备和上线；已有任务结果仍可查询。',
+    title: '部署更新', status: '发布状态', refresh: '刷新状态', loading: '正在读取状态',
+    disconnected: '连接暂时中断，正在重新查询任务结果', unavailable: '部署执行器尚未接入',
+    empty: '暂无已审核的候选版本', special: '专项更新，需要先审核迁移、插件或运行环境变化',
+    prepare: '准备更新', activate: '确认上线', rollback: '回退上一版',
+    expires: '本次备份有效至 {time}', checkFailed: '检查未通过，请查看该任务的私有日志；不要重复切换。',
+    actionUncertain: '请求未确认完成，正在查询已有任务；不会自动重复执行。',
+    activateConfirm: '将短暂维护并切换应用。数据库和 Redis 不重启；请求未排空会延后。确认现在上线？',
+    handoffConfirm: '新版本先待命验证，再短暂维护、暂停插件和后台任务、切换流量，最后恢复。共用原数据库和 Redis；请求未排空会取消本次更新。确认上线？',
+    rollbackConfirm: '将短暂维护并回退本次应用版本，不恢复数据库。只有兼容检查通过才会执行。确认回退？',
+    phases: {
+      BLOCKED: '更新已阻断',
+      QUEUED: '已排队', FETCHING: '核对源码', BUILDING: '构建镜像', VERIFYING: '隔离验收', BACKUP: '备份与预检',
+      PREPARED: '准备完成，等待确认', EXPIRED: '准备已过期', PREPARATION_FAILED: '准备失败，未切换',
+      SWITCHING: '正在提交切换', PAUSING: '暂停直连后台', DRAINING: '等待请求结束', STOPPING: '停止旧应用',
+      STAGING: '验证待命实例', RESUMING: '恢复插件与后台任务',
+      STARTING: '启动目标版本', PUBLIC_VERIFY: '公网验收', ACCEPTED: '上线成功', DEFERRED: '本次延后，旧版继续服务',
+      RECOVERING: '正在恢复', RECOVERED: '已恢复操作前版本', ROLLED_BACK: '回退完成',
+      PREFLIGHT_FAILED: '切换前检查失败', LAUNCH_FAILED: '任务启动失败', NEEDS_ATTENTION: '需要人工处理'
+    },
+    errors: {
+      AUXILIARY_SERVICES_PENDING: '主站已恢复，附属后台仍在自动重试恢复；恢复完成前暂不能再次切换。',
+      CANDIDATE_CHANGED: '候选审核信息已改变，需要重新检查版本。',
+      BASELINE_CHANGED: '线上版本与候选审核基线不一致，需要重新审核更新范围。',
+      VERSION_MISMATCH: '发布版本号与固定源码不一致，已阻断准备。',
+      SPECIAL_DEPLOYMENT_REQUIRED: '包含迁移、插件、依赖、配置或部署工具变化，不能走普通更新。',
+      INSUFFICIENT_RESOURCES: '服务器可用内存或磁盘不足，旧服务保持运行。',
+      BUILD_BUDGET_UNAVAILABLE: '构建资源限额尚未生效，已停止准备，请维护者检查。',
+      FETCHING_FAILED: '源码或候选校验失败，未切换服务。',
+      BUILDING_FAILED: '镜像构建或构建测试失败，未切换服务。',
+      VERIFYING_FAILED: '隔离验收未通过，未切换服务。',
+      BACKUP_FAILED: '备份或正式预检失败，未切换服务。'
+    }
+  },
   version: {
     currentVersion: '当前版本',
     latestVersion: '最新版本',
@@ -30,7 +70,10 @@ export default {
     viewChangelog: '查看更新日志',
     refresh: '刷新',
     sourceMode: '源码构建',
-    sourceModeHint: '源码构建请使用 git pull 更新',
+    sourceModeHint: '源码构建不支持原地更新',
+    deploymentGuide: '部署指南',
+    checkUnavailable: '版本状态尚未确认',
+    checkFailed: '无法检查更新',
     updateNow: '立即更新',
     updating: '正在更新...',
     updateComplete: '更新完成',

@@ -1,0 +1,9 @@
+[Unit]
+Description=Sub2API build container budget
+
+[Slice]
+CPUQuota=200%
+CPUWeight=20
+MemoryMax=6G
+MemorySwapMax=0
+IOWeight=20

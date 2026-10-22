@@ -450,7 +450,7 @@ func (s *PaymentService) dispatchPaymentFulfillmentNotification(o *dbent.Payment
 	if s == nil || s.notificationEmailService == nil || o == nil {
 		return
 	}
-	go func() {
+	runDeploymentAsync(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), emailSendTimeout)
 		defer cancel()
 		var err error
@@ -465,7 +465,7 @@ func (s *PaymentService) dispatchPaymentFulfillmentNotification(o *dbent.Payment
 		if err != nil {
 			slog.Warn("payment fulfillment notification email failed", "order_id", o.ID, "action", auditAction, "err", err.Error())
 		}
-	}()
+	})
 }
 
 func (s *PaymentService) sendBalanceRechargeSuccessNotification(ctx context.Context, o *dbent.PaymentOrder) error {

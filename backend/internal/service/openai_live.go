@@ -236,7 +236,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			return nil, fmt.Errorf("save live call mapping: %w", saveErr)
 		}
 		created.Account = account
-		go s.observeLiveCall(record)
+		runDeploymentAsync(func() { s.observeLiveCall(record) })
 		return created, nil
 	}
 	if lastErr != nil {
@@ -520,7 +520,7 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 	upstream, err := s.dialLiveSideband(ctx, record)
 	if err != nil {
 		_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
-		go s.observeLiveCall(record)
+		runDeploymentAsync(func() { s.observeLiveCall(record) })
 		return err
 	}
 	defer func() { _ = upstream.Close() }()
@@ -570,7 +570,7 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 		s.finalizeLiveCall(record)
 		return runErr
 	}
-	go s.observeLiveCall(record)
+	runDeploymentAsync(func() { s.observeLiveCall(record) })
 	return runErr
 }
 

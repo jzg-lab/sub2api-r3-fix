@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/Wei-Shaw/sub2api/migrations"
 
@@ -136,6 +137,9 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	migrationCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	if err := initializeDatabaseWithRetry(migrationCtx, func(ctx context.Context) error {
+		if deployment.Managed() {
+			return verifyDeploymentMigrations(ctx, drv.DB(), migrations.FS)
+		}
 		return applyMigrationsFS(ctx, drv.DB(), migrations.FS)
 	}); err != nil {
 		_ = drv.Close() // 迁移失败时关闭驱动，避免资源泄露
@@ -160,7 +164,7 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	// SIMPLE 模式：启动时补齐各平台默认分组。
 	// - anthropic/openai/gemini: 确保存在 <platform>-default
 	// - antigravity: 仅要求存在 >=2 个未软删除分组（用于 claude/gemini 混合调度场景）
-	if cfg.RunMode == config.RunModeSimple {
+	if cfg.RunMode == config.RunModeSimple && !deployment.Managed() {
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer seedCancel()
 		if err := ensureSimpleModeDefaultGroups(seedCtx, client); err != nil {

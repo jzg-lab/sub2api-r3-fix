@@ -915,13 +915,13 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 		return
 	}
 
-	go func() {
+	runDeploymentAsync(func() {
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer updateCancel()
 		if err := s.accountRepo.UpdateExtra(updateCtx, accountID, updates); err == nil {
 			notifyOpenAIAutoReset(accountID)
 		}
-	}()
+	})
 }
 
 func extractOpenAICodexProbeUpdates(resp *http.Response) (map[string]any, error) {

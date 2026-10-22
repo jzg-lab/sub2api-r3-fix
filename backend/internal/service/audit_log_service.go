@@ -28,13 +28,15 @@ type AuditLogService struct {
 
 	queue chan *AuditLog
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	enqueueMu sync.RWMutex
 
 	droppedCount uint64
 	writeFailed  uint64
 	writtenCount uint64
+	pending      atomic.Int64
 }
 
 func NewAuditLogService(repo AuditLogRepository, settingService *SettingService) *AuditLogService {
@@ -63,7 +65,9 @@ func (s *AuditLogService) Stop() {
 	if s == nil {
 		return
 	}
+	s.enqueueMu.Lock()
 	s.cancel()
+	s.enqueueMu.Unlock()
 	s.wg.Wait()
 }
 
@@ -72,6 +76,8 @@ func (s *AuditLogService) Record(entry *AuditLog) {
 	if s == nil || entry == nil {
 		return
 	}
+	s.enqueueMu.RLock()
+	defer s.enqueueMu.RUnlock()
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now().UTC()
 	}
@@ -80,12 +86,16 @@ func (s *AuditLogService) Record(entry *AuditLog) {
 		return
 	default:
 	}
+	s.pending.Add(1)
 	select {
 	case s.queue <- entry:
 	default:
+		s.pending.Add(-1)
 		atomic.AddUint64(&s.droppedCount, 1)
 	}
 }
+
+func (s *AuditLogService) Pending() int64 { return s.pending.Load() }
 
 // List 分页查询审计日志。
 func (s *AuditLogService) List(ctx context.Context, filter *AuditLogFilter) (*AuditLogList, error) {
@@ -148,6 +158,7 @@ func (s *AuditLogService) runWriter() {
 		} else {
 			atomic.AddUint64(&s.writtenCount, uint64(inserted))
 		}
+		s.pending.Add(-int64(len(batch)))
 		batch = batch[:0]
 	}
 
@@ -212,6 +223,11 @@ func (s *AuditLogService) runRetentionLoop() {
 }
 
 func (s *AuditLogService) runRetentionOnce() {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
+		return
+	}
+	defer deploymentDone()
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
 

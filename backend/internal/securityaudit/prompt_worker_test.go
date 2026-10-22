@@ -10,8 +10,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWorkerStandbyDoesNotClaimPersistedJobs(t *testing.T) {
+	t.Setenv("DEPLOYMENT_SOCKET", "/fixture/control.sock")
+	deployment.Background.SetOpen(false)
+	repo := &fakeJobRepository{claimQueue: []*Job{{ID: 1}}}
+	runner := NewRunner(&fakeConfigStore{cfg: asyncConfig(), active: true}, repo, nil, nil, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 650*time.Millisecond)
+	defer cancel()
+	runner.wg.Add(1)
+	runner.worker(ctx, 0)
+	require.Len(t, repo.claimQueue, 1)
+	require.Zero(t, deployment.Background.Pending())
+}
 
 type fixedClock struct{ now time.Time }
 

@@ -589,6 +589,11 @@ func (s *OpenCodeGoUsageService) Refresh(ctx context.Context, accountID int64) (
 }
 
 func (s *OpenCodeGoUsageService) RunDue(ctx context.Context) error {
+	done, ok := beginDeploymentBackground()
+	if !ok {
+		return nil
+	}
+	defer done()
 	if s == nil || s.accountRepo == nil {
 		return nil
 	}

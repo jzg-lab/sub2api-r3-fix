@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/antibypass"
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -20,10 +21,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/redis/go-redis/v9"
-	"log"
 	"net/http"
-	"sync"
-	"time"
 )
 
 import (
@@ -368,12 +366,15 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbeRunner, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
+	v := provideCleanup(timingWheelService, deferredService, contentModerationService, userMessageQueueService, client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, openAIDowngradeProbeRunner, openAIRescueLane, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, openAIOperationsService, promptService, pluginManager, concurrencyService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
 		PluginManager: pluginManager,
 		Readiness:     readiness,
+		UsageWorkers:  usageRecordWorkerPool,
+		Deferred:      deferredService,
+		Billing:       billingCacheService,
 		Cleanup:       v,
 	}
 	return application, nil
@@ -386,7 +387,10 @@ type Application struct {
 	PromptAudit   *securityaudit.PromptService
 	PluginManager *service.PluginManager
 	Readiness     *server.Readiness
-	Cleanup       func()
+	UsageWorkers  *service.UsageRecordWorkerPool
+	Deferred      *service.DeferredService
+	Billing       *service.BillingCacheService
+	Cleanup       func() error
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
@@ -408,6 +412,10 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 }
 
 func provideCleanup(
+	timingWheel *service.TimingWheelService,
+	deferred *service.DeferredService,
+	contentModeration *service.ContentModerationService,
+	userMessageQueue *service.UserMessageQueueService,
 	entClient *ent.Client,
 	rdb *redis.Client,
 	opsMetricsCollector *service.OpsMetricsCollector,
@@ -461,17 +469,43 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 	concurrencyService *service.ConcurrencyService,
-) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		type cleanupStep struct {
-			name string
-			fn   func() error
-		}
+) func() error {
+	return func() error {
+		ctx := context.Background()
 
 		parallelSteps := []cleanupStep{
+			{"OpsErrorLogWorkers", func() error {
+				if !handler.StopOpsErrorLogWorkers() {
+					return errors.New("operations error logs still draining")
+				}
+				return nil
+			}},
+			{"UserMessageQueueService", func() error {
+				if userMessageQueue != nil {
+					userMessageQueue.Stop()
+				}
+				return nil
+			}},
+			{"RequestSideEffectsBeforeQueues", func() error { return service.WaitDeploymentAsync(ctx) }},
+			{"ContentModerationService", func() error {
+				if contentModeration != nil {
+					contentModeration.Stop()
+				}
+				return nil
+			}},
+			{"TimingWheelService", func() error {
+				if timingWheel != nil {
+					timingWheel.Stop()
+				}
+				return nil
+			}},
+			{"DeferredService", func() error {
+				if deferred != nil {
+					deferred.Stop()
+				}
+				return nil
+			}},
+			{"RequestSideEffects", func() error { return service.WaitDeploymentAsync(ctx) }},
 			{"OpenAIDowngradeProbe", func() error {
 				if openAIDowngradeProbe != nil {
 					openAIDowngradeProbe.Stop()
@@ -769,42 +803,6 @@ func provideCleanup(
 			}},
 		}
 
-		runParallel := func(steps []cleanupStep) {
-			var wg sync.WaitGroup
-			for i := range steps {
-				step := steps[i]
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if err := step.fn(); err != nil {
-						log.Printf("[Cleanup] %s failed: %v", step.name, err)
-						return
-					}
-					log.Printf("[Cleanup] %s succeeded", step.name)
-				}()
-			}
-			wg.Wait()
-		}
-
-		runSequential := func(steps []cleanupStep) {
-			for i := range steps {
-				step := steps[i]
-				if err := step.fn(); err != nil {
-					log.Printf("[Cleanup] %s failed: %v", step.name, err)
-					continue
-				}
-				log.Printf("[Cleanup] %s succeeded", step.name)
-			}
-		}
-
-		runParallel(parallelSteps)
-		runSequential(infraSteps)
-
-		select {
-		case <-ctx.Done():
-			log.Printf("[Cleanup] Warning: cleanup timed out after 10 seconds")
-		default:
-			log.Printf("[Cleanup] All cleanup steps completed")
-		}
+		return runCleanup(parallelSteps, infraSteps)
 	}
 }

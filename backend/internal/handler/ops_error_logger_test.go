@@ -127,6 +127,15 @@ func resetOpsErrorLoggerStateForTest(t *testing.T) {
 	opsErrorLogDrained.Store(false)
 }
 
+func TestOpsErrorWorkersStopUsesOwnedChannel(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		resetOpsErrorLoggerStateForTest(t)
+		startOpsErrorLogWorkers()
+		require.True(t, StopOpsErrorLogWorkers(), "workers must not read the detached global nil channel")
+	}
+	resetOpsErrorLoggerStateForTest(t)
+}
+
 func TestEnqueueOpsErrorLog_QueueFullDrop(t *testing.T) {
 	resetOpsErrorLoggerStateForTest(t)
 
