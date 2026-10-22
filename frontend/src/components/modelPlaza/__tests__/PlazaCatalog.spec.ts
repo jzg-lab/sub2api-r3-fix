@@ -86,6 +86,43 @@ describe('plaza billing display', () => {
 })
 
 describe('plaza interactions', () => {
+  it('only offers groups with models from the selected provider and clears an incompatible group', async () => {
+    const data = plazaFixture()
+    data.groups[0].models.push({ ...data.groups[0].models[0], name: 'grok-1', platform: 'grok' })
+    const anthropic = structuredClone(data.groups[0])
+    anthropic.id = 2; anthropic.name = 'Claude group'; anthropic.platform = 'anthropic'
+    anthropic.models = [{ ...anthropic.models[0], name: 'claude-1', platform: 'anthropic' }]
+    const openai = structuredClone(data.groups[0])
+    openai.id = 3; openai.name = 'GPT group'; openai.models = [openai.models[0]]
+    data.groups.push(anthropic, openai)
+    const wrapper = mount(ModelPlazaContent, { props: { response: data, loading: false } })
+    const provider = (name: string) => wrapper.findAll('.plaza-provider-chips button')
+      .find(button => button.find(`[data-provider="${name}"]`).exists())!
+    const groups = () => wrapper.findAll('.plaza-filter-section')[1].findAll('button')
+    expect(groups().map(button => button.text())).toHaveLength(4)
+
+    await provider('grok').trigger('click')
+    expect(groups().map(button => button.text()).join(' ')).toContain('Standard')
+    expect(groups()).toHaveLength(2)
+    expect(wrapper.findAll('.plaza-model-card')).toHaveLength(1)
+
+    await provider('anthropic').trigger('click')
+    await groups()[1].trigger('click')
+    expect(groups()[1].attributes('aria-pressed')).toBe('true')
+    await provider('openai').trigger('click')
+    expect(groups()).toHaveLength(3)
+    expect(groups()[0].attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('.plaza-model-card')).toHaveLength(1)
+
+    await wrapper.find('.plaza-provider-chips button').trigger('click')
+    expect(groups()).toHaveLength(4)
+    await groups()[3].trigger('click')
+    await wrapper.setProps({ response: { ...data, groups: data.groups.slice(0, 2) } })
+    expect(groups()[0].attributes('aria-pressed')).toBe('true')
+    expect(groups()).toHaveLength(3)
+    wrapper.unmount()
+  })
+
   it('switches tier details and sorting to the same official price source', async () => {
     const data = plazaFixture()
     const model = data.groups[0].models[0]

@@ -29,7 +29,7 @@
           <summary>{{ t('modelPlaza.filters.groupLabel') }}</summary>
           <div class="plaza-chips">
             <button class="plaza-chip" :aria-pressed="selectedGroup === 'all'" @click="selectedGroup = 'all'">{{ t('modelPlaza.filters.all') }}</button>
-            <button v-for="g in response.groups" :key="g.id" class="plaza-chip" :aria-pressed="selectedGroup === g.id" @click="selectedGroup = g.id">{{ g.name }}<small>×{{ g.user_rate_multiplier ?? g.rate_multiplier }}</small></button>
+            <button v-for="g in visibleGroups" :key="g.id" class="plaza-chip" :aria-pressed="selectedGroup === g.id" @click="selectedGroup = g.id">{{ g.name }}<small>×{{ g.user_rate_multiplier ?? g.rate_multiplier }}</small></button>
           </div>
         </details>
       </template>
@@ -121,7 +121,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -153,6 +153,11 @@ const chosenGroups = reactive<Record<string, number>>({})
 const detailKey = ref('')
 const detailTab = ref<'pricing' | 'status'>('pricing')
 const allEntries = computed(() => catalogue(props.response?.groups ?? []))
+const visibleGroups = computed(() => (props.response?.groups ?? []).filter(group =>
+  !filters.platform || group.models.some(model => model.platform === filters.platform)))
+watch(visibleGroups, groups => {
+  if (selectedGroup.value !== 'all' && !groups.some(group => group.id === selectedGroup.value)) selectedGroup.value = 'all'
+})
 const descriptionHtml = computed(() => DOMPurify.sanitize(marked.parse(props.response?.description ?? '') as string))
 const unitLabel = '1M Tokens'
 const priceTitle = computed(() => t(showOriginal.value ? 'modelPlaza.catalog.referenceTitle' : 'modelPlaza.catalog.currentPrice'))
