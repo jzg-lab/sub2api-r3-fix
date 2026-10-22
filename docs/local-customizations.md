@@ -65,7 +65,7 @@ Nginx 故障证据仅在配置摘要完全不变时复用；调用方或插件�
 回归入口为 `managed_deployment_service_test.go`、`managed_deployment_handler_test.go`、
 `routes/managed_deployment_test.go`、`deploy/tests/test_managed_deploy.py` 及两项组件测试。
 早期按钮修复后 Python 共 79 项、前端 5 文件/51 项、Go 定向 race 测试通过；历史制品对真实隔离往返通过，
-不等于当前未提交代码已在 Linux 生产容器完整验收。详细证据与未测项见部署状态。
+不等于当前源码已在 Linux 生产容器完整验收。详细证据与未测项见部署状态。
 候选清单目前为空；未安装生产控制器、未挂载 socket、未发布新版本或切换线上。
 
 ### 共库交接替换（本地，未部署）
