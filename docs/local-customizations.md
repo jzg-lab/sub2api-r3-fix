@@ -6,7 +6,7 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
 本文以本地源码为准；当前线上提交、插件和实际部署证据统一见[部署状态](deployment-state.md)。
 
-## 更新入口缺陷修正（本地，未部署）
+## 更新入口缺陷修正（已随 f06a57d 部署）
 
 2026-10-20，本地回归复现更新入口指向官方仓库、沿用无来源缓存、源码构建仍可进入原地替换流程，
 以及版本比较丢失构建元数据前的补丁号和本项目序号。`update_service.go` 已修正为本项目仓库，
@@ -22,10 +22,14 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 回归入口：`backend/internal/service/update_service_test.go`、`system_handler_test.go`、
 `plugin_compatibility_test.go`，以及 `frontend/src/components/__tests__/VersionBadge.spec.ts`、
 `frontend/src/stores/__tests__/app.spec.ts` 和两种语言的消息编译/键冲突测试。
-未分配首个新版本号、未创建 Release、未接入生产；自动准备与受管更新流程见
+未分配首个新版本号、未创建 Release；2026-10-23 随 `f06a57d` 首次接入生产，自动准备与受管更新流程见
 [二期计划](merge-deploy-guide.md#第二期实施计划)。
 
-## 第二期部署按钮（本地，未部署）
+## 第二期部署按钮（已首次接入生产）
+
+2026-10-23 `f06a57d` 镜像、双槽及受管控制器已在生产首次接入；候选清单为空、管理员 TOTP 未启用，
+真实的“页面准备 → 确认上线/回退”尚未验收。以下保留各开发阶段的本地回归记录，
+实际运行身份与首次切换证据以[部署状态](deployment-state.md)为准。
 
 用户纠正了“终端先行”的范围理解：日常普通更新必须在页面完成，不靠 AI 或手工执行 SSH 命令。
 复用版本入口新增 `DeploymentDialog.vue` 和 `api/admin/deployment.ts`，支持候选、自动准备、
