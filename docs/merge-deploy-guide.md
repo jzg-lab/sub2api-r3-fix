@@ -285,6 +285,9 @@ Compose 挂载，必须走专项；不能把本轮实现本身伪装成普通应
   不用只限制 Python 客户端的 `MemoryMax` 冒充 Docker 编译容器限额，也不换成无法直接读取本机
   运行时镜像的独立 docker-container 构建器。首次接入仍须核对真实 RUN 进程处于该 cgroup 后代，
   并采样 `cpu.stat` / `memory.peak`；本地已有隔离 Docker，尚未完成此 systemd/cgroup 验收。
+- 2026-10-23 首次服务器构建在预算预检即停止：目标机 buildx v0.34.0 的 `inspect` 不支持
+  `--format`。预算检查改用 `buildx ls --format '{{json .}}'` 核对 `default` 的 `docker` 驱动；
+  部署前在目标机实跑该预检，不能只依赖开发机的 CLI 行为或单测替身。
 - 上线前确认镜像/备份保留策略。目前空闲资源门槛默认 20GiB 磁盘、
   8GiB 内存；隔离应用/数据库/Redis 分别限定 4GiB/1GiB/256MiB 和 2/1/1 CPU。
   编译容器限额不包含 Docker 守护进程导出镜像、宿主归档和数据库备份的全部开销，不能承诺零影响。

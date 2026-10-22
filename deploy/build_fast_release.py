@@ -52,9 +52,11 @@ def limited_build_options(parent):
             and os.environ.get("DOCKER_BUILDKIT", "1") == "1", "managed build requires local default Docker")
     endpoint = run("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").decode().strip()
     info = json.loads(run("docker", "info", "--format", "{{json .}}"))
-    builder = json.loads(run("docker", "buildx", "inspect", "default", "--format", "{{json .}}"))
+    builders = [json.loads(line) for line in run("docker", "buildx", "ls", "--format", "{{json .}}").splitlines()]
+    default = [builder for builder in builders if builder.get("Name") == "default"]
     require(endpoint.startswith("unix://") and info["OSType"] == "linux" and info["CgroupVersion"] == "2"
-            and builder["Driver"] == "docker", "local cgroup v2 Docker builder required")
+            and default and all(builder.get("Driver") == "docker" for builder in default),
+            "local cgroup v2 Docker builder required")
     group = run("systemctl", "show", "sub2api-build.slice", "--property=ControlGroup", "--value").decode().strip()
     require(group == parent, "build slice is not active")
     path = Path("/sys/fs/cgroup" + group)

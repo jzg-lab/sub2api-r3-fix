@@ -510,11 +510,16 @@ class ManagedDeploymentTests(unittest.TestCase):
 class BuildBudgetTests(unittest.TestCase):
     def check(self, *, memory="6442450944", cpu="200000 100000", swap="0", driver="docker"):
         responses = [b"unix:///var/run/docker.sock", b'{"OSType":"linux","CgroupVersion":"2"}',
-                     json.dumps({"Driver": driver}).encode(), m.build.BUILD_CGROUP.encode()]
+                     b"\n".join(json.dumps(builder).encode() for builder in (
+                         {"Name": "other", "Driver": "docker-container"},
+                         {"Name": "default", "Driver": driver},
+                         {"Name": "default", "Driver": driver})), m.build.BUILD_CGROUP.encode()]
         values = {"memory.max": memory, "cpu.max": cpu, "memory.swap.max": swap}
-        with patch.dict(os.environ, {}, clear=True), patch.object(m.build, "run", side_effect=responses), \
+        with patch.dict(os.environ, {}, clear=True), patch.object(m.build, "run", side_effect=responses) as run, \
              patch.object(Path, "read_text", autospec=True, side_effect=lambda path: values[path.name]):
-            return m.build.limited_build_options(m.build.BUILD_CGROUP)
+            result = m.build.limited_build_options(m.build.BUILD_CGROUP)
+        self.assertEqual(run.call_args_list[2].args, ("docker", "buildx", "ls", "--format", "{{json .}}"))
+        return result
 
     def test_budget_applies_to_buildkit_containers(self):
         self.assertEqual(self.check(), ["--builder", "default", "--cgroup-parent", m.build.BUILD_CGROUP])
