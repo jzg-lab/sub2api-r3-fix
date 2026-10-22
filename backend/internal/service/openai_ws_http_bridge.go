@@ -474,6 +474,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	turn int,
 	writeClientMessage func([]byte) error,
 ) (*OpenAIForwardResult, error) {
+	if turn == 1 {
+		InitOpenAIAmbiguous400Recovery(c, payload)
+	}
 	if s == nil {
 		return nil, errors.New("service is nil")
 	}
@@ -618,6 +621,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, openAIWSHTTPBridgeErrorBodyLimitBytes))
 		_ = resp.Body.Close()
+		if turn == 1 {
+			if failure := s.openAIAmbiguous400Failure(c, account, resp, respBody, true); failure != nil {
+				return nil, failure
+			}
+		}
 		if resp.StatusCode == http.StatusBadRequest &&
 			extractUpstreamErrorCode(respBody) == openAIWSFallbackReasonInvalidEncryptedContent {
 			s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
@@ -628,7 +636,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if retryErr != nil {
 			return nil, fmt.Errorf("normalize websocket http bridge rejected field retry: %w", retryErr)
 		}
-		if changed && rejectedFieldRetryState.Allow(retryBody) {
+		if changed && !(turn == 1 && OpenAIAmbiguous400RecoveryUsed(c, account)) && rejectedFieldRetryState.Allow(retryBody) {
 			logOpenAIWSModeInfo(
 				"ingress_ws_http_bridge_rejected_field_retry account_id=%d turn=%d reason=%s",
 				account.ID,

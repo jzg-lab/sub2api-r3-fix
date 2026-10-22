@@ -897,6 +897,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
+					if service.OpenAIAmbiguous400RecoveryExhausted(c, account, failoverErr) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
 					if smartRouteAttemptFrom(c) == nil && openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -2513,6 +2517,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 	var wsRouteCommitted atomic.Bool
 	wsRouteBaseCtx := ctx
 	wsRoutePinned := gjson.GetBytes(firstMessage, "previous_response_id").String() != "" || gjson.GetBytes(firstMessage, "conversation").Exists() || smartRouteImageRequest(firstMessage)
+	service.InitOpenAIAmbiguous400Recovery(c, firstMessage)
 	if wsRouteKey.HasSmartRoutes() {
 		wsRouteBaseCtx = service.WithAPIKeyRouteAdmission(ctx, !wsRoutePinned)
 		wsRouteIDs = h.apiKeyService.OrderAPIKeyRoutes(ctx, wsRouteKey, wsRouteScope, smartRouteSession(c, firstMessage))
@@ -2841,6 +2846,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 
 	sameAccountRetries := 0
 	waitForWSSameAccountRetry := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
+		if !wsRouteCommitted.Load() && service.OpenAIAmbiguous400RecoveryUsed(c, account) {
+			return false
+		}
 		if account == nil || failoverErr == nil || failoverErr.StatusCode != http.StatusTooManyRequests || failoverErr.SameAccountRetryDeadline.IsZero() {
 			return false
 		}
@@ -2877,7 +2885,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, failoverErr)
 		}
 		releaseAccountSlot()
-		if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
+		if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) ||
+			(!wsRouteCommitted.Load() && service.OpenAIAmbiguous400RecoveryExhausted(c, account, failoverErr)) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
 		}

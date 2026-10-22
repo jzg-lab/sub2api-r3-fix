@@ -565,6 +565,9 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	upstreamDetail := ""
+	if account.IsOpenAIApiKey() && resp.StatusCode == http.StatusBadRequest {
+		upstreamDetail = openAI400DiagnosticDetail(body, "no_eligible_failover")
+	}
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
 		if maxBytes <= 0 {
@@ -715,12 +718,8 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 
 	MarkResponseCommitted(c)
 
-	// 上游 400 是确定性的请求错误：同一份请求体换账号、重试多少次都会失败。归一成
-	// 502 upstream_error 会让下游网关把它当成可重试的上游故障反复重放（#5479 实测
-	// 30 个失败请求被放大成 60 次上游调用），同时抹掉客户端定位问题所需的 code/param。
-	//
-	// 走到这里说明 shouldFailoverOpenAIUpstreamResponse 已判定该 400 不可 failover，
-	// 即 server_is_overloaded / at capacity 这类可重试的 400 不会到达此处。
+	// 到此处的 400 已不适用恢复；保留状态与诊断，避免把明确参数错误包装成 502
+	// 后被下游反复重放。临时故障和可重放的模糊 400 在前序分支处理。
 	//
 	// 兄弟路径早已这么做：handleCompatErrorResponse（ChatCompletions / Anthropic）
 	// 回真实状态码 + invalid_request_error + 真实 message；/v1/images 还额外透传

@@ -247,6 +247,7 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 				}
 			}
 		}
+		service.InitOpenAIAmbiguous400Recovery(c, body)
 		base := c.Copy()
 		baseHeaders := c.Writer.Header().Clone()
 		base.Request = c.Request.WithContext(service.WithAPIKeyRouteAdmission(c.Request.Context(), !pinned))

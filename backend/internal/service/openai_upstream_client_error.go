@@ -16,9 +16,9 @@ const openAIUpstreamClientErrorFallbackType = "invalid_request_error"
 // 仍然比 "Upstream request failed" 明确：它说明拒绝来自请求本身，而不是链路故障。
 const openAIUpstreamClientErrorFallbackMessage = "Upstream rejected the request"
 
-// isOpenAIDeterministicClientError 判断上游状态码是否表示「请求本身非法」。
+// isOpenAIDeterministicClientError 保留终态 400 的状态码；不负责决定是否可重试。
 //
-// 只认 400：同一份请求体换任何账号、重试多少次都会得到同样的结果。
+// 可恢复的 400 已在前序分支处理，此处不能仅凭状态码证明故障来自客户端。
 //   - 401/402/403 是网关运营方的凭据/账单问题，继续包成 502，不向客户端暴露上游账号状态。
 //   - 404/405 既可能是模型不存在，也可能是上游 base_url 配错，同属运营方问题，保持现状。
 //   - 429 已有独立分支映射成 429。

@@ -398,6 +398,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			probeBody := s.readUpstreamErrorBody(resp)
 			_ = resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(probeBody))
+			if failure := s.openAIAmbiguous400Failure(c, account, resp, probeBody, true); failure != nil {
+				return nil, failure
+			}
+			if OpenAIAmbiguous400RecoveryUsed(c, account) {
+				return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
+			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, probeBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize passthrough rejected Responses field retry body: %w", retryErr)
 			} else if changed && rejectedFieldRetryState.Allow(retryBody) {
@@ -974,6 +980,9 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	upstreamDetail := ""
+	if account.IsOpenAIApiKey() && resp.StatusCode == http.StatusBadRequest {
+		upstreamDetail = openAI400DiagnosticDetail(body, "no_eligible_failover")
+	}
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
 		if maxBytes <= 0 {

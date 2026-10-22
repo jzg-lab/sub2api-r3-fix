@@ -736,7 +736,7 @@ func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
 		return false
 	}
-	if e.IsProxyChainFailure() {
+	if e.IsProxyChainFailure() || e.Reason == OpenAIAmbiguous400Reason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

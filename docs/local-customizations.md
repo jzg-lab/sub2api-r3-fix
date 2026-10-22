@@ -341,6 +341,30 @@ Redis 按密钥/端点/模型/显式会话/组记录失败 60 秒，只调整候
 - 同套餐换账号不改变价格；跨套餐按实际套餐倍率及余额/订阅归属计费。原权限、RPM、额度、
   取消、缓存计费保护和安全重放检查贯穿重入。
 
+### OpenAI 模糊 400 有限恢复（本地，未部署）
+
+2026-10-22：OpenAI API Key 的 Responses HTTP 原生/透传及 WebSocket HTTP 桥安全首轮，
+对原始错误字段精确匹配（忽略大小写及首尾空格）`Upstream request failed` 的 HTTP 400，
+允许在原预算内额外换一个账号。仅接受无具体 code/param/detail 等拒绝原因，且 type 为空、
+`upstream_error` 或 `server_error`；不把空体、任意未知 400、HTML 或请求回显当成泛化错误。
+明确的工具 Schema/参数错误、上下文和策略拒绝仍走已有处理；没有新增计划模式字段改写。
+
+机会通过请求共享状态跨同组重选、换套餐和 handler 重入保留；API Key 备用再次失败即结束，
+不继续同账号兼容重试或第三账号切换。混合套餐切到 OAuth 后，其原有重试、等待及恢复仍生效，
+不受此新增限制；切回 API Key 不重置机会。保留原总预算、管理员错误规则、取消和输出保护。
+原始请求含 `previous_response_id`/`conversation`、图片意图或 compact 时不启用此新增兜底；
+WS 后续轮次及原生 WS 帧错误的恢复范围不扩大。OAuth 本身的错误分类保持原行为。
+模糊 400 用请求级原因 `openai_ambiguous_400` 标记，不写账号健康惩罚、冷却或组失败偏好，
+成功后的账号/套餐亲和及实际套餐计费沿用原链路。
+
+运维尝试记录增加恢复可用、预算耗尽、绑定/输出/管理员规则阻止等诊断；OpenAI API Key Responses
+的普通 400 即使未打开原始错误体日志，也记录限长脱敏的 code/type/param，不新增请求正文采集。
+OAuth 的日志行为不变。
+入口：`openai_ambiguous_400.go`、`openai_gateway_forward.go`、`openai_gateway_passthrough.go`、
+`openai_ws_http_bridge.go`、`openai_gateway_handler.go`、`api_key_smart_routes.go`。
+回归：service/handler 的 `openai_ambiguous_400_test.go`，以及已有智能路由、计费、字段兼容
+和 WS 首轮/后续轮次测试。此次验证结果及未验证项见版本记录。
+
 ### 账号近期表现与分型调度
 
 `account_recent_stats.go` 与 repository 继续用 Redis 分钟桶汇总近 10 分钟真实文本尝试，
