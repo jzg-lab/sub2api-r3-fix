@@ -126,6 +126,8 @@ python3 /opt/sub2api-control/tools/managed_deploy.py prepare-special \
 - 所有测试和构建检出该候选的完整 SHA；前端全量 Vitest 含模型广场，执行 lint/类型检查、
   生产前端构建、内嵌资源测试和 Linux amd64 编译；后端执行 unit/integration，部署工具及候选逻辑
   执行隔离单测（Python 3.12），安全扫描纳入同一必需依赖。Linux CI 二进制仅作检查制品，不冒充生产镜像验收。
+  Linux CI 另安装 Nginx 并检查命令存在，显式执行真实 Nginx 下超过 8 秒的 SSE/WebSocket
+  切流/回切 race 测试，不能将缺少 Nginx 的 skip 当作通过。
 - 用户确认 Go lint 采用固定 `669ec02c6d720d86e3afe6a97a750dad776fad84` 基线拦截新增问题；
   全量历史报告仍上传为 `full-lint-report`。当次基线发现 144 项并非安全豁免；不自动移动基线，
   不忽略测试/编译错误或依赖漏洞。清理历史问题须另行逐项验证。

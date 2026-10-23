@@ -104,6 +104,13 @@ jobs:
       - name: Unit tests
         working-directory: backend
         run: make test-unit
+      - name: Real Nginx handoff with long-lived SSE and WebSocket
+        working-directory: backend
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx
+          command -v nginx
+          go test -race -v ./internal/server -run '^TestLiveHandoffThroughNginx$' -count=1
       - name: Integration tests
         working-directory: backend
         run: make test-integration
