@@ -261,8 +261,9 @@ class Fixture:
         control(candidate, "serve", expected=409)
         control(original, "resume")
         h.verify(old)
+        live = all(control(container).get("handoff_protocol") == 2 for container in (original, candidate))
         for source, target, artifact in ((original, candidate, new), (candidate, original, old)):
-            control(source, "pause")
+            control(source, "release" if live else "pause")
             state = control(target, "serve")
             d.require(state["phase"] == "serving_paused" and state["core_ready"], "target not core-ready with plugin paused")
             h.c["app_container"] = target
@@ -270,9 +271,15 @@ class Fixture:
             h.curl(h.c["local_url"], "/readyz", expected=503)
             control(target, "resume")
             h.verify(artifact)
+            if live:
+                # The former host still accepts core requests without owning a plugin.
+                h.c["app_container"] = source
+                h.curl(h.c["local_url"], "/api/v1/admin/users", expected=401)
+                control(source, "pause")
+                h.c["app_container"] = target
         d.require(before == {"migrations": h.migrations(), "plugins": d.plugin_contract(h.plugins())}, "handoff changed persistent contract")
         return {"shared_database": True, "standby_read_only": True, "exclusive_owner": True,
-                "original_signed_plugin_roundtrip": True, "traffic_before_plugin_resume": True}
+                "original_signed_plugin_roundtrip": True, "traffic_before_plugin_resume": True, "live_handoff": live}
 
     def cleanup(self):
         # Only this freshly generated Compose project owns these resources.

@@ -10,6 +10,7 @@ export interface DeploymentCandidate {
 }
 
 export interface DeploymentJob {
+  live_handoff?: boolean
   mode?: 'single' | 'handoff'
   id: string
   candidate_id: string

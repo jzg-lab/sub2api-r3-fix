@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,115 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLiveHandoffKeepsOldStreamAndAcceptsNewRequests(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "owner.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0600))
+	oldPlugin, nextPlugin := &handoffPluginStub{}, &handoffPluginStub{}
+	makeRuntime := func(p *handoffPluginStub) *Handoff {
+		h := NewHandoff(lock, "test", p, func(context.Context) bool { return true }, func(context.Context) error { return nil })
+		h.background = &deployment.Gate{}
+		return h
+	}
+	old, next := makeRuntime(oldPlugin), makeRuntime(nextPlugin)
+	ctx := context.Background()
+	require.NoError(t, old.transition(ctx, "serve"))
+	require.NoError(t, old.transition(ctx, "resume"))
+	end := make(chan struct{})
+	server := httptest.NewServer(old.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "before\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-end:
+			_, _ = io.WriteString(w, "after\n")
+		case <-r.Context().Done():
+		}
+	})))
+	defer server.Close()
+	defer close(end)
+	response, err := server.Client().Get(server.URL)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	first := make([]byte, len("before\n"))
+	_, err = io.ReadFull(response.Body, first)
+	require.NoError(t, err)
+	require.Equal(t, "before\n", string(first))
+	require.Equal(t, 1, old.requests.Pending())
+	require.NoError(t, old.transition(ctx, "release"))
+	require.Equal(t, "released", old.phase.Load())
+	require.False(t, oldPlugin.running)
+	require.Equal(t, 1, old.requests.Pending(), "releasing plugins must not wait for or cancel the core stream")
+	require.NoError(t, next.transition(ctx, "serve"))
+	require.NoError(t, next.transition(ctx, "resume"))
+	require.Error(t, old.transition(ctx, "serve"), "only one background owner is allowed")
+	w := httptest.NewRecorder()
+	next.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(w, httptest.NewRequest("GET", "/v1/models", nil))
+	require.Equal(t, 204, w.Code)
+	// Simulate automatic rollback while the old request is still open.
+	require.NoError(t, next.transition(ctx, "release"))
+	require.NoError(t, old.transition(ctx, "serve"))
+	require.NoError(t, old.transition(ctx, "resume"))
+	end <- struct{}{}
+	rest, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, "after\n", string(rest))
+	require.NoError(t, old.transition(ctx, "pause"))
+	require.NoError(t, next.transition(ctx, "pause"))
+}
+
+func TestLiveHandoffBackgroundTimeoutLeavesAdmissionOpen(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "owner.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0600))
+	p := &handoffPluginStub{}
+	h := NewHandoff(lock, "test", p, func(context.Context) bool { return true }, func(context.Context) error {
+		t.Fatal("release must not wait for request settlement")
+		return nil
+	})
+	h.background = &deployment.Gate{}
+	ctx := context.Background()
+	require.NoError(t, h.transition(ctx, "serve"))
+	require.NoError(t, h.transition(ctx, "resume"))
+	done, ok := h.background.Enter()
+	require.True(t, ok)
+	limited, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, h.transition(limited, "release"), context.DeadlineExceeded)
+	require.Equal(t, "active", h.phase.Load())
+	require.True(t, p.running)
+	requestDone, ok := h.requests.Enter()
+	require.True(t, ok)
+	requestDone()
+	done()
+	require.NoError(t, h.transition(ctx, "release"))
+	require.False(t, p.running)
+	require.NoError(t, h.transition(ctx, "release"), "release is retryable")
+	require.Equal(t, 2, h.status(ctx)["handoff_protocol"])
+}
+
+func TestLiveHandoffWaitsForConfigurationWritesButNotCoreRequests(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "owner.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0600))
+	p := &handoffPluginStub{}
+	h := NewHandoff(lock, "test", p, func(context.Context) bool { return true }, func(context.Context) error { return nil })
+	h.background = &deployment.Gate{}
+	ctx := context.Background()
+	require.NoError(t, h.transition(ctx, "serve"))
+	require.NoError(t, h.transition(ctx, "resume"))
+	require.NoError(t, h.transition(ctx, "unfreeze"))
+	done, ok := h.configuration.Enter()
+	require.True(t, ok)
+	limited, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, h.transition(limited, "release"), context.DeadlineExceeded)
+	require.True(t, p.running)
+	done()
+	coreDone, ok := h.requests.Enter()
+	require.True(t, ok)
+	require.NoError(t, h.transition(ctx, "release"))
+	require.Equal(t, 1, h.requests.Pending())
+	coreDone()
+	require.NoError(t, h.transition(ctx, "pause"))
+}
 
 type handoffPluginStub struct {
 	running bool

@@ -27,7 +27,8 @@ type handoffPlugin interface {
 }
 
 // The private Unix socket controls one process. The shared file lock grants
-// exactly one process permission to serve requests and own the unchanged plugin.
+// exactly one process permission to run plugins and autonomous background work.
+// A released process can finish HTTP/WS traffic while Nginx retires old workers.
 type Handoff struct {
 	operation               sync.Mutex
 	phase                   atomic.Value
@@ -93,7 +94,8 @@ func (h *Handoff) Listen(path string) (func(), error) {
 
 func (h *Handoff) status(ctx context.Context) map[string]any {
 	return map[string]any{"boot_id": h.boot, "source": h.source, "phase": h.phase.Load(),
-		"core_ready": h.coreReady(ctx), "requests": h.requests.Pending(), "background": h.background.Pending()}
+		"core_ready": h.coreReady(ctx), "requests": h.requests.Pending(), "background": h.background.Pending(),
+		"handoff_protocol": 2}
 }
 
 func (h *Handoff) control(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +150,7 @@ func (h *Handoff) transition(ctx context.Context, action string) error {
 		if phase == "serving_paused" || phase == "active" {
 			return nil
 		}
-		if phase != "standby" || !h.coreReady(ctx) {
+		if (phase != "standby" && phase != "released") || !h.coreReady(ctx) {
 			return errors.New("standby is not ready")
 		}
 		owner, err := privateLock(h.ownerPath)
@@ -175,11 +177,37 @@ func (h *Handoff) transition(ctx context.Context, action string) error {
 		}
 		h.background.SetOpen(true)
 		h.phase.Store("active")
+	case "release":
+		if phase == "standby" || phase == "released" {
+			return nil
+		}
+		if phase != "active" && phase != "serving_paused" {
+			return errors.New("invalid handoff state")
+		}
+		h.configuration.SetOpen(false)
+		h.background.SetOpen(false)
+		err := h.configuration.Wait(ctx)
+		if err == nil {
+			err = h.background.Wait(ctx)
+		}
+		if err != nil {
+			h.background.SetOpen(phase == "active")
+			return err
+		}
+		// Plugin interruption is allowed during live handoff; core requests and
+		// their billing continuations are deliberately left running.
+		h.phase.Store("releasing")
+		h.plugins.Stop()
+		if h.owner != nil {
+			_ = h.owner.Close()
+			h.owner = nil
+		}
+		h.phase.Store("released")
 	case "pause":
 		if phase == "standby" {
 			return nil
 		}
-		if phase != "active" && phase != "serving_paused" {
+		if phase != "active" && phase != "serving_paused" && phase != "released" {
 			return errors.New("invalid handoff state")
 		}
 		h.phase.Store("draining")

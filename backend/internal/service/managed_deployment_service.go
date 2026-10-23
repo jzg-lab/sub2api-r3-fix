@@ -30,6 +30,7 @@ type DeploymentCandidate struct {
 
 type DeploymentJob struct {
 	Mode            string   `json:"mode,omitempty"`
+	LiveHandoff     bool     `json:"live_handoff,omitempty"`
 	PreviousSource  string   `json:"previous_source,omitempty"`
 	PreviousVersion string   `json:"previous_version,omitempty"`
 	ID              string   `json:"id"`

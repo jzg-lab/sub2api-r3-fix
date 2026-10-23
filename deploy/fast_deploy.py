@@ -276,7 +276,10 @@ class Host:
         info = self.inspect(self.c["app_container"])
         require(info["State"]["Running"] and not info["State"]["Restarting"], "application not running")
         binary = run("docker", "exec", self.c["app_container"], "sha256sum", "/app/sub2api").decode().split()[0]
-        version = run("docker", "exec", self.c["app_container"], "/app/sub2api", "-version").decode()
+        raw_version = run("docker", "exec", self.c["app_container"], "/app/sub2api", "-version").decode()
+        match = re.search(r"Sub2API\s+v?[0-9][A-Za-z0-9.+-]*\s+\(commit:\s*[0-9a-f]{40},\s*built:\s*[^)\r\n]*\)", raw_version)
+        require(match, "application version identity unavailable")
+        version = match.group(0)
         return {"image_id": info["Image"], "binary_sha256": binary, "version": version}
 
     def assets(self, origin, expected=None):
@@ -440,7 +443,13 @@ def prepare(release, config_path, artifact_path):
                   "data_identity": host.data_identity(), "migrations": migrations, "plugins": host.plugins()}
         if c.get("mode") == "handoff":
             host.verify_ingress()
-            before["handoff"] = {"original_slot": host.selected(), "env_hashes": host.env_hashes()}
+            protocol = host.control(host.selected()).get("handoff_protocol", 1)
+            if protocol == 2:
+                receipt = read(release / "evidence.json")
+                rehearsal = read(release / receipt["checks"]["shared_database_handoff"]["log"])
+                require(rehearsal.get("live_handoff") is True, "live handoff rehearsal missing")
+                host.verify_live_ingress()
+            before["handoff"] = {"original_slot": host.selected(), "env_hashes": host.env_hashes(), "protocol": protocol}
         save(release / "preparation-started.json", {"started_at": time.time(), "source": artifact["source"]})
         with (release / "postgres.dump").open("wb") as dump:
             run("docker", "exec", c["postgres_container"], "pg_dump", "-Fc", "-U", c["database_user"],

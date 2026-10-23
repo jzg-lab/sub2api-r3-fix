@@ -33,6 +33,8 @@ export default {
     actionUncertain: '请求未确认完成，正在查询已有任务；不会自动重复执行。',
     activateConfirm: '将短暂维护并切换应用。数据库和 Redis 不重启；请求未排空会延后。确认现在上线？',
     handoffConfirm: '新版本先待命验证，再短暂维护、暂停插件和后台任务、切换流量，最后恢复。共用原数据库和 Redis；请求未排空会取消本次更新。确认上线？',
+    liveHandoffConfirm: '暂停插件和后台任务后热切换流量，旧实例继续完成已有本体请求。插件相关请求可能受影响；旧实例收尾完成前暂不能再次发布或修改相关配置。数据库和 Redis 不重启。确认上线？',
+    liveRollbackConfirm: '热切回经过兼容检查的上一版，不恢复数据库。插件和后台任务会暂停；当前实例继续完成已有本体请求。确认回退？',
     rollbackConfirm: '将短暂维护并回退本次应用版本，不恢复数据库。只有兼容检查通过才会执行。确认回退？',
     phases: {
       BLOCKED: '更新已阻断',
@@ -40,12 +42,14 @@ export default {
       PREPARED: '准备完成，等待确认', EXPIRED: '准备已过期', PREPARATION_FAILED: '准备失败，未切换',
       SWITCHING: '正在提交切换', PAUSING: '暂停直连后台', DRAINING: '等待请求结束', STOPPING: '停止旧应用',
       STAGING: '验证待命实例', RESUMING: '恢复插件与后台任务',
+      RELEASING: '交接插件与后台任务，本体继续服务',
       STARTING: '启动目标版本', PUBLIC_VERIFY: '公网验收', ACCEPTED: '上线成功', DEFERRED: '本次延后，旧版继续服务',
       RECOVERING: '正在恢复', RECOVERED: '已恢复操作前版本', ROLLED_BACK: '回退完成',
       PREFLIGHT_FAILED: '切换前检查失败', LAUNCH_FAILED: '任务启动失败', NEEDS_ATTENTION: '需要人工处理'
     },
     errors: {
       AUXILIARY_SERVICES_PENDING: '主站已恢复，附属后台仍在自动重试恢复；恢复完成前暂不能再次切换。',
+      PREVIOUS_REQUESTS_PENDING: '流量已切换，旧实例仍在完成已有请求。服务继续运行，收尾完成前暂不能再次发布或修改相关配置。',
       CANDIDATE_CHANGED: '候选审核信息已改变，需要重新检查版本。',
       BASELINE_CHANGED: '线上版本与候选审核基线不一致，需要重新审核更新范围。',
       VERSION_MISMATCH: '发布版本号与固定源码不一致，已阻断准备。',

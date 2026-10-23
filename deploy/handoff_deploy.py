@@ -24,6 +24,32 @@ def restore_pending_services(host, saved):
         d.save(Path(host.c["deploy_dir"]) / "handoff-active.json", {**saved, "pending_services": remaining})
 
 
+def retire_previous(host, saved):
+    peer = saved.get("retiring")
+    if not peer:
+        return
+    try:
+        d.require(host.selected() == saved["slot"] and peer["slot"] != saved["slot"], "retirement slot changed")
+        current = host.runtime(saved["slot"], saved["target"], "active", full=False)
+        d.require(current["boot_id"] == saved["boot_id"], "selected boot changed during retirement")
+        state = host.runtime(peer["slot"], peer["target"], ready=False, full=False)
+        d.require(state["boot_id"] == peer["boot_id"] and state["phase"] in ("released", "standby"),
+                  "retiring instance changed")
+        # Reloaded Nginx workers may still own HTTP/2 or WebSocket connections.
+        # A zero application request count alone does not make replacement safe.
+        if set(peer["workers"]) & set(host.nginx_workers()):
+            return
+        if state["requests"] or state["background"] or host.connections(peer["slot"]):
+            return
+        host.control(peer["slot"], "pause", state["boot_id"], host.c["drain_seconds"])
+        host.control(saved["slot"], "unfreeze", current["boot_id"])
+        d.save(Path(host.c["deploy_dir"]) / "handoff-active.json", {**saved, "retiring": None})
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        print(json.dumps({"retirement_pending": peer["slot"], "error_type": type(error).__name__}), flush=True)
+    finally:
+        host.use(saved["slot"])
+
+
 class Host(d.Host):
     def __init__(self, config):
         self.site = config
@@ -70,7 +96,7 @@ class Host(d.Host):
         d.require(code == b"200", "runtime transition failed: " + (action or "status"))
         state = json.loads(body)
         d.require(re.fullmatch(r"[0-9a-f]{32}", state["boot_id"]) and state["phase"] in
-                  ("standby", "draining", "serving_paused", "active"), "invalid runtime status")
+                  ("standby", "draining", "serving_paused", "active", "releasing", "released"), "invalid runtime status")
         return state
 
     def runtime(self, slot, target, phase=None, ready=True, full=True):
@@ -102,6 +128,33 @@ class Host(d.Host):
         block = b"# configuration file " + str(self.upstream).encode() + b":\n" + self.line(self.selected())
         d.require(raw.count(block) == 1, "upstream include absent or ambiguous")
         return hashlib.sha256(raw.replace(block, b"# fixed handoff upstream\n")).hexdigest()
+
+    def nginx_workers(self):
+        result = []
+        for line in d.run("ps", "-C", "nginx", "-o", "pid=,args=").decode().splitlines():
+            pid, command = line.strip().split(None, 1)
+            if command.startswith("nginx: worker process"):
+                try:
+                    stat = Path("/proc", pid, "stat").read_text().rsplit(") ", 1)[1].split()
+                    result.append(pid + ":" + stat[19])
+                except FileNotFoundError:
+                    pass  # A worker can finish between ps and /proc.
+        return result
+
+    def connections(self, slot):
+        self.use(slot)
+        raw = d.run("docker", "exec", self.c["app_container"], "cat", "/proc/net/tcp", "/proc/net/tcp6").decode()
+        service = json.loads(self.compose("config", "--format", "json"))["services"][self.c["app_service"]]
+        port = ":%04X" % int(service["ports"][0]["target"])
+        return sum(len(p) > 3 and p[1].endswith(port) and p[3] in ("01", "08")
+                   for p in map(str.split, raw.splitlines()))
+
+    def verify_live_ingress(self):
+        raw = d.run("nginx", "-T").decode()
+        values = re.findall(r"(?m)^[^#\r\n]*?\bworker_shutdown_timeout\s+([^;]+);", raw)
+        d.require(all(re.fullmatch(r"0(?:ms|s|m|h|d|w)?", value.strip()) for value in values),
+                  "finite nginx worker shutdown timeout can interrupt old streams")
+        d.require(self.nginx_workers(), "nginx workers unavailable")
 
     def switch(self, slot, boot):
         state = self.control(slot)
@@ -236,6 +289,7 @@ class Switch(d.Switch):
         original = self.p["handoff"]["original_slot"]
         self.old = original if self.s["mode"] == "activate" else self.other(original)
         self.new = self.other(self.old)
+        self.live = self.p["handoff"].get("protocol", 1) == 2
 
     @staticmethod
     def other(slot):
@@ -244,6 +298,7 @@ class Switch(d.Switch):
     def preflight(self):
         active = Path(self.h.c["deploy_dir"]) / "handoff-active.json"
         d.require(not active.exists() or not d.read(active).get("pending_services"), "auxiliary services still require recovery")
+        d.require(not active.exists() or not d.read(active).get("retiring"), "previous instance still serving old connections")
         # The legacy preflight's single .env binding is not applicable to two slots.
         for name, checksum in self.p["sealed_files"].items():
             d.require(d.digest(self.release / name) == checksum, "prepared file changed: " + name)
@@ -257,6 +312,9 @@ class Switch(d.Switch):
         d.require(self.h.selected() == self.old, "selected slot changed")
         self.h.verify_ingress()
         state = self.h.runtime(self.old, self.original, "active")
+        if self.live:
+            d.require(state.get("handoff_protocol") == 2, "live handoff runtime unavailable")
+            self.h.verify_live_ingress()
         self.h.verify(self.original, public=True)
         self.h.check_applied_compose()
         return state
@@ -268,14 +326,29 @@ class Switch(d.Switch):
         self.h.gate(False)
         self.h.identity(slot, state["boot_id"])
         self.h.verify(target, public=True)
-        self.h.control(slot, "unfreeze", state["boot_id"])
         saved = {"slot": slot, "target": target, "boot_id": state["boot_id"],
                  "pending_services": [name for name, active in self.s.get("services", {}).items() if active]}
+        if self.live and self.s.get("new_boot") and "retiring_workers" in self.s:
+            peer = self.other(slot)
+            peer_target = self.original if peer == self.old else self.target
+            self.h.use(peer)
+            info = self.h.inspect(self.h.c["app_container"])
+            d.require(info["Image"] == peer_target["image_id"] and not info["State"]["Restarting"], "retiring artifact unresolved")
+            if info["State"]["Running"]:
+                peer_state = self.h.runtime(peer, peer_target, ready=False, full=False)
+                d.require(peer_state["phase"] in ("released", "standby"), "peer still owns background work")
+                if peer_state["phase"] == "released":
+                    saved["retiring"] = {"slot": peer, "target": peer_target, "boot_id": peer_state["boot_id"],
+                                         "workers": self.s["retiring_workers"]}
+        if not saved.get("retiring"):
+            self.h.control(slot, "unfreeze", state["boot_id"])
+        self.h.use(slot)
         d.save(Path(self.h.c["deploy_dir"]) / "handoff-active.json", saved)
         self.state(phase)
         self.h.pending.unlink(missing_ok=True)
         # The verified application is committed before restarting auxiliary callers.
         restore_pending_services(self.h, saved)
+        retire_previous(self.h, d.read(Path(self.h.c["deploy_dir"]) / "handoff-active.json"))
 
     def execute(self):
         try:
@@ -291,15 +364,19 @@ class Switch(d.Switch):
             settings = self.h.settings_hash()
             self.state("STAGING", runtime_config=settings)
             candidate = self.h.stage(self.new, self.target)
+            if self.live:
+                d.require(candidate.get("handoff_protocol") == 2, "candidate lacks live handoff protocol")
             self.state("PAUSING", new_boot=candidate["boot_id"])
             for name, active in services.items():
                 if active:
                     self.h.pause(name)
                 d.require(not self.h.service_state(name), "direct caller still active")
-            self.h.gate(True)
-            self.state("DRAINING")
+            if not self.live:
+                self.h.gate(True)
+            self.state("RELEASING" if self.live else "DRAINING")
             try:
-                self.h.control(self.old, "pause", old["boot_id"], self.h.c["drain_seconds"])
+                self.h.control(self.old, "release" if self.live else "pause", old["boot_id"],
+                               self.h.c["ready_seconds"] if self.live else self.h.c["drain_seconds"])
             except RuntimeError:
                 if self.h.runtime(self.old, self.original)["phase"] == "active":
                     self.finish("DEFERRED", self.old, self.original)
@@ -307,7 +384,7 @@ class Switch(d.Switch):
                 raise
             self.h.unchanged(self.p)
             d.require(settings == self.h.settings_hash(), "settings changed during standby boot; retry preparation")
-            self.state("SWITCHING")
+            self.state("SWITCHING", retiring_workers=self.h.nginx_workers() if self.live else [])
             self.h.control(self.new, "serve", candidate["boot_id"])
             self.h.switch(self.new, candidate["boot_id"])
             self.state("RESUMING", public_opened=True)
@@ -347,7 +424,12 @@ class Switch(d.Switch):
             if old["phase"] == "active" and self.h.selected() == self.old:
                 self.finish("RECOVERED", self.old, self.original)
                 return
-            self.h.gate(True)
+            if self.live:
+                d.require(self.s.get("runtime_config") == self.h.settings_hash() and
+                          self.s.get("old_boot") == old["boot_id"],
+                          "live rollback configuration changed; manual recovery required")
+            if not self.live:
+                self.h.gate(True)
             for name, active in self.s["services"].items():
                 if active:
                     self.h.pause(name)
@@ -356,22 +438,29 @@ class Switch(d.Switch):
             d.require(info["Image"] == self.target["image_id"] and not info["State"]["Restarting"], "candidate identity unresolved")
             if info["State"]["Running"]:
                 candidate = self.h.runtime(self.new, self.target, ready=False)
-                self.h.control(self.new, "pause", candidate["boot_id"], self.h.c["drain_seconds"])
+                self.h.control(self.new, "release" if self.live else "pause", candidate["boot_id"],
+                               self.h.c["ready_seconds"] if self.live else self.h.c["drain_seconds"])
             # Background sync may have updated cached settings/prices after cutover.
             settings = self.h.settings_hash()
             if self.s.get("runtime_config") != settings or self.s.get("old_boot", old["boot_id"]) != old["boot_id"]:
+                # Never restart a live old process with requests still attached.
+                # Config drift requires a separate recovery decision in live mode.
+                d.require(not self.live, "live rollback configuration changed; manual recovery required")
                 if old["phase"] != "standby":
                     self.h.control(self.old, "pause", old["boot_id"], self.h.c["drain_seconds"])
                 old = self.h.stage(self.old, self.original)
                 d.require(settings == self.h.settings_hash(), "settings changed during recovery boot")
                 self.state("RECOVERING", runtime_config=settings, old_boot=old["boot_id"])
             self.h.control(self.old, "serve", old["boot_id"])
+            if self.live:
+                self.state("RECOVERING", retiring_workers=self.h.nginx_workers())
             self.h.switch(self.old, old["boot_id"])
             self.h.control(self.old, "resume", old["boot_id"], self.h.c["ready_seconds"])
             self.finish("RECOVERED", self.old, self.original)
         except Exception as error:
             if self.s["phase"] not in d.TERMINAL:
-                d.atomic(self.h.marker, b"recovery required\n", 0o644)
+                if not self.live:
+                    d.atomic(self.h.marker, b"recovery required\n", 0o644)
                 self.state("NEEDS_ATTENTION", recovery_error_type=type(error).__name__)
             raise
 
@@ -400,6 +489,7 @@ def reconcile(config):
                 state = host.runtime(slot, target, full=False)
                 if state["phase"] == "active" and state["boot_id"] == saved.get("boot_id"):
                     restore_pending_services(host, saved)
+                    retire_previous(host, d.read(Path(host.c["deploy_dir"]) / "handoff-active.json"))
                     return
                 d.require(state["phase"] in ("standby", "serving_paused", "active"), "runtime operation unresolved")
                 # A boot is complete only after verification and configuration
@@ -410,10 +500,12 @@ def reconcile(config):
                 host.identity(slot, state["boot_id"])
                 host.control(slot, "resume", state["boot_id"], host.c["ready_seconds"])
                 host.verify(target, public=True)
-                host.control(slot, "unfreeze", state["boot_id"])
+                if not saved.get("retiring"):
+                    host.control(slot, "unfreeze", state["boot_id"])
                 saved = {**saved, "boot_id": state["boot_id"]}
                 d.save(Path(host.c["deploy_dir"]) / "handoff-active.json", saved)
                 restore_pending_services(host, saved)
+                retire_previous(host, d.read(Path(host.c["deploy_dir"]) / "handoff-active.json"))
                 return
     except BlockingIOError:
         return

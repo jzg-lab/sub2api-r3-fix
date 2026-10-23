@@ -88,7 +88,7 @@
     <p v-if="confirm === 'rollback'" class="mb-2 text-xs text-gray-500 dark:text-dark-400">{{ t('deployment.previousVersion') }}</p>
     <p class="break-all font-mono font-semibold">{{ confirm === 'rollback' ? (confirmJob?.previous_version || t('deployment.targetCommit')) : confirmJob?.version }}</p>
     <p class="mt-2 break-all font-mono text-xs text-gray-500">{{ confirm === 'rollback' ? confirmJob?.previous_source : confirmJob?.source }}</p>
-    <p class="mt-4 text-sm">{{ t(confirm === 'rollback' ? 'deployment.rollbackConfirm' : confirmJob?.mode === 'handoff' ? 'deployment.handoffConfirm' : 'deployment.activateConfirm') }}</p>
+    <p class="mt-4 text-sm">{{ t(confirmJob?.live_handoff ? (confirm === 'rollback' ? 'deployment.liveRollbackConfirm' : 'deployment.liveHandoffConfirm') : confirm === 'rollback' ? 'deployment.rollbackConfirm' : confirmJob?.mode === 'handoff' ? 'deployment.handoffConfirm' : 'deployment.activateConfirm') }}</p>
     <template #footer>
       <button type="button" class="btn btn-secondary" :disabled="busy" @click="confirm = null">{{ t('common.cancel') }}</button>
       <button type="button" class="btn btn-primary" :disabled="busy || disconnected" @click="executeConfirmed">
@@ -123,7 +123,7 @@ const confirmJob = ref<DeploymentJob | null>(null)
 const settled = new Set(['PREPARATION_FAILED', 'BLOCKED', 'PREPARED', 'EXPIRED', 'ACCEPTED', 'ROLLED_BACK', 'RECOVERED', 'DEFERRED', 'PREFLIGHT_FAILED', 'LAUNCH_FAILED'])
 const jobActive = computed(() => {
   const job = snapshot.value?.job
-  return !!job && !settled.has(job.phase)
+  return !!job && (!settled.has(job.phase) || ['AUXILIARY_SERVICES_PENDING', 'PREVIOUS_REQUESTS_PENDING'].includes(job.error_code || ''))
 })
 const rollbackJob = computed(() => [snapshot.value?.rollback_job, snapshot.value?.job].find(job => job?.actions.includes('rollback')) ?? null)
 const previousJob = computed(() => rollbackJob.value ?? snapshot.value?.job)

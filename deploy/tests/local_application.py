@@ -138,14 +138,18 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="sub2api-app-test-") as temp:
             binary = Path(temp) / "sub2api"
+            handoff_test = Path(temp) / "handoff.test"
             print("Compiling current backend for local Linux/ARM64", flush=True)
             run(["go", "build", "-o", str(binary), "./cmd/server"], cwd=ROOT / "backend",
+                env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"}, timeout=600)
+            run(["go", "test", "-c", "-o", str(handoff_test), "./internal/server"], cwd=ROOT / "backend",
                 env={**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"}, timeout=600)
             archive = io.BytesIO()
             with tarfile.open(fileobj=archive, mode="w") as tar:
                 files = {
                     "Dockerfile": (f"FROM {BASE}\nWORKDIR /app\n"
                                    "COPY sub2api /app/sub2api\n"
+                                   "COPY handoff.test /app/handoff.test\n"
                                    "COPY --chown=10001:10001 config.yaml /app/data/config.yaml\n"
                                    "COPY --chown=10001:10001 model_pricing.json /shared/model_pricing.json\n"
                                    "COPY nginx.conf upstream.conf /shared/\n"
@@ -161,8 +165,13 @@ def main():
                     entry.size, entry.mode = len(content), 0o600
                     tar.addfile(entry, io.BytesIO(content))
                 tar.add(binary, arcname="sub2api")
+                tar.add(handoff_test, arcname="handoff.test")
                 tar.add(ROOT / "backend/resources/model-pricing/model_prices_and_context_window.json", arcname="model_pricing.json")
             run(docker + ["build", "--network=none", "-t", image, "-"], data=archive.getvalue(), timeout=120)
+        # No published ports or production data; nginx and both targets are local to this container.
+        print(run(docker + ["run", "--rm", "--network=none", "--cpus=1", "--memory=512m",
+                           "--entrypoint=/app/handoff.test", image,
+                           "-test.run=^TestLiveHandoffThroughNginx$", "-test.v", "-test.timeout=60s"], timeout=75), flush=True)
         run(docker + ["network", "create", "--internal", network])
         run(docker + ["volume", "create", volume])
         pg = start("postgres", ["-e", "POSTGRES_USER=fixture", "-e", "POSTGRES_DB=fixture",
@@ -262,9 +271,11 @@ def main():
         switch_proxy(blue)
         for old, new in ((blue, green), (green, blue)):
             control(old, "freeze")
-            control(old, "pause")
+            control(old, "release")
             if status(old) != "503":
-                raise RuntimeError("old instance still admits traffic")
+                raise RuntimeError("released instance must report its paused plugin readiness")
+            if control(old)["phase"] != "released" or status(old, "/api/v1/admin/users") != "401":
+                raise RuntimeError("released instance stopped core HTTP admission")
             state = control(new, "serve")
             if not state["core_ready"] or status(new) != "503":
                 raise RuntimeError("paused target must be core-ready but not publicly ready")
@@ -273,8 +284,9 @@ def main():
                 raise RuntimeError("plugin/tasks restored before traffic")
             control(new, "resume")
             wait_ready(new)
+            control(old, "pause")
             control(new, "unfreeze")
-        print("PASS: exclusive ownership, Nginx reload, traffic-before-resume and old/new/old handoff", flush=True)
+        print("PASS: exclusive plugin ownership, live HTTP admission, Nginx reload and old/new/old handoff", flush=True)
         boot = control(blue)["boot_id"]
         run(docker + ["restart", "-t", "90", blue], timeout=100)
         standby(blue)

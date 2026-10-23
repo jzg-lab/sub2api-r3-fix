@@ -13,9 +13,62 @@
 | 入口与槽位 | Nginx 指向 `sub2api-blue`，绿槽 standby；本机固定 `127.0.0.1:8080`、`ciyuan.fast` 和 `api.ciyuan.fast` 的 `/readyz` 均为 200；主站模型广场为 200 |
 | 数据与插件 | 新旧迁移记录、PostgreSQL/Redis 容器及启动身份、原签名 Cookie Pin 0.3.20 的包/配置/绑定契约均与切换前相同；蓝槽插件健康 |
 | 后台与恢复 | `account-manager.service`、`account-manager-trial.service`、部署控制器和交接巡检计时器 active；维护及 pending 标记不存在 |
-| 后续按钮 | 受管入口已随源码上线；2026-10-24 已登记首个候选 `v0.2.17+r17.1`，未启动准备或切换。首次接入时管理员 TOTP 未启用，本轮未重新核查其状态；完整按钮上线流程仍未验收 |
+| 后续按钮 | 2026-10-24 首个候选准备通过，随后用户发起切换；8 秒排空后仍有 2 条请求，以 `DEFERRED` 结束，旧版继续服务。缺失清单及版本时间戳误报已修复；本体热切换修订仅在本地验证，尚未安装到生产 |
 
-## 首个候选登记（2026-10-24，未准备或切换）
+## 首个候选准备缺项修复（2026-10-24，未切换）
+
+用户在页面准备 `release-r17-1` 时，任务 `job-d921d76e2d6c43c5bbc00634a1755af8`
+以 `PREPARATION_FAILED / FETCHING_FAILED` 结束。`task.log` 明确为
+`/opt/sub2api-control/verification-manifest.json` 不存在；失败发生在源码/版本检查后、
+构建前，没有切换。只读复核蓝绿槽仍为 `f06a57de6` 且启动时间不变，本机 `/readyz` 为 200。
+
+用户授权修复后，从首次接入的归档找回插件、信任与配置验收材料，确认文件摘要及线上插件契约
+一致；旧清单的入口和调用方摘要仍为双实例接入前的值，未直接复制放行。
+当前三个 Nginx 文件与首次接入的已记录目标文件完全一致，原两套账号管理 unit 及应用配置摘要
+仍匹配。使用当前配置副本、独立回环端口及合成后端完成开启/维护/重开 36 项隔离检查，
+再生成并安装当前基准清单；`approved_inputs` 与实际构建 cgroup 限额检查通过。
+生产应用/数据容器、插件契约、配置、入口选择、后台状态及维护/pending 标记前后不变。
+
+修复证据保存在 `/opt/sub2api-backups/managed-manifest-repair-o1uvrnyf/`；
+清单 SHA-256 为 `88f2c985ccd00e0c1b15f63cc635efb8eb0133af1822472facbf2cfa6a43c9c1`。
+原失败任务保留，通过控制器新建准备任务 `job-6e25f068af0040d396efe0301ab35fde`，
+固定源码仍为 `95248f3a02fe09e1c195fd4e2bd23cf3a0b64052`。未执行确认上线或回退。
+
+该次重试完成构建及全部七项隔离验收、清理通过，但封存时以 `VERIFYING_FAILED` 结束。
+两次连续读取现场上下文，仅 `app.version` 中 `-version` 输出的日志时间戳不同；
+镜像、程序摘要、版本/提交/构建时间、数据身份等其余字段相同。修正 `Host.app_facts()`，
+只提取稳定版本身份，并要求完整提交存在；仍保留镜像与程序摘要核验。
+本地部署工具回归 130 项通过，覆盖日志时间变化、真实版本/提交/构建时间变化及缺失身份拒绝。
+源码修复尚未提交；按本次故障修复安装到控制器工具目录，重启部署控制器，未重启应用。
+已安装 `fast_deploy.py` SHA-256 为
+`424d049e4339a31a8592fac5f3c5cfb9e37eb8fc9b14ac9549b2620c90892ff5`，原文件留存在
+`/opt/sub2api-backups/fast_deploy.py.before-timestamp-fix`，历史封存工具未改。
+随后新建任务 `job-0189e5310fb84d629554cf0f164c404b` 重新准备同一固定候选，未重放失败任务。
+
+该任务最终为 `PREPARED`，错误码为空，控制器返回 `actions=["activate"]`。前后端构建、
+镜像内自动测试、七项真实隔离验收、夹具清理、上下文封存和新备份校验均通过。
+候选镜像为 `sha256:de4c9c48b310ef056e0fb8b34940ccfc42cb37a10df4b88c83a7ca58b43f2428`，
+程序 SHA-256 为 `688db4734bf997b66bba96eb501f027648b1c0e93a52c08e969e848da11d7b35`。
+PostgreSQL 备份为 2,986,167,206 字节，`pg_restore --list` 校验通过，SHA-256 为
+`c4a7ab24c61fbcc415539af3b1e796f3629e0d6cd8f84dd3b4457d6080f0d6f3`；
+备份于北京时间 2026-10-24 03:19:36 完成，准备有效期至当日 05:19:36。
+发布材料保存在 `/opt/sub2api-control/jobs/job-0189e5310fb84d629554cf0f164c404b/release/`。
+最终核对蓝槽仍运行 `f06a57de6`，旧镜像及程序摘要不变；本机 8080、主站和 API 的 `/readyz`
+均为 200，两套账号管理服务正常，维护与 pending 标记不存在。正式切换、生产回退和收费调用未执行。
+
+随后用户通过页面发起该任务的 `activate`。北京时间 03:23:19 旧实例日志记录
+`deployment_transition_failed action=pause requests=2 background=0 error=context deadline exceeded`，
+配置排空上限仍为 8 秒；03:23:24 独立任务 `sub2api-fast-eec0142768afca64` 以 `DEFERRED` 结束。
+不是备份过期或准备再次失败，也不会自动重试。03:27 只读复核蓝槽仍是原镜像/启动 ID，
+绿槽 `95248f3a` 已启动但处于 standby；主站、API、本机 `/readyz` 均为 200，两套账号后台 active，
+维护/pending 标记不存在。此后本轮仅做本地热切换改造与测试，没有再次切换生产。
+
+本地新流程验证：Python 部署工具 146 项、Go server/deployment/cmd-server 及部署 API 定向 race 回归、部署弹窗
+23 项及前端正式构建通过；独立本机 Colima 夹具验证真实 Nginx 下 SSE/WS 保持超过原 8 秒并
+跨切换/回切，双应用共享隔离 PostgreSQL/Redis、依赖故障恢复及重启待命通过，夹具资源已清理。
+尚未执行本次新协议的原签名插件及生产完整执行器验收，不能将此记录解读为已上线或绝对无感。
+
+## 首个候选登记（2026-10-24，登记阶段未准备或切换）
 
 用户要求让最新版出现在部署更新的“可用版本”。登记前只读核对部署执行器 active，
 `/status?refresh=true` 返回 `enabled=true`、空候选、无任务及空 `catalog_error`；
@@ -30,7 +83,7 @@
 
 GitHub main 及固定候选清单提交均可从服务器读取；登记后首次强制刷新仍为空，
 确认是 GitHub Raw 分支地址的旧缓存，不能把清单推送或固定提交读取成功冒充执行器已取得。
-实现与回归详情见[版本记录](upstream-sync-state.md#首个部署候选-v0217r1712026-10-24已登记未准备或部署)。
+实现与回归详情见[版本记录](upstream-sync-state.md#首个部署候选-v0217r1712026-10-24已准备未部署)。
 本轮只登记与查询，未触发生产构建、备份、维护、插件暂停或应用切换，线上仍为原版本。
 
 ## 公网入口与旧中转核查（2026-10-23，只读）

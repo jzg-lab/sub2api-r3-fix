@@ -33,8 +33,11 @@ export default {
     actionUncertain: 'Request result is uncertain. Checking the existing task without resubmitting.',
     activateConfirm: 'Brief maintenance will switch the application. PostgreSQL and Redis stay running. Busy requests defer the switch. Deploy now?',
     handoffConfirm: 'Validate the standby, briefly pause plugins and tasks, switch traffic, then resume. Both instances share PostgreSQL and Redis. Busy requests cancel this update. Deploy now?',
+    liveHandoffConfirm: 'Pause plugins and background jobs, then hot-switch traffic while the old instance finishes existing core requests. Plugin traffic may be affected. Further releases and related configuration changes wait for cleanup. PostgreSQL and Redis stay running. Deploy now?',
+    liveRollbackConfirm: 'Hot-switch to the compatible previous version without restoring the database. Plugins and background jobs pause; the current instance finishes existing core requests. Roll back now?',
     rollbackConfirm: 'Brief maintenance will restore the previous application, not the database. Compatibility checks must pass. Roll back now?',
     phases: {
+      RELEASING: 'Handing over plugins and jobs; core service stays online',
       BLOCKED: 'Deployment blocked',
       QUEUED: 'Queued', FETCHING: 'Checking source', BUILDING: 'Building image', VERIFYING: 'Isolated verification', BACKUP: 'Backup and preflight',
       PREPARED: 'Prepared, awaiting confirmation', EXPIRED: 'Preparation expired', PREPARATION_FAILED: 'Preparation failed, no switch',
@@ -45,6 +48,7 @@ export default {
       PREFLIGHT_FAILED: 'Preflight failed', LAUNCH_FAILED: 'Task launch failed', NEEDS_ATTENTION: 'Operator attention required'
     },
     errors: {
+      PREVIOUS_REQUESTS_PENDING: 'Traffic has switched. The old instance is finishing existing requests while service continues. Further releases and related configuration changes wait for cleanup.',
       AUXILIARY_SERVICES_PENDING: 'The main application is available. Auxiliary services are retrying recovery; another switch is blocked until they recover.',
       CANDIDATE_CHANGED: 'Candidate approval changed. Check available releases again.',
       BASELINE_CHANGED: 'The running version differs from the reviewed baseline. Review the full update again.',

@@ -147,11 +147,15 @@ class Controller:
         expires = 0
         previous_version = ""
         auxiliary_pending = False
+        retiring = False
+        live_handoff = False
         if (release / "prepared.json").exists():
             prepared, config = d.read(release / "prepared.json"), d.read(release / "config.json")
+            live_handoff = prepared.get("handoff", {}).get("protocol") == 2
             if mode == "handoff":
                 active = Path(config["deploy_dir"]) / "handoff-active.json"
                 auxiliary_pending = active.exists() and bool(d.read(active).get("pending_services"))
+                retiring = active.exists() and bool(d.read(active).get("retiring"))
             previous = prepared.get("previous", {})
             identity = re.search(r"\bSub2API (v?[0-9][A-Za-z0-9.+-]*) \(commit: ([0-9a-f]{40}), built: [^\r\n)]*\)", previous.get("version", ""))
             if identity and identity[2] == previous.get("source") == state.get("previous_source"):
@@ -171,10 +175,14 @@ class Controller:
         if auxiliary_pending:
             actions = []
             error_code = error_code or "AUXILIARY_SERVICES_PENDING"
+        if retiring:
+            actions = []
+            error_code = error_code or "PREVIOUS_REQUESTS_PENDING"
         return {k: state[k] for k in ("id", "candidate_id", "version", "source")} | {
             "mode": mode, "phase": phase, "expires_at": expires, "actions": actions,
             "previous_source": state.get("previous_source", ""),
             "previous_version": previous_version,
+            "live_handoff": live_handoff,
             "reused": state.get("reused", False),
             "error_code": error_code or ("CHECK_FAILED" if phase in ("PREPARATION_FAILED", "PREFLIGHT_FAILED", "LAUNCH_FAILED", "NEEDS_ATTENTION") else ""),
         }
@@ -205,6 +213,8 @@ class Controller:
             state = self.job_status(latest) if latest else None
             d.require(not state or state["mode"] == self.mode, "deployment mode changed; explicit installation required")
             if action == "prepare":
+                d.require(not state or state.get("error_code") not in
+                          ("AUXILIARY_SERVICES_PENDING", "PREVIOUS_REQUESTS_PENDING"), "previous handoff still finishing")
                 # Repeated clicks attach to the same unfinished preparation, never duplicate it.
                 if state and state["candidate_id"] == identifier and state["phase"] in PREPARING | {"PREPARED"}:
                     return self.snapshot()

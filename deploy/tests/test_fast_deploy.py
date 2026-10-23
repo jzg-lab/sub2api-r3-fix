@@ -285,6 +285,39 @@ class UtilityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 b.deployment_version(invalid, "a" * 40)
 
+    def test_app_facts_ignores_volatile_version_log_timestamp(self):
+        config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))
+        host = d.Host(config)
+        inspect = {"State": {"Running": True, "Restarting": False}, "Image": "sha256:image"}
+        identity = "Sub2API v0.2.17+r17.1.fast.abc (commit: " + "a" * 40 + ", built: 2026-10-23T00:00:00Z)"
+        versions = [(timestamp + '\tINFO\tstdlog\t' + identity + '\t{"legacy_stdlog":true}\n').encode()
+                    for timestamp in ("2026-10-24T03:04:36Z", "2026-10-24T03:14:36Z")]
+        with patch.object(host, "inspect", return_value=inspect), patch.object(
+                d, "run", side_effect=(b"binary  /app/sub2api\n", versions[0],
+                                       b"binary  /app/sub2api\n", versions[1])):
+            facts = host.app_facts()
+            self.assertEqual(facts, host.app_facts())
+        self.assertEqual(facts, {"image_id": "sha256:image", "binary_sha256": "binary", "version": identity})
+
+    def test_app_facts_preserves_real_version_identity_changes(self):
+        host = d.Host(d.read(Path(d.__file__).with_name("fast-deploy.example.json")))
+        inspect = {"State": {"Running": True, "Restarting": False}, "Image": "sha256:image"}
+        identity = "Sub2API 0.3.0+r17bi.fast.abc (commit: " + "a" * 40 + ", built: 2026-10-23T00:00:00Z)"
+        for changed in (identity.replace("r17bi", "r17bj"), identity.replace("a" * 40, "b" * 40),
+                        identity.replace("00:00:00Z", "01:00:00Z")):
+            with self.subTest(identity=changed), patch.object(host, "inspect", return_value=inspect), patch.object(
+                    d, "run", side_effect=(b"binary  /app/sub2api\n", identity.encode(),
+                                           b"binary  /app/sub2api\n", changed.encode())):
+                self.assertNotEqual(host.app_facts(), host.app_facts())
+
+    def test_app_facts_rejects_missing_or_incomplete_identity(self):
+        host = d.Host(d.read(Path(d.__file__).with_name("fast-deploy.example.json")))
+        inspect = {"State": {"Running": True, "Restarting": False}, "Image": "sha256:image"}
+        for output in (b"", b"startup failed", b"Sub2API 0.2.17 (commit: abc, built: now)"):
+            with self.subTest(output=output), patch.object(host, "inspect", return_value=inspect), patch.object(
+                    d, "run", side_effect=(b"binary  /app/sub2api\n", output)), self.assertRaises(RuntimeError):
+                host.app_facts()
+
     def test_restricted_guard_preserves_denial_when_open(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))
         with tempfile.TemporaryDirectory() as root:

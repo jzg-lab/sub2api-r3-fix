@@ -24,6 +24,9 @@ class FakeHost:
         self.fail = None
         self.settings = "unchanged"
         self.runtime_checks = []
+        self.workers = ["101:1000"]
+        self.requests = {"blue": 0, "green": 0}
+        self.tcp = {"blue": 0, "green": 0}
 
     def event(self, value):
         self.events.append(value)
@@ -42,18 +45,21 @@ class FakeHost:
         self.runtime_checks.append(full)
         if phase:
             d.require(self.states[slot] == phase, "phase mismatch")
-        return {"phase": self.states[slot], "boot_id": self.boots[slot]}
+        return {"phase": self.states[slot], "boot_id": self.boots[slot], "handoff_protocol": 2,
+                "requests": self.requests[slot], "background": 0}
 
     def control(self, slot, action, boot, seconds=30):
         d.require(boot == self.boots[slot], "stale boot")
         self.event(slot + ":" + action)
-        if action == "serve" and self.states[slot] == "standby":
-            d.require(all(value == "standby" for name, value in self.states.items() if name != slot), "duplicate owner")
+        if action == "serve" and self.states[slot] in ("standby", "released"):
+            d.require(all(value in ("standby", "released") for name, value in self.states.items() if name != slot), "duplicate owner")
             self.states[slot] = "serving_paused"
         elif action == "resume":
             self.states[slot] = "active"
         elif action == "pause":
             self.states[slot] = "standby"
+        elif action == "release" and self.states[slot] != "standby":
+            self.states[slot] = "released"
         return self.runtime(slot, {})
 
     def stage(self, slot, target):
@@ -97,7 +103,14 @@ class FakeHost:
         self.event("verify:" + target["source"])
 
     def inspect(self, _):
-        return {"Image": "new", "State": {"Running": True, "Restarting": False}}
+        return {"Image": "old" if self.c.get("app_container") == "blue" else "new",
+                "State": {"Running": True, "Restarting": False}}
+
+    def nginx_workers(self):
+        return self.workers.copy()
+
+    def connections(self, slot):
+        return self.tcp[slot]
 
 
 class HandoffTests(unittest.TestCase):
@@ -512,6 +525,126 @@ class HandoffTests(unittest.TestCase):
                 host.nginx_hash()
 
 
+class LiveHandoffTests(unittest.TestCase):
+    def setUp(self):
+        HandoffTests.setUp(self)
+        prepared = d.read(self.root / "prepared.json")
+        prepared["handoff"]["protocol"] = 2
+        d.save(self.root / "prepared.json", prepared)
+        self.switch.live = True
+
+    def reconcile(self):
+        config = self.root / "config.json"
+        d.save(config, {})
+        with patch.object(h, "Host", return_value=self.host):
+            h.reconcile({"deployment_config": str(config)})
+
+    def test_long_requests_do_not_delay_switch_or_close_entrance(self):
+        self.host.requests["blue"] = 2
+        self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "ACCEPTED")
+        self.assertEqual(self.host.states, {"blue": "released", "green": "active"})
+        self.assertEqual(self.host.selected(), "green")
+        self.assertEqual(self.host.requests["blue"], 2)
+        self.assertNotIn("gate:True", self.host.events)
+        self.assertNotIn("blue:pause", self.host.events)
+        self.assertNotIn("green:unfreeze", self.host.events)
+        self.assertEqual(d.read(self.root / "handoff-active.json")["retiring"]["slot"], "blue")
+        self.assertEqual(self.host.services, {"caller.service": True, "unused.service": False})
+
+    def test_retirement_waits_for_nginx_workers_requests_and_tcp(self):
+        self.switch.execute()
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.workers = []
+        self.host.requests["blue"] = 1
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.requests["blue"] = 0
+        self.host.tcp["blue"] = 1
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.tcp["blue"] = 0
+        self.reconcile()
+        self.assertEqual(self.host.states["blue"], "standby")
+        self.assertIn("green:unfreeze", self.host.events)
+        self.assertIsNone(d.read(self.root / "handoff-active.json")["retiring"])
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_retirement_settlement_timeout_is_retried_without_closing_service(self):
+        self.switch.execute()
+        self.host.workers = []
+        self.host.fail = "blue:pause"
+        self.reconcile()
+        self.assertEqual(self.host.states["blue"], "released")
+        self.assertTrue(d.read(self.root / "handoff-active.json")["retiring"])
+        self.reconcile()
+        self.assertIsNone(d.read(self.root / "handoff-active.json")["retiring"])
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_changed_peer_is_not_stopped_or_replaced(self):
+        self.switch.execute()
+        self.host.workers = []
+        self.host.boots["blue"] = "c" * 32
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.assertTrue(d.read(self.root / "handoff-active.json")["retiring"])
+
+    def test_new_preflight_cannot_replace_a_retiring_slot(self):
+        self.switch.execute()
+        with self.assertRaisesRegex(RuntimeError, "old connections"):
+            h.Switch.preflight(self.switch)
+
+    def test_plugin_failure_hot_rolls_back_while_both_slots_have_requests(self):
+        self.host.requests = {"blue": 2, "green": 1}
+        self.host.fail = "green:resume"
+        with self.assertRaises(RuntimeError):
+            self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "RECOVERED")
+        self.assertEqual(self.host.selected(), "blue")
+        self.assertEqual(self.host.states, {"blue": "active", "green": "released"})
+        self.assertEqual(self.host.requests, {"blue": 2, "green": 1})
+        self.assertNotIn("gate:True", self.host.events)
+        self.assertNotIn("green:pause", self.host.events)
+        self.assertEqual(d.read(self.root / "handoff-active.json")["retiring"]["slot"], "green")
+
+    def test_staging_failure_keeps_old_traffic_open(self):
+        self.host.fail = "green:stage"
+        with self.assertRaises(RuntimeError):
+            self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "RECOVERED")
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_interrupted_live_recovery_keeps_both_request_paths(self):
+        self.host.fail = "green:resume"
+        with patch.object(self.switch, "recover", side_effect=SystemExit), self.assertRaises(SystemExit):
+            self.switch.execute()
+        h.Switch(self.root, self.attempt, self.host).recover()
+        self.assertEqual(d.read(self.attempt / "state.json")["phase"], "RECOVERED")
+        self.assertEqual(self.host.selected(), "blue")
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_background_timeout_defers_without_any_maintenance(self):
+        self.host.fail = "blue:release"
+        self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "DEFERRED")
+        self.assertNotIn("gate:True", self.host.events)
+        self.assertNotIn("green:serve", self.host.events)
+
+    def test_live_rollback_drift_does_not_pause_the_current_owner(self):
+        self.host.states = {"blue": "released", "green": "active"}
+        self.host.selected_slot = "green"
+        self.switch.state("RECOVERING", touched=True, services=self.host.services.copy(),
+                          old_boot=self.host.boots["blue"], runtime_config="before-change")
+        d.atomic(self.host.pending, str(self.attempt).encode())
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            self.switch.recover()
+        self.assertEqual(self.switch.s["phase"], "NEEDS_ATTENTION")
+        self.assertNotIn("green:release", self.host.events)
+        self.assertNotIn("gate:True", self.host.events)
+        self.assertEqual(self.host.states["green"], "active")
+
+
 class HostChecks(unittest.TestCase):
     def setUp(self):
         self.host = object.__new__(h.Host)
@@ -611,6 +744,31 @@ class HostChecks(unittest.TestCase):
                 self.assertEqual(host.selected(), "green")
                 gate.assert_called_once_with(False)
                 identity.assert_called_once_with("green", state["boot_id"])
+
+    def test_live_ingress_rejects_finite_worker_shutdown_timeout(self):
+        self.host.nginx_workers = lambda: ["1:100"]
+        for config in (b"worker_shutdown_timeout 10s;", b"events {} worker_shutdown_timeout 10s;",
+                       b"worker_shutdown_timeout 1m 5s;"):
+            with patch.object(d, "run", return_value=config), self.assertRaisesRegex(RuntimeError, "interrupt old streams"):
+                self.host.verify_live_ingress()
+        for config in (b"events {}", b"worker_shutdown_timeout 0s;", b"# worker_shutdown_timeout 10s;\nevents {}"):
+            with patch.object(d, "run", return_value=config):
+                self.host.verify_live_ingress()
+
+    def test_retirement_checks_container_target_port_not_host_mapping(self):
+        self.host.c = {"app_container": "app", "app_service": "app", "app_port": 8081}
+        self.host.use = lambda _: None
+        self.host.compose = lambda *_: json.dumps({"services": {"app": {"ports": [{"target": 8080, "published": 8081}]}}})
+        tcp = b"0: 00000000:1F90 0100007F:ABCD 01\n1: 00000000:1F90 0100007F:BCDE 08\n2: 00000000:1F90 00000000:0000 0A\n"
+        with patch.object(d, "run", return_value=tcp):
+            self.assertEqual(self.host.connections("blue"), 2)
+
+    def test_nginx_worker_identity_includes_process_start_ticks(self):
+        self.host.c = {}
+        fields = ["S"] + ["0"] * 18 + ["123456"]
+        with patch.object(d, "run", return_value=b"101 nginx: master process nginx\n102 nginx: worker process is shutting down\n"), \
+                patch.object(Path, "read_text", return_value="102 (nginx) " + " ".join(fields)):
+            self.assertEqual(self.host.nginx_workers(), ["102:123456"])
 
 
 if __name__ == "__main__":

@@ -76,6 +76,25 @@ describe('managed deployment controls', () => {
     expect(wrapper.text()).toContain(`deployment.phases.${phase}`)
   })
 
+  it('shows live confirmation only for a verified live handoff', async () => {
+    await open({ enabled: true, candidates: [], job: { ...job, mode: 'handoff', live_handoff: true } })
+    await button('deployment.activate').trigger('click')
+    expect(wrapper.text()).toContain('deployment.liveHandoffConfirm')
+    expect(wrapper.text()).not.toContain('deployment.handoffConfirm')
+    expect(mocks.action).not.toHaveBeenCalled()
+  })
+
+  it('keeps polling and prevents another prepare while old requests finish', async () => {
+    await open({ enabled: true, candidates: [{ ...candidate, id: 'release-2' }], job: {
+      ...job, phase: 'ACCEPTED', actions: [], error_code: 'PREVIOUS_REQUESTS_PENDING'
+    } })
+    expect(wrapper.text()).toContain('deployment.errors.PREVIOUS_REQUESTS_PENDING')
+    expect(button('deployment.prepare').attributes('disabled')).toBeDefined()
+    await vi.advanceTimersByTimeAsync(3100)
+    expect(mocks.get.mock.calls.length).toBeGreaterThan(1)
+    expect(mocks.action).not.toHaveBeenCalled()
+  })
+
 
   it('prepares without activating, using the existing step-up flow', async () => {
     await open()

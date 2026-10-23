@@ -174,6 +174,23 @@ class ManagedDeploymentTests(unittest.TestCase):
         d.save(job / "release/prepared.json", {"backup_at": time.time()})
         self.assertEqual(self.controller.job_status(job)["previous_version"], "")
 
+    def test_live_handoff_retirement_is_visible_and_blocks_mutations(self):
+        job = self.prepared()
+        self.controller.state(job, "ACCEPTED", mode="handoff")
+        d.save(job / "release/config.json", {"backup_max_age_seconds": 7200, "deploy_dir": str(self.root)})
+        d.save(job / "release/prepared.json", {"backup_at": time.time(), "handoff": {"protocol": 2}})
+        record = self.root / "handoff-active.json"
+        d.save(record, {"retiring": {"slot": "blue"}, "pending_services": []})
+        state = self.controller.job_status(job)
+        self.assertEqual(state["phase"], "ACCEPTED")
+        self.assertTrue(state["live_handoff"])
+        self.assertEqual(state["error_code"], "PREVIOUS_REQUESTS_PENDING")
+        self.assertEqual(state["actions"], [])
+        with self.assertRaises(RuntimeError), patch.object(d, "run", side_effect=AssertionError("must not launch")):
+            self.controller.command("prepare", "release-1")
+        d.save(record, {"retiring": None, "pending_services": []})
+        self.assertEqual(self.controller.job_status(job)["actions"], ["rollback"])
+
     def test_failed_new_preparation_preserves_previous_rollback_and_idempotency(self):
         accepted = self.prepared()
         self.controller.state(accepted, "ACCEPTED")
