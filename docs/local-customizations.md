@@ -6,6 +6,14 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
 本文以本地源码为准；当前线上提交、插件和实际部署证据统一见[部署状态](deployment-state.md)。
 
+## 项目 CI 与候选登记
+
+`.github/workflows/backend-ci.yml` 对固定 SHA 执行前后端、部署工具、安全扫描和构建，包含
+模型广场全量测试；`tools/deployment_candidates.py` 只负责审核准入、版本标签和候选清单。
+生产控制器不变，CI 无生产调用。初始化审核文件为 `null`，未填写兼容结论或创建真实候选。
+回归入口为 `tools/test_deployment_candidates.py`，用临时 Git 仓库验证版本、失败、重跑、
+并发更新、文档提交、完整基线差异及旧控制器兼容。规则和操作见[部署指南](merge-deploy-guide.md#项目-ci-与固定-sha-候选)。
+
 ## 更新入口缺陷修正（已随 f06a57d 部署）
 
 2026-10-20，本地回归复现更新入口指向官方仓库、沿用无来源缓存、源码构建仍可进入原地替换流程，

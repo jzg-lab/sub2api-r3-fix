@@ -37,7 +37,8 @@ def blocked(path):
                      'frontend/pnpm-workspace.yaml', '.npmrc', 'frontend/.npmrc') or
             (not path.startswith('backend/internal/web/dist/') and
              ('plugin' in path.lower() or 'migrations_runner' in path or
-              'handoff' in path or 'deployment_bootstrap' in path)))
+              'handoff' in path or
+              (path.startswith('backend/') and 'deployment' in path))))
 
 
 def ordinary_path(path):
@@ -121,16 +122,15 @@ def review_for(repo, head):
     require(repo.ancestor(source, head), 'review source is not an ancestor of the push')
     require(all(metadata(p) for p in repo.changed(source, head)), 'STALE_REVIEW: code changed after review')
     # A prior candidate is a version-only child of a main commit, not an ancestor of main.
-    base = previous
-    if not repo.ancestor(base, source):
+    if not repo.ancestor(previous, source):
         parent = repo.git('rev-parse', previous + '^')
         require(repo.changed(parent, previous) == [VERSION], 'previous source has unrelated history')
         require(repo.ancestor(parent, source), 'previous source has unrelated history')
-        base = parent
     paths = repo.changed(previous, source)
     denied = [p for p in paths if blocked(p) or not ordinary_path(p)]
     require(not denied, 'SPECIAL_REVIEW_REQUIRED: ' + ', '.join(denied))
-    require(any(not metadata(p) and p != VERSION for p in paths), 'NO_APPLICATION_CHANGE')
+    require(any(p != VERSION and p.startswith(('frontend/src/', 'frontend/public/', 'backend/'))
+                for p in paths), 'NO_APPLICATION_CHANGE')
     require(review.get('compatibility') == {
         'data': 'unchanged', 'config': 'unchanged', 'plugins': 'unchanged',
         'runtime': 'unchanged', 'rollback': 'compatible'}, 'COMPATIBILITY_UNKNOWN')
@@ -166,6 +166,10 @@ def freeze(repo, head, publish=False):
     original = review['source']
     catalog = validate_catalog(json.loads(repo.read(head, CATALOG)))
     sequences = [int(RELEASE.fullmatch(c['version'])[4]) for c in catalog]
+    # Formal releases and an explicitly committed version share the same global counter.
+    versions = repo.git('tag', '--list', 'v*+r17.*').splitlines()
+    versions.append('v' + repo.read(original, VERSION).removeprefix('v'))
+    sequences.extend(int(match[4]) for version in versions if (match := RELEASE.fullmatch(version)))
     found = None
     for tag in repo.tags():
         suffix = tag.removeprefix(TAG_PREFIX)

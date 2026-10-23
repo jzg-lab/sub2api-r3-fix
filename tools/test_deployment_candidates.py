@@ -53,6 +53,16 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(items[0]['previous_source'], self.base)
         self.assertIsNone(c.add_candidate(self.repo, plan, head, self.url))
 
+    def test_sequence_continues_across_official_baselines_and_formal_tags(self):
+        self.repo.git('tag', 'v0.2.16+r17.10', self.base)
+        plan = c.freeze(self.repo, self.head)
+        self.assertEqual(plan['version'], 'v0.2.17+r17.11')
+
+    def test_automation_only_change_does_not_allocate(self):
+        source = self.repo.commit(self.base, {'tools/deployment_candidates.py': '# automation only\n'}, 'ci')
+        head = self.with_review(source, {**self.review, 'source': source})
+        self.assertIn('NO_APPLICATION_CHANGE', c.freeze(self.repo, head)['reason'])
+
     def test_rerun_and_documentation_push_reuse_sha_and_sequence(self):
         first = c.freeze(self.repo, self.head)
         docs = self.repo.commit(self.head, {'docs/notes.md': 'docs only\n'}, 'documentation')

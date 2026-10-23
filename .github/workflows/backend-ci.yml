@@ -56,16 +56,22 @@ jobs:
           ref: ${{ needs.freeze.outputs.source }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Check deployment scripts
+      - name: Apple container syntax and fixture tests
         run: |
           /bin/bash -n deploy/apple-container.sh
           /bin/bash deploy/tests/apple-container-test.sh
-          /bin/sh deploy/tests/docker-compose-security-test.sh
-          /bin/sh deploy/tests/docker-compose-gateway-env-test.sh
-          /bin/sh deploy/tests/docker-runtime-resources-test.sh
-          /bin/sh deploy/test-caddyfile-cache.sh
-          python3 -m unittest discover -s deploy/tests -p 'test_*.py'
-          python3 -m unittest discover -s tools -p 'test_deployment_candidates.py'
+      - name: Compose security fixture
+        run: /bin/sh deploy/tests/docker-compose-security-test.sh
+      - name: Gateway environment fixture
+        run: /bin/sh deploy/tests/docker-compose-gateway-env-test.sh
+      - name: Runtime resources fixture
+        run: /bin/sh deploy/tests/docker-runtime-resources-test.sh
+      - name: Caddy policy fixture
+        run: /bin/sh deploy/test-caddyfile-cache.sh
+      - name: Deployment controller unit tests
+        run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
+      - name: Candidate publication unit tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
 
   test:
     needs: freeze
