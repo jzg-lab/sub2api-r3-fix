@@ -401,7 +401,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			if failure := s.openAIAmbiguous400Failure(c, account, resp, probeBody, true); failure != nil {
 				return nil, failure
 			}
-			if OpenAIAmbiguous400RecoveryUsed(c, account) {
+			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(probeBody))
+			if OpenAIAmbiguous400RecoveryUsed(c, account) &&
+				(openAIAmbiguous400RecoveryBlocked(c, account, resp.StatusCode, probeBody, upstreamMsg) ||
+					!shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, probeBody, resp.Header)) {
 				return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, body, probeBody)
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, probeBody); retryErr != nil {
@@ -419,7 +422,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				}
 				continue
 			}
-			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(probeBody)))
+			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, probeBody, compactModelFallbackRetried,
 			); retry {
@@ -1552,6 +1555,11 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 }
 
 func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool {
+	return openAIErrorShouldFailover(payload, message, 0)
+}
+
+// httpStatus is zero for stream events, whose generic invalid_request remains terminal.
+func openAIErrorShouldFailover(payload []byte, message string, httpStatus int) bool {
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
 		return false
 	}
@@ -1596,6 +1604,10 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 		"violat",
 	}
 	for _, marker := range nonRetryableMarkers {
+		// HTTP 413 can describe this account's body limit despite invalid_request_error.
+		if marker == "invalid_request" && isOpenAIRequestBodyTooLargeError(httpStatus, message, payload) {
+			continue
+		}
 		if strings.Contains(combined, marker) {
 			return false
 		}

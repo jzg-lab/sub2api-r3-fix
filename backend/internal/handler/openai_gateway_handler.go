@@ -898,6 +898,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						return
 					}
 					if service.OpenAIAmbiguous400RecoveryExhausted(c, account, failoverErr) {
+						if nextSmartRoute(c, failoverErr, account) {
+							smartRouteAttemptFrom(c).skipGroup = true
+							applyRetryExhaustedDisposition(c.Request.Context(), h.gatewayService, account.ID, failoverErr)
+							return
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -2885,8 +2890,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, failoverErr)
 		}
 		releaseAccountSlot()
-		if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) ||
-			(!wsRouteCommitted.Load() && service.OpenAIAmbiguous400RecoveryExhausted(c, account, failoverErr)) {
+		if !failoverErr.ShouldRetryNextAccount() || capacityRetryBudget.exhausted(failoverErr) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
 		}
@@ -2904,6 +2908,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
+		}
+		if !wsRouteCommitted.Load() && service.OpenAIAmbiguous400RecoveryExhausted(c, account, failoverErr) {
+			if !advanceWSRoute() {
+				closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
+				return false
+			}
 		}
 		reqLog.Warn("openai.websocket_upstream_failover_switching",
 			zap.Int64("account_id", account.ID),
@@ -2957,7 +2967,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 			requestPlatform,
 		)
 		if err != nil {
-			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && lastFailoverErr != nil {
+			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && rememberSmartRouteFailure(lastFailoverErr) {
 				h.apiKeyService.MarkAPIKeyRouteFailed(ctx, apiKey, wsRouteScope, smartRouteSession(c, firstMessage))
 			}
 			if (errors.Is(err, service.ErrNoAvailableAccounts) || errors.Is(err, service.ErrNoAvailableCompactAccounts)) && advanceWSRoute() {

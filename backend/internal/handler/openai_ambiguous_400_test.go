@@ -30,13 +30,37 @@ type ambiguous400Upstream struct {
 	firstBody    string
 	secondStatus int
 	secondBody   string
+	outcomes     map[int64]int
 }
 
 func TestOpenAIAmbiguous400WebSocketRecoveryBudget(t *testing.T) {
-	for _, secondStatus := range []int{200, 400, 502} {
-		t.Run(fmt.Sprint(secondStatus), func(t *testing.T) {
-			h, key, _ := smartRoutingFixture(t)
+	for _, tc := range []struct {
+		name        string
+		outcomes    map[int64]int
+		calls       []int64
+		maxSwitches int
+		completed   bool
+	}{
+		{"same_group", map[int64]int{11: 200}, []int64{10, 11}, 8, true},
+		{"backup_group_retry", map[int64]int{21: 200}, []int64{10, 11, 20, 21}, 8, true},
+		{"third_group", map[int64]int{30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+		{"second_account_502", map[int64]int{11: 502, 30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+		{"second_account_413", map[int64]int{11: 413, 30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+		{"all_groups_fail", map[int64]int{}, []int64{10, 11, 20, 21, 30, 31}, 8, false},
+		{"shared_budget", map[int64]int{30: 200}, []int64{10, 11, 20}, 2, false},
+		{"single_account_groups", map[int64]int{30: 200}, []int64{10, 20, 30}, 8, true},
+		{"no_backups", map[int64]int{30: 200}, []int64{10, 11}, 8, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, key, cache, accounts := ambiguous400BackupGroupsFixture(t, false)
+			if tc.name == "single_account_groups" {
+				accounts.accounts = []service.Account{accounts.accounts[0], accounts.accounts[3], accounts.accounts[6]}
+			}
+			if tc.name == "no_backups" {
+				key.RouteGroupIDs = nil
+			}
 			cfg := *h.cfg
+			cfg.RunMode = config.RunModeStandard
 			cfg.Gateway.OpenAIWS.Enabled = true
 			cfg.Gateway.OpenAIWS.APIKeyEnabled = true
 			cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
@@ -44,20 +68,20 @@ func TestOpenAIAmbiguous400WebSocketRecoveryBudget(t *testing.T) {
 			cfg.Gateway.OpenAIWS.IngressModeDefault = service.OpenAIWSIngressModeHTTPBridge
 			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
-			var pool []service.Account
-			for _, id := range []int64{10, 20, 21} {
-				pool = append(pool, service.Account{ID: id, Concurrency: 1, Priority: int(id), Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "test", "base_url": "https://provider.invalid"}, Extra: map[string]any{"openai_apikey_responses_websockets_v2_mode": service.OpenAIWSIngressModeHTTPBridge}})
+			for i := range accounts.accounts {
+				accounts.accounts[i].Extra["openai_apikey_responses_websockets_v2_mode"] = service.OpenAIWSIngressModeHTTPBridge
 			}
-			accounts := smartRouteAccounts{openAIImagesFailoverAccountRepo{accounts: pool}}
-			upstream := &ambiguous400Upstream{firstBody: ambiguous400Response, secondStatus: secondStatus, secondBody: ambiguous400Response}
+			upstream := &ambiguous400Upstream{outcomes: tc.outcomes}
+			usage := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 10)}
+			ledger := &smartRouteLedger{}
 			billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
 			t.Cleanup(billing.Stop)
-			gateway := service.NewOpenAIGatewayService(accounts, nil, nil, nil, nil, nil, nil, &cfg, nil, nil, service.NewBillingService(&cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+			gateway := service.NewOpenAIGatewayService(accounts, usage, ledger, nil, nil, nil, nil, &cfg, nil, nil, service.NewBillingService(&cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
 			openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(&concurrencyCacheMock{
 				acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
 				acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
 			}), billing, h.apiKeyService, nil, nil, nil, nil, &cfg)
-			openAI.maxAccountSwitches = 8
+			openAI.maxAccountSwitches = tc.maxSwitches
 			done := make(chan struct{})
 			r := gin.New()
 			r.GET("/v1/responses", func(c *gin.Context) {
@@ -92,9 +116,114 @@ func TestOpenAIAmbiguous400WebSocketRecoveryBudget(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("websocket handler did not finish")
 			}
-			require.Equal(t, secondStatus == 200, completed)
-			require.Equal(t, []int64{10, 20}, upstream.calls)
+			require.Equal(t, tc.completed, completed)
+			require.Equal(t, tc.calls, upstream.calls)
+			if tc.completed {
+				accountID := tc.calls[len(tc.calls)-1]
+				select {
+				case log := <-usage.created:
+					require.Equal(t, accountID/10, *log.GroupID)
+					require.Equal(t, float64(accountID/10*2-1), log.RateMultiplier)
+				case <-time.After(time.Second):
+					t.Fatal("usage was not recorded")
+				}
+				require.Len(t, ledger.commands, 1)
+				require.Equal(t, accountID, ledger.commands[0].AccountID)
+			} else {
+				require.Empty(t, ledger.commands)
+			}
+			if tc.name != "second_account_502" {
+				require.Empty(t, cache.failed, "ambiguous request errors must not penalize packages")
+			}
 		})
+	}
+}
+
+type ambiguous400SharedAccounts struct{ smartRouteAccounts }
+
+func (r ambiguous400SharedAccounts) ListSchedulableByGroupIDAndPlatform(ctx context.Context, groupID int64, platform string) ([]service.Account, error) {
+	accounts, err := r.smartRouteAccounts.ListSchedulableByGroupIDAndPlatform(ctx, groupID, platform)
+	if groupID == 2 {
+		for _, account := range r.accounts {
+			if account.ID == 10 || account.ID == 11 {
+				accounts = append(accounts, account)
+			}
+		}
+	}
+	return accounts, err
+}
+
+func ambiguous400BackupGroupsFixture(t *testing.T, passthrough bool) (*GatewayHandler, *service.APIKey, *smartRouteCache, ambiguous400SharedAccounts) {
+	h, key, cache := smartRoutingFixture(t)
+	groups := map[int64]*service.Group{1: key.Group}
+	for _, id := range []int64{2, 3} {
+		groups[id] = &service.Group{ID: id, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true, RateMultiplier: float64(id*2 - 1)}
+	}
+	key.RouteGroupIDs = []int64{1, 2, 3}
+	h.apiKeyService = service.NewAPIKeyService(nil, nil, smartRouteGroups{groups: groups}, nil, nil, cache, h.cfg)
+	var pool []service.Account
+	for _, id := range []int64{10, 11, 12, 20, 21, 22, 30, 31, 32} {
+		pool = append(pool, service.Account{ID: id, Name: fmt.Sprint(id), Concurrency: 1, Priority: int(id), Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "test", "base_url": "https://provider.invalid", "pool_mode": true, "pool_mode_retry_count": float64(5)}, Extra: map[string]any{"openai_passthrough": passthrough}})
+	}
+	return h, key, cache, ambiguous400SharedAccounts{smartRouteAccounts{openAIImagesFailoverAccountRepo{accounts: pool}}}
+}
+
+func TestOpenAIAmbiguous400ContinuesThroughBackupGroups(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			for _, tc := range []struct {
+				name        string
+				outcomes    map[int64]int
+				calls       []int64
+				maxSwitches int
+				success     bool
+			}{
+				{"third_group", map[int64]int{30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+				{"second_account_502", map[int64]int{11: 502, 30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+				{"second_account_413", map[int64]int{11: 413, 30: 200}, []int64{10, 11, 20, 21, 30}, 8, true},
+				{"all_groups_fail", map[int64]int{}, []int64{10, 11, 20, 21, 30, 31}, 8, false},
+				{"shared_budget", map[int64]int{30: 200}, []int64{10, 11, 20}, 2, false},
+			} {
+				t.Run(fmt.Sprintf("passthrough=%v/stream=%v/%s", passthrough, stream, tc.name), func(t *testing.T) {
+					h, key, cache, accounts := ambiguous400BackupGroupsFixture(t, passthrough)
+					h.maxAccountSwitches = tc.maxSwitches
+					cfg := *h.cfg
+					cfg.RunMode = config.RunModeStandard
+					upstream := &ambiguous400Upstream{outcomes: tc.outcomes}
+					usage := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 10)}
+					ledger := &smartRouteLedger{}
+					billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
+					t.Cleanup(billing.Stop)
+					gateway := service.NewOpenAIGatewayService(accounts, usage, ledger, nil, nil, nil, nil, &cfg, nil, nil, service.NewBillingService(&cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+					openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, h.apiKeyService, nil, nil, nil, nil, &cfg)
+					openAI.maxAccountSwitches = tc.maxSwitches
+					c, rec := smartRoutingContext(key, fmt.Sprintf(`{"model":"gpt-5.1","stream":%t,"input":"hello","prompt_cache_key":"backup-session"}`, stream))
+					h.WithSmartRoutes(openAI.Responses, nil, openAI)(c)
+					require.Equal(t, tc.calls, upstream.calls, rec.Body.String())
+					if tc.success {
+						require.Equal(t, 200, rec.Code, rec.Body.String())
+						select {
+						case log := <-usage.created:
+							require.Equal(t, int64(3), *log.GroupID)
+							require.Equal(t, 5.0, log.RateMultiplier)
+						case <-time.After(time.Second):
+							t.Fatal("usage was not recorded")
+						}
+						require.Len(t, ledger.commands, 1)
+						require.Equal(t, int64(30), ledger.commands[0].AccountID)
+						require.Greater(t, ledger.commands[0].BalanceCost, 0.0)
+						require.Contains(t, cache.sessions, "9/responses\x00gpt-5.1/backup-session")
+						require.Equal(t, int64(3), cache.sessions["9/responses\x00gpt-5.1/backup-session"])
+					} else {
+						require.Equal(t, 502, rec.Code, rec.Body.String())
+						require.Empty(t, ledger.commands)
+					}
+					if tc.name != "second_account_502" {
+						require.Empty(t, cache.failed, "ambiguous request errors must not penalize packages")
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -107,6 +236,15 @@ func (u *ambiguous400Upstream) Do(req *http.Request, _ string, id int64, _ int) 
 	status, body := 400, u.firstBody
 	if len(u.calls) > 1 {
 		status, body = u.secondStatus, u.secondBody
+	}
+	if u.outcomes != nil {
+		status, body = u.outcomes[id], ambiguous400Response
+		if status == 0 {
+			status = 400
+		}
+	}
+	if status == 413 {
+		body = `{"error":{"type":"invalid_request_error","message":"Request body too large"}}`
 	}
 	if status == 200 {
 		success := &smartRouteHTTPUpstream{succeedID: id}
@@ -153,6 +291,9 @@ func TestOpenAIAmbiguous400RealRoutingAndBilling(t *testing.T) {
 						case "budget_exhausted":
 							h.maxAccountSwitches = 0
 							wantCalls = []int64{10}
+						}
+						if placement == "backup_package" && (outcome == "generic400" || outcome == "server502") {
+							wantCalls = append(wantCalls, secondID+1)
 						}
 						cfg := *h.cfg
 						cfg.RunMode = config.RunModeStandard

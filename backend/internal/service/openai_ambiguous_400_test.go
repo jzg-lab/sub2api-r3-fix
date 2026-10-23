@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -192,4 +193,116 @@ func TestOpenAIAmbiguous400MixedRouteKeepsOAuthRecovery(t *testing.T) {
 			require.True(t, OpenAIAmbiguous400RecoveryExhausted(c, apiKey, &UpstreamFailoverError{StatusCode: 502}), "OAuth must not reset the API-key recovery budget")
 		})
 	}
+}
+
+func TestOpenAIAmbiguous400RecoveryIsPerGroup(t *testing.T) {
+	c, _ := newOpenAIUpstreamErrorTestContext(t)
+	InitOpenAIAmbiguous400Recovery(c, []byte(`{"model":"gpt-5.1","input":"hello"}`))
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	failure := &UpstreamFailoverError{Reason: OpenAIAmbiguous400Reason, StatusCode: 400}
+	for _, id := range []int64{1, 2, 3} {
+		routed := c.Copy()
+		routed.Request = c.Request.WithContext(ContextWithAPIKeyRoute(c.Request.Context(), &APIKey{Group: &Group{ID: id}}))
+		require.False(t, OpenAIAmbiguous400RecoveryExhausted(routed, account, failure))
+		require.True(t, OpenAIAmbiguous400RecoveryExhausted(routed.Copy(), account, &UpstreamFailoverError{StatusCode: 502}))
+	}
+	c.Request = c.Request.WithContext(ContextWithAPIKeyRoute(c.Request.Context(), &APIKey{Group: &Group{ID: 1}}))
+	require.True(t, OpenAIAmbiguous400RecoveryExhausted(c, account, failure), "revisiting a group must not reset its retry")
+}
+
+func TestOpenAIAmbiguous400FollowupHonorsTerminalErrors(t *testing.T) {
+	for _, transport := range []string{"http", "passthrough", "ws_http_bridge"} {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{"schema", 400, `{"error":{"code":"invalid_function_parameters","message":"Invalid schema"}}`},
+			{"context_413", 413, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Context window exceeded"}}`},
+			{"content_policy_413", 413, `{"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"Content policy violation"}}`},
+			{"cyber_policy_413", 413, `{"error":{"type":"invalid_request_error","code":"cyber_policy","message":"Request blocked by cyber policy"}}`},
+			{"administrator_rule_413", 413, `{"error":{"type":"invalid_request_error","message":"Request body too large"}}`},
+			{"account_error_code_413", 413, `{"error":{"type":"invalid_request_error","message":"Request body too large"}}`},
+			{"context", 400, `{"error":{"code":"context_length_exceeded","message":"Context window exceeded"}}`},
+			{"content_policy", 502, `{"error":{"code":"content_policy_violation","message":"Content policy violation"}}`},
+			{"cyber_policy", 502, `{"error":{"code":"cyber_policy","message":"Request blocked by cyber policy"}}`},
+			{"administrator_rule", 502, ambiguous400Body},
+			{"account_error_code", 502, ambiguous400Body},
+		} {
+			t.Run(transport+"/"+tc.name, func(t *testing.T) {
+				c, _ := newOpenAIUpstreamErrorTestContext(t)
+				body := []byte(`{"model":"gpt-5.1","input":"hello","stream":false}`)
+				account := openAIFailoverCachedBodyTestAccount(1, "test", nil)
+				account.Type = AccountTypeAPIKey
+				account.Credentials["api_key"] = "test"
+				account.Extra = map[string]any{"openai_passthrough": transport == "passthrough"}
+				InitOpenAIAmbiguous400Recovery(c, body)
+				require.False(t, OpenAIAmbiguous400RecoveryExhausted(c, account, &UpstreamFailoverError{Reason: OpenAIAmbiguous400Reason}))
+				if strings.HasPrefix(tc.name, "administrator_rule") {
+					rules := &ErrorPassthroughService{}
+					rules.setLocalCache([]*model.ErrorPassthroughRule{newNonFailoverPassthroughRule(tc.status, extractUpstreamErrorMessage([]byte(tc.body)), tc.status, "custom")})
+					BindErrorPassthroughService(c, rules)
+				}
+				if strings.HasPrefix(tc.name, "account_error_code") {
+					account.Credentials["custom_error_codes_enabled"] = true
+					account.Credentials["custom_error_codes"] = []any{float64(429)}
+				}
+				upstream := &httpUpstreamRecorder{resp: newOpenAIUpstreamErrorResponse(tc.status, tc.body)}
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+				var err error
+				if transport == "ws_http_bridge" {
+					writes := 0
+					_, err = svc.proxyOpenAIWSHTTPBridgeTurn(context.Background(), c, account, "test", body, len(body), "gpt-5.1", "", "", "", "", 1, func([]byte) error { writes++; return nil })
+					require.Equal(t, 1, writes)
+				} else {
+					_, err = svc.Forward(context.Background(), c, account, body)
+				}
+				require.Error(t, err)
+				var failover *UpstreamFailoverError
+				require.False(t, errors.As(err, &failover), "terminal errors must not rotate accounts or groups")
+				require.Len(t, upstream.requests, 1)
+			})
+		}
+	}
+}
+
+func TestOpenAIAmbiguous400FollowupBodyLimit(t *testing.T) {
+	for _, transport := range []string{"http", "passthrough", "ws_http_bridge"} {
+		for _, recovered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/recovered=%t", transport, recovered), func(t *testing.T) {
+				c, recorder := newOpenAIUpstreamErrorTestContext(t)
+				body := []byte(`{"model":"gpt-5.1","input":"hello","stream":false}`)
+				account := openAIFailoverCachedBodyTestAccount(1, "test", nil)
+				account.Type = AccountTypeAPIKey
+				account.Credentials["api_key"] = "test"
+				account.Extra = map[string]any{"openai_passthrough": transport == "passthrough"}
+				InitOpenAIAmbiguous400Recovery(c, body)
+				if recovered {
+					require.False(t, OpenAIAmbiguous400RecoveryExhausted(c, account, &UpstreamFailoverError{Reason: OpenAIAmbiguous400Reason}))
+				}
+				upstream := &httpUpstreamRecorder{resp: newOpenAIUpstreamErrorResponse(413, `{"error":{"type":"invalid_request_error","message":"Request body too large"}}`)}
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+				var err error
+				writes := 0
+				if transport == "ws_http_bridge" {
+					_, err = svc.proxyOpenAIWSHTTPBridgeTurn(context.Background(), c, account, "test", body, len(body), "gpt-5.1", "", "", "", "", 1, func([]byte) error { writes++; return nil })
+				} else {
+					_, err = svc.Forward(context.Background(), c, account, body)
+				}
+				var failure *UpstreamFailoverError
+				require.ErrorAs(t, err, &failure, "account-specific body limits should retain ordinary failover")
+				require.Equal(t, openAIRequestBodyTooLargeReason, failure.Reason)
+				require.True(t, failure.ShouldRetryNextAccount())
+				require.False(t, failure.RetryableOnSameAccount)
+				require.Empty(t, recorder.Body.String())
+				require.Zero(t, writes)
+				require.Len(t, upstream.requests, 1)
+			})
+		}
+	}
+}
+
+func TestOpenAIAmbiguous400BodyLimitDoesNotChangeSSEClassification(t *testing.T) {
+	payload := []byte(`{"type":"response.failed","response":{"error":{"type":"invalid_request_error","message":"Request body too large"}}}`)
+	require.False(t, openAIStreamFailedEventShouldFailover(payload, "Request body too large"))
 }
