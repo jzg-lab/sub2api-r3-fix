@@ -285,6 +285,33 @@ class UtilityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 b.deployment_version(invalid, "a" * 40)
 
+    def test_special_build_review_is_exact_and_only_allows_go_patch(self):
+        paths = ["Dockerfile", "backend/go.mod", "deploy/handoff_deploy.py"]
+        review = {"status": "approved", "source": "new", "previous_source": "old",
+                  "changed_paths": paths, "reviewed_by": "fixture reviewer", "evidence": "fixture only"}
+        files = {"old:backend/go.mod": b"module example\n\ngo 1.27.2\n",
+                 "new:backend/go.mod": b"module example\n\ngo 1.27.3\n",
+                 "old:Dockerfile": b"ARG GOLANG_IMAGE=golang:1.27.2-alpine\nFROM old-runtime\n",
+                 "new:Dockerfile": b"ARG GOLANG_IMAGE=golang:1.27.3-alpine\nFROM old-runtime\n"}
+        with patch.object(b, "git", return_value="\n".join(paths)), \
+             patch.object(b, "run", side_effect=lambda *args: files[args[-1]]):
+            b.check_contract("repo", "old", "new", review)
+            for change in ({"status": "pending"}, {"source": "other"}, {"previous_source": "other"},
+                           {"changed_paths": paths[:-1]}, {"reviewed_by": ""}, {"evidence": ""}):
+                with self.subTest(change=change), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", {**review, **change})
+            for path, data in (("new:backend/go.mod", b"module replaced\n\ngo 1.27.3\n"),
+                               ("new:backend/go.mod", b"module example\n\ngo 1.28.0\n"),
+                               ("new:backend/go.mod", b"module example\n\ngo 1.27.1\n"),
+                               ("new:Dockerfile", files["new:Dockerfile"] + b"RUN unsafe\n")):
+                with self.subTest(path=path, data=data), patch.dict(files, {path: data}), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", review)
+        for path in ("backend/migrations/new.sql", "backend/go.sum", "backend/pkg/pluginapi/new.go",
+                     "deploy/codex-lb-cookie-pin/VERSION"):
+            changed = paths + [path]
+            with patch.object(b, "git", return_value="\n".join(changed)), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", {**review, "changed_paths": changed})
+
     def test_app_facts_ignores_volatile_version_log_timestamp(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))
         host = d.Host(config)

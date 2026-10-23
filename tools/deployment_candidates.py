@@ -111,7 +111,7 @@ def validate_catalog(items):
     return items
 
 
-def review_for(repo, head):
+def review_for(repo, head, allow_special=False):
     review = json.loads(repo.read(head, REVIEW))
     require(isinstance(review, dict), 'MISSING_REVIEW: a maintainer must review this source first')
     require(review.get('status') == 'approved', 'REVIEW_REQUIRED')
@@ -126,12 +126,26 @@ def review_for(repo, head):
         require(repo.ancestor(parent, source), 'previous source has unrelated history')
     paths = repo.changed(previous, source)
     denied = [p for p in paths if blocked(p) or not ordinary_path(p)]
-    require(not denied, 'SPECIAL_REVIEW_REQUIRED: ' + ', '.join(denied))
-    require(any(p != VERSION and p.startswith(('frontend/src/', 'frontend/public/', 'backend/'))
-                for p in paths), 'NO_APPLICATION_CHANGE')
-    require(review.get('compatibility') == {
-        'data': 'unchanged', 'config': 'unchanged', 'plugins': 'unchanged',
-        'runtime': 'unchanged', 'rollback': 'compatible'}, 'COMPATIBILITY_UNKNOWN')
+    channel = review.get('channel', 'ordinary')
+    require(channel in ('ordinary', 'special'), 'invalid review channel')
+    if channel == 'special':
+        require(allow_special, 'SPECIAL_MANUAL_DISPATCH_REQUIRED')
+        require(any(not metadata(p) and p != VERSION for p in paths), 'NO_APPLICATION_CHANGE')
+        compatibility = review.get('compatibility', {})
+        require(set(compatibility) == {'data', 'config', 'plugins', 'runtime', 'rollback'} and
+                all(compatibility[k] in ('unchanged', 'reviewed_change')
+                    for k in ('data', 'config', 'plugins', 'runtime')) and
+                compatibility['rollback'] in ('compatible', 'conditional'), 'COMPATIBILITY_UNKNOWN')
+        for field in ('special_plan', 'rollback_plan'):
+            require(isinstance(review.get(field), str) and 0 < len(review[field].strip()) <= 4000,
+                    'missing or oversized ' + field)
+    else:
+        require(not denied, 'SPECIAL_REVIEW_REQUIRED: ' + ', '.join(denied))
+        require(any(p != VERSION and p.startswith(('frontend/src/', 'frontend/public/', 'backend/'))
+                    for p in paths), 'NO_APPLICATION_CHANGE')
+        require(review.get('compatibility') == {
+            'data': 'unchanged', 'config': 'unchanged', 'plugins': 'unchanged',
+            'runtime': 'unchanged', 'rollback': 'compatible'}, 'COMPATIBILITY_UNKNOWN')
     for field in ('reviewed_by', 'evidence', 'summary', 'official_evidence'):
         require(isinstance(review.get(field), str) and 0 < len(review[field].strip()) <= 4000,
                 'missing or oversized ' + field)
@@ -153,11 +167,11 @@ def reservation(repo, tag):
     return source, parent, version
 
 
-def freeze(repo, head, publish=False):
+def freeze(repo, head, publish=False, allow_special=False):
     repo.sha(head)
     plan = {'source': head, 'candidate': False}
     try:
-        review = review_for(repo, head)
+        review = review_for(repo, head, allow_special)
     except (ValueError, KeyError, TypeError) as error:
         return {**plan, 'reason': str(error)}
     # Reviews are metadata; freeze the reviewed code, never later unreviewed commits.
@@ -194,9 +208,9 @@ def freeze(repo, head, publish=False):
             'tag': tag, 'candidate': True, 'review': review}
 
 
-def add_candidate(repo, plan, head, run_url):
+def add_candidate(repo, plan, head, run_url, allow_special=False):
     require(plan.get('candidate') is True, 'not an eligible candidate')
-    review = review_for(repo, head)
+    review = review_for(repo, head, allow_special)
     require(review == plan['review'], 'candidate review changed during CI')
     source, parent, version = reservation(repo, plan['tag'])
     require((source, parent, version) == (plan['source'], plan['input_source'], plan['version']),
@@ -211,11 +225,15 @@ def add_candidate(repo, plan, head, run_url):
     require(re.fullmatch(r'https://github\.com/' + re.escape(REPOSITORY) + r'/actions/runs/[1-9][0-9]*', run_url),
             'CI run URL required')
     item = {'id': 'r17-' + version.rsplit('.', 1)[1], 'source': source,
-            'previous_source': review['previous_source'], 'version': version, 'channel': 'ordinary',
+            'previous_source': review['previous_source'], 'version': version,
+            'channel': review.get('channel', 'ordinary'),
             'summary': review['summary'], 'review': review['evidence'],
             'reviewed_by': review['reviewed_by'], 'input_source': parent,
             'official_version': review['official_version'], 'official_source': review['official_source'],
             'ci_run': run_url}
+    if item['channel'] == 'special':
+        item['reason'] = review['special_plan']
+        item['rollback_plan'] = review['rollback_plan']
     items.append(item)
     validate_catalog(items)
     content = json.dumps(items, ensure_ascii=False, indent=2) + '\n'
@@ -245,19 +263,22 @@ def main():
     require(os.environ.get('GITHUB_REPOSITORY') == REPOSITORY, 'unexpected repository')
     require(os.environ.get('GITHUB_EVENT_NAME') in ('push', 'workflow_dispatch'), 'untrusted event')
     require(os.environ.get('GITHUB_REF') == 'refs/heads/main', 'main only')
+    allow_special = (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
+                     os.environ.get('PUBLISH_SPECIAL') == 'true')
     repo.git('fetch', 'origin', 'main', '--tags')
     if args.action == 'freeze':
         # Obsolete runs still test their own original SHA, but must not allocate versions.
         if repo.git('rev-parse', 'origin/main') != args.head:
             output({'source': args.head, 'candidate': False, 'reason': 'SUPERSEDED_PUSH'})
         else:
-            output(freeze(repo, args.head, publish=True))
+            output(freeze(repo, args.head, publish=True, allow_special=allow_special))
     else:
         plan = json.loads(Path('candidate-plan.json').read_text())
         # Read the latest metadata, then use a normal fast-forward push. A concurrent push fails closed.
         head = repo.git('rev-parse', 'origin/main')
         commit = add_candidate(repo, plan, head, os.environ['GITHUB_SERVER_URL'] + '/' +
-                               REPOSITORY + '/actions/runs/' + os.environ['GITHUB_RUN_ID'])
+                               REPOSITORY + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+                               allow_special=allow_special)
         if commit:
             repo.git('push', 'origin', commit + ':refs/heads/main')
             print('Catalog registered at ' + commit + '; production remains unchanged.')

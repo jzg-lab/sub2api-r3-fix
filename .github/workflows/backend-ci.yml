@@ -5,6 +5,11 @@ on:
     branches: [main, "codex/**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_special:
+        description: 'Register a reviewed SPECIAL candidate only; never prepare or deploy production'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +38,7 @@ jobs:
         id: source
         env:
           SOURCE_SHA: ${{ github.sha }}
+          PUBLISH_SPECIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_special == true }}
         run: |
           if [ "$GITHUB_REF" = refs/heads/main ] && { [ "$GITHUB_EVENT_NAME" = push ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; }; then
             python3 tools/deployment_candidates.py freeze --head "$SOURCE_SHA"
@@ -211,4 +217,5 @@ jobs:
       - name: Append the tested immutable candidate to the existing catalog
         env:
           SOURCE_SHA: ${{ github.sha }}
+          PUBLISH_SPECIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_special == true }}
         run: python3 tools/deployment_candidates.py publish --head "$SOURCE_SHA"

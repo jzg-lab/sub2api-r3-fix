@@ -26,10 +26,32 @@ def protected(path):
                              "deploy/docker-entrypoint", "deploy/client-identity/")))
 
 
-def check_contract(repo, previous, commit):
-    changed = git(repo, "diff", "--name-only", previous, commit).splitlines()
+def check_contract(repo, previous, commit, review=None):
+    changed = git(repo, "diff", "--no-renames", "--name-only", previous, commit).splitlines()
     blocked = [p for p in changed if protected(p)]
-    require(not blocked, "special deployment required: " + ", ".join(blocked))
+    if review is None:
+        require(not blocked, "special deployment required: " + ", ".join(blocked))
+        return
+    require(review.get("status") == "approved" and review.get("source") == commit and
+            review.get("previous_source") == previous and review.get("changed_paths") == changed,
+            "special build review does not match the complete source diff")
+    require(all(isinstance(review.get(k), str) and review[k].strip() for k in ("reviewed_by", "evidence")),
+            "special build review requires reviewer and evidence")
+    require(set(blocked) <= {"Dockerfile", "backend/go.mod"}, "special build cannot change migrations, plugins or dependencies")
+    # This exception only permits a reviewed Go patch; runtime layers still come from the old image.
+    old = run("git", "-C", str(repo), "show", previous + ":backend/go.mod")
+    new = run("git", "-C", str(repo), "show", commit + ":backend/go.mod")
+    versions = [re.search(rb"(?m)^go ([0-9]+)\.([0-9]+)\.([0-9]+)$", data) for data in (old, new)]
+    require(all(versions), "Go patch review requires three-part toolchain versions")
+    before, after = versions
+    require(before.groups()[:2] == after.groups()[:2] and int(after[3]) >= int(before[3]) and
+            old.replace(before[0], after[0], 1) == new, "special build only permits a Go patch version change")
+    old_docker = run("git", "-C", str(repo), "show", previous + ":Dockerfile")
+    new_docker = run("git", "-C", str(repo), "show", commit + ":Dockerfile")
+    versions = [b".".join(match.groups()) for match in (before, after)]
+    require(old_docker.replace(b"ARG GOLANG_IMAGE=golang:" + versions[0] + b"-alpine\n",
+                               b"ARG GOLANG_IMAGE=golang:" + versions[1] + b"-alpine\n", 1) == new_docker,
+            "special build only permits the matching Dockerfile Go patch")
 
 
 def deployment_version(source_version, commit):
@@ -74,7 +96,14 @@ def build(args):
     for ref in (args.commit, args.previous):
         require(re.fullmatch(r"[0-9a-f]{40}", ref), "full Git commit required")
         require(git(repo, "rev-parse", ref + "^{commit}") == ref, "commit not found")
-    check_contract(repo, args.previous, args.commit)
+    review = None
+    if getattr(args, "special_review", None):
+        path = Path(args.special_review)
+        require(not path.is_symlink() and path.stat().st_uid == os.geteuid() and
+                path.stat().st_mode & 0o077 == 0, "private special build review required")
+        review = json.loads(path.read_bytes())
+        require(isinstance(review, dict), "invalid special build review")
+    check_contract(repo, args.previous, args.commit, review)
     limits = limited_build_options(getattr(args, "cgroup_parent", None))
     require(repo not in output.parents, "build artifacts belong outside the repository")
     for image in (args.node_image, args.go_image):
@@ -134,6 +163,7 @@ def build(args):
         "builder_id": builder_id, "node_image": args.node_image, "go_image": args.go_image,
         "source_archive_sha256": digest(output / "source.tar"),
         "build_log_sha256": digest(output / "build.log"), "runtime_dockerfile_sha256": digest(Path(__file__).with_name("FastRuntime.Dockerfile")),
+        "special_review": review,
     })
     print(str(output / "artifact.json"))
 
@@ -145,4 +175,5 @@ if __name__ == "__main__":
     for name in ("repo", "output", "commit", "previous", "runtime", "node-image", "go-image"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--cgroup-parent", choices=[BUILD_CGROUP])
+    parser.add_argument("--special-review", help="private approved review bound to the full diff; Go patch changes only")
     build(parser.parse_args())

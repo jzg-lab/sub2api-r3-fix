@@ -78,11 +78,33 @@
 选择性整合记录不代表完整采用上游每个路径，也不能用旧 `VERSION=0.3.0+r17bi` 充当官方基线。
 新命名仍需核对原插件最低宿主版本，不能只改数字绕过兼容校验。
 
+### 人工审核的专项候选
+
+专项仍使用同一份审核文件、固定标签、完整 CI 和候选清单。维护者完成实际审查后在审核中增加
+`"channel": "special"`、`special_plan` 和 `rollback_plan`；后两项分别写明需要人工实施的
+安装/配置变更、首次接入限制，以及失败时的恢复条件。`compatibility` 五项不得缺失或未知：
+data/config/plugins/runtime 分别明确 `unchanged` 或已审查的 `reviewed_change`，rollback 为
+`compatible` 或明确条件的 `conditional`。这些字段不是测试结果，也不授权数据库/插件修改。
+
+专项审核 push 到 main 后仍只运行检查，不分配候选。维护者须在 GitHub Actions 的 CI 中显式
+手动运行 main，并勾选 `publish_special`；只有该次完整 CI 全部通过才登记 `channel=special`。
+普通 push、未勾选的手动运行、其他分支都不能打开此入口。后台显示专项原因，普通“准备更新”
+继续拒绝专项候选；CI 不连接服务器，登记成功不代表已安装、已备份或已切流。
+
+本轮 Go 安全补丁及部署协议首次接入的维护构建可显式传 `build_fast_release.py --special-review`。
+该私有 JSON 必须写明 `status=approved`、最终候选 `source`、实际生产 `previous_source`、
+按 `git diff --no-renames --name-only <previous> <source>` 顺序列出的完整 `changed_paths`、
+真实 `reviewed_by` 和 `evidence`。清单/SHA 任一不符即阻断；例外仅允许 Go 同一主次版本的
+补丁升级及 Dockerfile 对应 Go 默认值，不能改变 go.mod 的模块依赖或其他 Dockerfile 内容。
+迁移、go.sum、插件协议/包、浏览器及入口脚本仍不可通过此例外放行。最终镜像依旧复用原运行层
+和配置，构建回执封存专项审查。普通控制器不会传此参数。安装工具/修改生产构建镜像固定值
+仍先取得用户确认，最终原签名插件隔离验收和新备份仍必须完成。
+
 ### CI 的固定流程
 
 - 工作流入口为 `.github/workflows/backend-ci.yml`，覆盖 `main`、`codex/**`、PR 和手动运行。
   只有本项目 `main` 的 push/手动运行允许分配候选；PR/其他分支仅检查，不登记。
-- 审核缺失、代码在审核后变化、已被更新 push 替代、基线不相关、专项路径或未知路径，都停止候选
+- 审核缺失、代码在审核后变化、已被更新 push 替代、基线不相关、普通通道中的专项路径或未知路径，都停止候选
   分配并写明原因；代码检查仍执行。机器检查只能阻断，不能代替人工语义审核。
   发布脚本、CI 工作流、构建 Makefile 也按专项路径阻断，包括与普通业务代码一并修改的情况。
 - 通过审核门槛后，只在已审核代码提交上改 `backend/cmd/server/VERSION`，创建固定子提交，

@@ -59,6 +59,32 @@ class CandidateTests(unittest.TestCase):
         plan = c.freeze(self.repo, self.head)
         self.assertEqual(plan['version'], 'v0.2.17+r17.11')
 
+    def test_special_candidate_requires_manual_dispatch_and_stays_special(self):
+        source = self.repo.commit(self.source, {'deploy/handoff_deploy.py': 'new protocol\n'}, 'special')
+        review = {**self.review, 'source': source, 'channel': 'special',
+                  'special_plan': 'Fixture: separately install reviewed deployment tools',
+                  'rollback_plan': 'Fixture: preserve the previous sealed tools and image',
+                  'compatibility': {**self.review['compatibility'], 'runtime': 'reviewed_change',
+                                    'rollback': 'conditional'}}
+        head = self.with_review(source, review)
+        self.assertIn('SPECIAL_MANUAL_DISPATCH_REQUIRED', c.freeze(self.repo, head)['reason'])
+        self.assertEqual(self.repo.tags(), [])
+        plan = c.freeze(self.repo, head, allow_special=True)
+        self.assertTrue(plan['candidate'])
+        with self.assertRaisesRegex(ValueError, 'SPECIAL_MANUAL_DISPATCH_REQUIRED'):
+            c.add_candidate(self.repo, plan, head, self.url)
+        published = c.add_candidate(self.repo, plan, head, self.url, allow_special=True)
+        item = json.loads(self.repo.read(published, c.CATALOG))[0]
+        self.assertEqual(item['channel'], 'special')
+        self.assertEqual(item['reason'], review['special_plan'])
+        self.assertEqual(item['rollback_plan'], review['rollback_plan'])
+        for patch in ({'special_plan': ''}, {'rollback_plan': ''},
+                      {'compatibility': {**review['compatibility'], 'runtime': 'unknown'}}):
+            rejected = c.freeze(self.repo, self.with_review(source, {**review, **patch}), allow_special=True)
+            self.assertFalse(rejected['candidate'])
+        ordinary = self.with_review(source, {**self.review, 'source': source})
+        self.assertIn('SPECIAL_REVIEW_REQUIRED', c.freeze(self.repo, ordinary, allow_special=True)['reason'])
+
     def test_automation_only_change_does_not_allocate(self):
         source = self.repo.commit(self.base, {'tools/deployment_candidates.py': '# automation only\n'}, 'ci')
         head = self.with_review(source, {**self.review, 'source': source})
@@ -190,6 +216,32 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(json.loads((self.repo.root / 'candidate-plan.json').read_text()), plan)
         run('publish', published)
         self.assertTrue(self.repo.git('ls-remote', 'origin', 'refs/heads/main').startswith(published))
+
+    def test_cli_push_cannot_enable_special_with_environment_flag(self):
+        remote = self.repo.root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+        self.repo.git('remote', 'add', 'origin', str(remote))
+        review = {**self.review, 'channel': 'special', 'special_plan': 'fixture plan',
+                  'rollback_plan': 'fixture rollback'}
+        head = self.with_review(self.source, review)
+        self.repo.git('push', 'origin', head + ':refs/heads/main')
+        import sys
+        env = {**os.environ, 'GITHUB_REPOSITORY': c.REPOSITORY, 'GITHUB_EVENT_NAME': 'push',
+               'GITHUB_REF': 'refs/heads/main', 'PUBLISH_SPECIAL': 'true'}
+        subprocess.run([sys.executable, c.__file__, 'freeze', '--head', head],
+                       cwd=self.repo.root, env=env, check=True, capture_output=True)
+        plan = json.loads((self.repo.root / 'candidate-plan.json').read_text())
+        self.assertFalse(plan['candidate'])
+        self.assertIn('SPECIAL_MANUAL_DISPATCH_REQUIRED', plan['reason'])
+        self.assertEqual(self.repo.tags(), [])
+        env.update(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_SERVER_URL='https://github.com', GITHUB_RUN_ID='123')
+        for action in ('freeze', 'publish'):
+            subprocess.run([sys.executable, c.__file__, action, '--head', head],
+                           cwd=self.repo.root, env=env, check=True, capture_output=True)
+        published = self.repo.git('ls-remote', 'origin', 'refs/heads/main').split()[0]
+        item = json.loads(self.repo.read(published, c.CATALOG))[0]
+        self.assertEqual(item['channel'], 'special')
+        self.assertEqual(item['reason'], 'fixture plan')
 
 
 if __name__ == '__main__':
