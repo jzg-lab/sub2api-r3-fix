@@ -34,7 +34,10 @@ func TestLiveHandoffKeepsOldStreamAndAcceptsNewRequests(t *testing.T) {
 	end := make(chan struct{})
 	server := httptest.NewServer(old.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "before\n")
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
 		select {
 		case <-end:
 			_, _ = io.WriteString(w, "after\n")
@@ -45,7 +48,7 @@ func TestLiveHandoffKeepsOldStreamAndAcceptsNewRequests(t *testing.T) {
 	defer close(end)
 	response, err := server.Client().Get(server.URL)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	first := make([]byte, len("before\n"))
 	_, err = io.ReadFull(response.Body, first)
 	require.NoError(t, err)

@@ -45,7 +45,10 @@ func TestLiveHandoffThroughNginx(t *testing.T) {
 			case "/stream":
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = io.WriteString(w, "data: before\n\n")
-				w.(http.Flusher).Flush()
+				if err := http.NewResponseController(w).Flush(); err != nil {
+					t.Error(err)
+					return
+				}
 				select {
 				case <-finish:
 					_, _ = io.WriteString(w, "data: after\n\n")
@@ -56,7 +59,7 @@ func TestLiveHandoffThroughNginx(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer ws.CloseNow()
+				defer func() { _ = ws.CloseNow() }()
 				for {
 					kind, data, err := ws.Read(r.Context())
 					if err != nil || ws.Write(r.Context(), kind, data) != nil {
@@ -112,7 +115,7 @@ http {
 		if err != nil {
 			return false
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		return res.StatusCode == 204 && res.Header.Get("X-Sub2api-Instance") == boot
 	}
 	require.Eventually(t, func() bool { return check(old.boot) }, 5*time.Second, 10*time.Millisecond)
@@ -120,14 +123,14 @@ http {
 	require.NoError(t, err)
 	stream, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
-	defer stream.Body.Close()
+	defer func() { _ = stream.Body.Close() }()
 	reader := bufio.NewReader(stream.Body)
 	line, err := reader.ReadString('\n')
 	require.NoError(t, err)
 	require.Equal(t, "data: before\n", line)
 	ws, _, err := websocket.Dial(ctx, "ws://"+addr+"/ws", nil)
 	require.NoError(t, err)
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 	for _, pair := range []struct {
 		from, to *Handoff
 		url      string
