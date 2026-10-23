@@ -57,17 +57,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 11.21.0
-
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          cache: 'pnpm'
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          node-version: '24'
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -115,7 +112,7 @@ jobs:
 
       - name: Verify Go version
         run: |
-          go version | grep -q 'go1.27.2'
+          go version | grep -q 'go1.27.3'
 
       # Docker setup for GoReleaser
       - name: Set up QEMU

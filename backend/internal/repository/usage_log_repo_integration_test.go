@@ -328,6 +328,7 @@ func TestUsageLogRepositoryCreateBestEffort_QueueFullWaitsForDrain(t *testing.T)
 		time.Sleep(100 * time.Millisecond)
 		<-repo.bestEffortBatchCh // 排空占位请求，为阻塞中的入队腾出空间
 		req := <-repo.bestEffortBatchCh
+		req.finished() // The test consumer owns the task, just like the real flusher.
 		sendUsageLogBestEffortResult(req.resultCh, nil)
 	}()
 
@@ -442,6 +443,7 @@ func TestUsageLogRepositoryCreate_BatchPathCanceledAfterQueueMarksNotPersisted(t
 	}()
 
 	req := <-repo.createBatchCh
+	defer req.finished() // No real flusher runs in this cancellation fixture.
 	require.NotNil(t, req.shared)
 	cancel()
 

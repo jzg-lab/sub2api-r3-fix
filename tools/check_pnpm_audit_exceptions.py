@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import json
 import sys
@@ -147,6 +148,13 @@ def main() -> int:
 
     with open(args.audit, "r", encoding="utf-8") as handle:
         audit = json.load(handle)
+
+    # A failed registry request is not an audit with zero vulnerabilities.
+    if (not isinstance(audit, dict) or audit.get("error") or
+            not isinstance(audit.get("metadata", {}).get("vulnerabilities"), dict) or
+            not any(isinstance(audit.get(key), dict) for key in ("advisories", "vulnerabilities"))):
+        print("Invalid or unavailable pnpm audit result", file=sys.stderr)
+        return 1
 
     # 读取异常清单并建立索引，便于快速匹配包名 + advisory。
     exceptions = parse_exceptions(args.exceptions)
