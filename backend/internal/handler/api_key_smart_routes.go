@@ -35,6 +35,7 @@ type smartRouteAttempt struct {
 	budgetChecked     bool
 	pluginUnavailable bool
 	retry             bool
+	skipGroup         bool
 	upstream          *service.UpstreamFailoverError
 	err               error
 	failedAccountID   int64
@@ -365,7 +366,7 @@ func (h *GatewayHandler) WithSmartRoutes(next gin.HandlerFunc, subscriptions *se
 					}
 					break
 				}
-				if state.failedAccountID > 0 {
+				if state.failedAccountID > 0 && !state.skipGroup {
 					routeIndex--
 				} else if failedGroups[id] {
 					h.apiKeyService.MarkAPIKeyRouteFailed(base.Request.Context(), routed, scope, session)

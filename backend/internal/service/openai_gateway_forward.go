@@ -1129,11 +1129,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if failure := s.openAIAmbiguous400Failure(c, account, resp, respBody, false); failure != nil {
 				return nil, failure
 			}
-			if OpenAIAmbiguous400RecoveryUsed(c, account) {
+			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+			if OpenAIAmbiguous400RecoveryUsed(c, account) &&
+				(openAIAmbiguous400RecoveryBlocked(c, account, resp.StatusCode, respBody, upstreamMsg) ||
+					!s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody)) {
 				return s.handleErrorResponse(ctx, resp, c, account, body, upstreamModel)
 			}
 
-			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
 			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {

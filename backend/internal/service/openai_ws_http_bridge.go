@@ -636,7 +636,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if retryErr != nil {
 			return nil, fmt.Errorf("normalize websocket http bridge rejected field retry: %w", retryErr)
 		}
-		if changed && !(turn == 1 && OpenAIAmbiguous400RecoveryUsed(c, account)) && rejectedFieldRetryState.Allow(retryBody) {
+		recoveryUsed := turn == 1 && OpenAIAmbiguous400RecoveryUsed(c, account)
+		if changed && !recoveryUsed && rejectedFieldRetryState.Allow(retryBody) {
 			logOpenAIWSModeInfo(
 				"ingress_ws_http_bridge_rejected_field_retry account_id=%d turn=%d reason=%s",
 				account.ID,
@@ -648,11 +649,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			continue
 		}
 
-		upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+		recoveryBlocked := recoveryUsed && openAIAmbiguous400RecoveryBlocked(c, account, resp.StatusCode, respBody, upstreamMsg)
+		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 		if upstreamMsg == "" {
 			upstreamMsg = http.StatusText(resp.StatusCode)
 		}
 		shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody)
+		if recoveryBlocked {
+			shouldFailover = false
+		}
 		if account.Platform == PlatformGrok {
 			shouldFailover = s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody)
 			s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, resolveGrokWSUpstreamModel(account, body, originalModel)), account, resp.StatusCode, resp.Header, respBody)

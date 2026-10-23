@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -15,10 +17,11 @@ const openAIAmbiguous400RecoveryKey = "openai_ambiguous_400_recovery"
 
 type openAIAmbiguous400Recovery struct {
 	replayAllowed bool
-	used          atomic.Bool
+	started       atomic.Bool
+	used          sync.Map // group ID -> struct{}; shared by copies of this request
 }
 
-// Initialize before smart-route copies so every account and package shares one chance.
+// Initialize before smart-route copies so each package keeps its own single retry.
 func InitOpenAIAmbiguous400Recovery(c *gin.Context, body []byte) {
 	if c == nil {
 		return
@@ -47,11 +50,38 @@ func OpenAIAmbiguous400RecoveryUsed(c *gin.Context, account *Account) bool {
 		return false
 	}
 	state := openAIAmbiguous400RecoveryFrom(c)
-	return state != nil && state.used.Load()
+	return state != nil && state.started.Load()
+}
+
+// A retryable HTTP status must not override an explicit rejection or administrator rule.
+// Call only for API-key attempts after ambiguous-400 recovery has started.
+func openAIAmbiguous400RecoveryBlocked(c *gin.Context, account *Account, status int, body []byte, message string) bool {
+	if !account.ShouldHandleErrorCode(status) || !openAIErrorShouldFailover(body, message, status) {
+		return true
+	}
+	rules := getBoundErrorPassthroughService(c)
+	return rules != nil && rules.MatchRule(account.Platform, status, body) != nil
+}
+
+func (s *openAIAmbiguous400Recovery) usedInGroup(c *gin.Context) bool {
+	if s == nil {
+		return false
+	}
+	_, used := s.used.Load(openAIAmbiguous400Group(c))
+	return used
+}
+
+func openAIAmbiguous400Group(c *gin.Context) int64 {
+	if c != nil && c.Request != nil {
+		if group, ok := c.Request.Context().Value(ctxkey.Group).(*Group); ok && group != nil {
+			return group.ID
+		}
+	}
+	return 0
 }
 
 // Call once per failed forward, after checking output commitment and cancellation.
-// After an API-key rescue fails, a different error cannot start another retry.
+// An exhausted package yields to the next eligible package, never a third local account.
 // OAuth keeps its original recovery even in a mixed-account route.
 func OpenAIAmbiguous400RecoveryExhausted(c *gin.Context, account *Account, failure *UpstreamFailoverError) bool {
 	if account == nil || !account.IsOpenAIApiKey() {
@@ -61,11 +91,13 @@ func OpenAIAmbiguous400RecoveryExhausted(c *gin.Context, account *Account, failu
 	if state == nil {
 		return false
 	}
-	if state.used.Load() {
+	if state.usedInGroup(c) {
 		return true
 	}
 	if failure != nil && failure.Reason == OpenAIAmbiguous400Reason {
-		return !state.used.CompareAndSwap(false, true)
+		state.started.Store(true)
+		_, used := state.used.LoadOrStore(openAIAmbiguous400Group(c), struct{}{})
+		return used
 	}
 	return false
 }
@@ -120,7 +152,7 @@ func (s *OpenAIGatewayService) openAIAmbiguous400Failure(c *gin.Context, account
 		reason = "client_disconnected"
 	case IsResponseCommitted(c):
 		reason = "response_committed"
-	case state.used.Load():
+	case state.usedInGroup(c):
 		reason = "retry_exhausted"
 	}
 	kind := "http_error"
@@ -137,14 +169,10 @@ func (s *OpenAIGatewayService) openAIAmbiguous400Failure(c *gin.Context, account
 	if reason != "retry_available" && reason != "retry_exhausted" {
 		return nil
 	}
-	action := NextAccountRetry
-	if reason == "retry_exhausted" {
-		action = NextAccountStop
-	}
 	setOpsUpstreamError(c, resp.StatusCode, "Upstream request failed", reason)
 	return &UpstreamFailoverError{
 		StatusCode: resp.StatusCode, ResponseBody: body, ResponseHeaders: resp.Header.Clone(),
-		Reason: OpenAIAmbiguous400Reason, Scope: GatewayFailureScopeRequest, NextAccountAction: action,
+		Reason: OpenAIAmbiguous400Reason, Scope: GatewayFailureScopeRequest, NextAccountAction: NextAccountRetry,
 	}
 }
 

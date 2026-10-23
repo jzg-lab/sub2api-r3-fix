@@ -607,7 +607,8 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		)
 	}
 
-	if isOpenAIRequestBodyTooLargeError(resp.StatusCode, upstreamMsg, body) {
+	if isOpenAIRequestBodyTooLargeError(resp.StatusCode, upstreamMsg, body) &&
+		!(OpenAIAmbiguous400RecoveryUsed(c, account) && openAIAmbiguous400RecoveryBlocked(c, account, resp.StatusCode, body, upstreamMsg)) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			ProxyID:            opsUpstreamProxyID(account),
 			ProxyName:          opsUpstreamProxyName(account),
