@@ -2,16 +2,60 @@ name: CI
 
 on:
   push:
+    branches: [main, "codex/**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOFLAGS: -p=2
+
 jobs:
-  shell:
-    runs-on: macos-15
+  freeze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+      candidate: ${{ steps.source.outputs.candidate }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Freeze a reviewed main candidate, or test the original source
+        id: source
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if [ "$GITHUB_REF" = refs/heads/main ] && { [ "$GITHUB_EVENT_NAME" = push ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; }; then
+            python3 tools/deployment_candidates.py freeze --head "$SOURCE_SHA"
+          else
+            echo "source=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+            echo "candidate=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: steps.source.outputs.candidate == 'true'
+        with:
+          name: candidate-plan
+          path: candidate-plan.json
+          retention-days: 30
+  shell:
+    needs: freeze
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.freeze.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check deployment scripts
         run: |
           /bin/bash -n deploy/apple-container.sh
@@ -20,11 +64,19 @@ jobs:
           /bin/sh deploy/tests/docker-compose-gateway-env-test.sh
           /bin/sh deploy/tests/docker-runtime-resources-test.sh
           /bin/sh deploy/test-caddyfile-cache.sh
+          python3 -m unittest discover -s deploy/tests -p 'test_*.py'
+          python3 -m unittest discover -s tools -p 'test_deployment_candidates.py'
 
   test:
+    needs: freeze
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.freeze.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -42,29 +94,61 @@ jobs:
         run: make test-integration
 
   frontend:
+    needs: freeze
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
         with:
-          version: 11.21.0
+          ref: ${{ needs.freeze.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          cache: 'pnpm'
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          node-version: '24'
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
-      - name: Frontend typecheck and critical vitest
-        run: make test-frontend
+      - name: Frontend lint, types and full tests (including model plaza)
+        run: |
+          pnpm --dir frontend lint:check
+          pnpm --dir frontend typecheck
+          pnpm --dir frontend test:run
+      - name: Build frontend
+        run: pnpm --dir frontend build
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test embedded assets and build Linux application
+        working-directory: backend
+        run: |
+          go test -tags=embed ./internal/web
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags=embed -trimpath \
+            -ldflags="-X main.Version=$(cat cmd/server/VERSION) -X main.Commit=$(git rev-parse HEAD)" \
+            -o bin/sub2api ./cmd/server
+          sha256sum bin/sub2api > bin/sub2api.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-linux-amd64-${{ needs.freeze.outputs.source }}
+          path: backend/bin/sub2api*
+          retention-days: 7
 
   golangci-lint:
+    needs: freeze
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.freeze.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -78,5 +162,44 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
-          args: --timeout=30m
+          args: --timeout=30m --new-from-rev=669ec02c6d720d86e3afe6a97a750dad776fad84
           working-directory: backend
+      - name: Preserve the full historical lint report
+        if: always()
+        working-directory: backend
+        run: golangci-lint run --timeout=30m --issues-exit-code=0 --output.text.path=../lint-full.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: full-lint-report
+          path: lint-full.txt
+
+  security:
+    needs: freeze
+    uses: ./.github/workflows/security-scan.yml
+    with:
+      source: ${{ needs.freeze.outputs.source }}
+
+  candidate:
+    name: Register candidate (never deploy)
+    needs: [freeze, shell, test, frontend, golangci-lint, security]
+    if: >-
+      needs.freeze.outputs.candidate == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidate-plan
+      - name: Append the tested immutable candidate to the existing catalog
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 tools/deployment_candidates.py publish --head "$SOURCE_SHA"
