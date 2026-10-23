@@ -68,8 +68,17 @@ jobs:
         run: /bin/sh deploy/tests/docker-runtime-resources-test.sh
       - name: Caddy policy fixture
         run: /bin/sh deploy/test-caddyfile-cache.sh
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Deployment controller unit tests
-        run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
+        run: |
+          if ! python3 -m unittest discover -s deploy/tests -p 'test_*.py' > controller-tests.log 2>&1; then
+            cat controller-tests.log
+            python3 -c 'from pathlib import Path; print("::error::" + Path("controller-tests.log").read_text()[-6000:].replace("%", "%25").replace("\n", "%0A"))'
+            exit 1
+          fi
+          cat controller-tests.log
       - name: Candidate publication unit tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -91,7 +100,7 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Verify Go version
         run: |
-          go version | grep -q 'go1.27.2'
+          go version | grep -q 'go1.27.3'
       - name: Unit tests
         working-directory: backend
         run: make test-unit
@@ -163,7 +172,7 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Verify Go version
         run: |
-          go version | grep -q 'go1.27.2'
+          go version | grep -q 'go1.27.3'
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
