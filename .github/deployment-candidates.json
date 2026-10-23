@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "id": "release-r17-1",
+    "version": "v0.2.17+r17.1",
+    "source": "95248f3a02fe09e1c195fd4e2bd23cf3a0b64052",
+    "previous_source": "f06a57de6ae4377919485e81811ca85ce3a35c76",
+    "channel": "ordinary",
+    "summary": "OpenAI API Key 模糊 400 按组恢复：本组额外换号仍失败时继续合格备用分组；修复恢复后 413 提前截断。模型广场分组选项随供应商筛选联动。",
+    "review": "以线上 f06a57de6ae4377919485e81811ca85ce3a35c76 为审核基线，目标固定为 95248f3a02fe09e1c195fd4e2bd23cf3a0b64052。差异仅为 OpenAI 请求内恢复、对应测试、模型广场供应商/分组筛选及内嵌资源、版本和文档；无迁移、启动期数据转换、依赖、部署工具、配置、插件协议或持久状态格式变化。保留 OAuth、明确请求/策略拒绝、管理员终止、输出/会话重放保护和计费路径；不修改全局账号健康、冷却或亲和数据格式。回退仅替换应用，既有数据库/Redis/插件数据格式保持兼容。官方命名基线为已选择性整合的 v0.2.17，不声明无差异全量同步；首个自有序号 r17.1 与目标 VERSION 一致。路由 go test -race -tags=unit 对 service/handler 定向回归 233 个顶层测试、含子用例 747 项通过，go build -tags=embed 后端构建通过；模型广场分组交互 10 项、类型检查、定向 lint、前端构建和内嵌资源测试通过；本轮 go test -tags=unit ./internal/service -run 'Test(EvaluatePluginCompatibility|MatchesSemverRange)' -count=1 通过。未执行全量测试或生产收费复现。准备阶段仍须对该固定源码构建最终镜像、核验原签名 Cookie Pin 0.3.20 并完成隔离新旧往返、现场预检及新备份；未通过不得上线。输出后断流的故障归因与后续请求避让缺口不在本次修复范围。"
+  }
+]
