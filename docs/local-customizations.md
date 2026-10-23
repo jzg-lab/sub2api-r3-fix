@@ -10,7 +10,8 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 
 `.github/workflows/backend-ci.yml` 对固定 SHA 执行前后端、部署工具、安全扫描和构建，包含
 模型广场全量测试；`tools/deployment_candidates.py` 只负责审核准入、版本标签和候选清单。
-生产控制器不变，CI 无生产调用。初始化审核文件为 `null`，未填写兼容结论或创建真实候选。
+本轮不修改生产控制器，CI 无生产调用。自动审核文件为 `null`，未编造兼容结论或自动创建真实候选；
+清单保留另一轮手工登记的 `release-r17-1`，其固定源码不含本轮 CI 与安全补丁。
 回归入口为 `tools/test_deployment_candidates.py`，用临时 Git 仓库验证版本、失败、重跑、
 并发更新、文档提交、完整基线差异及旧控制器兼容。规则和操作见[部署指南](merge-deploy-guide.md#项目-ci-与固定-sha-候选)。
 
