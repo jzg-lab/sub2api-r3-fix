@@ -72,13 +72,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Deployment controller unit tests
-        run: |
-          if ! python3 -m unittest discover -s deploy/tests -p 'test_*.py' > controller-tests.log 2>&1; then
-            cat controller-tests.log
-            python3 -c 'from pathlib import Path; print("::error::" + Path("controller-tests.log").read_text()[-6000:].replace("%", "%25").replace("\n", "%0A"))'
-            exit 1
-          fi
-          cat controller-tests.log
+        run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
       - name: Candidate publication unit tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 

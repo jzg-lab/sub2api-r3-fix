@@ -82,7 +82,8 @@ class ManagedDeploymentTests(unittest.TestCase):
         real_open = os.open
         def replace_before_open(target, *args, **kwargs):
             path.rename(path.with_suffix(".old"))
-            path.touch(mode=0o600)
+            # Path.touch uses the mocked os.open on Python 3.12 and newer.
+            os.close(real_open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
             return real_open(target, *args, **kwargs)
         with patch.object(os, "open", side_effect=replace_before_open):
             with self.assertRaisesRegex(RuntimeError, "lock replaced"):
