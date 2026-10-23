@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -155,6 +156,38 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'git operation failed: push'):
             self.repo.git('push', 'origin', registration + ':refs/heads/main')
         self.assertTrue(self.repo.git('ls-remote', 'origin', 'refs/heads/main').startswith(other))
+
+    def test_cli_freezes_publishes_and_retries_against_local_remote(self):
+        remote = self.repo.root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+        self.repo.git('remote', 'add', 'origin', str(remote))
+        self.repo.git('push', 'origin', self.head + ':refs/heads/main')
+        import sys
+        env = {**os.environ, 'GITHUB_REPOSITORY': c.REPOSITORY, 'GITHUB_EVENT_NAME': 'push',
+               'GITHUB_REF': 'refs/heads/main', 'GITHUB_SERVER_URL': 'https://github.com',
+               'GITHUB_RUN_ID': '1', 'GITHUB_OUTPUT': str(self.repo.root / 'output'),
+               'GITHUB_STEP_SUMMARY': str(self.repo.root / 'summary')}
+
+        def run(action, head):
+            subprocess.run([sys.executable, c.__file__, action, '--head', head],
+                           cwd=self.repo.root, env=env, check=True, capture_output=True)
+
+        run('freeze', self.head)
+        plan = json.loads((self.repo.root / 'candidate-plan.json').read_text())
+        self.assertIn('candidate=true', (self.repo.root / 'output').read_text())
+        self.assertTrue(self.repo.git('ls-remote', 'origin', 'refs/tags/' + plan['tag'])
+                        .startswith(plan['source']))
+        self.assertEqual(json.loads(self.repo.read(self.head, c.CATALOG)), [])
+        run('publish', self.head)
+        self.repo.git('fetch', 'origin', 'main')
+        published = self.repo.git('rev-parse', 'origin/main')
+        self.assertEqual(self.repo.changed(self.head, published), [c.CATALOG])
+        items = json.loads(self.repo.read(published, c.CATALOG))
+        self.assertEqual(items[0]['source'], plan['source'])
+        run('freeze', published)
+        self.assertEqual(json.loads((self.repo.root / 'candidate-plan.json').read_text()), plan)
+        run('publish', published)
+        self.assertTrue(self.repo.git('ls-remote', 'origin', 'refs/heads/main').startswith(published))
 
 
 if __name__ == '__main__':
