@@ -62,7 +62,7 @@ class CandidateTests(unittest.TestCase):
     def test_automation_only_change_does_not_allocate(self):
         source = self.repo.commit(self.base, {'tools/deployment_candidates.py': '# automation only\n'}, 'ci')
         head = self.with_review(source, {**self.review, 'source': source})
-        self.assertIn('NO_APPLICATION_CHANGE', c.freeze(self.repo, head)['reason'])
+        self.assertIn('SPECIAL_REVIEW_REQUIRED', c.freeze(self.repo, head)['reason'])
 
     def test_rerun_and_documentation_push_reuse_sha_and_sequence(self):
         first = c.freeze(self.repo, self.head)
@@ -95,7 +95,9 @@ class CandidateTests(unittest.TestCase):
     def test_full_baseline_diff_blocks_special_changes_even_after_clean_push(self):
         for path in ('backend/migrations/999.sql', 'deploy/tool.py', 'backend/internal/config/config.go',
                      'backend/internal/service/plugin_service.go', 'backend/go.mod', 'Dockerfile',
-                     'frontend/package.json', 'backend/ent/schema/user.go', 'unknown/runtime.sh'):
+                     'frontend/package.json', 'backend/ent/schema/user.go', 'unknown/runtime.sh',
+                     '.github/workflows/backend-ci.yml', 'tools/deployment_candidates.py',
+                     'tools/check_pnpm_audit_exceptions.py', 'Makefile', 'backend/Makefile'):
             with self.subTest(path=path):
                 special = self.repo.commit(self.base, {path: 'changed\n'}, 'special')
                 source = self.repo.commit(special, {'frontend/src/view.ts': 'ordinary\n'}, 'ordinary')

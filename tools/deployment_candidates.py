@@ -29,10 +29,11 @@ def metadata(path):
 
 def blocked(path):
     # These are hard stops even when a review claims compatibility. Renames include both names.
-    return (path.startswith(('deploy/', 'backend/migrations/', 'backend/ent/',
+    return (path.startswith(('deploy/', 'tools/', '.github/workflows/',
+                             'backend/migrations/', 'backend/ent/',
                              'backend/internal/config/', 'backend/internal/setup/',
                              'backend/pkg/pluginapi/', 'backend/internal/pkg/deployment/')) or
-            path in ('Dockerfile', 'backend/go.mod', 'backend/go.sum',
+            path in ('Dockerfile', 'Makefile', 'backend/Makefile', 'backend/go.mod', 'backend/go.sum',
                      'frontend/package.json', 'frontend/pnpm-lock.yaml',
                      'frontend/pnpm-workspace.yaml', '.npmrc', 'frontend/.npmrc') or
             (not path.startswith('backend/internal/web/dist/') and
@@ -44,10 +45,7 @@ def blocked(path):
 def ordinary_path(path):
     return (metadata(path) or path == VERSION or
             path.startswith(('frontend/src/', 'frontend/public/', 'backend/internal/',
-                             'backend/cmd/', 'backend/pkg/', 'backend/tests/')) or
-            path in ('Makefile', '.github/workflows/backend-ci.yml',
-                     '.github/workflows/security-scan.yml', '.github/workflows/release.yml',
-                     'tools/deployment_candidates.py', 'tools/test_deployment_candidates.py'))
+                             'backend/cmd/', 'backend/pkg/', 'backend/tests/')))
 
 
 class Repo:
