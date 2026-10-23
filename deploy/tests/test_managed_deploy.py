@@ -107,6 +107,40 @@ class ManagedDeploymentTests(unittest.TestCase):
             with self.subTest(action=action, identifier=identifier), self.assertRaises(RuntimeError):
                 self.controller.command(action, identifier)
 
+    def test_special_preparation_requires_private_exact_review_and_stops_at_confirmation(self):
+        candidate = {**self.candidate, "channel": "special"}
+        d.save(self.root / "candidates.json", [candidate])
+        approval = self.root / "special-review.json"
+        review = {"status": "approved", "source": candidate["source"],
+                  "previous_source": candidate["previous_source"], "changed_paths": ["deploy/handoff_deploy.py"],
+                  "reviewed_by": "fixture reviewer", "evidence": "fixture only"}
+        for change in ({"status": "pending"}, {"source": "c" * 40}, {"previous_source": "c" * 40},
+                       {"changed_paths": None}, {"reviewed_by": ""}, {"evidence": ""}):
+            d.save(approval, {**review, **change})
+            with self.assertRaises(RuntimeError), patch.object(self.controller, "launch_prepare") as launch:
+                self.controller.command("prepare", candidate["id"], special_review=approval)
+            launch.assert_not_called()
+        d.save(approval, review)
+        approval.chmod(0o644)
+        with self.assertRaisesRegex(RuntimeError, "permissions"):
+            self.controller.command("prepare", candidate["id"], special_review=approval)
+        approval.chmod(0o600)
+        with patch.object(self.controller, "launch_prepare") as launch:
+            state = self.controller.command("prepare", candidate["id"], special_review=approval)
+        job = self.controller.latest()
+        launch.assert_called_once_with(job)
+        self.assertEqual(d.read(job / "special-review.json"), review)
+        self.assertEqual(state["job"]["phase"], "QUEUED")
+        release = job / "release"
+        release.mkdir()
+        d.save(release / "prepared.json", {"backup_at": time.time()})
+        d.save(release / "config.json", {"backup_max_age_seconds": 7200})
+        self.controller.state(job, "PREPARED")
+        self.assertEqual(self.controller.snapshot()["job"]["actions"], ["activate"])
+        with patch.object(d, "run") as run:
+            self.controller.command("activate", job.name)
+        self.assertEqual(run.call_args.args[2], "activate")
+
     def test_pending_recovery_blocks_new_preparation(self):
         (self.root / ".fast-deploy-pending").touch()
         with self.assertRaises(RuntimeError):
@@ -481,6 +515,7 @@ class ManagedDeploymentTests(unittest.TestCase):
                 self.assertEqual(request("POST", "/prepare", '{"id":"release-1"}')[0], 200)
                 server.control.command.assert_called_once_with("prepare", "release-1")
                 for route, body in (("/shell", '{}'), ("/prepare", '{"id":"a","command":"restart"}'),
+                                    ("/prepare", '{"id":"a","special_review":"/tmp/approval"}'),
                                     ("/prepare", '[]'), ("/prepare", 'x' * 1025)):
                     self.assertEqual(request("POST", route, body)[0], 409)
                 self.assertEqual(server.control.command.call_count, 1)
@@ -518,6 +553,40 @@ class ManagedDeploymentTests(unittest.TestCase):
         host.pause.assert_not_called()
         host.gate.assert_not_called()
         host.stop.assert_not_called()
+
+    def test_special_worker_checks_review_before_build_and_keeps_verification_gate(self):
+        candidate = {**self.candidate, "channel": "special"}
+        d.save(self.root / "candidates.json", [candidate])
+        approval = self.root / "special-review.json"
+        review = {"status": "approved", "source": candidate["source"],
+                  "previous_source": candidate["previous_source"], "changed_paths": ["deploy/handoff_deploy.py"],
+                  "reviewed_by": "fixture reviewer", "evidence": "fixture only"}
+        d.save(approval, review)
+        with patch.object(self.controller, "launch_prepare"):
+            self.controller.command("prepare", candidate["id"], special_review=approval)
+        job = self.controller.latest()
+        host = Mock()
+        host.marker, host.pending = self.root / "marker", self.root / "pending"
+        host.app_facts.return_value = {"version": candidate["previous_source"], "image_id": "old"}
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            return "MemAvailable: 100000 kB\n" if str(path) == "/proc/meminfo" else read_text(path, *args, **kwargs)
+        with patch.object(d, "Host", return_value=host), patch.object(d, "run"), \
+             patch.object(Path, "read_text", read), \
+             patch.object(m.build, "git", side_effect=["https://github.com/jzg-lab/sub2api-r3-fix.git", "deploy/handoff_deploy.py", candidate["version"]]), \
+             patch.object(m.build, "check_contract") as contract, patch.object(m.build, "build") as build, \
+             patch.object(m.build, "limited_build_options", return_value=[]), \
+             patch.object(self.controller, "verification_context", return_value={}), \
+             patch.object(v, "verify", side_effect=RuntimeError("fixture verification failed")), \
+             patch.object(d, "prepare") as backup:
+            with self.assertRaisesRegex(RuntimeError, "fixture verification failed"):
+                self.controller.prepare(job.name)
+            contract.assert_called_once_with(self.c["repo"], candidate["previous_source"], candidate["source"], review)
+            self.assertEqual(build.call_args.args[0].special_review, str(job / "special-review.json"))
+            backup.assert_not_called()
+        self.assertEqual(self.controller.snapshot()["job"]["phase"], "PREPARATION_FAILED")
+        host.pause.assert_not_called()
+        host.gate.assert_not_called()
 
     def test_shared_catalog_is_not_accepted(self):
         self.config.chmod(0o644)
@@ -560,13 +629,23 @@ class FixtureIsolationTests(unittest.TestCase):
         host = Mock(c={"pause_services": ["caller.service"]})
         persistent = b"caller.service enabled -\nother.timer enabled -\n"
 
-        def inventory(units):
-            with patch.object(d, "run", side_effect=[units, b"FragmentPath=/etc/systemd/system/caller.service\n"]):
-                return v.caller_inventory(host)
+        def inventory(units, config=b"[Service]\nExecStart=/app/caller\n", properties=None):
+            if properties is None:
+                properties = b"FragmentPath=/etc/systemd/system/caller.service\nNeedDaemonReload=no\n"
+            with patch.object(d, "run", side_effect=[units, properties, config]) as run:
+                result = v.caller_inventory(host)
+                self.assertNotIn("ExecStart", run.call_args_list[1].args[-1])
+                return result
 
         baseline = inventory(persistent)
         self.assertEqual(inventory(persistent + b"sub2api-prepare-123.service transient -\n"), baseline)
+        self.assertEqual(inventory(b"other.timer      enabled   -\ncaller.service   enabled   -\n"), baseline)
         self.assertNotEqual(inventory(persistent + b"new-caller.timer enabled -\n"), baseline)
+        self.assertNotEqual(inventory(persistent, b"[Service]\nExecStart=/app/different-caller\n"), baseline)
+        self.assertNotEqual(inventory(persistent, b"[Service]\nExecStart=/app/caller\n# drop-in\nRestart=always\n"), baseline)
+        for properties in (b"NeedDaemonReload=yes\n", b"FragmentPath=/unknown\n"):
+            with self.assertRaisesRegex(RuntimeError, "unapplied"):
+                inventory(persistent, properties=properties)
 
     def test_runtime_uid_uses_the_application_process_not_docker_exec(self):
         with patch.object(d, "run", return_value=b"Name:\tsub2api\nUid:\t1000\t1000\t1000\t1000\n") as run:

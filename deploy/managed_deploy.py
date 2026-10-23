@@ -201,9 +201,14 @@ class Controller:
         return {"enabled": True, "candidates": candidates, "job": job,
                 "rollback_job": self.rollback_job(), "catalog_error": catalog_error}
 
-    def command(self, action, identifier):
+    def command(self, action, identifier, *, special_review=None):
         d.require(isinstance(identifier, str) and ID.fullmatch(identifier), "invalid identifier")
         d.require(action in ("prepare", "activate", "rollback"), "invalid action")
+        review = None
+        if special_review is not None:
+            d.require(action == "prepare", "special review is preparation only")
+            review = d.read(private_file(special_review))
+            d.require(isinstance(review, dict), "invalid special review")
         with self.lock():
             d.require(d.digest(self.config_path) == self.config_digest, "controller configuration changed; restart required")
             config = d.read(private_file(self.c["deployment_config"]))
@@ -221,12 +226,23 @@ class Controller:
                 d.require(not state or state["phase"] in FINISHED, "another operation requires attention")
                 d.require(not host.pending.exists() and not host.marker.exists(), "deployment needs recovery")
                 candidate = next((c for c in self.catalog(refresh=True) if c["id"] == identifier), None)
-                d.require(candidate and candidate["channel"] == "ordinary", "special or unknown candidate")
+                d.require(candidate, "special or unknown candidate")
+                if review is None:
+                    d.require(candidate["channel"] == "ordinary", "special or unknown candidate")
+                else:
+                    d.require(candidate["channel"] == "special" and review.get("status") == "approved" and
+                              review.get("source") == candidate["source"] and
+                              review.get("previous_source") == candidate["previous_source"] and
+                              isinstance(review.get("changed_paths"), list) and
+                              all(isinstance(review.get(k), str) and review[k].strip()
+                                  for k in ("reviewed_by", "evidence")), "special review differs from candidate")
                 if state and state["phase"] == "ACCEPTED":
                     d.save(self.root / "accepted.json", {"id": state["id"]})
                 job = self.root / ("job-" + uuid.uuid4().hex)
                 job.mkdir(mode=0o700)
                 d.save(job / "candidate.json", candidate)
+                if review is not None:
+                    d.save(job / "special-review.json", review)
                 d.save(job / "state.json", {"id": job.name, "candidate_id": identifier, "version": candidate["version"],
                                            "source": candidate["source"], "previous_source": candidate["previous_source"],
                                            "mode": self.mode, "phase": "QUEUED", "created_at": time.time()})
@@ -269,6 +285,7 @@ class Controller:
         inputs, plugins = approved_inputs(self.c, host)
         tools = Path(__file__).resolve().parent
         return {"candidate": d.read(job / "candidate.json"), "controller": self.c,
+                "special_review": d.digest(job / "special-review.json") if (job / "special-review.json").exists() else None,
                 "deployment_config": d.digest(self.c["deployment_config"]), "inputs": inputs,
                 "tools": {name: d.digest(tools / name) for name in (
                     "managed_deploy.py", "verify_fast_release.py", "build_fast_release.py",
@@ -344,7 +361,13 @@ class Controller:
                 d.require(build.git(repo, "remote", "get-url", "origin") == "https://github.com/jzg-lab/sub2api-r3-fix.git", "unexpected repository")
                 d.run("git", "-C", repo, "fetch", "--no-tags", "origin", candidate["source"], timeout=180)
                 changed = build.git(repo, "diff", "--name-only", candidate["previous_source"], candidate["source"]).splitlines()
-                admission(not any(build.protected(p) or p.startswith(("deploy/", "backend/internal/config/")) for p in changed), "SPECIAL_DEPLOYMENT_REQUIRED")
+                special = job / "special-review.json"
+                if candidate["channel"] == "special":
+                    review = d.read(private_file(special))
+                    build.check_contract(repo, candidate["previous_source"], candidate["source"], review)
+                else:
+                    admission(not special.exists() and not any(build.protected(p) or p.startswith(
+                        ("deploy/", "backend/internal/config/")) for p in changed), "SPECIAL_DEPLOYMENT_REQUIRED")
                 version = build.git(repo, "show", candidate["source"] + ":backend/cmd/server/VERSION").removeprefix("v")
                 admission("v" + version == candidate["version"], "VERSION_MISMATCH")
                 context = self.verification_context(job, host)
@@ -357,7 +380,8 @@ class Controller:
                     self.state(job, "BUILDING")
                     build.build(argparse.Namespace(repo=repo, output=str(job / "build"), commit=candidate["source"],
                                 previous=candidate["previous_source"], runtime=old["image_id"],
-                                node_image=self.c["node_image"], go_image=self.c["go_image"], cgroup_parent=build.BUILD_CGROUP))
+                                node_image=self.c["node_image"], go_image=self.c["go_image"], cgroup_parent=build.BUILD_CGROUP,
+                                special_review=str(special) if candidate["channel"] == "special" else None))
                     self.state(job, "VERIFYING")
                     from verify_fast_release import verify
                     release.mkdir(mode=0o700)
@@ -458,14 +482,19 @@ def controller_server(control):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("serve", "prepare", "interrupted", "reconcile"))
+    parser.add_argument("command", choices=("serve", "prepare", "prepare-special", "interrupted", "reconcile"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--job")
+    parser.add_argument("--candidate")
+    parser.add_argument("--special-review")
     args = parser.parse_args()
     d.require(os.geteuid() == 0, "executor must be installed by the host administrator")
     control = Controller(args.config)
     if args.command == "prepare":
         control.prepare(args.job)
+    elif args.command == "prepare-special":
+        d.require(args.special_review, "explicit special review required")
+        print(json.dumps(control.command("prepare", args.candidate, special_review=args.special_review)))
     elif args.command == "interrupted":
         control.interrupted(args.job)
     elif args.command == "reconcile":

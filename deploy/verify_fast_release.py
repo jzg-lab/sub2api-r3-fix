@@ -12,10 +12,15 @@ import fast_deploy as d
 
 def caller_inventory(host):
     listed = d.run("systemctl", "list-unit-files", "--type=service", "--type=timer", "--no-legend", "--no-pager")
-    units = b"\n".join(line for line in listed.splitlines()
-                       if len(line.split()) < 2 or line.split()[1] != b"transient")
-    details = [d.run("systemctl", "show", name, "--property=FragmentPath,DropInPaths,ExecStart,Restart,Triggers,TriggeredBy")
-               for name in host.c["pause_services"]]
+    units = b"\n".join(sorted(b" ".join(line.split()) for line in listed.splitlines()
+                             if line.strip() and (len(line.split()) < 2 or line.split()[1] != b"transient")))
+    details = []
+    for name in sorted(host.c["pause_services"]):
+        # ExecStart's show value includes the last PID/start time; hash the loaded unit files instead.
+        properties = d.run("systemctl", "show", name,
+                           "--property=FragmentPath,DropInPaths,Restart,Triggers,TriggeredBy,NeedDaemonReload")
+        d.require(b"NeedDaemonReload=no" in properties.splitlines(), "caller unit has unapplied changes")
+        details += [b"\n".join(sorted(properties.splitlines())), d.run("systemctl", "cat", name)]
     return hashlib.sha256(units + b"\n".join(details)).hexdigest()
 
 

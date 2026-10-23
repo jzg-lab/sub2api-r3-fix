@@ -97,8 +97,21 @@ data/config/plugins/runtime 分别明确 `unchanged` 或已审查的 `reviewed_c
 真实 `reviewed_by` 和 `evidence`。清单/SHA 任一不符即阻断；例外仅允许 Go 同一主次版本的
 补丁升级及 Dockerfile 对应 Go 默认值，不能改变 go.mod 的模块依赖或其他 Dockerfile 内容。
 迁移、go.sum、插件协议/包、浏览器及入口脚本仍不可通过此例外放行。最终镜像依旧复用原运行层
-和配置，构建回执封存专项审查。普通控制器不会传此参数。安装工具/修改生产构建镜像固定值
+和配置，构建回执封存专项审查。普通页面准备不会传此参数。安装工具/修改生产构建镜像固定值
 仍先取得用户确认，最终原签名插件隔离验收和新备份仍必须完成。
+
+专项工具安装获准后，由维护者以 root 显式执行：
+
+```sh
+python3 /opt/sub2api-control/tools/managed_deploy.py prepare-special \
+  --config /opt/sub2api-control/config.json --candidate r17-N \
+  --special-review /填写实际私有路径/special-review.json
+```
+
+此入口检查私有审核文件和清单 SHA，将审核副本封存到新任务，复用受限构建、原插件隔离验收、
+新备份及独立 systemd 工作进程，最终停在后台可见的 `PREPARED`。它不执行 activate。
+页面/API 不接受 `special_review` 或此维护命令；管理员仍通过原 TOTP 确认上线。
+专项审核文件或源码差异变化也会使验收复用失效，不能把历史准备任务改成新候选。
 
 ### CI 的固定流程
 
@@ -151,6 +164,10 @@ data/config/plugins/runtime 分别明确 `unchanged` 或已审查的 `reviewed_c
   通过门槛不表示依赖完全没有风险。
 - 本轮升级 Go 1.27.3、DOMPurify 3.4.17、follow-redirects 1.16.1；生产受管构建的固定 Go
   镜像及摘要未变。下次专项审核必须先核对工具链与原插件最低宿主版本，生产配置变更另行确认。
+- 服务清单摘要必须规范化列间空白，并核对 unit 主文件与 drop-in；不要哈希 `systemctl show`
+  的 `ExecStart` 运行信息，其中含上次启动时间和 PID，正常暂停/恢复也会造成漂移。新算法要求
+  `NeedDaemonReload=no`；真实文件修改、新增持久服务/timer 仍阻断。升级此算法时须实际核对
+  当前配置并经批准重建验收基准，不能直接忽略原清单不匹配，也不能覆盖历史回执。
 
 ## 终端操作速查
 
