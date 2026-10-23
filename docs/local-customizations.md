@@ -22,12 +22,14 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 回归入口：`backend/internal/service/update_service_test.go`、`system_handler_test.go`、
 `plugin_compatibility_test.go`，以及 `frontend/src/components/__tests__/VersionBadge.spec.ts`、
 `frontend/src/stores/__tests__/app.spec.ts` 和两种语言的消息编译/键冲突测试。
-未分配首个新版本号、未创建 Release；2026-10-23 随 `f06a57d` 首次接入生产，自动准备与受管更新流程见
+初次接入时未分配新版本号；2026-10-24 已按用户要求登记首个候选 `v0.2.17+r17.1`，
+未创建 GitHub Release。2026-10-23 随 `f06a57d` 首次接入生产，自动准备与受管更新流程见
 [二期计划](merge-deploy-guide.md#第二期实施计划)。
 
 ## 第二期部署按钮（已首次接入生产）
 
-2026-10-23 `f06a57d` 镜像、双槽及受管控制器已在生产首次接入；候选清单为空、管理员 TOTP 未启用，
+2026-10-23 `f06a57d` 镜像、双槽及受管控制器已在生产首次接入；当时清单为空、管理员 TOTP 未启用。
+2026-10-24 GitHub 清单已登记首个固定源码候选 `v0.2.17+r17.1`，仅登记不启动准备或切换；
 真实的“页面准备 → 确认上线/回退”尚未验收。以下保留各开发阶段的本地回归记录，
 实际运行身份与首次切换证据以[部署状态](deployment-state.md)为准。
 
@@ -70,7 +72,8 @@ Nginx 故障证据仅在配置摘要完全不变时复用；调用方或插件�
 `routes/managed_deployment_test.go`、`deploy/tests/test_managed_deploy.py` 及两项组件测试。
 早期按钮修复后 Python 共 79 项、前端 5 文件/51 项、Go 定向 race 测试通过；历史制品对真实隔离往返通过，
 不等于当前源码已在 Linux 生产容器完整验收。详细证据与未测项见部署状态。
-候选清单目前为空；未安装生产控制器、未挂载 socket、未发布新版本或切换线上。
+上述为早期开发验证；控制器与 socket 后于 2026-10-23 接入生产，候选后于 2026-10-24 登记。
+首个候选尚未准备或切换，历史验收不代替本次最终镜像验收。
 
 ### 共库交接替换（本地，未部署）
 
