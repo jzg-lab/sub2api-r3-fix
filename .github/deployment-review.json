@@ -1,1 +1,22 @@
-null
+{
+  "status": "approved",
+  "channel": "special",
+  "source": "dd7884af727d510403a3b9021904107767a3d42e",
+  "previous_source": "f06a57de6ae4377919485e81811ca85ce3a35c76",
+  "official_version": "0.2.17",
+  "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+  "integration_source": "98d6cb09b22dec991296b0d69b2bf46acfb4c143",
+  "official_evidence": "docs/upstream-sync-state.md：官方 v0.2.17 选择性整合，保留本项目个人定制；不声明全树与官方无差异。整合结果是本候选源码祖先。",
+  "reviewed_by": "Codex 辅助源码及差异审查；维护者于 2026-10-24 在本任务明确允许所列生产准备和首次接入安排，最终上线仍由维护者在后台确认。",
+  "summary": "模型广场分组筛选、OpenAI 模糊 400 按组恢复及 413 修复；最小安全补丁；部署热切换协议和固定 SHA CI/CD。首次从旧协议接入需受控维护，后续双端协议 2 才能热切换。",
+  "evidence": "完整核对生产 f06a57de6 到 dd7884af7 的差异：无 backend/migrations、ent、config/setup、go.sum、插件 API/包或浏览器/身份/入口脚本改动；go.mod 和 Dockerfile 仅 Go 1.27.2→1.27.3，前端授权 DOMPurify 3.4.17/follow-redirects 1.16.1 补丁。应用改动保留输出后禁止重放、明确拒绝边界及计费续作；协议 2 分离普通请求与后台单活，不改变数据库/Redis/插件持久格式。149 项部署和 21 项工具本地回归通过；完整 GitHub CI 40030450428 在精确源码 dd7884af727d510403a3b9021904107767a3d42e 成功，含全量 Go unit/integration、前端/模型广场/构建、安全扫描及真实 Nginx SSE/WS race 回归。生产当前 f06a57de6、协议 1、插件 Cookie Pin 0.3.20；原签名插件与最终镜像隔离往返及新备份尚未执行，准备阶段必须实际通过，不能沿用旧任务。",
+  "compatibility": {
+    "data": "unchanged",
+    "config": "reviewed_change",
+    "plugins": "unchanged",
+    "runtime": "reviewed_change",
+    "rollback": "conditional"
+  },
+  "special_plan": "安装本次已通过 CI 的六个部署工具文件；备份原控制器配置与验收清单，将 Go 构建镜像固定为 1.27.3 官方摘要；重建已核对静态服务配置清单摘要，保留旧清单和文件证据；排空上限从 8 秒改为 30 秒。CI 仅登记固定 SHA，不接触生产。root 专项准备必须执行受限构建、原签名 Cookie Pin 0.3.20 隔离验收和新备份，停在 PREPARED。首次旧协议仅在用户后台确认后进入短暂维护，30 秒仅为排空上限，排不空就取消并恢复旧版，不强杀普通请求。后续双方协议 2 才走热切换。",
+  "rollback_plan": "无数据库/插件迁移，仅在固定制品身份、原配置/数据/插件契约仍匹配且备份有效时允许受控回退。首次协议 1 排不空返回 DEFERRED 并恢复旧实例；切换后验收失败按已封存旧制品恢复，不自动恢复整库。协议 2 下旧请求/计费续作未收尾时保留旧槽；配置漂移或恢复失败转人工处理，不强杀请求。工具安装前保留原文件和配置，安装预检失败恢复原工具及配置；历史封存任务不修改、不复用。"
+}
