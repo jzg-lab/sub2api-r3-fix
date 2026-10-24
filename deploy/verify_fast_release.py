@@ -263,12 +263,28 @@ class Fixture:
                   "standby changed settings")
         d.require(before == {"migrations": h.migrations(), "plugins": d.plugin_contract(h.plugins())}, "standby changed contract")
         control(original, "serve")
-        control(candidate, "serve", expected=409)
         control(original, "resume")
         h.verify(old)
-        live = all(control(container).get("handoff_protocol") == 2 for container in (original, candidate))
+        previous_protocol = control(original).get("handoff_protocol", 1)
+        candidate_protocol = control(candidate).get("handoff_protocol", 1)
+        d.require(previous_protocol in (1, 2, 3) and candidate_protocol in (1, 2, 3), "unknown fixture handoff protocol")
+        core_first = candidate_protocol == 3
+        if core_first:
+            control(candidate, "serve")
+            control(candidate, "resume", expected=409)
+            h.c["app_container"] = candidate
+            h.curl(h.c["local_url"], "/api/v1/admin/users", expected=401)
+            h.curl(h.c["local_url"], "/readyz", expected=503)
+            h.c["app_container"] = original
+        else:
+            control(candidate, "serve", expected=409)
+        live = core_first or all(protocol >= 2 for protocol in (previous_protocol, candidate_protocol))
         for source, target, artifact in ((original, candidate, new), (candidate, original, old)):
-            control(source, "release" if live else "pause")
+            if control(target).get("handoff_protocol", 1) == 3:
+                control(target, "serve")
+                h.c["app_container"] = target
+                h.curl(h.c["local_url"], "/api/v1/admin/users", expected=401)
+            control(source, "release" if control(source).get("handoff_protocol", 1) >= 2 else "pause")
             state = control(target, "serve")
             d.require(state["phase"] == "serving_paused" and state["core_ready"], "target not core-ready with plugin paused")
             h.c["app_container"] = target
@@ -276,7 +292,7 @@ class Fixture:
             h.curl(h.c["local_url"], "/readyz", expected=503)
             control(target, "resume")
             h.verify(artifact)
-            if live:
+            if control(source).get("handoff_protocol", 1) >= 2:
                 # The former host still accepts core requests without owning a plugin.
                 h.c["app_container"] = source
                 h.curl(h.c["local_url"], "/api/v1/admin/users", expected=401)
@@ -284,7 +300,9 @@ class Fixture:
                 h.c["app_container"] = target
         d.require(before == {"migrations": h.migrations(), "plugins": d.plugin_contract(h.plugins())}, "handoff changed persistent contract")
         return {"shared_database": True, "standby_read_only": True, "exclusive_owner": True,
-                "original_signed_plugin_roundtrip": True, "traffic_before_plugin_resume": True, "live_handoff": live}
+                "original_signed_plugin_roundtrip": True, "traffic_before_plugin_resume": True, "live_handoff": live,
+                "candidate_protocol": candidate_protocol, "previous_protocol": previous_protocol,
+                "core_before_owner": core_first}
 
     def cleanup(self):
         # Only this freshly generated Compose project owns these resources.

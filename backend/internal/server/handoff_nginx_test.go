@@ -27,6 +27,14 @@ import (
 // The local container fixture supplies nginx. No production listener or account
 // is used; both targets use the real Handoff middleware with synthetic traffic.
 func TestLiveHandoffThroughNginx(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			testLiveHandoffThroughNginx(t, legacy)
+		})
+	}
+}
+
+func testLiveHandoffThroughNginx(t *testing.T, legacy bool) {
 	nginx, err := exec.LookPath("nginx")
 	if err != nil {
 		t.Skip("nginx required; run deploy/tests/local_application.py")
@@ -76,7 +84,7 @@ func TestLiveHandoffThroughNginx(t *testing.T) {
 	old, oldServer := makeServer()
 	next, newServer := makeServer()
 	t.Cleanup(end)
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	require.NoError(t, old.transition(ctx, "serve"))
 	require.NoError(t, old.transition(ctx, "resume"))
@@ -131,12 +139,19 @@ http {
 	ws, _, err := websocket.Dial(ctx, "ws://"+addr+"/ws", nil)
 	require.NoError(t, err)
 	defer func() { _ = ws.CloseNow() }()
-	for _, pair := range []struct {
+	pairs := []struct {
 		from, to *Handoff
 		url      string
-	}{{old, next, newServer.URL}, {next, old, oldServer.URL}} {
-		require.NoError(t, pair.from.transition(ctx, "release"))
+	}{{old, next, newServer.URL}, {next, old, oldServer.URL}}
+	if legacy {
+		pairs = pairs[:1]
+	}
+	for _, pair := range pairs {
 		require.NoError(t, pair.to.transition(ctx, "serve"))
+		require.Error(t, pair.to.transition(ctx, "resume"), "core is open while the old runtime still owns plugins")
+		if !legacy {
+			require.NoError(t, pair.from.transition(ctx, "release"))
+		}
 		writeTarget(pair.url)
 		require.NoError(t, process.Process.Signal(syscall.SIGHUP))
 		// Every new connection must succeed, including during the reload gap.
@@ -152,15 +167,29 @@ http {
 			require.True(t, time.Now().Before(deadline), "nginx did not switch")
 			time.Sleep(5 * time.Millisecond)
 		}
-		require.NoError(t, pair.to.transition(ctx, "resume"))
+		if !legacy {
+			require.NoError(t, pair.to.transition(ctx, "resume"))
+		}
 		require.NoError(t, ws.Write(ctx, websocket.MessageText, []byte("still connected")))
 		_, reply, err := ws.Read(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "still connected", string(reply))
 		if pair.to == next {
-			// Keep the old SSE and WebSocket alive beyond the former 8-second limit.
-			time.Sleep(9 * time.Second)
-			require.True(t, check(next.boot))
+			// A legacy owner cannot release plugins separately. It must remain
+			// alive beyond the former 30-second drain limit without blocking core.
+			wait := 9 * time.Second
+			if legacy {
+				wait = 31 * time.Second
+			}
+			deadline := time.Now().Add(wait)
+			for time.Now().Before(deadline) {
+				require.True(t, check(next.boot))
+				time.Sleep(100 * time.Millisecond)
+			}
+			require.NoError(t, ws.Write(ctx, websocket.MessageText, []byte("after wait")))
+			_, reply, err := ws.Read(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "after wait", string(reply))
 		}
 	}
 	end()
@@ -169,5 +198,8 @@ http {
 	require.Equal(t, "\ndata: after\n\n", string(rest))
 	require.NoError(t, ws.Close(websocket.StatusNormalClosure, "done"))
 	require.NoError(t, old.transition(ctx, "pause"))
+	if legacy {
+		require.NoError(t, next.transition(ctx, "resume"))
+	}
 	require.NoError(t, next.transition(ctx, "pause"))
 }

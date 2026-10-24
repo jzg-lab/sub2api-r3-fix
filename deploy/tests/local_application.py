@@ -171,7 +171,7 @@ def main():
         # No published ports or production data; nginx and both targets are local to this container.
         print(run(docker + ["run", "--rm", "--network=none", "--cpus=1", "--memory=512m",
                            "--entrypoint=/app/handoff.test", image,
-                           "-test.run=^TestLiveHandoffThroughNginx$", "-test.v", "-test.timeout=60s"], timeout=75), flush=True)
+                           "-test.run=^TestLiveHandoffThroughNginx$", "-test.v", "-test.timeout=120s"], timeout=135), flush=True)
         run(docker + ["network", "create", "--internal", network])
         run(docker + ["volume", "create", volume])
         pg = start("postgres", ["-e", "POSTGRES_USER=fixture", "-e", "POSTGRES_DB=fixture",
@@ -226,8 +226,12 @@ def main():
         state = control(blue, "serve")
         if not state["core_ready"] or status(blue) != "503":
             raise RuntimeError("paused target must be core-ready but not publicly ready")
-        control(green, "serve", expected=409)
         control(blue, "resume")
+        control(green, "serve")
+        control(green, "resume", expected=409)
+        if status(green, "/api/v1/admin/users") != "401":
+            raise RuntimeError("plugin owner blocked candidate core admission")
+        control(green, "pause")
         wait_ready(blue)
         control(blue, "unfreeze")
         for dependency in (pg, redis):
@@ -271,6 +275,9 @@ def main():
         switch_proxy(blue)
         for old, new in ((blue, green), (green, blue)):
             control(old, "freeze")
+            control(new, "serve")
+            control(new, "resume", expected=409)
+            switch_proxy(new)
             control(old, "release")
             if status(old) != "503":
                 raise RuntimeError("released instance must report its paused plugin readiness")

@@ -95,7 +95,7 @@ func (h *Handoff) Listen(path string) (func(), error) {
 func (h *Handoff) status(ctx context.Context) map[string]any {
 	return map[string]any{"boot_id": h.boot, "source": h.source, "phase": h.phase.Load(),
 		"core_ready": h.coreReady(ctx), "requests": h.requests.Pending(), "background": h.background.Pending(),
-		"handoff_protocol": 2}
+		"handoff_protocol": 3}
 }
 
 func (h *Handoff) control(w http.ResponseWriter, r *http.Request) {
@@ -153,19 +153,22 @@ func (h *Handoff) transition(ctx context.Context, action string) error {
 		if (phase != "standby" && phase != "released") || !h.coreReady(ctx) {
 			return errors.New("standby is not ready")
 		}
-		owner, err := privateLock(h.ownerPath)
-		if err != nil {
-			return err
-		}
-		h.owner = owner
 		h.phase.Store("serving_paused")
 		h.requests.SetOpen(true)
 	case "resume":
 		if phase == "active" {
 			return nil
 		}
-		if phase != "serving_paused" || h.owner == nil {
+		if phase != "serving_paused" {
 			return errors.New("instance is not serving")
+		}
+		// Core traffic never waits for plugin/background ownership.
+		if h.owner == nil {
+			owner, err := privateLock(h.ownerPath)
+			if err != nil {
+				return err
+			}
+			h.owner = owner
 		}
 		if err := h.plugins.Start(ctx); err != nil {
 			h.plugins.Stop()

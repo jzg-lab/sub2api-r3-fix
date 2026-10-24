@@ -30,11 +30,35 @@ def retire_previous(host, saved):
         return
     try:
         d.require(host.selected() == saved["slot"] and peer["slot"] != saved["slot"], "retirement slot changed")
-        current = host.runtime(saved["slot"], saved["target"], "active", full=False)
+        current = host.runtime(saved["slot"], saved["target"], full=False)
         d.require(current["boot_id"] == saved["boot_id"], "selected boot changed during retirement")
+        d.require(current["phase"] in (("serving_paused", "active") if saved.get("core_only") else ("active",)),
+                  "selected instance not serving")
         state = host.runtime(peer["slot"], peer["target"], ready=False, full=False)
-        d.require(state["boot_id"] == peer["boot_id"] and state["phase"] in ("released", "standby"),
+        d.require(state["boot_id"] == peer["boot_id"] and state["phase"] in
+                  (("active", "serving_paused", "released", "standby") if saved.get("core_only") else ("released", "standby")),
                   "retiring instance changed")
+        if saved.get("core_only"):
+            if state["phase"] in ("active", "serving_paused"):
+                if state.get("handoff_protocol", 1) >= 2:
+                    host.control(peer["slot"], "release", state["boot_id"], host.c["ready_seconds"])
+                else:
+                    # Legacy pause closes core admission. Only use it after all
+                    # old Nginx workers/connections have naturally finished.
+                    if (set(peer["workers"]) & set(host.nginx_workers()) or state["requests"] or
+                            host.connections(peer["slot"])):
+                        return
+                    host.control(peer["slot"], "pause", state["boot_id"], host.c["drain_seconds"])
+            if "runtime_config" in saved:
+                d.require(host.settings_hash() == saved["runtime_config"], "settings changed during background takeover")
+            host.control(saved["slot"], "resume", current["boot_id"], host.c["ready_seconds"])
+            host.use(saved["slot"])
+            host.verify(saved["target"], public=True)
+            saved = {**saved, "core_only": False}
+            d.save(Path(host.c["deploy_dir"]) / "handoff-active.json", saved)
+            restore_pending_services(host, saved)
+            saved = d.read(Path(host.c["deploy_dir"]) / "handoff-active.json")
+            state = host.runtime(peer["slot"], peer["target"], ready=False, full=False)
         # Reloaded Nginx workers may still own HTTP/2 or WebSocket connections.
         # A zero application request count alone does not make replacement safe.
         if set(peer["workers"]) & set(host.nginx_workers()):
@@ -289,7 +313,9 @@ class Switch(d.Switch):
         original = self.p["handoff"]["original_slot"]
         self.old = original if self.s["mode"] == "activate" else self.other(original)
         self.new = self.other(self.old)
-        self.live = self.p["handoff"].get("protocol", 1) == 2
+        self.live = self.p["handoff"].get("protocol", 1) in (2, 3)
+        self.core_first = self.p["handoff"].get("protocol") == 3 and (
+            self.s["mode"] == "activate" or self.p["handoff"].get("previous_protocol") == 3)
 
     @staticmethod
     def other(slot):
@@ -313,21 +339,26 @@ class Switch(d.Switch):
         self.h.verify_ingress()
         state = self.h.runtime(self.old, self.original, "active")
         if self.live:
-            d.require(state.get("handoff_protocol") == 2, "live handoff runtime unavailable")
+            expected = self.p["handoff"].get("previous_protocol", 2) if self.s["mode"] == "activate" else self.p["handoff"]["protocol"]
+            d.require(state.get("handoff_protocol", 1) == expected, "live handoff runtime unavailable")
             self.h.verify_live_ingress()
         self.h.verify(self.original, public=True)
         self.h.check_applied_compose()
         return state
 
     def finish(self, phase, slot, target):
-        state = self.h.runtime(slot, target, "active")
+        state = self.h.runtime(slot, target)
+        core_only = self.core_first and state["phase"] == "serving_paused"
+        d.require(state["phase"] == "active" or core_only, "selected instance not serving")
         self.h.unchanged(self.p, recovering=phase == "RECOVERED")
-        self.h.verify(target)
+        self.h.verify(target, core_only=core_only)
         self.h.gate(False)
         self.h.identity(slot, state["boot_id"])
-        self.h.verify(target, public=True)
+        self.h.verify(target, public=True, core_only=core_only)
         saved = {"slot": slot, "target": target, "boot_id": state["boot_id"],
                  "pending_services": [name for name, active in self.s.get("services", {}).items() if active]}
+        if core_only:
+            saved.update(core_only=True, runtime_config=self.s["runtime_config"])
         if self.live and self.s.get("new_boot") and "retiring_workers" in self.s:
             peer = self.other(slot)
             peer_target = self.original if peer == self.old else self.target
@@ -336,10 +367,12 @@ class Switch(d.Switch):
             d.require(info["Image"] == peer_target["image_id"] and not info["State"]["Restarting"], "retiring artifact unresolved")
             if info["State"]["Running"]:
                 peer_state = self.h.runtime(peer, peer_target, ready=False, full=False)
-                d.require(peer_state["phase"] in ("released", "standby"), "peer still owns background work")
-                if peer_state["phase"] == "released":
+                d.require(peer_state["phase"] in (("active", "serving_paused", "released", "standby") if core_only
+                                                 else ("released", "standby")), "peer still owns background work")
+                if peer_state["phase"] == "released" or core_only:
                     saved["retiring"] = {"slot": peer, "target": peer_target, "boot_id": peer_state["boot_id"],
                                          "workers": self.s["retiring_workers"]}
+        d.require(not core_only or saved.get("retiring"), "background takeover record missing")
         if not saved.get("retiring"):
             self.h.control(slot, "unfreeze", state["boot_id"])
         self.h.use(slot)
@@ -347,7 +380,8 @@ class Switch(d.Switch):
         self.state(phase)
         self.h.pending.unlink(missing_ok=True)
         # The verified application is committed before restarting auxiliary callers.
-        restore_pending_services(self.h, saved)
+        if not core_only:
+            restore_pending_services(self.h, saved)
         retire_previous(self.h, d.read(Path(self.h.c["deploy_dir"]) / "handoff-active.json"))
 
     def execute(self):
@@ -365,7 +399,9 @@ class Switch(d.Switch):
             self.state("STAGING", runtime_config=settings)
             candidate = self.h.stage(self.new, self.target)
             if self.live:
-                d.require(candidate.get("handoff_protocol") == 2, "candidate lacks live handoff protocol")
+                d.require(candidate.get("handoff_protocol") in (2, 3), "candidate lacks live handoff protocol")
+            if self.core_first:
+                d.require(candidate.get("handoff_protocol") == 3, "candidate lacks core-first handoff protocol")
             self.state("PAUSING", new_boot=candidate["boot_id"])
             for name, active in services.items():
                 if active:
@@ -373,22 +409,24 @@ class Switch(d.Switch):
                 d.require(not self.h.service_state(name), "direct caller still active")
             if not self.live:
                 self.h.gate(True)
-            self.state("RELEASING" if self.live else "DRAINING")
-            try:
-                self.h.control(self.old, "release" if self.live else "pause", old["boot_id"],
-                               self.h.c["ready_seconds"] if self.live else self.h.c["drain_seconds"])
-            except RuntimeError:
-                if self.h.runtime(self.old, self.original)["phase"] == "active":
-                    self.finish("DEFERRED", self.old, self.original)
-                    return
-                raise
+            if not self.core_first:
+                self.state("RELEASING" if self.live else "DRAINING")
+                try:
+                    self.h.control(self.old, "release" if self.live else "pause", old["boot_id"],
+                                   self.h.c["ready_seconds"] if self.live else self.h.c["drain_seconds"])
+                except RuntimeError:
+                    if self.h.runtime(self.old, self.original)["phase"] == "active":
+                        self.finish("DEFERRED", self.old, self.original)
+                        return
+                    raise
             self.h.unchanged(self.p)
             d.require(settings == self.h.settings_hash(), "settings changed during standby boot; retry preparation")
             self.state("SWITCHING", retiring_workers=self.h.nginx_workers() if self.live else [])
             self.h.control(self.new, "serve", candidate["boot_id"])
             self.h.switch(self.new, candidate["boot_id"])
             self.state("RESUMING", public_opened=True)
-            self.h.control(self.new, "resume", candidate["boot_id"], self.h.c["ready_seconds"])
+            if not self.core_first:
+                self.h.control(self.new, "resume", candidate["boot_id"], self.h.c["ready_seconds"])
             self.state("PUBLIC_VERIFY")
             self.observe(self.new, self.target)
             self.finish("ACCEPTED" if self.s["mode"] == "activate" else "ROLLED_BACK", self.new, self.target)
@@ -400,9 +438,10 @@ class Switch(d.Switch):
 
     def observe(self, slot, target):
         for _ in range(5):
-            state = self.h.runtime(slot, target, "active", full=False)
+            state = self.h.runtime(slot, target, "serving_paused" if self.core_first else "active", full=False)
             self.h.identity(slot, state["boot_id"])
-            d.require(json.loads(self.h.curl(self.h.c["local_url"], "/readyz"))["status"] == "ready", "readiness failed")
+            path, status = ("/health", "ok") if self.core_first else ("/readyz", "ready")
+            d.require(json.loads(self.h.curl(self.h.c["local_url"], path))["status"] == status, "readiness failed")
             time.sleep(2)
 
     def recover(self):
@@ -422,6 +461,8 @@ class Switch(d.Switch):
             old = self.h.runtime(self.old, self.original)
             # A standby build failure must not close healthy customer traffic.
             if old["phase"] == "active" and self.h.selected() == self.old:
+                if self.core_first and "retiring_workers" in self.s:
+                    self.h.control(self.new, "release", self.s["new_boot"], self.h.c["ready_seconds"])
                 self.finish("RECOVERED", self.old, self.original)
                 return
             if self.live:
@@ -488,7 +529,8 @@ def reconcile(config):
                 d.require(host.selected() == slot, "selected slot differs from accepted record")
                 state = host.runtime(slot, target, full=False)
                 if state["phase"] == "active" and state["boot_id"] == saved.get("boot_id"):
-                    restore_pending_services(host, saved)
+                    if not saved.get("core_only"):
+                        restore_pending_services(host, saved)
                     retire_previous(host, d.read(Path(host.c["deploy_dir"]) / "handoff-active.json"))
                     return
                 d.require(state["phase"] in ("standby", "serving_paused", "active"), "runtime operation unresolved")
@@ -498,6 +540,13 @@ def reconcile(config):
                 # The shared lock also excludes an unexpected live peer.
                 host.control(slot, "serve", state["boot_id"])
                 host.identity(slot, state["boot_id"])
+                if saved.get("core_only"):
+                    d.require(state.get("handoff_protocol") == 3, "core-first recovery unavailable")
+                    host.verify(target, public=True, core_only=True)
+                    saved = {**saved, "boot_id": state["boot_id"]}
+                    d.save(Path(host.c["deploy_dir"]) / "handoff-active.json", saved)
+                    retire_previous(host, saved)
+                    return
                 host.control(slot, "resume", state["boot_id"], host.c["ready_seconds"])
                 host.verify(target, public=True)
                 if not saved.get("retiring"):

@@ -442,6 +442,34 @@ class UtilityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 host.verify({**target, "has_readyz": True})
 
+    def test_core_only_verification_keeps_artifact_auth_assets_and_plugin_trust_checks(self):
+        host = d.Host(d.read(Path(d.__file__).with_name("fast-deploy.example.json")))
+        target = {"image_id": "id", "binary_sha256": "sha", "source": "commit", "assets": {}, "has_readyz": True}
+        plugin = {"id": "cookie-pin", "bindings": [(0, 0, 0, True)], "state": "enabled", "signature_status": "trusted"}
+        with patch.object(host, "app_facts", return_value={**target, "version": "commit"}), \
+             patch.object(host, "curl", return_value=b'{"status":"ok"}') as curl, \
+             patch.object(host, "plugins", return_value=[plugin]), patch.object(host, "api") as api, \
+             patch.object(host, "assets") as assets:
+            host.verify(target, public=True, core_only=True)
+            self.assertNotIn("/readyz", [call.args[1] for call in curl.call_args_list])
+            self.assertTrue(any(call.kwargs.get("expected") == 401 for call in curl.call_args_list))
+            self.assertEqual(api.call_args.args, ("/api/v1/admin/usage?page=1&page_size=1",))
+            assets.assert_called()
+            plugin["signature_status"] = "untrusted"
+            with self.assertRaisesRegex(RuntimeError, "trusted/enabled"):
+                host.verify(target, core_only=True)
+            with self.assertRaisesRegex(RuntimeError, "artifact mismatch"):
+                host.verify({**target, "image_id": "wrong"}, core_only=True)
+
+    def test_seamless_preparation_requires_matching_core_first_evidence(self):
+        receipt = {"candidate_protocol": 3, "previous_protocol": 1, "live_handoff": True, "core_before_owner": True}
+        self.assertEqual(d.handoff_protocol(1, receipt), 3)
+        self.assertEqual(d.handoff_protocol(2, {"candidate_protocol": 2, "live_handoff": True}), 2)
+        for previous, changed in ((1, {"candidate_protocol": 2}), (1, {"core_before_owner": False}),
+                                  (2, {}), (1, {"live_handoff": False}), (4, {}), (1, {"candidate_protocol": 4})):
+            with self.subTest(previous=previous, changed=changed), self.assertRaises(RuntimeError):
+                d.handoff_protocol(previous, {**receipt, **changed})
+
     def test_evidence_cannot_be_missing_or_for_another_image(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

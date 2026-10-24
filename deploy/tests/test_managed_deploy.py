@@ -226,6 +226,28 @@ class ManagedDeploymentTests(unittest.TestCase):
         d.save(record, {"retiring": None, "pending_services": []})
         self.assertEqual(self.controller.job_status(job)["actions"], ["rollback"])
 
+    def test_legacy_prepared_job_cannot_activate_with_new_controller(self):
+        job = self.prepared()
+        self.controller.state(job, "PREPARED", mode="handoff")
+        d.save(job / "release/config.json", {"backup_max_age_seconds": 7200, "deploy_dir": str(self.root)})
+        d.save(job / "release/prepared.json", {"backup_at": time.time(), "handoff": {"protocol": 1}})
+        state = self.controller.job_status(job)
+        self.assertEqual(state["actions"], [])
+        self.assertEqual(state["error_code"], "SEAMLESS_REPREPARE_REQUIRED")
+        self.assertFalse((job / "release/activate").exists())
+
+    def test_core_first_takeover_is_visible_and_blocks_further_mutations(self):
+        job = self.prepared()
+        self.controller.state(job, "ACCEPTED", mode="handoff")
+        d.save(job / "release/config.json", {"backup_max_age_seconds": 7200, "deploy_dir": str(self.root)})
+        d.save(job / "release/prepared.json", {"backup_at": time.time(), "handoff": {"protocol": 3}})
+        d.save(self.root / "handoff-active.json", {"core_only": True, "retiring": {"slot": "blue"},
+                                                "pending_services": ["caller.service"]})
+        state = self.controller.job_status(job)
+        self.assertTrue(state["live_handoff"])
+        self.assertEqual(state["error_code"], "PREVIOUS_REQUESTS_PENDING")
+        self.assertEqual(state["actions"], [])
+
     def test_failed_new_preparation_preserves_previous_rollback_and_idempotency(self):
         accepted = self.prepared()
         self.controller.state(accepted, "ACCEPTED")

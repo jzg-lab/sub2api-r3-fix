@@ -151,7 +151,7 @@ class Controller:
         live_handoff = False
         if (release / "prepared.json").exists():
             prepared, config = d.read(release / "prepared.json"), d.read(release / "config.json")
-            live_handoff = prepared.get("handoff", {}).get("protocol") == 2
+            live_handoff = prepared.get("handoff", {}).get("protocol") in (2, 3)
             if mode == "handoff":
                 active = Path(config["deploy_dir"]) / "handoff-active.json"
                 auxiliary_pending = active.exists() and bool(d.read(active).get("pending_services"))
@@ -172,12 +172,15 @@ class Controller:
         if valid and phase == "ACCEPTED" and not (release / "rollback").exists():
             actions = ["rollback"]
         error_code = state.get("error_code", "")
-        if auxiliary_pending:
+        if mode == "handoff" and phase == "PREPARED" and not live_handoff:
             actions = []
-            error_code = error_code or "AUXILIARY_SERVICES_PENDING"
+            error_code = error_code or "SEAMLESS_REPREPARE_REQUIRED"
         if retiring:
             actions = []
             error_code = error_code or "PREVIOUS_REQUESTS_PENDING"
+        if auxiliary_pending:
+            actions = []
+            error_code = error_code or "AUXILIARY_SERVICES_PENDING"
         return {k: state[k] for k in ("id", "candidate_id", "version", "source")} | {
             "mode": mode, "phase": phase, "expires_at": expires, "actions": actions,
             "previous_source": state.get("previous_source", ""),
@@ -221,7 +224,8 @@ class Controller:
                 d.require(not state or state.get("error_code") not in
                           ("AUXILIARY_SERVICES_PENDING", "PREVIOUS_REQUESTS_PENDING"), "previous handoff still finishing")
                 # Repeated clicks attach to the same unfinished preparation, never duplicate it.
-                if state and state["candidate_id"] == identifier and state["phase"] in PREPARING | {"PREPARED"}:
+                if (state and state["candidate_id"] == identifier and state["phase"] in PREPARING | {"PREPARED"}
+                        and state.get("error_code") != "SEAMLESS_REPREPARE_REQUIRED"):
                     return self.snapshot()
                 d.require(not state or state["phase"] in FINISHED, "another operation requires attention")
                 d.require(not host.pending.exists() and not host.marker.exists(), "deployment needs recovery")

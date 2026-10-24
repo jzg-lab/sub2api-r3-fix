@@ -27,6 +27,7 @@ class FakeHost:
         self.workers = ["101:1000"]
         self.requests = {"blue": 0, "green": 0}
         self.tcp = {"blue": 0, "green": 0}
+        self.protocols = {"blue": 2, "green": 2}
 
     def event(self, value):
         self.events.append(value)
@@ -45,16 +46,19 @@ class FakeHost:
         self.runtime_checks.append(full)
         if phase:
             d.require(self.states[slot] == phase, "phase mismatch")
-        return {"phase": self.states[slot], "boot_id": self.boots[slot], "handoff_protocol": 2,
+        return {"phase": self.states[slot], "boot_id": self.boots[slot], "handoff_protocol": self.protocols[slot],
                 "requests": self.requests[slot], "background": 0}
 
     def control(self, slot, action, boot, seconds=30):
         d.require(boot == self.boots[slot], "stale boot")
         self.event(slot + ":" + action)
         if action == "serve" and self.states[slot] in ("standby", "released"):
-            d.require(all(value in ("standby", "released") for name, value in self.states.items() if name != slot), "duplicate owner")
+            if self.protocols[slot] < 3:
+                d.require(all(value in ("standby", "released") for name, value in self.states.items() if name != slot), "duplicate owner")
             self.states[slot] = "serving_paused"
         elif action == "resume":
+            d.require(all(value != "active" and not (value == "serving_paused" and self.protocols[name] < 3)
+                          for name, value in self.states.items() if name != slot), "duplicate owner")
             self.states[slot] = "active"
         elif action == "pause":
             self.states[slot] = "standby"
@@ -99,8 +103,8 @@ class FakeHost:
     def identity(self, slot, boot):
         d.require(slot == self.selected_slot, "wrong ingress")
 
-    def verify(self, target, public=False):
-        self.event("verify:" + target["source"])
+    def verify(self, target, public=False, core_only=False):
+        self.event(("verify-core:" if core_only else "verify:") + target["source"])
 
     def inspect(self, _):
         return {"Image": "old" if self.c.get("app_container") == "blue" else "new",
@@ -769,6 +773,144 @@ class HostChecks(unittest.TestCase):
         with patch.object(d, "run", return_value=b"101 nginx: master process nginx\n102 nginx: worker process is shutting down\n"), \
                 patch.object(Path, "read_text", return_value="102 (nginx) " + " ".join(fields)):
             self.assertEqual(self.host.nginx_workers(), ["102:123456"])
+
+
+class CoreFirstTests(unittest.TestCase):
+    def setUp(self):
+        HandoffTests.setUp(self)
+        prepared = d.read(self.root / "prepared.json")
+        prepared["handoff"].update(protocol=3, previous_protocol=1)
+        d.save(self.root / "prepared.json", prepared)
+        self.host.protocols = {"blue": 1, "green": 3}
+        self.switch = h.Switch(self.root, self.attempt, self.host)
+        self.switch.preflight = lambda: self.host.runtime("blue", {}, "active")
+        self.switch.observe = lambda *_: self.host.event("observe")
+
+    def reconcile(self):
+        LiveHandoffTests.reconcile(self)
+
+    def record(self):
+        return d.read(self.root / "handoff-active.json")
+
+    def test_legacy_owner_and_long_connections_do_not_block_core_switch(self):
+        self.host.requests["blue"] = 2
+        self.switch.execute()
+        self.assertEqual(self.host.states, {"blue": "active", "green": "serving_paused"})
+        self.assertEqual(self.host.selected(), "green")
+        self.assertEqual(self.switch.s["phase"], "ACCEPTED")
+        self.assertTrue(self.record()["core_only"])
+        self.assertNotIn("gate:True", self.host.events)
+        self.assertNotIn("blue:pause", self.host.events)
+        self.assertNotIn("green:resume", self.host.events)
+        self.assertNotIn("restore:caller.service", self.host.events)
+        self.assertEqual(self.host.requests["blue"], 2)
+        self.reconcile()
+        self.host.workers = []
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.requests["blue"] = 0
+        self.host.tcp["blue"] = 1
+        self.reconcile()
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.tcp["blue"] = 0
+        self.reconcile()
+        self.assertEqual(self.host.states, {"blue": "standby", "green": "active"})
+        self.assertFalse(self.record()["core_only"])
+        self.assertIsNone(self.record()["retiring"])
+        self.assertEqual(self.record()["pending_services"], [])
+        self.assertLess(self.host.events.index("blue:pause"), self.host.events.index("green:resume"))
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_modern_background_release_happens_after_switch(self):
+        self.host.protocols["blue"] = 2
+        self.host.requests["blue"] = 3
+        self.switch.execute()
+        self.assertEqual(self.host.states, {"blue": "released", "green": "active"})
+        self.assertLess(self.host.events.index("switch:green"), self.host.events.index("blue:release"))
+        self.assertEqual(self.host.requests["blue"], 3)
+        self.assertFalse(self.record()["core_only"])
+
+    def test_background_failure_retries_without_rolling_back_core(self):
+        self.host.protocols["blue"] = 2
+        self.host.fail = "blue:release"
+        self.switch.execute()
+        self.assertTrue(self.record()["core_only"])
+        self.assertEqual(self.host.states["green"], "serving_paused")
+        self.reconcile()
+        self.assertEqual(self.host.states["green"], "active")
+        self.assertNotIn("switch:blue", self.host.events)
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_plugin_start_failure_keeps_core_and_retries(self):
+        self.host.protocols["blue"] = 2
+        self.host.fail = "green:resume"
+        self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "ACCEPTED")
+        self.assertTrue(self.record()["core_only"])
+        self.assertEqual(self.host.states, {"blue": "released", "green": "serving_paused"})
+        self.reconcile()
+        self.assertFalse(self.record()["core_only"])
+        self.assertEqual(self.host.selected(), "green")
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_legacy_pause_timeout_never_closes_new_core(self):
+        self.switch.execute()
+        self.host.workers = []
+        self.host.fail = "blue:pause"
+        self.reconcile()
+        self.assertTrue(self.record()["core_only"])
+        self.assertEqual(self.host.states["green"], "serving_paused")
+        self.reconcile()
+        self.assertFalse(self.record()["core_only"])
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_selected_restart_reopens_core_without_waiting_for_owner(self):
+        self.switch.execute()
+        self.host.boots["green"] = "c" * 32
+        self.host.states["green"] = "standby"
+        self.reconcile()
+        self.assertEqual(self.host.states["green"], "serving_paused")
+        self.assertEqual(self.record()["boot_id"], self.host.boots["green"])
+        self.assertIn("verify-core:new", self.host.events)
+        self.assertNotIn("green:resume", self.host.events)
+
+    def test_configuration_drift_blocks_background_takeover(self):
+        self.switch.execute()
+        self.host.workers = []
+        self.host.settings = "changed"
+        self.reconcile()
+        self.assertEqual(self.host.selected(), "green")
+        self.assertTrue(self.record()["core_only"])
+        self.assertNotIn("green:resume", self.host.events)
+        self.assertNotIn("green:unfreeze", self.host.events)
+
+    def test_failed_core_verification_returns_to_live_legacy_instance(self):
+        self.host.requests["blue"] = 2
+        self.host.fail = "verify-core:new"
+        with self.assertRaises(RuntimeError):
+            self.switch.execute()
+        self.assertEqual(self.switch.s["phase"], "RECOVERED")
+        self.assertEqual(self.host.selected(), "blue")
+        self.assertEqual(self.host.requests["blue"], 2)
+        self.assertEqual(self.host.states["green"], "released")
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_committed_core_switch_survives_interrupted_takeover(self):
+        with patch.object(h, "retire_previous", side_effect=SystemExit), self.assertRaises(SystemExit):
+            self.switch.execute()
+        self.assertFalse(self.host.pending.exists())
+        self.assertTrue(self.record()["core_only"])
+        self.reconcile()
+        self.assertEqual(self.host.selected(), "green")
+        self.assertEqual(self.host.states["green"], "serving_paused")
+
+    def test_rollback_to_legacy_still_releases_new_owner_first(self):
+        path = self.root / "rollback"
+        path.mkdir()
+        d.save(path / "state.json", {"mode": "rollback", "phase": "QUEUED"})
+        switch = h.Switch(self.root, path, self.host)
+        self.assertTrue(switch.live)
+        self.assertFalse(switch.core_first)
 
 
 if __name__ == "__main__":

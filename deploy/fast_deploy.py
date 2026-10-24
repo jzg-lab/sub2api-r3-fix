@@ -290,19 +290,20 @@ class Host:
             require(all(expected.get(p) == value for p, value in values.items()), "frontend identity mismatch")
         return values
 
-    def verify(self, target, public=False):
+    def verify(self, target, public=False, core_only=False):
         origin = self.c["local_url"]
         facts = self.app_facts()
         require(facts["image_id"] == target["image_id"] and facts["binary_sha256"] == target["binary_sha256"], "application artifact mismatch")
         require(target["source"] in facts["version"], "running source mismatch")
         require(json.loads(self.curl(origin, "/health"))["status"] == "ok", "liveness failed")
-        if target["has_readyz"]:
+        if target["has_readyz"] and not core_only:
             require(json.loads(self.curl(origin, "/readyz"))["status"] == "ready", "readiness failed")
         # Also needed for bootstrap rollback to a binary without /readyz.
         for plugin in self.plugins():
             if any(b[3] for b in plugin["bindings"]):
                 require(plugin["state"] == "enabled" and plugin["signature_status"] == "trusted", "plugin not trusted/enabled")
-                require(self.api("/api/v1/admin/plugins/%s/status" % plugin["id"])["healthy"] is True, "plugin unhealthy")
+                if not core_only:
+                    require(self.api("/api/v1/admin/plugins/%s/status" % plugin["id"])["healthy"] is True, "plugin unhealthy")
         self.curl(origin, "/api/v1/admin/usage?page=1&page_size=1", expected=401)
         self.api("/api/v1/admin/usage?page=1&page_size=1")
         self.assets(origin, target["assets"])
@@ -363,6 +364,19 @@ def deployment_switch(release, attempt):
         from handoff_deploy import Switch as HandoffSwitch
         return HandoffSwitch(release, attempt)
     return Switch(release, attempt)
+
+
+def handoff_protocol(previous, rehearsal):
+    require(previous in (1, 2, 3), "unknown runtime handoff protocol")
+    candidate = rehearsal.get("candidate_protocol")
+    require(candidate is None or candidate in (2, 3), "candidate lacks seamless handoff")
+    protocol = 3 if candidate == 3 else previous
+    require(protocol in (2, 3), "legacy maintenance handoff prohibited; prepare a core-first candidate")
+    require(rehearsal.get("live_handoff") is True, "live handoff rehearsal missing")
+    if protocol == 3:
+        require(candidate == 3 and rehearsal.get("core_before_owner") is True and
+                rehearsal.get("previous_protocol") == previous, "core-first rehearsal missing or stale")
+    return protocol
 
 
 def evidence(release, artifact, host):
@@ -443,13 +457,13 @@ def prepare(release, config_path, artifact_path):
                   "data_identity": host.data_identity(), "migrations": migrations, "plugins": host.plugins()}
         if c.get("mode") == "handoff":
             host.verify_ingress()
-            protocol = host.control(host.selected()).get("handoff_protocol", 1)
-            if protocol == 2:
-                receipt = read(release / "evidence.json")
-                rehearsal = read(release / receipt["checks"]["shared_database_handoff"]["log"])
-                require(rehearsal.get("live_handoff") is True, "live handoff rehearsal missing")
-                host.verify_live_ingress()
-            before["handoff"] = {"original_slot": host.selected(), "env_hashes": host.env_hashes(), "protocol": protocol}
+            previous_protocol = host.control(host.selected()).get("handoff_protocol", 1)
+            receipt = read(release / "evidence.json")
+            rehearsal = read(release / receipt["checks"]["shared_database_handoff"]["log"])
+            protocol = handoff_protocol(previous_protocol, rehearsal)
+            host.verify_live_ingress()
+            before["handoff"] = {"original_slot": host.selected(), "env_hashes": host.env_hashes(),
+                                 "protocol": protocol, "previous_protocol": previous_protocol}
         save(release / "preparation-started.json", {"started_at": time.time(), "source": artifact["source"]})
         with (release / "postgres.dump").open("wb") as dump:
             run("docker", "exec", c["postgres_container"], "pg_dump", "-Fc", "-U", c["database_user"],
