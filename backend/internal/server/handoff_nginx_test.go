@@ -118,13 +118,18 @@ http {
 	t.Cleanup(func() { _ = process.Process.Signal(syscall.SIGTERM); _ = process.Wait() })
 	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	defer client.CloseIdleConnections()
-	check := func(boot string) bool {
+	check := func(boots ...string) bool {
 		res, err := client.Get("http://" + addr + "/core")
 		if err != nil {
 			return false
 		}
 		defer func() { _ = res.Body.Close() }()
-		return res.StatusCode == 204 && res.Header.Get("X-Sub2api-Instance") == boot
+		for _, boot := range boots {
+			if res.StatusCode == 204 && res.Header.Get("X-Sub2api-Instance") == boot {
+				return true
+			}
+		}
+		return false
 	}
 	require.Eventually(t, func() bool { return check(old.boot) }, 5*time.Second, 10*time.Millisecond)
 	request, err := http.NewRequestWithContext(ctx, "GET", "http://"+addr+"/stream", nil)
@@ -155,7 +160,7 @@ http {
 		writeTarget(pair.url)
 		require.NoError(t, process.Process.Signal(syscall.SIGHUP))
 		// Every new connection must succeed, including during the reload gap.
-		deadline := time.Now().Add(5 * time.Second)
+		reloadDeadline := time.Now().Add(5 * time.Second)
 		for {
 			res, err := client.Get("http://" + addr + "/core")
 			require.NoError(t, err)
@@ -164,7 +169,7 @@ http {
 			if res.Header.Get("X-Sub2api-Instance") == pair.to.boot {
 				break
 			}
-			require.True(t, time.Now().Before(deadline), "nginx did not switch")
+			require.True(t, time.Now().Before(reloadDeadline), "nginx did not switch")
 			time.Sleep(5 * time.Millisecond)
 		}
 		if !legacy {
@@ -183,7 +188,12 @@ http {
 			}
 			deadline := time.Now().Add(wait)
 			for time.Now().Before(deadline) {
-				require.True(t, check(next.boot))
+				// New workers can answer before old workers close their listeners.
+				if time.Now().Before(reloadDeadline) {
+					require.True(t, check(next.boot, old.boot))
+				} else {
+					require.True(t, check(next.boot))
+				}
 				time.Sleep(100 * time.Millisecond)
 			}
 			require.NoError(t, ws.Write(ctx, websocket.MessageText, []byte("after wait")))

@@ -348,7 +348,7 @@ class Switch(d.Switch):
 
     def finish(self, phase, slot, target):
         state = self.h.runtime(slot, target)
-        core_only = self.core_first and state["phase"] == "serving_paused"
+        core_only = self.live and state.get("handoff_protocol") == 3 and state["phase"] == "serving_paused"
         d.require(state["phase"] == "active" or core_only, "selected instance not serving")
         self.h.unchanged(self.p, recovering=phase == "RECOVERED")
         self.h.verify(target, core_only=core_only)
@@ -399,7 +399,9 @@ class Switch(d.Switch):
             self.state("STAGING", runtime_config=settings)
             candidate = self.h.stage(self.new, self.target)
             if self.live:
-                d.require(candidate.get("handoff_protocol") in (2, 3), "candidate lacks live handoff protocol")
+                expected = (self.p["handoff"]["protocol"] if self.s["mode"] == "activate" else
+                            self.p["handoff"].get("previous_protocol", 2))
+                d.require(candidate.get("handoff_protocol", 1) == expected, "candidate handoff protocol changed")
             if self.core_first:
                 d.require(candidate.get("handoff_protocol") == 3, "candidate lacks core-first handoff protocol")
             self.state("PAUSING", new_boot=candidate["boot_id"])
@@ -479,6 +481,14 @@ class Switch(d.Switch):
             d.require(info["Image"] == self.target["image_id"] and not info["State"]["Restarting"], "candidate identity unresolved")
             if info["State"]["Running"]:
                 candidate = self.h.runtime(self.new, self.target, ready=False)
+                if self.live and old.get("handoff_protocol") == 3 and candidate.get("handoff_protocol", 1) == 1:
+                    # A failed rollback target cannot release its owner without
+                    # draining. Restore core first and retire that target later.
+                    self.h.control(self.old, "serve", old["boot_id"])
+                    self.state("RECOVERING", retiring_workers=self.h.nginx_workers())
+                    self.h.switch(self.old, old["boot_id"])
+                    self.finish("RECOVERED", self.old, self.original)
+                    return
                 self.h.control(self.new, "release" if self.live else "pause", candidate["boot_id"],
                                self.h.c["ready_seconds"] if self.live else self.h.c["drain_seconds"])
             # Background sync may have updated cached settings/prices after cutover.

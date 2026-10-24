@@ -535,6 +535,7 @@ class LiveHandoffTests(unittest.TestCase):
         prepared = d.read(self.root / "prepared.json")
         prepared["handoff"]["protocol"] = 2
         d.save(self.root / "prepared.json", prepared)
+        self.switch.p = prepared
         self.switch.live = True
 
     def reconcile(self):
@@ -911,6 +912,41 @@ class CoreFirstTests(unittest.TestCase):
         switch = h.Switch(self.root, path, self.host)
         self.assertTrue(switch.live)
         self.assertFalse(switch.core_first)
+        self.host.selected_slot = "green"
+        self.host.states = {"blue": "standby", "green": "active"}
+        self.host.requests["green"] = 2
+        switch.preflight = lambda: self.host.runtime("green", {}, "active")
+        switch.observe = lambda *_: None
+        switch.execute()
+        self.assertEqual(switch.s["phase"], "ROLLED_BACK")
+        self.assertEqual(self.host.selected(), "blue")
+        self.assertEqual(self.host.requests["green"], 2)
+        self.assertLess(self.host.events.index("green:release"), self.host.events.index("blue:serve"))
+        self.assertNotIn("gate:True", self.host.events)
+
+    def test_failed_rollback_to_legacy_restores_modern_core_before_legacy_drain(self):
+        path = self.root / "rollback"
+        path.mkdir()
+        d.save(path / "state.json", {"mode": "rollback", "phase": "QUEUED"})
+        switch = h.Switch(self.root, path, self.host)
+        self.host.selected_slot = "green"
+        self.host.states = {"blue": "standby", "green": "active"}
+        self.host.requests["blue"] = 1
+        switch.preflight = lambda: self.host.runtime("green", {}, "active")
+        switch.observe = lambda *_: None
+        self.host.fail = "blue:resume"
+        with self.assertRaises(RuntimeError):
+            switch.execute()
+        self.assertEqual(switch.s["phase"], "RECOVERED")
+        self.assertEqual(self.host.selected(), "green")
+        self.assertTrue(self.record()["core_only"])
+        self.assertNotIn("blue:pause", self.host.events)
+        self.host.requests["blue"] = 0
+        self.host.workers = []
+        self.reconcile()
+        self.assertFalse(self.record()["core_only"])
+        self.assertEqual(self.host.states, {"blue": "standby", "green": "active"})
+        self.assertNotIn("gate:True", self.host.events)
 
 
 if __name__ == "__main__":

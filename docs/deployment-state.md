@@ -27,7 +27,7 @@
 Nginx 仍指向蓝槽，本机 `/health`、`/readyz` 均为 200。本轮只读观察未执行生产变更或取消任务。
 主任务文件的顶层 `SWITCHING` 不是最终结果，控制器按 `release/activate/state.json` 的实际阶段返回。
 
-本轮本地部署 Python 163 项、候选/工具 21 项、前端 11 文件/102 项和 Go server/deployment race
+本轮本地部署 Python 164 项、候选/工具 21 项、前端 11 文件/102 项和 Go server/deployment race
 通过。独立 `colima-sub2api-verify` 中真实 Nginx 测试通过：模拟不能释放后台的旧端保留 SSE/WS
 31 秒，新连接持续进入新版；随后请求自然完成并转交所有权。真实双应用共 PostgreSQL/Redis 的
 启动只读性、核心接入与后台互斥、依赖故障及重启恢复均通过，夹具清理成功。
