@@ -124,7 +124,6 @@
 .plaza-legend { display: flex; gap: 14px; }
 .plaza-legend > span { display: flex; align-items: center; gap: 5px; }
 .plaza-legend i { width: 5px; height: 9px; border-radius: 2px; }
-.plaza-conversion-note { color: var(--plaza-dim); font-size: 11px; line-height: 1.8; margin-top: 16px; }
 .plaza-empty { border: 1px dashed var(--plaza-line); border-radius: 14px; padding: 80px 20px; text-align: center; color: var(--plaza-muted); }
 .plaza-button { border: 1px solid var(--plaza-line); border-radius: 7px; padding: 8px 13px; font-size: 12px; background: var(--plaza-raised); margin-top: 15px; }
 .plaza-mobile { display: none; }

@@ -42,8 +42,8 @@
         <label class="plaza-search"><Icon name="search" size="sm" /><input v-model="search" :aria-label="t('modelPlaza.filters.searchPlaceholder')" :placeholder="t('modelPlaza.filters.searchPlaceholder')" /></label>
         <div class="plaza-toolbar-actions">
           <div class="plaza-segmented" :aria-label="t('modelPlaza.catalog.currency')">
-            <button :aria-pressed="currency === 'CNY'" @click="currency = 'CNY'">CNY</button>
-            <button :aria-pressed="currency === 'USD'" @click="currency = 'USD'">USD</button>
+            <button :aria-pressed="currency === 'CNY'" @click="currency = 'CNY'">{{ t('modelPlaza.catalog.cny') }}</button>
+            <button :aria-pressed="currency === 'USD'" @click="currency = 'USD'">{{ usdLabel }}</button>
           </div>
           <button class="plaza-original-toggle" :aria-pressed="showOriginal" @click="showOriginal = !showOriginal">{{ t(showOriginal ? 'modelPlaza.catalog.showCurrent' : 'modelPlaza.catalog.showOriginal') }}</button>
           <select v-model="sort" :aria-label="t('modelPlaza.catalog.sort')"><option value="name">{{ t('modelPlaza.catalog.sortName') }}</option><option value="price">{{ t('modelPlaza.catalog.sortPrice') }}</option><option value="health">{{ t('modelPlaza.catalog.sortHealth') }}</option></select>
@@ -52,11 +52,11 @@
         </div>
       </div>
       <div class="plaza-catalog-meta">
-        <span>{{ t(currency === 'CNY' ? 'modelPlaza.catalog.cny' : 'modelPlaza.catalog.usd') }} · {{ unitLabel }} · {{ t(showOriginal ? 'modelPlaza.catalog.referenceTitle' : 'modelPlaza.catalog.regular') }}</span>
+        <span>{{ currencyLabel }} · {{ unitLabel }} · {{ t(showOriginal ? 'modelPlaza.catalog.referenceTitle' : 'modelPlaza.catalog.regular') }}</span>
         <span v-if="error" class="plaza-stale" role="status">{{ t('modelPlaza.catalog.stale') }} <button @click="$emit('retry')">{{ t('modelPlaza.catalog.retry') }}</button></span>
         <span v-else :title="updatedAt?.toLocaleTimeString()" class="plaza-live"><i></i>{{ t('modelPlaza.catalog.live') }}</span>
       </div>
-      <div v-if="showOriginal" class="plaza-notice">{{ referenceHint }}</div>
+      <div class="plaza-notice">{{ conversionNote }}</div>
       <details v-if="descriptionHtml" class="plaza-description"><summary>{{ t('modelPlaza.catalog.priceNotes') }}</summary><div v-html="descriptionHtml"></div></details>
 
       <div v-if="entries.length" class="plaza-model-grid" :class="{ 'plaza-list': view === 'list' }">
@@ -68,7 +68,7 @@
           </div>
           <p class="plaza-model-description">{{ offer(entry).group.description || t('modelPlaza.catalog.configuredPrice') }}</p>
           <div class="plaza-model-tags"><span v-if="offer(entry).group.is_exclusive">{{ t('modelPlaza.badges.exclusive') }}</span><span v-if="offer(entry).group.subscription_type === 'subscription'">{{ t('modelPlaza.badges.subscription') }}</span><span>{{ modeLabel(offer(entry).model) }}</span><span v-if="pricingRows(offer(entry).model, showOriginal).length > 1">{{ t('modelPlaza.catalog.tiered') }}</span><span v-if="!showOriginal && (offer(entry).model.time_pricing || offer(entry).group.peak_rate_enabled)">{{ t('modelPlaza.catalog.timed') }}</span></div>
-          <div class="plaza-pricing-type">{{ priceTitle }}<small>{{ priceUnit(offer(entry).model) }}<template v-if="firstTierLabel(offer(entry).model)"> · {{ firstTierLabel(offer(entry).model) }}</template></small></div>
+          <div class="plaza-pricing-type">{{ priceTitle }} · {{ currencyLabel }}<small>{{ priceUnit(offer(entry).model) }}<template v-if="firstTierLabel(offer(entry).model)"> · {{ firstTierLabel(offer(entry).model) }}</template></small></div>
           <PlazaPriceGrid :offer="offer(entry)" :currency="currency" :conversion="response.balance_recharge_multiplier" :show-original="showOriginal" />
           <div class="plaza-model-meta"><label>{{ t('modelPlaza.filters.groupLabel') }}<select :value="offer(entry).group.id" :aria-label="t('modelPlaza.filters.groupLabel') + ' ' + offer(entry).model.name" @change="chosenGroups[entry.key] = Number(($event.target as HTMLSelectElement).value)"><option v-for="item in entry.offers" :key="item.group.id" :value="item.group.id">{{ item.group.name }}</option></select></label><span>{{ protocol(offer(entry).model) }}</span></div>
           <PlazaStatus :row="status(offer(entry))" :coverage="monitor?.coverage" @details="openDetail(entry.key, 'status')" />
@@ -80,7 +80,6 @@
         <div class="plaza-legend"><span v-for="state in ['healthy', 'warning', 'critical', 'unknown']" :key="state"><i :class="state"></i>{{ t(`modelPlaza.catalog.${state}`) }}</span></div>
         <span>{{ t(monitorUnavailable ? 'modelPlaza.catalog.monitorUnavailable' : 'modelPlaza.catalog.monitorWindow') }}</span>
       </footer>
-      <p class="plaza-conversion-note">{{ conversionNote }}</p>
     </section>
   </div>
 
@@ -88,7 +87,7 @@
     <div v-if="detailEntry && response" class="plaza-detail">
       <div class="plaza-detail-tabs"><button :aria-pressed="detailTab === 'pricing'" @click="detailTab = 'pricing'">{{ t('modelPlaza.catalog.priceDetails') }}</button><button :aria-pressed="detailTab === 'status'" @click="detailTab = 'status'">{{ t('modelPlaza.catalog.statusDetails') }}</button></div>
       <template v-if="detailTab === 'pricing'">
-        <p class="plaza-detail-note">{{ priceTitle }} · {{ offer(detailEntry).group.name }} · {{ priceUnit(offer(detailEntry).model) }} · {{ t(currency === 'CNY' ? 'modelPlaza.catalog.cny' : 'modelPlaza.catalog.usd') }}</p>
+        <p class="plaza-detail-note">{{ priceTitle }} · {{ offer(detailEntry).group.name }} · {{ priceUnit(offer(detailEntry).model) }} · {{ currencyLabel }}</p>
         <div class="plaza-detail-prices"><PlazaPriceGrid :offer="offer(detailEntry)" :currency="currency" :conversion="response.balance_recharge_multiplier" :show-original="showOriginal" /></div>
         <p v-if="error" class="plaza-stale">{{ t('modelPlaza.catalog.stale') }}</p>
         <h3>{{ t('modelPlaza.catalog.tiers') }}</h3>
@@ -161,10 +160,15 @@ watch(visibleGroups, groups => {
 const descriptionHtml = computed(() => DOMPurify.sanitize(marked.parse(props.response?.description ?? '') as string))
 const unitLabel = '1M Tokens'
 const priceTitle = computed(() => t(showOriginal.value ? 'modelPlaza.catalog.referenceTitle' : 'modelPlaza.catalog.currentPrice'))
-const referenceHint = computed(() => t('modelPlaza.catalog.referenceHint', { fx: USD_TO_CNY.toFixed(2) }))
-const conversionNote = computed(() => showOriginal.value ? referenceHint.value : props.response?.balance_recharge_multiplier
-  ? t('modelPlaza.catalog.conversion', { rate: props.response.balance_recharge_multiplier, fx: USD_TO_CNY.toFixed(2) })
-  : t('modelPlaza.catalog.conversionUnavailable'))
+const usdLabel = computed(() => t(showOriginal.value ? 'modelPlaza.catalog.officialUsd' : 'modelPlaza.catalog.usd'))
+const currencyLabel = computed(() => currency.value === 'CNY' ? t('modelPlaza.catalog.cny') : usdLabel.value)
+const conversionNote = computed(() => {
+  if (showOriginal.value) return t('modelPlaza.catalog.referenceHint', { fx: USD_TO_CNY.toFixed(2) })
+  const rate = props.response?.balance_recharge_multiplier
+  return rate != null && Number.isFinite(rate) && rate > 0
+    ? t('modelPlaza.catalog.conversion', { rate })
+    : t('modelPlaza.catalog.conversionUnavailable')
+})
 const monitorRows = computed(() => new Map((props.monitor?.items ?? []).map(row => [monitorKey(row.platform, row.group_id, row.model), row])))
 function status(item: PlazaOffer) { return monitorRows.value.get(monitorKey(item.model.platform, item.group.id, item.model.name)) }
 function protocol(m: PlazaModel) {

@@ -12,27 +12,27 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 
 describe('plaza billing display', () => {
-  it('uses the server billing rate and live recharge conversion, preserving zero and missing prices', () => {
+  it('shows account USD charges and only applies recharge conversion to CNY', () => {
     const data = plazaFixture()
     const offer = catalogue(data.groups)[0].offers[0]
     expect(displayPrice(3e-6, offer, 'CNY', 10)).toBeCloseTo(1.5e-7)
     expect(formatPrice(displayPrice(3e-6, offer, 'CNY', 10), 1e6, 'CNY')).toBe('¥0.15')
-    expect(formatPrice(displayPrice(3e-6, offer, 'USD', 10), 1e6)).toBe('$0.0223881')
-    expect(displayPrice(3e-6, offer, 'USD', 10)! * 6.7).toBeCloseTo(displayPrice(3e-6, offer, 'CNY', 10)!, 14)
-    expect(displayPrice(3e-6, offer, 'USD', 20)).toBeCloseTo(7.5e-8 / 6.7, 14)
+    expect(formatPrice(displayPrice(3e-6, offer, 'USD', 10), 1e6)).toBe('$1.5')
+    expect(displayPrice(3e-6, offer, 'USD', 10)! / 10).toBeCloseTo(displayPrice(3e-6, offer, 'CNY', 10)!, 14)
+    expect(displayPrice(3e-6, offer, 'USD', 20)).toBeCloseTo(1.5e-6, 14)
     expect(displayPrice(3e-6, offer, 'CNY', 20)).toBeCloseTo(7.5e-8)
     expect(displayPrice(0, offer, 'CNY', 10)).toBe(0)
     expect(displayPrice(null, offer, 'CNY', 10)).toBeNull()
     for (const conversion of [undefined, 0, -1, NaN, Infinity]) {
       expect(displayPrice(3e-6, offer, 'CNY', conversion)).toBeNull()
-      expect(displayPrice(3e-6, offer, 'USD', conversion)).toBeNull()
+      expect(displayPrice(3e-6, offer, 'USD', conversion)).toBeCloseTo(1.5e-6, 14)
     }
     offer.model.current_rate_multiplier = 0
     expect(displayPrice(3e-6, offer, 'USD', 10)).toBe(0)
     delete offer.model.current_rate_multiplier
     expect(displayPrice(3e-6, offer, 'USD', 10)).toBeNull()
   })
-  it('replaces the main price with official prices in the selected real currency', async () => {
+  it('replaces account charges with official reference prices and restores them', async () => {
     const offer = catalogue(plazaFixture().groups)[0].offers[0]
     const wrapper = mount(PlazaPriceGrid, { props: { offer, currency: 'CNY', conversion: 10, showOriginal: false } })
     expect(wrapper.find('strong').text()).toBe('¥0.15')
@@ -45,7 +45,7 @@ describe('plaza billing display', () => {
     await wrapper.setProps({ conversion: 20 })
     expect(wrapper.find('strong').text()).toBe('$5')
     await wrapper.setProps({ showOriginal: false })
-    expect(wrapper.find('strong').text()).toBe('$0.011194')
+    expect(wrapper.find('strong').text()).toBe('$1.5')
     wrapper.unmount()
   })
   it('keeps official prices independent of billing rates and preserves missing and zero values', () => {
@@ -71,7 +71,7 @@ describe('plaza billing display', () => {
     const wrapper = mount(PlazaPriceGrid, { props: { offer, currency: 'CNY', conversion: 10, showOriginal: false } })
     expect(wrapper.find('strong').text()).toBe('¥0.1')
     await wrapper.setProps({ currency: 'USD' })
-    expect(wrapper.find('strong').text()).toBe('$0.0149254')
+    expect(wrapper.find('strong').text()).toBe('$1')
     await wrapper.setProps({ showOriginal: true })
     expect(wrapper.find('strong').text()).toBe('—')
     wrapper.unmount()
@@ -178,7 +178,7 @@ describe('plaza interactions', () => {
     expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$7')
     expect(wrapper.find('.plaza-original-toggle').attributes('aria-pressed')).toBe('true')
     await wrapper.find('.plaza-original-toggle').trigger('click')
-    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$0.0238806')
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$1.6')
     expect(wrapper.findAll('button').some(button => ['/1K', '/1M'].includes(button.text()))).toBe(false)
     await wrapper.find('.plaza-search input').setValue('not-found')
     expect(wrapper.findAll('.plaza-model-card')).toHaveLength(0)

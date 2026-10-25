@@ -29,9 +29,10 @@ export function displayPrice(value: number | null | undefined, offer: PlazaOffer
   if (original) return value * (currency === 'CNY' ? USD_TO_CNY : 1)
   const rate = offer.model.current_rate_multiplier
   // Older/unavailable backends must not silently display a guessed billing price.
-  if (rate == null || !Number.isFinite(rate) || !conversion || !Number.isFinite(conversion) || conversion <= 0) return null
-  const cny = value * rate / conversion
-  return currency === 'CNY' ? cny : cny / USD_TO_CNY
+  if (rate == null || !Number.isFinite(rate)) return null
+  const charge = value * rate
+  if (currency === 'USD') return charge
+  return conversion != null && Number.isFinite(conversion) && conversion > 0 ? charge / conversion : null
 }
 export function formatPrice(value: number | null | undefined, unit = 1, currency: PlazaCurrency = 'USD'): string {
   if (value == null || !Number.isFinite(value)) return '—'
