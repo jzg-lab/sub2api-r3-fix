@@ -291,7 +291,7 @@ func (s *AccountTestService) testAntigravityManualQuality(c *gin.Context, accoun
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Antigravity request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d", resp.StatusCode))
 	}

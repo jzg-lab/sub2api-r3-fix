@@ -135,7 +135,7 @@ func (h *AccountHandler) RunManualQuality(c *gin.Context) {
 		defer func() {
 			if recover() != nil {
 				log.Print("manual quality worker panicked")
-				done <- completion{err: errors.New("The test was interrupted; its upstream outcome is unknown.")}
+				done <- completion{err: errors.New("the test was interrupted; its upstream outcome is unknown")}
 			}
 		}()
 		result, err := h.accountTestService.RunManualQuality(ctx, id, input)

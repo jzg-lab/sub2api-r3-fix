@@ -61,7 +61,7 @@ func (r *accountRepository) GetManualQuality(ctx context.Context, accountID int6
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return nil, rows.Err()
 	}
@@ -82,7 +82,7 @@ func (r *accountRepository) ListManualQuality(ctx context.Context, ids []int64) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []service.ManualQualityResult{}
 	for rows.Next() {
 		var data []byte

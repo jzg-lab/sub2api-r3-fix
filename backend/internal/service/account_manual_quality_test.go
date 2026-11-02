@@ -157,7 +157,7 @@ func TestManualQualityCandyReferenceByExhaustiveCounts(t *testing.T) {
 				for x := 0; x <= 7; x++ {
 					for y := 0; y <= 6; y++ {
 						for z := 0; z <= 4; z++ {
-							if !(a > 0 && y > 0 || p > 0 && x > 0) {
+							if (a == 0 || y == 0) && (p == 0 || x == 0) {
 								bad[[2]int{a + p + w, x + y + z}] = true
 							}
 						}
@@ -191,8 +191,11 @@ func TestManualQualityAntigravitySendsFullQuestionOnce(t *testing.T) {
 				require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
 				data, _ := json.Marshal(body)
 				require.Contains(t, string(data), "custom pelican")
-				request := body["request"].(map[string]any)
-				require.EqualValues(t, 8192, request["generationConfig"].(map[string]any)["maxOutputTokens"])
+				request, ok := body["request"].(map[string]any)
+				require.True(t, ok)
+				generation, ok := request["generationConfig"].(map[string]any)
+				require.True(t, ok)
+				require.EqualValues(t, 8192, generation["maxOutputTokens"])
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"<svg></svg>\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))}, nil
 			}}
 			gateway := &AntigravityGatewayService{tokenProvider: &AntigravityTokenProvider{}}
