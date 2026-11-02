@@ -7,6 +7,8 @@ import type { Account, AccountUsageInfo } from '@/types'
 const { getUsage, getBatchUsage, list, listHealth } = vi.hoisted(() => ({
   getUsage: vi.fn(), getBatchUsage: vi.fn(), list: vi.fn(), listHealth: vi.fn()
 }))
+vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {

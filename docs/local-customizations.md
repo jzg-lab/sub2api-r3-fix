@@ -453,6 +453,35 @@ API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；�
 回归入口：`frontend/src/views/user/__tests__/KeysView.spec.ts`；验证见
 [密钥筛选记录](upstream-sync-state.md#密钥厂商分类筛选)。
 
+## 手动质量测试
+
+账号“健康”列新增手动质量测试入口，复用管理员权限和账号的模型/代理/协议配置。
+`ManualQualityTestModal.vue` 支持糖果与鹈鹕 SVG 模板、编辑/全局保存/恢复默认、指定模型测试、
+读取最近结果。模板保存在 settings，迁移 `265_account_manual_quality_tests.sql` 单独保存
+账号＋请求模型＋题型的最近结果；不把完整回答塞进账号 extra 或调度缓存。
+
+- 执行路由 `/admin/accounts/:id/manual-quality`；GET 读取、POST 执行。模板与批量摘要在
+  `/admin/accounts/manual-quality/` 下。只有 POST 执行会发出题目，SSE 心跳保持长推理连接。
+- 沿用文本协议请求构造，覆盖 Responses、Chat Completions、Anthropic、Gemini、Grok 和
+  Antigravity，Bedrock 使用非流式响应；自适应账号单次选择 Chat Completions，不同时跑多协议。
+  TypeSafe 的结构化分类接口及合成 UI 测试账号拒绝执行，图片/视频模型需改选文本模型。
+- 手测独立于连接测试的恢复、认证错误停用和冷却写入；不调用自动糖果探针的状态机。
+  OAuth 仍使用现有凭据与插件传输保护，必要的凭据获取/刷新不是手测判分。
+- 同一账号＋模型＋题型用数据库 11 分钟租约去重，执行上限 10 分钟；过期在途结果显示 unknown，
+  仅新的人工点击可再次执行，旧 run ID 不能覆盖新结果。断线后用独立短上下文保存已收集结果。
+- 保存题目、参考答案、完整文本回答（最多 256 KiB）、实际构造的模型/显式参数、可用用量和耗时。
+  未显式设置的思考强度等参数由上游决定，不推断实际推理深度。输出上限/断流/空回答不报完成。
+- 糖果默认参考 21，以穷举无有效配对的取糖组合核验；末行精确匹配仅作提示，不是语义判分。
+  鹈鹕用清理后的 SVG 图片预览，不执行模型生成脚本或加载外部资源，原始文本仍可查看。
+
+回归入口：`account_manual_quality_test.go` 的协议请求、状态隔离、完整响应与糖果穷举测试，
+`account_manual_quality_integration_test.go` 的 PostgreSQL 持久化/租约/旧结果隔离测试，
+以及 `ManualQualityTestModal.spec.ts`、`manualQuality.spec.ts` 的交互和 SVG 安全测试。
+本次定向后端 unit/race、独立 PostgreSQL 迁移与持久化回归、前端组件/账号列表/语言检查、
+类型检查与涉及文件 lint、生产前端及后端 embed 构建通过。浏览器用本地模拟接口核验糖果
+题目与结果展示；手机端完整视觉、真实供应商及插件端到端尚未验收。
+本次仅本地实现与隔离验证；未迁移生产数据库、未发送真实供应商测试、未部署。
+
 ## 密钥智能路由
 
 2026-10-10 智能路由及后续会话粘性/超时修复已部署；下文按 2026-10-11 本地适配后的源码描述。

@@ -17,6 +17,8 @@ const {
   getAllGroups: vi.fn()
 }))
 
+vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {

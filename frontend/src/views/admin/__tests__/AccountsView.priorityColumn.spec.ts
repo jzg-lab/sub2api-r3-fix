@@ -3,8 +3,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import AccountsView from '../AccountsView.vue'
 
-const { listAccounts } = vi.hoisted(() => ({
-  listAccounts: vi.fn()
+const { listAccounts, qualitySummaries } = vi.hoisted(() => ({
+  listAccounts: vi.fn(),
+  qualitySummaries: vi.fn().mockResolvedValue([])
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -24,6 +25,8 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
+vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: qualitySummaries } }))
+
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn(), showInfo: vi.fn() })
 }))
@@ -41,13 +44,14 @@ vi.mock('vue-i18n', async () => {
 })
 
 const DataTableStub = {
-  props: ['columns'],
+  props: ['columns', 'data'],
   emits: ['sort'],
   template: `
     <div data-test="data-table">
       <span v-for="column in columns" :key="column.key" :data-column="column.key">
         {{ column.sortable ? 'sortable' : 'fixed' }}
       </span>
+      <div v-for="row in data" :key="row.id"><slot name="cell-health" :row="row" /></div>
       <button data-test="sort-priority" @click="$emit('sort', 'priority', 'desc')" />
     </div>
   `
@@ -71,6 +75,7 @@ function mountView() {
         ImportDataModal: true,
         ReAuthAccountModal: true,
         AccountTestModal: true,
+        ManualQualityTestModal: { props: ['account'], template: '<div data-test="manual-quality-modal">{{ account.id }}</div>' },
         AccountStatsModal: true,
         ScheduledTestsPanel: true,
         SyncFromCrsModal: true,
@@ -104,6 +109,18 @@ describe('admin AccountsView priority column preferences', () => {
       page_size: 20,
       pages: 0
     })
+  })
+
+  it('opens manual quality testing for an API key account from the health column', async () => {
+    listAccounts.mockResolvedValue({ items: [{id: 7, name: 'upstream', platform: 'openai', type: 'apikey', status: 'active', credentials: {}, extra: {}, groups: []}], total: 1, page: 1, page_size: 20, pages: 1 })
+    const wrapper = mountView()
+    await flushPromises()
+    const button = wrapper.findAll('button').find(value => value.text() === 'admin.accounts.manualQuality.title')
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    expect(wrapper.get('[data-test="manual-quality-modal"]').text()).toBe('7')
+    expect(qualitySummaries).toHaveBeenCalledWith([7])
+    wrapper.unmount()
   })
 
   it('shows priority as a sortable column for fresh preferences', async () => {

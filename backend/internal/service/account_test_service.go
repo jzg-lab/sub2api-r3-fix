@@ -326,6 +326,9 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	if account.RoutesProtocolByInbound() {
 		switch account.GetAPIProtocol() {
 		case APIProtocolAdaptive:
+			if manualQuality(c) != nil {
+				return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
+			}
 			return s.testCNProviderAdaptiveConnection(c, account, modelID, prompt)
 		case APIProtocolResponses:
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode))
@@ -501,6 +504,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
 	}
+	prepareManualQualityPayload(c, payload, "anthropic")
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event
@@ -547,11 +551,11 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAccountTestResponse(c, resp.Body)
 		errMsg := fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body))
 
 		// 403 表示账号被上游封禁，标记为 error 状态
-		if resp.StatusCode == http.StatusForbidden {
+		if resp.StatusCode == http.StatusForbidden && manualQuality(c) == nil {
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
 
@@ -579,6 +583,7 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
 	}
+	prepareManualQualityPayload(c, payload, "anthropic")
 	payloadBytes, _ := json.Marshal(payload)
 	vertexBody, err := buildVertexAnthropicRequestBody(payloadBytes)
 	if err != nil {
@@ -619,9 +624,9 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAccountTestResponse(c, resp.Body)
 		errMsg := fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body))
-		if resp.StatusCode == http.StatusForbidden {
+		if resp.StatusCode == http.StatusForbidden && manualQuality(c) == nil {
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
 		return s.sendErrorAndEnd(c, errMsg)
@@ -663,6 +668,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 		"max_tokens":  256,
 		"temperature": 1,
 	}
+	prepareManualQualityPayload(c, bedrockPayload, "anthropic")
 	bedrockBody, _ := json.Marshal(bedrockPayload)
 
 	// Use non-streaming endpoint (response is standard Claude JSON)
@@ -704,12 +710,15 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAccountTestResponse(c, resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
+	if manualQuality(c) != nil {
+		return processManualQualityBedrock(c, body)
+	}
 	// Bedrock non-streaming response is standard Claude JSON, extract the text
 	var result struct {
 		Content []struct {
@@ -835,6 +844,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		upstreamTestModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
 	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth)
+	prepareManualQualityPayload(c, payload, "responses")
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event once. A task-invalid Agent Identity response may
@@ -895,13 +905,18 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.doOpenAIAccountTestUpstream(req, proxyURL, account, true)
+	var resp *http.Response
+	if manualQuality(c) != nil {
+		resp, err = s.roundTripOpenAIAccountTestUpstream(req, proxyURL, account, true)
+	} else {
+		resp, err = s.doOpenAIAccountTestUpstream(req, proxyURL, account, true)
+	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if isOAuth && s.accountRepo != nil {
+	if isOAuth && s.accountRepo != nil && manualQuality(c) == nil {
 		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
 			mergeAccountExtra(account, updates)
@@ -909,9 +924,9 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAccountTestResponse(c, resp.Body)
 		body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
-		if !agentIdentityTaskRecoveryWasTried(ctx) && credentialAccount.IsOpenAIAgentIdentity() && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, body) {
+		if manualQuality(c) == nil && !agentIdentityTaskRecoveryWasTried(ctx) && credentialAccount.IsOpenAIAgentIdentity() && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, body) {
 			expectedTaskID := credentialAccount.GetCredential("task_id")
 			if err := ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount, expectedTaskID); err != nil {
 				return s.sendErrorAndEnd(c, fmt.Sprintf("Agent Identity task recovery failed: %s", err.Error()))
@@ -919,11 +934,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			c.Request = c.Request.WithContext(markAgentIdentityTaskRecoveryTried(ctx))
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, mode)
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests && manualQuality(c) == nil {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
 		// 401 Unauthorized: 标记账号为永久错误
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil && manualQuality(c) == nil {
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			setAccountTestAuthError(ctx, s.accountRepo, openAIResponseAccount(resp, account), errMsg)
 		}
@@ -1202,6 +1217,12 @@ func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx con
 		return s.sendErrorAndEnd(c, "Failed to create Grok test payload")
 	}
 
+	if manualQuality(c) != nil {
+		payload := createOpenAITestPayload(testModelID, false)
+		prepareManualQualityPayload(c, payload, "responses")
+		payloadBytes, _ = json.Marshal(payload)
+	}
+
 	if !agentIdentityTaskRecoveryWasTried(ctx) {
 		s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	}
@@ -1218,10 +1239,12 @@ func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx con
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	s.observeGrokTestResponse(withGrokTeamRateLimitModel(ctx, testModelID), account, resp)
+	if manualQuality(c) == nil {
+		s.observeGrokTestResponse(withGrokTeamRateLimitModel(ctx, testModelID), account, resp)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAccountTestResponse(c, resp.Body)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -2077,6 +2100,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	c.Writer.Flush()
 
 	payload := createOpenAIChatCompletionsTestPayload(testModelID, prompt)
+	prepareManualQualityPayload(c, payload, "chat_completions")
 	payloadBytes, _ := json.Marshal(payload)
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
@@ -2110,11 +2134,11 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := readAccountTestResponse(c, resp.Body)
+		if resp.StatusCode == http.StatusTooManyRequests && manualQuality(c) == nil {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil && manualQuality(c) == nil {
 			errMsg := fmt.Sprintf("Chat Completions authentication failed (401): %s", string(body))
 			setAccountTestAuthError(ctx, s.accountRepo, openAIResponseAccount(resp, account), errMsg)
 		}
@@ -2380,6 +2404,14 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 
 	// Create test payload (Gemini format)
 	payload := createGeminiTestPayload(testModelID, prompt)
+	if manualQuality(c) != nil {
+		var request map[string]any
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return err
+		}
+		prepareManualQualityPayload(c, request, "gemini")
+		payload, _ = json.Marshal(request)
+	}
 
 	// Build request based on account type
 	var req *http.Request
@@ -2416,7 +2448,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAccountTestResponse(c, resp.Body)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -2432,6 +2464,9 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 			return s.testGeminiAccountConnection(c, account, modelID, prompt)
 		}
 		return s.testClaudeAccountConnection(c, account, modelID)
+	}
+	if manualQuality(c) != nil {
+		return s.testAntigravityManualQuality(c, account, modelID)
 	}
 	return s.testAntigravityAccountConnection(c, account, modelID, prompt)
 }
@@ -2663,6 +2698,9 @@ func createGeminiTestPayload(modelID string, prompt string) []byte {
 
 // processGeminiStream processes SSE stream from Gemini API
 func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader) error {
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, body, "gemini")
+	}
 	reader := bufio.NewReader(body)
 
 	for {
@@ -2791,6 +2829,9 @@ func createOpenAIChatCompletionsTestPayload(modelID string, prompt string) map[s
 
 // processClaudeStream processes the SSE stream from Claude API
 func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader) error {
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, body, "anthropic")
+	}
 	reader := bufio.NewReader(body)
 
 	for {
@@ -2846,6 +2887,9 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 // processOpenAIChatCompletionsStream processes SSE chunks from the
 // OpenAI-compatible Chat Completions API.
 func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, body io.Reader) error {
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, body, "chat_completions")
+	}
 	reader := bufio.NewReader(body)
 	seenJSON := false
 	seenFinish := false
@@ -2921,6 +2965,9 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 
 // processOpenAIStream processes the SSE stream from OpenAI Responses API
 func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader) error {
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, body, "responses")
+	}
 	reader := bufio.NewReader(body)
 	seenCompleted := false
 
@@ -3214,6 +3261,13 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
+	if run := manualQuality(c); run != nil {
+		if event.Type == "test_start" && run.result.UpstreamModel == "" {
+			run.result.UpstreamModel = event.Model
+		}
+		return
+	}
+
 	if event.Type == "test_complete" {
 		if suppress, ok := c.Get(accountTestSuppressCompletionContextKey); ok {
 			if suppressCompletion, _ := suppress.(bool); suppressCompletion {
@@ -3231,6 +3285,16 @@ func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
 
 // sendErrorAndEnd sends an error event and ends the stream
 func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) error {
+	if run := manualQuality(c); run != nil {
+		// Provider error bodies and transport URLs can contain credentials.
+		safe := "Upstream request failed; check account credentials and protocol configuration."
+		if code := regexp.MustCompile(`(?:returned|failed) (?:\()?([45][0-9]{2})`).FindStringSubmatch(errorMsg); len(code) > 1 {
+			safe = "Upstream returned HTTP " + code[1]
+		}
+		run.result.Error = safe
+		return errors.New(safe)
+	}
+
 	log.Printf("Account test error: %s", errorMsg)
 	s.sendEvent(c, TestEvent{Type: "error", Error: errorMsg})
 	return fmt.Errorf("%s", errorMsg)

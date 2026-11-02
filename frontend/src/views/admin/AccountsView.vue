@@ -410,7 +410,16 @@
                 {{ probingAccounts.has(row.id) ? t('admin.accounts.health.probeNowRunning') : t('admin.accounts.health.probeNow') }}
               </button>
             </div>
-            <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
+            <div class="mt-1 flex flex-col items-start gap-1">
+              <button class="rounded border border-gray-300 px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700" @click="manualQualityAccount = row">
+                {{ t('admin.accounts.manualQuality.title') }}
+              </button>
+              <span v-if="manualQualityById[row.id]" class="max-w-[12rem] text-[10px] text-gray-500" :title="formatDateTime(manualQualityById[row.id].started_at)">
+                {{ t(`admin.accounts.manualQuality.${manualQualityById[row.id].kind}`) }} · {{ manualQualityById[row.id].model }}
+                <br />{{ t(`admin.accounts.manualQuality.status.${manualQualityById[row.id].status}`) }} · {{ formatDateTime(manualQualityById[row.id].started_at) }}
+              </span>
+              <span v-else class="text-[10px] text-gray-400">{{ t(manualQualityLoadError ? 'admin.accounts.manualQuality.summaryFailed' : 'admin.accounts.manualQuality.noResult') }}</span>
+            </div>
           </template>
           <template #cell-today_stats="{ row }">
             <AccountTodayStatsCell
@@ -577,6 +586,7 @@
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
+    <ManualQualityTestModal v-if="manualQualityAccount" :key="manualQualityAccount.id" :account="manualQualityAccount" :initial-result="manualQualityById[manualQualityAccount.id]" @close="manualQualityAccount = null" @result="onManualQualityResult" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" @terminate-rescue="handleTerminateRescue" @rescue="handleRescue" />
@@ -638,6 +648,8 @@ import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
+import ManualQualityTestModal from '@/components/admin/account/ManualQualityTestModal.vue'
+import { manualQualityAPI, type QualityResult } from '@/api/admin/manualQuality'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
@@ -1203,8 +1215,31 @@ const rescuedChipTitle = (health: OpenAIAccountHealth): string =>
 const isOpenAIOAuthHealthAccount = (row: Account): boolean =>
   row.platform === 'openai' && row.type === 'oauth'
 
+const manualQualityAccount = ref<Account | null>(null)
+const manualQualityById = ref<Record<number, QualityResult>>({})
+const manualQualityLoadError = ref(false)
+let manualQualitySequence = 0
+const onManualQualityResult = (result: QualityResult) => {
+  ++manualQualitySequence
+  manualQualityById.value = { ...manualQualityById.value, [result.account_id]: result }
+}
+const refreshManualQuality = async () => {
+  const sequence = ++manualQualitySequence
+  const ids = accounts.value.map(row => row.id)
+  if (!ids.length) { manualQualityById.value = {}; return }
+  try {
+    const summaries = await manualQualityAPI.summaries(ids)
+    if (sequence !== manualQualitySequence) return
+    manualQualityById.value = Object.fromEntries(summaries.map(value => [value.account_id, value]))
+    manualQualityLoadError.value = false
+  } catch {
+    if (sequence === manualQualitySequence) manualQualityLoadError.value = true
+  }
+}
+
 const refreshAccountHealthBatch = async () => {
   if (hiddenColumns.has('health')) return
+  void refreshManualQuality()
   const openAIIDs = accounts.value
     .filter(isOpenAIOAuthHealthAccount)
     .map((account) => account.id)
