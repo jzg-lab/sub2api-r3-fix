@@ -712,6 +712,9 @@ python3 "${TOOLS:?}/fast_deploy.py" evidence-template --release "$RELEASE" \
   --config "$PRIVATE_CONFIG" --artifact "$BUILD/artifact.json"
 ```
 
+Dockerfile 的 `FROM` 需要本地镜像标签或可解析仓库摘要，不能直接传 `sha256:<本地 image ID>`；
+隔离构建复用运行层时，先给已核验的镜像 ID 添加独立本地标签，构建后再核对标签、运行层及配置未漂移。
+
 构建从 Git archive 取固定源码，不受脏工作区影响；提前构建内嵌前端和应用，运行相关后端测试，
 在旧运行镜像上只替换程序及资源，保留浏览器、Node/Python、插件目录、用户与入口设置。
 并行开发期间，定向回归也使用同一完整 SHA 的独立归档，不用可能继续变化的工作区作为发布证据。
@@ -889,6 +892,8 @@ python3 "$RELEASE/tools/fast_deploy.py" rollback --release "$RELEASE"
   `PLUGINS_DATA_DIR=/app/data/plugins`，仍指向原目录、不搬数据。这是线上旧制品的部署修正；
   本期已提交源码修复并通过相对路径回归，随后已随 `5c28184c0` 部署。后续构建仍可保留该环境变量，
   不顺带移除线上配置。禁止通过关闭持久状态校验解决启动失败。
+- 只读预检直接读取维护标记并请求已有 guard/health 接口；不要调用 `gate(false)` 作检查，
+  该函数会删除维护标记，属于变更入口状态的操作。
 - 构建与服务切换分开：构建、下载和检查期间旧服务继续运行。提前检查磁盘、内存与构建资源，
   避免挤占生产容量。优先复用已验证制品，不无故反复构建。
 - 记录程序提交、镜像 ID/摘要及前端资源身份；候选制品用独立标识，验收后不再覆盖其内容。
@@ -927,6 +932,15 @@ python3 "$RELEASE/tools/fast_deploy.py" rollback --release "$RELEASE"
       无法安全回退时的处理已明确。启动前重新核对实际状态、制品和脚本摘要及备份时效，不复用过期的准备结论。
 
 ### 数据与迁移
+
+完整恢复验证使用独立数据库时，单库 `pg_dump` 不包含集群角色。先读取实际角色/授权，
+保存私有的 `pg_dumpall --roles-only --no-role-passwords` 快照，再恢复角色、数据库及原所有者/ACL。
+本项目 PostgreSQL 18 的源引导角色为 `sub2api`（OID 10）；隔离集群沿用同名引导角色，
+仅跳过该已存在角色的重复 CREATE，保留 ALTER/GRANT，再比对角色属性和成员授权。
+另建不同引导角色会使原 `GRANTED BY sub2api` 回放因 ADMIN option 不匹配而失败。
+不要用 `--no-acl` 隐藏缺失角色或授权者错误。
+不含密码的角色快照不能作为完整认证恢复方案；生产角色和密码不得因演练而修改。
+保留首次失败记录，恢复成功后再核对账本/权限并清理本次独立容器与卷。
 
 迁移规则见 [数据库迁移说明](../backend/migrations/README.md)。checksum 必须按当前迁移器
 实际算法核对，不能用不一致的原始文件摘要误判。不能通过修改库内 checksum 或跳过必要迁移
