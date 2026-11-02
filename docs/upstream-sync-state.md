@@ -15,7 +15,8 @@
 用户确认糖果题面及“鹈鹕骑自行车 SVG”，授权实现后明确要求合入主分支、推送远程，
 并允许服务器拉取和准备，禁止直接切换。本轮是本项目功能，无新上游合并；提交前本地及
 远端 `main` 均为 `8a8d1a2d918d9022743ada1cf8c789544c832f69`，直接在 `main` 提交，
-不制造额外合并提交。结果 SHA、远端与服务器准备证据随后补记。
+不制造额外合并提交。结果为 `c9bdf439266be6a69fb7f0024e035d99e04e281f`，已推送并通过
+`git ls-remote` 核对 `origin/main`；本条完成证据在后续文档提交补记。
 
 账号健康列新增手动质量测试入口，可编辑并保存糖果/鹈鹕题面、恢复默认，按账号、模型、
 题型保存最近结果；展示回答、实际模型、参数、用量和耗时，SVG 使用净化后的静态图片预览。
@@ -26,8 +27,20 @@
 
 已通过定向 Go unit、race、隔离 PostgreSQL 全迁移与持久化/租约集成回归，前端相关 Vitest、
 类型检查、定向 ESLint、生产构建，以及 Go embed 测试/构建和 diff 检查。
-全量 CI 待推送后核对；未执行真实收费上游调用、完整移动端视觉验收或生产插件端到端测试。
+[CI 41498894167](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41498894167)
+已触发，部署工具检查、前端全量测试/lint/类型检查及前端生产构建通过；前后端安全扫描失败，
+其余 Go 测试/编译/lint 在本次记录时仍运行中，不能记全绿。
+前端本地复查确认现有 Vue I18n、decode-uri-component、follow-redirects 高危通告
+`GHSA-83rm-6c8r-g728`、`GHSA-qr28-fpjm-wq7f`、`GHSA-mrwp-f3q8-3g9p`；
+后端 CI 注释指出 `parseOllamaCloudUsageHTML → html.Parse` 调用链，具体通告尚待完整核查。
+本轮未改变依赖或放宽安全门槛。未执行真实收费上游调用、完整移动端视觉验收或生产插件端到端测试。
 本条不把既有版本的 CI、旧备份或旧 PREPARED 状态作为本轮证据。
+
+服务器 `/opt/sub2api-source` 已从 `ed7ddbdd4982f3859eabb92b06e4838962bdda27`
+快进到本次功能提交；固定源码归档与完整生产差异保存在
+`/opt/sub2api-control/preparations/manual-quality-c9bdf439266b`，状态为
+`SOURCE_PREPARED_ONLY`，不是受管 `PREPARED`。线上仍是原蓝槽 `f06a57de6`，
+没有切换、生产迁移、生产工具安装或服务重启。现场与制品摘要见[部署状态](deployment-state.md)。
 
 ## 模型广场站内美元口径修订（2026-10-25，未部署）
 
