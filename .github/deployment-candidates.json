@@ -97,5 +97,19 @@
     "official_version": "0.2.17",
     "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41673054464"
+  },
+  {
+    "id": "r17-8",
+    "source": "d039b65daaa62f2044bbe8a0b2b900e6d8cb0bca",
+    "previous_source": "64e9cfdaec146bc5a8c08c98488fa4d8f3bdde49",
+    "version": "v0.2.17+r17.8",
+    "channel": "ordinary",
+    "summary": "管理员与用户共用隔离 HTML/JS 动画预览，支持 SVG/CSS/内联脚本、重新播放与停止；按当前线上 r17.6 重新审核。已保存题目及检测结果保留。",
+    "review": "Read-only production verification at 2026-11-04 03:54 Beijing: entry 127.0.0.1:8080 and green 8082 share instance 17993a047e191cf88a5b93aa21b1d1cc and /readyz ready; green image fast-64e9cfdaec146bc5a8c08c98488fa4d8f3bdde49-1793687114967322740 matches catalog r17.6. Blue 8081 is prior r17.5, not_ready. Job job-037cf501dd2e44759ce7b3bcf79842e0 is BLOCKED/BASELINE_CHANGED because r17.7 reviewed previous_source r17.5; no build or release directory exists. Re-reviewed complete diff from actual r17.6 to edb7b05f0cb04df4713223202916086b1df07afc: only shared frontend animation preview/controls/translations/tests and rebuilt embedded assets, docs/release metadata and normal candidate/main VERSION difference. Pelican default prompt already matches r17.6. No schema/migrations, dependencies/lockfiles, config/setup, backend routing/billing, runtime, deploy tools/workflows or plugin changes. Application source and embedded assets are identical to animation implementation 748e48539ec62d0b27bc7c2a7933e1cd057eb308, whose CI 41673054464 attempt 2 passed every required job and registered r17.7. Completed answers run in iframe sandbox=allow-scripts without allow-same-origin; nonce/CSP restrictions remain, source escaped; stop/unmount/question panel destroy frame. Existing saved prompts/results and retention keys unchanged. Existing local 27 targeted frontend checks, lint/typechecked build/embed and browser nonce/CSP isolation fixture passed; no claim to block all frame self-navigation or exhaustive hostile-script audit. This re-review changes only metadata/docs, preserves immutable r17.7 and its blocked job. New candidate must pass full CI; final server image/context/backup verification required before manual activation. No paid upstream calls or production mutation; rollback replaces application only.",
+    "reviewed_by": "Maintainer authorized completing validation, committing and pushing the shared animation-preview update; Codex re-reviewed its complete scope against the actual r17.6 production baseline after the reported BASELINE_CHANGED block on 2026-11-04. Production preparation and activation remain manual.",
+    "input_source": "edb7b05f0cb04df4713223202916086b1df07afc",
+    "official_version": "0.2.17",
+    "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41707928765"
   }
 ]
