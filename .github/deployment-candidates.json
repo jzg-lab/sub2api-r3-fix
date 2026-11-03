@@ -55,5 +55,19 @@
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41562379366",
     "reason": "After numbered candidate full CI passes, capture fresh production database/config backup. Apply only migration 265 in a transaction under existing migration advisory lock, lock_timeout=2s and statement_timeout=15s, checking all historical checksums; timeout rolls back and stops. Back up and install fast_deploy.py, handoff_deploy.py, managed_deploy.py, verify_fast_release.py and build_fast_release.py; restart only controller and reconciler. Root prepare-special requires private reviewed_files hashes plus full source/previous/changed_paths, rebuilds final image, verifies original signed plugin, migration and rollback, and takes a fresh backup before PREPARED. Maintainer already authorized activate through an independent server task: switch core first, retain old connections, then exclusive plugin/background takeover. No maintenance marker, forced request shutdown, data service restart or plugin package/config/trust change.",
     "rollback_plan": "Migration 265 adds only the diagnostics result table; old binary on migrated isolated schema passed. Application rollback retains the table/new records and never restores an old database. Require matching sealed artifacts, boot identities, data/config/plugin contracts; reverse hot handoff preserves in-flight requests. Release protocol-3 background ownership before returning to legacy. Infinite old connections may defer plugin takeover/retirement; reconciler retries without forced shutdown or overwriting busy slots. Tool-install verification failure restores backed-up tools. Preserve all historical candidates, jobs and backup timestamps."
+  },
+  {
+    "id": "r17-5",
+    "source": "ca62092b6c0911e8a3a90b1ef5343c561623234d",
+    "previous_source": "684a5da965bb4e3bd688aba06778c52d03cae530",
+    "version": "v0.2.17+r17.5",
+    "channel": "ordinary",
+    "summary": "智商检测支持关闭弹窗或站内切页后继续，完成后站内提醒；默认 gpt-6.1-sol。用户可用自己的 Key 正常计费检测，题目与结果同区切换、个人题目本地保存。部署列表默认最新一条，可展开近三条。",
+    "review": "Production read-only check on 2026-11-03: sub2api-green running revision 684a5da965bb4e3bd688aba06778c52d03cae530 and /readyz ready. Reviewed full diff to 383aeb46a93f346e76340249740497a160ea2357. No migration/ent, dependencies/lockfiles, config/setup, Docker/runtime, deployment tools/workflows, plugin API/package/state changes. Backend adds only JWT-protected public default-template GET; user calls regular gateway with own key so quota/IP/model/routing/billing remain enforced. Existing admin result schema and overwrite keys unchanged; personal templates are browser-only, tasks are page-memory only. Old binary can ignore the new route/UI; rollback replaces application only. Frontend targeted 17 files/107 tests passed, changed-file lint and typechecked production build passed; backend user handler unit and routes compilation passed, embed web tests passed. No paid upstream calls or production mutation. Complete required CI and final image/new backup/rollback verification still required before activation.",
+    "reviewed_by": "Maintainer authorized merging and pushing this change on 2026-11-03. Codex assisted review of the complete production-to-source diff and local regressions; production activation is not part of this push.",
+    "input_source": "383aeb46a93f346e76340249740497a160ea2357",
+    "official_version": "0.2.17",
+    "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41579694536"
   }
 ]
