@@ -196,7 +196,7 @@ python3 /opt/sub2api-control/tools/managed_deploy.py prepare-special \
 | 更新类型 | 普通或专项；说明数据、配置、插件及回退兼容结论，未知项不得当作普通更新 |
 | 发布目录 | 本次全新 `RELEASE` 绝对路径，0700；有 `prepared.json` 和封存的 `tools/fast_deploy.py` |
 | 验收与备份 | 六项真实回执、受影响业务回归结果、备份完成时间及到期时间；不是 `not_run` 模板 |
-| 操作边界 | 本次尚无 `activate/`；只切应用，短维护，排不空则延后；回退的目标与限制 |
+| 操作边界 | 本次尚无 `activate/`；协议 3 先切核心流量、旧连接自然收尾，插件/后台单活；回退的目标与限制 |
 
 没有这份交付或任一项未完成，停在准备阶段。不要直接 `git pull` 后重建生产容器。
 此清单是给人确认的摘要，不能替代工具对回执、摘要和现场的正式检查。
@@ -220,7 +220,7 @@ python3 "${RELEASE:?}/tools/fast_deploy.py" status --release "$RELEASE"
 ```
 
 核对目标 SHA/镜像与交付一致、备份未到期、没有该目录的既有 `activate` 尝试，
-并确认可以开始短维护。**只有下一条命令会申请正式切换**：
+并确认已获本次切换授权。协议 3 不进入全站维护或先排空主请求。**只有下一条命令会申请正式切换**：
 
 ```sh
 python3 "${RELEASE:?}/tools/fast_deploy.py" activate --release "$RELEASE"
@@ -251,12 +251,12 @@ journalctl -u "${UNIT:?}" -n 80 --no-pager
 
 ### 状态、验收和回退
 
-- 服务器当前旧工具的 `PREPARED source=...` 只表示磁盘上存在准备记录，**不检查备份过期、
+- 历史封存旧工具的 `PREPARED source=...` 只表示磁盘上存在准备记录，**不检查备份过期、
   线上健康或是否已部署过**；即使下面已有 `ACCEPTED`，第一行仍会是 `PREPARED`。
 - 本地状态提示修正后改为 `PREPARATION_SNAPSHOT`、`BACKUP_WINDOW=CURRENT/EXPIRED/CLOCK_INVALID`
   和 UTC `expires_at`。`CURRENT` 只说明时间窗口尚在，不说明摘要、配置或现场仍通过；
   `LIVE_STATE_NOT_CHECKED` 明示这是只读快照。正式任务始终重做完整检查。
-  此修正尚未安装到服务器，不能覆盖历史发布目录里的封存工具。
+  2026-11-03 已随五个工具更新安装；不能覆盖历史发布目录里的封存工具。
 - `EXPIRED` 不表示此前成功部署失效，只表示这份备份不能再用于新的切换/回退。
   已有尝试不得重放；过期、延后或失败后重新评估并准备新目录，不能改时间戳续期。
 
@@ -279,7 +279,7 @@ python3 "${RELEASE:?}/tools/fast_deploy.py" rollback --release "$RELEASE"
 python3 "${RELEASE:?}/tools/fast_deploy.py" status --release "$RELEASE"
 ```
 
-回退也有短维护；成功结果为 `ROLLED_BACK`，日志在 `$RELEASE/rollback/`。
+回退按本次封存交接协议执行；协议 3 保留已有主请求自然完成，成功结果为 `ROLLED_BACK`，日志在 `$RELEASE/rollback/`。
 过期或现场变化时交维护者重新评估，不直接改 `.env`、下载旧包或恢复整库。
 
 ## 已确认的部署改进范围
@@ -519,7 +519,7 @@ Compose 挂载，必须走专项；不能把本轮实现本身伪装成普通应
 
 ### 双实例追加实施
 
-#### 本体直接切流修订（2026-10-25，本地实现，未部署）
+#### 本体直接切流修订（2026-10-25 实现，2026-11-03 随 r17.4 部署）
 
 用户要求本体直接切流，不接受首次接入的维护/全站排空例外。插件允许暂停，但后台任务不能重复
 执行，已有普通 HTTP/SSE/WS 及计费续作不得强杀。协议 3 将 `serve` 的核心接入与 `resume`
@@ -552,7 +552,8 @@ Compose 挂载，必须走专项；不能把本轮实现本身伪装成普通应
 **旧任务不能复用。** 线上 `f06a57de6`、旧 r17.1 及 r17.2 的封存准备不是协议 3。
 新控制器不给旧维护准备 `activate`，新准备也拒绝维护排空流程；不得改 sealed 文件或备份时间
 冒充新任务。r17.2 的固定代码和标签保持不变，本轮修改必须重新经专项审核、CI、自动版本分配、
-最终原插件制品验收和新备份；生产工具安装仍先说明并取得确认，最终上线仍是本人后台确认。
+最终原插件制品验收和新备份。每轮仍须取得生产安装和切换授权；本轮用户已明确授权验证通过后
+直接上线，已于 2026-11-03 完成，实际制品与收尾证据见部署状态。
 
 回归入口沿用 `handoff_test.go`、`handoff_nginx_test.go`、`test_handoff_deploy.py`、
 `test_managed_deploy.py`、部署弹窗及 `deploy/tests/local_application.py`。本地独立 Linux 容器
@@ -914,7 +915,7 @@ python3 "$RELEASE/tools/fast_deploy.py" rollback --release "$RELEASE"
   验收上下文、缓存封存和回退展示沿用这个结果。缺失身份必须拒绝，版本/提交/构建时间真实变化
   仍须识别；不能为消除误报删除整项身份检查或手改失败任务的状态。
 
-## 3. 切换前检查：全部准备好才进入维护
+## 3. 切换前检查：全部准备好才切流
 
 ### 必检清单
 
