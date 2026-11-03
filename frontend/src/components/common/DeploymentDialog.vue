@@ -59,10 +59,16 @@
           </button>
         </section>
         <section :aria-label="t('deployment.candidates')">
-          <h4 class="mb-1 flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-dark-300"><Icon name="download" size="sm" class="text-gray-400 dark:text-dark-400" />{{ t('deployment.candidates') }}</h4>
+          <div class="mb-1 flex flex-wrap items-center justify-between gap-2">
+            <h4 class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-dark-300"><Icon name="download" size="sm" class="text-gray-400 dark:text-dark-400" />{{ t('deployment.candidates') }}</h4>
+            <button v-if="recentCandidates.length > 1" type="button" class="flex items-center gap-1 rounded px-1 py-1 text-xs text-gray-500 hover:text-primary-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-dark-400 dark:hover:text-primary-400" :aria-expanded="showRecentCandidates" aria-controls="deployment-candidate-list" @click="showRecentCandidates = !showRecentCandidates">
+              {{ t(showRecentCandidates ? 'deployment.collapseCandidates' : 'deployment.showRecentCandidates') }}
+              <Icon :name="showRecentCandidates ? 'chevronUp' : 'chevronDown'" size="sm" aria-hidden="true" />
+            </button>
+          </div>
           <p v-if="!snapshot.candidates.length" class="py-5 text-sm text-gray-500">{{ t('deployment.empty') }}</p>
-          <ul class="divide-y divide-gray-100 dark:divide-dark-700">
-            <li v-for="candidate in snapshot.candidates" :key="candidate.id" class="flex flex-wrap items-start justify-between gap-4 py-4">
+          <ul id="deployment-candidate-list" class="divide-y divide-gray-100 dark:divide-dark-700">
+            <li v-for="candidate in visibleCandidates" :key="candidate.id" class="flex flex-wrap items-start justify-between gap-4 py-4">
               <div class="min-w-0 flex-1 basis-64 space-y-2">
                 <div class="flex flex-wrap items-center gap-2">
                   <h4 class="break-all font-mono text-sm font-semibold text-gray-900 dark:text-white">{{ candidate.version }}</h4>
@@ -113,6 +119,10 @@ defineEmits<{ close: [] }>()
 const { t, te } = useI18n()
 const stepUp = useStepUp()
 const snapshot = ref<DeploymentSnapshot | null>(null)
+const showRecentCandidates = ref(false)
+// The reviewed catalog appends releases in publication order.
+const recentCandidates = computed(() => (snapshot.value?.candidates ?? []).slice(-3).reverse())
+const visibleCandidates = computed(() => showRecentCandidates.value ? recentCandidates.value : recentCandidates.value.slice(0, 1))
 const loading = ref(false)
 const busy = ref(false)
 const disconnected = ref(false)
@@ -225,6 +235,7 @@ watch(() => props.show, show => {
   generation++
   clearTimeout(poll)
   confirm.value = null
+  showRecentCandidates.value = false
   if (show) void refresh()
 }, { immediate: true })
 onBeforeUnmount(() => { generation++; clearTimeout(poll) })

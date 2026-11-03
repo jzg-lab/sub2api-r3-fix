@@ -1,3 +1,4 @@
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
@@ -128,6 +129,7 @@ const BulkEditAccountModalStub = {
 
 describe('admin AccountsView bulk edit scope', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     localStorage.clear()
 
     listAccounts.mockReset()

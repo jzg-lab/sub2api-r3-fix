@@ -216,6 +216,12 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/quality-test',
+    name: 'QualityTest',
+    component: () => import('@/views/user/QualityTestView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: false, title: 'Intelligence test', titleKey: 'qualityTest.title' }
+  },
+  {
     path: '/batch-image',
     name: 'BatchImageGuide',
     alias: '/docs/batch-image',

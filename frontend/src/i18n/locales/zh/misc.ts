@@ -19,6 +19,7 @@ export default {
 
   // Version Badge
   deployment: {
+    showRecentCandidates: '展开近三个版本', collapseCandidates: '收起版本列表',
     currentTask: '当前任务', candidates: '可用版本', source: '源码提交', taskId: '任务编号',
     channels: { ordinary: '普通更新', special: '专项更新' },
     details: '技术详情', reused: '复用已验收镜像，备份与预检仍重新执行',

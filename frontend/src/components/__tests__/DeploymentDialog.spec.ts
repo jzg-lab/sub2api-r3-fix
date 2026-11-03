@@ -30,6 +30,32 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); vi.useRealTimers() })
 
 describe('managed deployment controls', () => {
+  it('defaults to the latest release, expands only the last three and prepares the selected release', async () => {
+    const candidates = [1, 2, 3, 4].map(number => ({
+      ...candidate, id: `release-${number}`, version: `v0.2.17+r17.${number}`
+    }))
+    const state = { enabled: true, candidates, job: null }
+    await open(state)
+    const releases = () => wrapper.findAll('#deployment-candidate-list li').map(row => row.text())
+    expect(releases()).toHaveLength(1)
+    expect(releases()[0]).toContain('r17.4')
+    await button('deployment.showRecentCandidates').trigger('click')
+    expect(releases()).toHaveLength(3)
+    expect(releases().map(text => text.match(/r17\.\d+/)?.[0])).toEqual(['r17.4', 'r17.3', 'r17.2'])
+    expect(candidates.map(value => value.id)).toEqual(['release-1', 'release-2', 'release-3', 'release-4'])
+    await button('deployment.collapseCandidates').trigger('click')
+    expect(releases()).toHaveLength(1)
+    mocks.action.mockResolvedValue(state)
+    await button('deployment.prepare').trigger('click')
+    await flushPromises()
+    expect(mocks.action).toHaveBeenCalledWith('prepare', 'release-4')
+    await button('deployment.showRecentCandidates').trigger('click')
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(releases()).toHaveLength(1)
+  })
+
   it('shows the actual previous version, not the release being rolled back', async () => {
     await open({ enabled: true, candidates: [], job: { ...job, previous_version: 'v0.2.16+r17.9', phase: 'ACCEPTED', actions: ['rollback'] } })
     const previous = wrapper.get('section[aria-label="deployment.previousVersion"]')

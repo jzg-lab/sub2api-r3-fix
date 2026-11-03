@@ -637,3 +637,8 @@ func buildUserProfileSourceContext(provider string) *userProfileSourceContext {
 		Source:   provider,
 	}
 }
+
+// QualityTestTemplates exposes public question defaults, never admin account data.
+func (h *UserHandler) QualityTestTemplates(c *gin.Context) {
+	response.Success(c, service.DefaultManualQualityTemplates())
+}

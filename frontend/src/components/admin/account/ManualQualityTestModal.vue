@@ -1,5 +1,5 @@
 <template>
-  <BaseDialog :show="true" :title="`${t('admin.accounts.manualQuality.title')} · ${account.name}`" width="wide" :close-on-escape="!running" :show-close-button="!running" @close="emit('close')">
+  <BaseDialog :show="true" :title="`${t('admin.accounts.manualQuality.title')} · ${account.name}`" width="wide" @close="emit('close')">
     <div class="space-y-4">
       <p class="text-sm text-gray-500">{{ t('admin.accounts.manualQuality.hint') }}</p>
       <p v-if="loading" role="status">{{ t('common.loading') }}</p>
@@ -28,42 +28,25 @@
         <button class="btn btn-secondary" :disabled="running || loading" @click="restore">{{ t('admin.accounts.manualQuality.restore') }}</button>
         <button class="btn btn-secondary" :disabled="running || loading || saving || !prompt.trim()" @click="save">{{ t('admin.accounts.manualQuality.save') }}</button>
         <button class="btn btn-primary" :disabled="running || loading || saving || !model || !prompt.trim()" @click="run">{{ t(running ? 'admin.accounts.manualQuality.running' : 'admin.accounts.manualQuality.run') }}</button>
-        <button v-if="running" class="btn btn-secondary" @click="controller?.abort()">{{ t('common.cancel') }}</button>
+        <button v-if="running" class="btn btn-secondary" @click="task?.controller.abort()">{{ t('common.cancel') }}</button>
+        <button v-if="running" class="btn btn-secondary" @click="emit('close')">{{ t('qualityTest.background') }}</button>
       </div>
       <p v-if="running" role="status" class="text-sm text-gray-500">{{ t('admin.accounts.manualQuality.waitHint') }}</p>
-      <section v-if="result" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600" aria-live="polite">
-        <div class="flex flex-wrap gap-2 text-sm">
-          <strong>{{ t(`admin.accounts.manualQuality.status.${result.status}`) }}</strong>
-          <span>{{ t(`admin.accounts.manualQuality.${result.kind}`) }} · {{ result.model }}</span>
-          <span>{{ new Date(result.started_at).toLocaleString() }} · {{ (result.duration_ms / 1000).toFixed(1) }}s</span>
-        </div>
-        <p v-if="result.error" class="text-sm text-red-600 dark:text-red-400">{{ result.error }}</p>
-        <p v-if="comparison !== null" class="text-sm text-gray-500">{{ t(comparison ? 'admin.accounts.manualQuality.match' : 'admin.accounts.manualQuality.noMatch') }}</p>
-        <img v-if="svgURL" :src="svgURL" :alt="t('admin.accounts.manualQuality.preview')" class="max-h-[28rem] w-full rounded-lg bg-white p-3" />
-        <p v-else-if="result.kind === 'pelican' && result.status === 'completed'" class="text-sm text-gray-500">{{ t('admin.accounts.manualQuality.noSVG') }}</p>
-        <pre class="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-4 text-sm dark:bg-dark-800">{{ result.answer }}</pre>
-        <details class="text-sm">
-          <summary class="cursor-pointer">{{ t('admin.accounts.manualQuality.details') }}</summary>
-          <p class="mt-2">{{ t('admin.accounts.manualQuality.upstreamModel') }}: {{ result.upstream_model || '—' }}</p>
-          <pre class="whitespace-pre-wrap break-words">{{ result.prompt }}</pre>
-          <p>{{ t('admin.accounts.manualQuality.reference') }}: {{ result.reference_answer || '—' }}</p>
-          <pre class="whitespace-pre-wrap break-words">{{ JSON.stringify(result.parameters || {}, null, 2) }}</pre>
-          <p>{{ t('admin.accounts.manualQuality.usage') }}: {{ result.usage ? JSON.stringify(result.usage) : '—' }}</p>
-        </details>
-        <button v-if="result.status === 'running'" class="btn btn-secondary" :disabled="running" @click="loadResult">{{ t('common.refresh') }}</button>
-      </section>
+      <ManualQualityResult v-if="result" :result="result" />
+      <button v-if="result?.status === 'running'" class="btn btn-secondary" :disabled="running" @click="loadResult">{{ t('common.refresh') }}</button>
     </div>
   </BaseDialog>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { adminQualityKey, DEFAULT_QUALITY_MODEL, useManualQualityStore } from '@/stores/manualQuality'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import { getAvailableModels } from '@/api/admin/accounts'
 import { manualQualityAPI, type QualityKind, type QualityResult, type QualityTemplate } from '@/api/admin/manualQuality'
-import { qualitySVGDataURL, qualityAnswerMatches } from '@/utils/manualQuality'
+import ManualQualityResult from '@/components/common/ManualQualityResult.vue'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import type { Account } from '@/types'
 
@@ -72,23 +55,32 @@ const emit = defineEmits<{ close: []; result: [result: QualityResult] }>()
 const { t } = useI18n()
 const loading = ref(true)
 const saving = ref(false)
-const running = ref(false)
-const error = ref('')
+const tests = useManualQualityStore()
+const task = computed(() => tests.tasks[adminQualityKey(props.account.id, model.value, kind.value)])
+const running = computed(() => task.value?.running || false)
+const localError = ref('')
+const error = computed(() => task.value?.error || localError.value)
 const notice = ref('')
-const model = ref(props.initialResult?.model || '')
-const kind = ref<QualityKind>(props.initialResult?.kind || 'candy')
+const accountTasks = Object.entries(tests.tasks).filter(([key]) => key.startsWith(`admin:${props.account.id}:`)).map(([, task]) => task)
+const pending = accountTasks.find(task => task.running) || accountTasks.filter(task => task.result).sort((a, b) => (b.result?.started_at || '').localeCompare(a.result?.started_at || ''))[0]
+const model = ref(pending?.input?.model || DEFAULT_QUALITY_MODEL)
+const kind = ref<QualityKind>(pending?.input?.kind || props.initialResult?.kind || 'candy')
 const prompt = ref('')
 const reference = ref('')
 const models = ref<{ value: string; label: string }[]>([])
 const templates = ref<QualityTemplate[]>([])
 const defaults = ref<QualityTemplate[]>([])
-const result = ref<QualityResult | null>(null)
-let controller: AbortController | undefined
+const savedResult = ref<QualityResult | null>(null)
+const result = computed(() => {
+  const local = task.value?.result
+  const saved = savedResult.value
+  if (!local) return saved
+  if (task.value?.saved && saved && Date.parse(saved.started_at) >= Date.parse(local.started_at)) return saved
+  return local
+})
 let resultSequence = 0
 let active = true
 const kinds = computed(() => (['candy', 'pelican'] as const).map(value => ({ value, label: t(`admin.accounts.manualQuality.${value}`) })))
-const svgURL = computed(() => result.value?.kind === 'pelican' ? qualitySVGDataURL(result.value.answer) : null)
-const comparison = computed(() => result.value?.kind === 'candy' && result.value.status === 'completed' ? qualityAnswerMatches(result.value.answer, result.value.reference_answer) : null)
 
 function applyTemplate(template?: QualityTemplate) {
   prompt.value = template?.prompt || ''
@@ -101,42 +93,37 @@ watch(model, () => { void loadResult() })
 
 async function loadResult() {
   const sequence = ++resultSequence
-  result.value = null
+  savedResult.value = null
   if (!model.value || loading.value || running.value) return
   try {
     const saved = await manualQualityAPI.result(props.account.id, model.value, kind.value)
-    if (active && sequence === resultSequence) result.value = saved
-  } catch (cause) { if (active && sequence === resultSequence) error.value = extractApiErrorMessage(cause) }
+    if (active && sequence === resultSequence) savedResult.value = saved
+  } catch (cause) { if (active && sequence === resultSequence) localError.value = extractApiErrorMessage(cause) }
 }
 async function save() {
   if (saving.value || running.value) return
-  saving.value = true; error.value = ''; notice.value = ''
+  saving.value = true
+  localError.value = ''
+  notice.value = ''
   const input = { kind: kind.value, prompt: prompt.value, reference_answer: kind.value === 'candy' ? reference.value : '' }
   try {
     const saved = await manualQualityAPI.save(input)
     templates.value = templates.value.map(value => value.kind === saved.kind ? saved : value)
     notice.value = t('admin.accounts.manualQuality.saved')
-  } catch (cause) { error.value = extractApiErrorMessage(cause) }
+  } catch (cause) { localError.value = extractApiErrorMessage(cause) }
   finally { saving.value = false }
 }
 async function run() {
   if (running.value || loading.value || !model.value || !prompt.value.trim()) return
   ++resultSequence
-  running.value = true; error.value = ''; notice.value = ''; result.value = null
-  controller = new AbortController()
-  try {
-    const response = await manualQualityAPI.run(props.account.id, {
-      kind: kind.value, model: model.value, prompt: prompt.value,
-      reference_answer: kind.value === 'candy' ? reference.value : ''
-    }, controller.signal)
-    if (!active) return
-    result.value = response.result
-    if (response.saved) emit('result', response.result)
-    else error.value = response.error || t('admin.accounts.manualQuality.saveFailed')
-  } catch (cause) {
-    if (!active) return
-    error.value = controller.signal.aborted ? t('admin.accounts.manualQuality.canceled') : extractApiErrorMessage(cause)
-  } finally { running.value = false }
+  localError.value = ''
+  notice.value = ''
+  savedResult.value = null
+  const finished = await tests.runAdmin(props.account.id, props.account.name, {
+    kind: kind.value, model: model.value, prompt: prompt.value,
+    reference_answer: kind.value === 'candy' ? reference.value : ''
+  })
+  if (active && finished.saved && finished.result) emit('result', finished.result)
 }
 onMounted(async () => {
   const [templateResponse, modelResponse] = await Promise.allSettled([
@@ -146,14 +133,16 @@ onMounted(async () => {
   if (templateResponse.status === 'fulfilled') {
     templates.value = templateResponse.value.templates
     defaults.value = templateResponse.value.defaults
-    applyTemplate(templates.value.find(value => value.kind === kind.value))
-  } else error.value = extractApiErrorMessage(templateResponse.reason)
+    applyTemplate(task.value?.input || templates.value.find(value => value.kind === kind.value))
+  } else localError.value = extractApiErrorMessage(templateResponse.reason)
   if (modelResponse.status === 'fulfilled') {
     models.value = modelResponse.value.map(value => ({ value: value.id, label: value.display_name || value.id }))
-    if (!model.value && models.value.length) model.value = models.value[0].value
-  } else if (!error.value) error.value = t('admin.accounts.manualQuality.modelLoadFailed')
+    if (!models.value.some(value => value.value === model.value)) {
+      models.value.unshift({ value: model.value, label: model.value })
+    }
+  } else if (!error.value) localError.value = t('admin.accounts.manualQuality.modelLoadFailed')
   loading.value = false
   await loadResult()
 })
-onBeforeUnmount(() => { active = false; ++resultSequence; controller?.abort() })
+onBeforeUnmount(() => { active = false; ++resultSequence })
 </script>

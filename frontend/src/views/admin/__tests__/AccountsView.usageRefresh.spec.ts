@@ -1,3 +1,4 @@
+import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import AccountsView from '../AccountsView.vue'
@@ -94,6 +95,7 @@ function request(options?: { force?: boolean; source?: 'active' }) {
 
 describe('AccountsView usage refresh ownership', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)
     localStorage.clear()

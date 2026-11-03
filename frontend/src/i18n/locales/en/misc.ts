@@ -19,6 +19,7 @@ export default {
 
   // Version Badge
   deployment: {
+    showRecentCandidates: 'Show last three releases', collapseCandidates: 'Collapse releases',
     currentTask: 'Current task', candidates: 'Available releases', source: 'Source commit', taskId: 'Task ID',
     channels: { ordinary: 'Standard update', special: 'Special update' },
     details: 'Technical details', reused: 'Reusing the verified image; backup and preflight run again',

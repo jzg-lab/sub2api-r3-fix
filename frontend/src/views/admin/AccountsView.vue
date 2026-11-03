@@ -627,6 +627,7 @@ import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useManualQualityStore } from '@/stores/manualQuality'
 import { adminAPI } from '@/api/admin'
 import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
@@ -1223,6 +1224,14 @@ const onManualQualityResult = (result: QualityResult) => {
   ++manualQualitySequence
   manualQualityById.value = { ...manualQualityById.value, [result.account_id]: result }
 }
+const manualQualityTasks = useManualQualityStore()
+watch(() => Object.values(manualQualityTasks.tasks).filter(task => task.saved).map(task => task.result), results => {
+  for (const result of results) {
+    if (!result) continue
+    const current = manualQualityById.value[result.account_id]
+    if (!current || ((result.run_id !== current.run_id || result.status !== current.status) && Date.parse(result.started_at) >= Date.parse(current.started_at))) onManualQualityResult(result)
+  }
+}, { immediate: true })
 const refreshManualQuality = async () => {
   const sequence = ++manualQualitySequence
   const ids = accounts.value.map(row => row.id)

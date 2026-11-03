@@ -29,6 +29,7 @@ func RegisterUserRoutes(
 		user := authenticated.Group("/user")
 		{
 			user.GET("/profile", h.User.GetProfile)
+			user.GET("/quality-test/templates", h.User.QualityTestTemplates)
 			user.PUT("/password", h.User.ChangePassword)
 			user.PUT("", h.User.UpdateProfile)
 			user.GET("/aff", h.User.GetAffiliate)

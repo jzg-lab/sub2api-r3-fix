@@ -1,14 +1,17 @@
+import { loadLocaleMessages } from '@/i18n'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ManualQualityTestModal from '../ManualQualityTestModal.vue'
+import { createPinia, setActivePinia } from 'pinia'
+import { useAppStore } from '@/stores/app'
 import type { Account } from '@/types'
 
 const { api, models } = vi.hoisted(() => ({
   api: { templates: vi.fn(), save: vi.fn(), result: vi.fn(), run: vi.fn() }, models: vi.fn()
 }))
 vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: api }))
-vi.mock('@/api/admin/accounts', () => ({ getAvailableModels: models }))
-vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
+vi.mock('@/api/admin/accounts', () => ({ getAvailableModels: models, default: {} }))
+vi.mock('vue-i18n', async () => ({ ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'), useI18n: () => ({ t: (key: string) => key }) }))
 const templates = [
   { kind: 'candy', prompt: 'candy default', reference_answer: '21' },
   { kind: 'pelican', prompt: 'pelican SVG', reference_answer: '' }
@@ -22,8 +25,10 @@ const mountModal = () => mount(ManualQualityTestModal, {
   } }
 })
 function button(wrapper: ReturnType<typeof mountModal>, name: string) { return wrapper.findAll('button').find(value => value.text() === `admin.accounts.manualQuality.${name}`)! }
-beforeEach(() => {
+beforeEach(async () => {
+  await loadLocaleMessages('en')
   vi.resetAllMocks()
+  setActivePinia(createPinia())
   api.templates.mockResolvedValue({ templates, defaults: templates })
   api.result.mockResolvedValue(null)
   api.save.mockImplementation(async value => value)
@@ -49,7 +54,7 @@ describe('ManualQualityTestModal', () => {
     await wrapper.get('#quality-prompt').setValue('temporary question')
     await button(wrapper, 'run').trigger('click'); await flushPromises()
     expect(api.save).not.toHaveBeenCalled()
-    expect(api.run).toHaveBeenCalledWith(7, { kind: 'candy', model: 'm', prompt: 'temporary question', reference_answer: '' }, expect.any(AbortSignal))
+    expect(api.run).toHaveBeenCalledWith(7, { kind: 'candy', model: 'gpt-6.1-sol', prompt: 'temporary question', reference_answer: '' }, expect.any(AbortSignal))
     expect(wrapper.emitted('result')?.[0]).toEqual([result])
     expect(wrapper.text()).toContain('upstream-m')
     wrapper.unmount()
@@ -63,22 +68,50 @@ describe('ManualQualityTestModal', () => {
     expect(wrapper.emitted('result')).toBeUndefined()
     wrapper.unmount()
   })
-  it('prevents duplicate clicks and aborts an active request on unmount', async () => {
-    api.run.mockReturnValue(new Promise(() => {}))
+  it('prevents duplicate clicks, survives closing and notifies after completion', async () => {
+    let finish!: (value: unknown) => void
+    api.run.mockReturnValue(new Promise(resolve => { finish = resolve }))
     const wrapper = mountModal(); await flushPromises()
     await button(wrapper, 'run').trigger('click')
     expect(button(wrapper, 'running').attributes('disabled')).toBeDefined()
     expect(api.run).toHaveBeenCalledTimes(1)
     const signal = api.run.mock.calls[0][2] as AbortSignal
     wrapper.unmount()
-    expect(signal.aborted).toBe(true)
+    expect(signal.aborted).toBe(false)
+    const reopened = mountModal(); await flushPromises()
+    expect(button(reopened, 'running').attributes('disabled')).toBeDefined()
+    finish({ result, saved: true }); await flushPromises()
+    expect(reopened.text()).toContain('upstream-m')
+    expect(useAppStore().toasts).toHaveLength(1)
+    expect(useAppStore().toasts[0].duration).toBeUndefined()
+    reopened.unmount()
+  })
+  it('shows a newer server result instead of an older result cached before reopening', async () => {
+    const first = mountModal(); await flushPromises()
+    await button(first, 'run').trigger('click'); await flushPromises()
+    first.unmount()
+    api.result.mockResolvedValue({ ...result, answer: 'newer server answer', started_at: '2026-11-03T01:00:00Z' })
+    const reopened = mountModal(); await flushPromises()
+    expect(reopened.text()).toContain('newer server answer')
+    reopened.unmount()
+  })
+  it('retains an unsaved local answer when reopening finds an older saved result', async () => {
+    api.run.mockResolvedValue({ result, saved: false, error: 'storage failed' })
+    const first = mountModal(); await flushPromises()
+    await button(first, 'run').trigger('click'); await flushPromises()
+    first.unmount()
+    api.result.mockResolvedValue({ ...result, answer: 'older saved answer', started_at: '2026-11-02T00:00:00Z' })
+    const reopened = mountModal(); await flushPromises()
+    expect(reopened.text()).toContain('storage failed')
+    expect(reopened.text()).not.toContain('older saved answer')
+    reopened.unmount()
   })
   it('loads the result scoped to the selected model and kind', async () => {
     api.result.mockResolvedValue(result)
     const wrapper = mountModal(); await flushPromises()
-    expect(api.result).toHaveBeenLastCalledWith(7, 'm', 'candy')
+    expect(api.result).toHaveBeenLastCalledWith(7, 'gpt-6.1-sol', 'candy')
     await wrapper.get('#quality-kind').setValue('pelican'); await flushPromises()
-    expect(api.result).toHaveBeenLastCalledWith(7, 'm', 'pelican')
+    expect(api.result).toHaveBeenLastCalledWith(7, 'gpt-6.1-sol', 'pelican')
     expect((wrapper.get('#quality-prompt').element as HTMLTextAreaElement).value).toBe('pelican SVG')
     wrapper.unmount()
   })

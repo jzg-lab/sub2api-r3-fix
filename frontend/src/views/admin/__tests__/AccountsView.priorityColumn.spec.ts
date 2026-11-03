@@ -1,3 +1,5 @@
+import { useManualQualityStore } from '@/stores/manualQuality'
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
@@ -100,7 +102,25 @@ function mountView() {
 }
 
 describe('admin AccountsView priority column preferences', () => {
+  it('updates the health summary when a background test finishes after its dialog closes', async () => {
+    listAccounts.mockResolvedValue({ items: [{ id: 7, name: 'upstream', platform: 'openai', type: 'apikey', status: 'active', credentials: {}, extra: {}, groups: [] }], total: 1, page: 1, page_size: 20, pages: 1 })
+    qualitySummaries.mockResolvedValueOnce([{ account_id: 7, model: 'gpt-6.1-sol', kind: 'candy', run_id: 'background', started_at: '2026-11-03T00:00:00Z', status: 'running' }])
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.accounts.manualQuality.status.running')
+    const tests = useManualQualityStore()
+    tests.tasks['admin:7:gpt-6.1-sol:candy'] = {
+      running: false, saved: true, error: '', controller: new AbortController(),
+      result: { account_id: 7, model: 'gpt-6.1-sol', kind: 'candy', run_id: 'background', started_at: '2026-11-03T00:00:00Z', duration_ms: 1, status: 'completed', answer: '21', upstream_model: '', prompt: 'question', reference_answer: '21' }
+    }
+    await flushPromises()
+    expect(wrapper.text()).toContain('gpt-6.1-sol')
+    expect(wrapper.text()).toContain('admin.accounts.manualQuality.status.completed')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
+    setActivePinia(createPinia())
     localStorage.clear()
     listAccounts.mockReset().mockResolvedValue({
       items: [],

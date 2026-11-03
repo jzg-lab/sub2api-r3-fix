@@ -1,3 +1,4 @@
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import AccountsView from '../AccountsView.vue'
@@ -31,6 +32,7 @@ vi.mock('vue-i18n', async importOriginal => ({
 
 describe('AccountsView environment audit entry', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     localStorage.clear()
     listAccounts.mockReset().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
   })
