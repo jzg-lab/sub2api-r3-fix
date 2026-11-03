@@ -80,7 +80,17 @@ Vue I18n 新版运行时可以直接翻译测试消息，修正套餐卡片中�
 类型检查、ESLint、生产构建通过；Go 定向 race 覆盖 Ollama HTML 解析、代理/TLS、WebSocket
 及手动质量测试。pnpm 生产依赖扫描 high/critical 为 0（仍有 1 low、1 moderate），
 govulncheck 无可达漏洞、导入包漏洞为 0，依赖模块内另有 7 项未被当前调用路径触达。
-完整 CI、固定源码提交及最终隔离制品验证随后追加；旧验证镜像不得冒充本轮新制品。
+修复结果为 `4aa8998cf381e6603ab2671e0e9e7ed975c4c6b0`，已推送 main，服务器源码目录
+`/opt/sub2api-source` 已从上述基线干净快进到该提交。Go 模块校验、embed 测试/构建及固定
+基线增量 lint（0 issues）通过。[本次 CI 41557664064](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41557664064)
+全部必要检查通过：前后端安全、前端全量/lint/类型/构建、Linux embed、后端全量
+unit/integration、真实 Nginx SSE/WS race、Go lint、macOS shell/部署及候选工具检查。
+候选登记按规则跳过，未发布或放宽专项门槛。
+服务器按本次固定 SHA 重建独立镜像，镜像内回归、迁移 265 后旧版启动、原签名插件往返、
+依赖故障就绪及协议 1 → 3 → 1 共库接管通过，状态为 `VERIFIED_ISOLATED_ONLY`；
+夹具已清理，生产身份/入口/迁移/插件契约未变。新制品身份和收尾证据见部署状态。
+此结果不构成受管 PREPARED：迁移专项准备、四个新工具正式安装及候选登记仍未执行，
+旧备份已过期；没有生产迁移、切流或收费上游调用。
 
 ## 模型广场站内美元口径修订（2026-10-25，未部署）
 
