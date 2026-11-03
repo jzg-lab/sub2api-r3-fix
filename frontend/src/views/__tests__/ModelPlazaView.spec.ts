@@ -4,11 +4,11 @@ import { reactive, ref } from 'vue'
 import ModelPlazaView from '../ModelPlazaView.vue'
 import ModelPlazaContent from '@/components/modelPlaza/ModelPlazaContent.vue'
 import { refreshModelPlaza } from '@/api/modelPlaza'
+import { apiClient } from '@/api/client'
 import { plazaFixture } from '@/components/modelPlaza/__tests__/plazaFixture'
-const state = vi.hoisted(() => ({ auth: null as unknown, locale: null as unknown }))
+const state = vi.hoisted(() => ({ auth: null as unknown, locale: null as unknown, monitorEnabled: false }))
 vi.mock('@/api/modelPlaza', () => ({ refreshModelPlaza: vi.fn() }))
-vi.mock('@/api/channelMonitorV2', () => ({ getMatrix: vi.fn(), getSnapshot: vi.fn() }))
-vi.mock('@/stores/app', () => ({ useAppStore: () => ({ fetchPublicSettings: vi.fn(), cachedPublicSettings: { channel_monitor_enabled: false } }) }))
+vi.mock('@/stores/app', () => ({ useAppStore: () => ({ fetchPublicSettings: vi.fn(), cachedPublicSettings: { channel_monitor_enabled: state.monitorEnabled } }) }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...await importOriginal<typeof import('vue-i18n')>(),
@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   state.auth = reactive({ isAuthenticated: false, user: null as { id: number } | null })
   state.locale = ref('zh')
+  state.monitorEnabled = false
   Object.defineProperty(document, 'hidden', { configurable: true, value: false })
   api.mockReset()
   api.mockResolvedValue({ data: plazaFixture(), etag: 'version-1' })
@@ -26,6 +27,21 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 const create = () => mount(ModelPlazaView, { global: { stubs: { PlazaNavBar: true, ModelPlazaContent: true } } })
 describe('live model prices', () => {
+  it('loads exact model statistics for signed-in plaza viewers', async () => {
+    state.monitorEnabled = true
+    state.auth = reactive({ isAuthenticated: true, user: { id: 1 } })
+    const matrix = { coverage: {}, group_by: 'platform_group_model', items: [] }
+    const get = vi.spyOn(apiClient, 'get').mockImplementation(async url => ({
+      data: url.endsWith('/matrix') ? matrix : { config: { refresh_interval_seconds: 300 } },
+    }))
+    const wrapper = create()
+    await flushPromises()
+    expect(get).toHaveBeenCalledWith('/channel-monitor-v2/matrix', expect.objectContaining({
+      params: expect.objectContaining({ range: '24h', group_by: 'platform_group_model', include_output_tps: true, preserve_model_names: true }),
+    }))
+    expect(wrapper.findComponent(ModelPlazaContent).props('monitor')).toEqual(matrix)
+    wrapper.unmount()
+  })
   it('revalidates at 3 seconds, keeps data on 304/failure and aborts on unmount', async () => {
     const wrapper = create()
     await flushPromises()

@@ -247,8 +247,12 @@ export async function getSnapshot(filter: MonitorFilter, admin = false, signal?:
   const { data } = await apiClient.get<MonitorSnapshot>(`${base(admin)}/snapshot`, requestConfig(filter, signal))
   return data
 }
-export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal, includeOutputTPS = false) {
-  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy, ...(includeOutputTPS ? { include_output_tps: true } : {}) }))
+export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal, options: { includeOutputTPS?: boolean; preserveModelNames?: boolean } = {}) {
+  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, {
+    group_by: groupBy,
+    ...(options.includeOutputTPS ? { include_output_tps: true } : {}),
+    ...(options.preserveModelNames ? { preserve_model_names: true } : {}),
+  }))
   return data
 }
 export async function getModels(filter: MonitorFilter, admin = false, signal?: AbortSignal) {

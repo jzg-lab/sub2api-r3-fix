@@ -81,7 +81,7 @@ async function refreshMonitor() {
     const filter = { range: '24h' as const, platforms: [], groupIds: [], models: [] }
     const [snapshot, matrix] = await Promise.all([
       getSnapshot(filter, false, request.signal),
-      getMatrix(filter, 'platform_group_model', false, request.signal, true)
+      getMatrix(filter, 'platform_group_model', false, request.signal, { includeOutputTPS: true, preserveModelNames: true })
     ])
     if (request.signal.aborted) return
     monitor.value = matrix

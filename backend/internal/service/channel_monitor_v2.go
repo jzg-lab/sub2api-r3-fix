@@ -74,10 +74,11 @@ var ChannelMonitorV2ErrorCategories = []string{
 }
 
 type ChannelMonitorV2Filter struct {
-	IncludeOutputTPS bool
-	Range            string
-	Platforms        []string
-	GroupIDs         []int64
+	IncludeOutputTPS   bool
+	PreserveModelNames bool
+	Range              string
+	Platforms          []string
+	GroupIDs           []int64
 	// AllowedGroupIDs is the authenticated viewer's server-derived group scope.
 	// RestrictGroups distinguishes an ordinary user with no allowed groups from
 	// the unrestricted admin/configured scope represented by an empty slice.
@@ -517,7 +518,15 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	}
 	hideTP := s.hideThroughputForViewer(ctx, admin)
 	filter.IncludeOutputTPS = filter.IncludeOutputTPS && !hideTP && groupBy == ChannelMonitorV2GroupByPlatformGroupModel && filter.End.Sub(filter.Start) <= 24*time.Hour
-	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
+	matrixConfig := *cfg
+	if filter.PreserveModelNames && groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
+		// Plaza cards need exact model keys, not the monitor's named + other split.
+		matrixConfig.Platforms = append([]ChannelMonitorV2PlatformConfig(nil), cfg.Platforms...)
+		for i := range matrixConfig.Platforms {
+			matrixConfig.Platforms[i].Models = nil
+		}
+	}
+	matrix, err := s.repo.GetMatrix(ctx, filter, matrixConfig, groupBy, admin)
 	if err != nil {
 		return nil, err
 	}

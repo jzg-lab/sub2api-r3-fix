@@ -145,6 +145,7 @@ func (h *ChannelMonitorV2Handler) matrix(c *gin.Context, admin bool) {
 		return
 	}
 	filter.IncludeOutputTPS = c.Query("include_output_tps") == "true"
+	filter.PreserveModelNames = c.Query("preserve_model_names") == "true"
 	result, err := h.service.Matrix(c.Request.Context(), filter, groupBy, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)

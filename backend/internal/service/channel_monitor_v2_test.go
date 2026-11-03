@@ -10,14 +10,15 @@ import (
 )
 
 type channelMonitorV2RepoStub struct {
-	filter ChannelMonitorV2Filter
-	config serviceChannelMonitorV2ConfigAlias
-	users  *ChannelMonitorV2List[ChannelMonitorV2UserRow]
-	matrix *ChannelMonitorV2Matrix
-	errors *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
-	snap   *ChannelMonitorV2Snapshot
-	group  ChannelMonitorV2GroupBy
-	admin  bool
+	filter       ChannelMonitorV2Filter
+	config       serviceChannelMonitorV2ConfigAlias
+	users        *ChannelMonitorV2List[ChannelMonitorV2UserRow]
+	matrix       *ChannelMonitorV2Matrix
+	matrixConfig ChannelMonitorV2Config
+	errors       *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
+	snap         *ChannelMonitorV2Snapshot
+	group        ChannelMonitorV2GroupBy
+	admin        bool
 }
 
 // Alias keeps composite literals readable without introducing another package.
@@ -53,8 +54,9 @@ func (s *channelMonitorV2RepoStub) GetSnapshot(_ context.Context, _ ChannelMonit
 func (s *channelMonitorV2RepoStub) GetModels(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config, bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
 	return nil, nil
 }
-func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, filter ChannelMonitorV2Filter, _ ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
+func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
 	s.group, s.admin, s.filter = groupBy, admin, filter
+	s.matrixConfig = cfg
 	return s.matrix, nil
 }
 func (s *channelMonitorV2RepoStub) GetErrors(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
@@ -159,6 +161,34 @@ func TestChannelMonitorV2MatrixForwardsGroupingAndAdminScope(t *testing.T) {
 
 	_, err = NewChannelMonitorV2Service(repo).Matrix(context.Background(), ChannelMonitorV2Filter{}, "bad", false)
 	require.ErrorIs(t, err, ErrChannelMonitorV2InvalidGroupBy)
+}
+
+func TestChannelMonitorV2PlazaModelNamesKeepScopeAndConfig(t *testing.T) {
+	cfg := ChannelMonitorV2Config{
+		Enabled:   true,
+		Platforms: []ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{"gpt-5.6-sol"}}},
+		GroupIDs:  []int64{37}, IgnoredErrorCategories: []string{"quota_or_balance"},
+		HealthThresholds: DefaultChannelMonitorV2HealthThresholds(),
+	}
+	repo := &channelMonitorV2RepoStub{config: cfg}
+	svc := NewChannelMonitorV2Service(repo)
+	filter := ChannelMonitorV2Filter{PreserveModelNames: true, RestrictGroups: true, AllowedGroupIDs: []int64{37}, Models: []string{"gpt-6.1-sol"}}
+	_, err := svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
+	require.NoError(t, err)
+	want := cfg
+	want.Platforms = []ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}
+	require.Equal(t, want, repo.matrixConfig)
+	require.Equal(t, filter, repo.filter)
+	require.Equal(t, []string{"gpt-5.6-sol"}, cfg.Platforms[0].Models, "request must not mutate the shared config")
+
+	filter.PreserveModelNames = false
+	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
+	require.NoError(t, err)
+	require.Equal(t, cfg, repo.matrixConfig, "channel monitor keeps its model presentation")
+	filter.PreserveModelNames = true
+	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformModel, false)
+	require.NoError(t, err)
+	require.Equal(t, cfg, repo.matrixConfig, "exact names only apply to the plaza grouping")
 }
 
 func TestChannelMonitorV2ConfigValidation(t *testing.T) {

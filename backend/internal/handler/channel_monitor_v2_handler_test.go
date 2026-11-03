@@ -18,6 +18,38 @@ type channelMonitorV2GroupAuthorizerStub struct {
 	calls  []int64
 }
 
+type channelMonitorV2MatrixRepoStub struct {
+	service.ChannelMonitorV2Repository
+	filter service.ChannelMonitorV2Filter
+}
+
+func (s *channelMonitorV2MatrixRepoStub) GetConfig(context.Context) (*service.ChannelMonitorV2Config, error) {
+	return &service.ChannelMonitorV2Config{Enabled: true}, nil
+}
+
+func (s *channelMonitorV2MatrixRepoStub) GetMatrix(_ context.Context, filter service.ChannelMonitorV2Filter, _ service.ChannelMonitorV2Config, _ service.ChannelMonitorV2GroupBy, _ bool) (*service.ChannelMonitorV2Matrix, error) {
+	s.filter = filter
+	return &service.ChannelMonitorV2Matrix{Items: []service.ChannelMonitorV2MatrixRow{}}, nil
+}
+
+func TestChannelMonitorV2MatrixPreserveModelNamesKeepsViewerScope(t *testing.T) {
+	for _, value := range []string{"false", "true"} {
+		t.Run(value, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/channel-monitor-v2/matrix?range=24h&group_by=platform_group_model&preserve_model_names="+value, nil)
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 42})
+			repo := &channelMonitorV2MatrixRepoStub{}
+			h := &ChannelMonitorV2Handler{service: service.NewChannelMonitorV2Service(repo), apiKeyService: &channelMonitorV2GroupAuthorizerStub{groups: []service.Group{{ID: 37}}}}
+			h.Matrix(c)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, value == "true", repo.filter.PreserveModelNames)
+			require.True(t, repo.filter.RestrictGroups)
+			require.Equal(t, []int64{37}, repo.filter.AllowedGroupIDs)
+		})
+	}
+}
+
 func (s *channelMonitorV2GroupAuthorizerStub) GetAvailableGroups(_ context.Context, userID int64) ([]service.Group, error) {
 	s.calls = append(s.calls, userID)
 	return s.groups, s.err
