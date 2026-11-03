@@ -83,5 +83,19 @@
     "official_version": "0.2.17",
     "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41586156737"
+  },
+  {
+    "id": "r17-7",
+    "source": "ae92cd3fe63df31bc531a7a198447907e2b2b696",
+    "previous_source": "ca62092b6c0911e8a3a90b1ef5343c561623234d",
+    "version": "v0.2.17+r17.7",
+    "channel": "ordinary",
+    "summary": "管理员与用户智商检测共用隔离 HTML/JS 动画预览，支持 SVG/CSS/内联脚本及重新播放、停止；切回题目释放播放器。包含新版 HTML+SVG 鹈鹕默认题面，已保存的自定义题目保留。",
+    "review": "Read-only production verification on 2026-11-04: Nginx points to 127.0.0.1:8081, mapped to sub2api-blue revision ca62092b6c0911e8a3a90b1ef5343c561623234d (r17.5); /readyz ready. Reviewed complete diff to 748e48539ec62d0b27bc7c2a7933e1cd057eb308: shared frontend preview/controls/translations/tests and rebuilt embedded assets, the previously requested pelican default Prompt string, release metadata/docs and normal main/candidate VERSION difference. No schema/migrations, dependencies/lockfiles, config/setup, backend routing/billing, Docker/runtime, deploy tools/workflows or plugin contracts/state changed. Generated HTML runs only for completed results in iframe sandbox=allow-scripts, without allow-same-origin; source remains escaped text. Inert parsing removes policy overrides/external scripts/embedded documents; child CSP restricts resources/connectivity/forms and reuses the page nonce without weakening main CSP. Stop, unmount and returning to the question panel destroy the frame; saved templates/results and retention keys unchanged. Browser fixture under nonce/CSP confirmed increasing JS frames, CSS animation, parent DOM/storage isolation and blocked fetch; does not claim to prevent all self-navigation or provide an exhaustive malicious-script audit. Relevant frontend 7 files/27 tests, changed-file ESLint, typecheck and final web embed tests passed; typechecked production build passed and embedded assets rebuilt. No paid upstream calls or production mutation. Rollback replaces application only. Full CI and final server image/context/backup verification remain required before manual activation.",
+    "reviewed_by": "User explicitly authorized validating, committing and pushing the shared animation-preview fix on 2026-11-04. Codex assisted review of the complete actual-production-to-source diff; preparation and production activation remain manual.",
+    "input_source": "748e48539ec62d0b27bc7c2a7933e1cd057eb308",
+    "official_version": "0.2.17",
+    "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41673054464"
   }
 ]
