@@ -9,9 +9,19 @@
     </div>
     <p v-if="result.error" class="text-sm text-red-600 dark:text-red-400">{{ result.error }}</p>
     <p v-if="comparison !== null" class="text-sm text-gray-500">{{ t(comparison ? 'admin.accounts.manualQuality.match' : 'admin.accounts.manualQuality.noMatch') }}</p>
-    <img v-if="svgURL" :src="svgURL" :alt="t('admin.accounts.manualQuality.preview')" class="max-h-[28rem] w-full rounded-lg bg-white p-3" />
+    <div v-if="previewHTML" class="space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.manualQuality.previewHint') }}</p>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-secondary btn-sm" @click="playing = true; frameKey++">{{ t('admin.accounts.manualQuality.replay') }}</button>
+          <button v-if="playing" type="button" class="btn btn-secondary btn-sm" @click="playing = false">{{ t('admin.accounts.manualQuality.stopPreview') }}</button>
+        </div>
+      </div>
+      <iframe v-if="playing" :key="frameKey" :srcdoc="previewHTML" sandbox="allow-scripts" referrerpolicy="no-referrer" :title="t('admin.accounts.manualQuality.preview')" class="h-[28rem] w-full rounded-lg border border-gray-200 bg-white dark:border-dark-600" />
+      <p v-else class="rounded-lg bg-gray-50 p-4 text-sm text-gray-500 dark:bg-dark-900/50">{{ t('admin.accounts.manualQuality.previewStopped') }}</p>
+    </div>
     <p v-else-if="result.kind === 'pelican' && result.status === 'completed'" class="text-sm text-gray-500">{{ t('admin.accounts.manualQuality.noSVG') }}</p>
-    <details v-if="svgURL" class="rounded-lg border border-gray-200 p-3 text-sm dark:border-dark-600">
+    <details v-if="previewHTML" class="rounded-lg border border-gray-200 p-3 text-sm dark:border-dark-600">
       <summary class="cursor-pointer text-gray-500 dark:text-gray-400">{{ t('qualityTest.svgSource') }}</summary>
       <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs leading-6">{{ result.answer }}</pre>
     </details>
@@ -28,13 +38,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { QualityResult } from '@/api/admin/manualQuality'
-import { qualitySVGDataURL, qualityAnswerMatches } from '@/utils/manualQuality'
+import { qualityPreviewHTML, qualityAnswerMatches } from '@/utils/manualQuality'
 
 const props = defineProps<{ result: QualityResult }>()
 const { t } = useI18n()
-const svgURL = computed(() => props.result.kind === 'pelican' ? qualitySVGDataURL(props.result.answer) : null)
+const previewHTML = computed(() => props.result.kind === 'pelican' && props.result.status === 'completed' ? qualityPreviewHTML(props.result.answer) : null)
+const playing = ref(true)
+const frameKey = ref(0)
+watch(previewHTML, () => { playing.value = true })
 const comparison = computed(() => props.result.kind === 'candy' && props.result.status === 'completed' ? qualityAnswerMatches(props.result.answer, props.result.reference_answer) : null)
 </script>

@@ -96,4 +96,17 @@ describe('QualityTestView', () => {
     expect(useManualQualityStore().tasks).toEqual({})
     expect(useAppStore().toasts).toHaveLength(0)
   })
+
+  it('removes animation playback while the question panel is visible', async () => {
+    api.run.mockResolvedValue({ result: { ...result, kind: 'pelican', answer: '<svg><circle r="10"/></svg>' } })
+    const wrapper = mountPage(); await flushPromises()
+    await wrapper.findAll('button').find(value => value.text().includes('admin.accounts.manualQuality.pelican'))!.trigger('click')
+    await button(wrapper, 'admin.accounts.manualQuality.run').trigger('click'); await flushPromises()
+    expect(wrapper.find('iframe').exists()).toBe(true)
+    await button(wrapper, 'qualityTest.backToQuestion').trigger('click')
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    await button(wrapper, 'qualityTest.result').trigger('click')
+    expect(wrapper.find('iframe').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })

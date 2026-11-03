@@ -1,26 +1,20 @@
-import DOMPurify from 'dompurify'
+// Use only as srcdoc in an iframe with sandbox="allow-scripts", never with v-html.
+export function qualityPreviewHTML(answer: string): string | null {
+  const blocks = Array.from(answer.matchAll(/```(?:html|svg|xml)?\s*\n([\s\S]*?)```/gi))
+  const source = blocks.find(block => /<svg\b/i.test(block[1]))?.[1] || answer
+  if (!/<svg\b[\s\S]*<\/svg\s*>/i.test(source)) return null
 
-// Render as an SVG image, never as executable HTML in the application document.
-// Static geometry only: remove embedded documents, animation and resource URLs.
-export function qualitySVGDataURL(answer: string): string | null {
-  const start = answer.indexOf('<svg')
-  const end = answer.lastIndexOf('</svg>')
-  if (start < 0 || end < start) return null
-  const sanitized = DOMPurify.sanitize(answer.slice(start, end + 6), {
-    USE_PROFILES: { svg: true },
-    FORBID_TAGS: ['script', 'foreignObject', 'style', 'image', 'use', 'a', 'animate', 'animateMotion', 'animateTransform', 'set'],
-    FORBID_ATTR: ['href', 'xlink:href', 'style']
-  })
-  const doc = new DOMParser().parseFromString(sanitized, 'image/svg+xml')
-  const svg = doc.documentElement
-  if (svg.localName !== 'svg' || doc.querySelector('parsererror')) return null
-  for (const element of [svg, ...Array.from(svg.querySelectorAll('*'))]) {
-    for (const attr of Array.from(element.attributes)) {
-      if (/url\s*\(/i.test(attr.value) && !/^url\(#[\w-]+\)$/.test(attr.value)) element.removeAttribute(attr.name)
-    }
-  }
-  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svg))}`
+  // Template contents stay inert while external documents and policy overrides are removed.
+  const template = document.createElement('template')
+  template.innerHTML = source
+  if (!template.content.querySelector('svg')) return null
+  for (const element of template.content.querySelectorAll('base, meta, link, iframe, frame, object, embed, script[src]')) element.remove()
+
+  // srcdoc inherits the main page CSP; reuse its nonce without relaxing that policy.
+  const nonce = document.querySelector<HTMLScriptElement>('script[nonce]')?.nonce || crypto.randomUUID()
+  for (const element of template.content.querySelectorAll('script, style')) element.setAttribute('nonce', nonce)
+  const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'`
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style nonce="${nonce}">html,body{margin:0;min-height:100%;}svg{max-width:100%;height:auto;}</style></head><body>${template.innerHTML}</body></html>`
 }
 
 // A conservative comparison hint, not a semantic grade. Never search the entire

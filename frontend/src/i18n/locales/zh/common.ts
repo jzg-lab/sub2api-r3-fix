@@ -1,7 +1,7 @@
 export default {
   qualityTest: {
     "backToQuestion": "返回测试题目",
-    "svgSource": "查看 SVG 源码",
+    "svgSource": "查看 HTML / SVG 源码",
     "resultHint": "回答、SVG 预览与请求详情将在这里展示；结果供人工判断。",
     "emptyResult": "准备好后，开始第一次检测",
     "localTemplateHint": "仅保存在当前浏览器",

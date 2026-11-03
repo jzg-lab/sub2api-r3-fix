@@ -1,7 +1,7 @@
 export default {
   qualityTest: {
     "backToQuestion": "Back to prompt",
-    "svgSource": "View SVG source",
+    "svgSource": "View HTML / SVG source",
     "resultHint": "Responses, SVG previews and request details will appear here for your review.",
     "emptyResult": "Ready for your first test",
     "localTemplateHint": "Saved only in this browser",

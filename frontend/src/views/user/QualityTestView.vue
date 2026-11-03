@@ -81,7 +81,7 @@
               </div>
             </div>
             <p v-if="task?.error" role="alert" class="mb-4 text-sm text-red-600 dark:text-red-400">{{ task.error }}</p>
-            <ManualQualityResult v-if="task?.result" :result="task.result" />
+            <ManualQualityResult v-if="panel === 'result' && task?.result" :result="task.result" />
             <div v-else-if="!running && !task?.error" class="py-5 text-center">
               <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('qualityTest.emptyResult') }}</p>
               <p class="mt-2 text-xs text-gray-400">{{ t('qualityTest.resultHint') }}</p>
