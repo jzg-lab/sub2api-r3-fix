@@ -89,6 +89,14 @@ r17.6 `64e9cfdaec146bc5a8c08c98488fa4d8f3bdde49`；蓝槽为 r17.5、not_ready�
 已相同，没有数据库/依赖/配置/插件/部署流程变化。应用源码及内嵌资源与已通过 CI 的
 `748e48539` 相同，本轮只修订审核元数据及操作记录；保留 r17.7 不改写，重新分配候选。
 完整 CI、新候选登记及现场最终镜像/备份验收仍须通过，准备和切换继续由用户本人操作。
+重新审核提交 `2d83e35e124a08e56e59396894df6529dd878627` 已推送 main。
+[CI 41707928765](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41707928765)
+全部成功（macOS 部署夹具、前端全量/lint/类型/构建/Linux embed 程序、后端 unit/integration、
+真实 Nginx SSE/WS、Go lint、安全扫描及候选登记）。新普通候选 r17.8 固定
+`d039b65daaa62f2044bbe8a0b2b900e6d8cb0bca`，`previous_source` 为实际 r17.6
+`64e9cfdaec146bc5a8c08c98488fa4d8f3bdde49`；相对审核源只改 VERSION。
+清单机器人提交 `ff21e5d6f72edddc373f190a7b09f2a1e14e53a5` 已快进拉取核验。
+r17.7 历史记录未改写，生产最终准备/镜像验收/新备份和切换尚未执行，仍由用户本人操作。
 
 
 
