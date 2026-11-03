@@ -111,5 +111,19 @@
     "official_version": "0.2.17",
     "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41707928765"
+  },
+  {
+    "id": "r17-9",
+    "source": "bf4fba6e30501fefc64dbc3e317a59ab90915883",
+    "previous_source": "d039b65daaa62f2044bbe8a0b2b900e6d8cb0bca",
+    "version": "v0.2.17+r17.9",
+    "channel": "ordinary",
+    "summary": "智商检测两端固定居中预览框，SVG 按画框宽高完整显示；用户密钥选择显示厂商图标、套餐颜色和倍率。包含主分支已提交的模型广场真实模型统计修复。",
+    "review": "Read-only production verification on 2026-11-04 before push: nginx selects blue 127.0.0.1:8081; blue image revision d039b65daaa62f2044bbe8a0b2b900e6d8cb0bca matches r17.8 and both entry 8080 and blue /readyz report ready. Green remains prior r17.6. Complete diff from live r17.8 to c7b8dd6cfa4d100986e33d636066000830384bb3 covers two already authorized changes: quality-test layout/key option presentation and existing model-plaza statistics fix 220d8e92972c5c2a69a9c675531f6a4c902ac2bc, plus tests, rebuilt embedded frontend assets, docs/metadata and normal VERSION difference. Quality changes only shared iframe wrapper and preview CSS, plus GroupBadge option slots; sandbox without same-origin, nonce/CSP, animation scripts, saved prompts/results, routing and billing remain unchanged. Quality utility/result/admin modal/user page 4 files 20 tests passed; changed-file ESLint and typechecked production build passed. Browser mock verified square, portrait, explicit CSS sizes and landscape, 390px viewport with no preview overflow, and continued CSS/JS animation. Final go test -tags=embed ./internal/web passed. Existing model-plaza change preserves real model keys for opt-in platform_group_model queries by copying display config; authorization, group scope, ignored errors, throughput hiding, storage and default monitor grouping remain. Its recorded source-identical 82 frontend checks, service/repository/handler targeted unit, lint/typechecked build/embed and backend compilation passed; not claimed as rerun for this layout change. No migrations, dependencies/lockfiles, runtime/config/setup, deploy scripts/workflows, plugin package/API, routing or billing modifications. Ordinary-path checks pass; rollback replaces application only, unchanged data/config/plugins/runtime. Full CI must still pass before candidate registration; final server image/context/isolation/backup checks and activation remain manual. No paid upstream request or production mutation.",
+    "reviewed_by": "User authorized committing and pushing the verified quality-test layout update on 2026-11-04. Codex reviewed the complete difference from the read-only verified live r17.8 baseline. Production preparation and activation remain manual.",
+    "input_source": "c7b8dd6cfa4d100986e33d636066000830384bb3",
+    "official_version": "0.2.17",
+    "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41726782562"
   }
 ]
