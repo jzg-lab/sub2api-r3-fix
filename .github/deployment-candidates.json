@@ -69,5 +69,19 @@
     "official_version": "0.2.17",
     "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41579694536"
+  },
+  {
+    "id": "r17-6",
+    "source": "64e9cfdaec146bc5a8c08c98488fa4d8f3bdde49",
+    "previous_source": "ca62092b6c0911e8a3a90b1ef5343c561623234d",
+    "version": "v0.2.17+r17.6",
+    "channel": "ordinary",
+    "summary": "鹈鹕测试默认题面改为创建 HTML、使用 SVG 绘制鹈鹕骑自行车的 2D 动画，并保留用户要求的不测试、不使用工具提示。管理员与用户共用默认值，已保存自定义题目保留。",
+    "review": "Read-only production check on 2026-11-03: Nginx sub2api_handoff points to 127.0.0.1:8081, mapped to sub2api-blue revision ca62092b6c0911e8a3a90b1ef5343c561623234d (r17.5); /readyz ready. Reviewed complete diff from that actual revision to b99163acad726d345ec25e42ab07c3377298b4c6: application change is only the pelican Prompt string in DefaultManualQualityTemplates; remaining paths are release metadata, docs and the normal main/candidate VERSION difference. No schema/migration, dependency, deployment-tool/workflow, runtime/config or plugin changes. Admin defaults/restore and user template endpoint share this function; saved global/personal templates are not overwritten. Existing sanitized SVG rendering remains unchanged; generated HTML scripts are not enabled. Rollback changes application only. git diff --check passed; no local tests/build or paid upstream requests were run for this string-only update. Complete required CI and final server image/context/backup verification remain required before manual activation.",
+    "reviewed_by": "Maintainer authorized pushing this prompt change on 2026-11-03. Codex assisted static review of the complete actual-production-to-source diff; production preparation and switching remain manual.",
+    "input_source": "b99163acad726d345ec25e42ab07c3377298b4c6",
+    "official_version": "0.2.17",
+    "official_source": "060d0160417782cd962a0c7f460f6cd4565d4916",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/41586156737"
   }
 ]
