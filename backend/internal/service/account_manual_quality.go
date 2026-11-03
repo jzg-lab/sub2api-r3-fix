@@ -72,7 +72,7 @@ func DefaultManualQualityTemplates() []ManualQualityTemplate {
 | --- | --- | --- | --- |
 | 圆形 | 7 | 9 | 8 |
 | 五角星形 | 7 | 6 | 4 |`, ReferenceAnswer: "21"},
-		{Kind: "pelican", Prompt: "请用 SVG 绘制一只骑自行车的鹈鹕。只输出完整、可独立显示的 SVG 代码，不要使用外部图片、外部资源或脚本。"},
+		{Kind: "pelican", Prompt: "创建一个HTML，内容是SVG绘制一个鹈鹕骑自行车的2D动画，你不需要任何测试，只靠你自己完成，不要使用任何工具"},
 	}
 }
 

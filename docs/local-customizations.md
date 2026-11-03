@@ -476,6 +476,11 @@ API 密钥与使用记录使用编号标题、紧凑工具栏和细线分区；�
 读取最近结果。模板保存在 settings，迁移 `265_account_manual_quality_tests.sql` 单独保存
 账号＋请求模型＋题型的最近结果；不把完整回答塞进账号 extra 或调度缓存。
 
+2026-11-03 按用户要求，将 `DefaultManualQualityTemplates()` 中 `pelican` 默认提示替换为
+HTML 内以 SVG 绘制鹈鹕骑自行车的 2D 动画题，包含不测试、不使用工具的原文要求。
+管理员默认/恢复默认与用户自测共用此值；已保存的全局模板和个人草稿保留。
+本次仅修改默认题面及规则记录，未运行本地测试；用户随后授权提交推送，实际提交及 CI 见版本记录，生产仍由用户手动切换。
+
 - 执行路由 `/admin/accounts/:id/manual-quality`；GET 读取、POST 执行。模板与批量摘要在
   `/admin/accounts/manual-quality/` 下。只有 POST 执行会发出题目，SSE 心跳保持长推理连接。
 - 沿用文本协议请求构造，覆盖 Responses、Chat Completions、Anthropic、Gemini、Grok 和
