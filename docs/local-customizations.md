@@ -6,6 +6,14 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 来源核对进展见 [版本与合并记录](upstream-sync-state.md)，运行环境见 [部署状态](deployment-state.md)。
 本文以本地源码为准；当前线上提交、插件和实际部署证据统一见[部署状态](deployment-state.md)。
 
+## 依赖安全与国际化运行时
+
+Vue I18n 和消息编译器统一为 11.4.14，沿用 Composition API、运行时构建及中英文按需加载。
+`runtimeCompatibility.spec.ts` 覆盖两份真实语言包、插值/复数与禁止动态 Function 的 CSP 场景；
+套餐卡片回归断言真实翻译后的显示。既有 overrides 将 decode-uri-component 固定到 0.5.1、
+follow-redirects 固定到 1.16.2，x/net 升至 0.62.0 及其必需关联 x/* 模块。
+实际安全扫描与部署身份见版本记录和部署状态，不以源码依赖更新代替线上升级。
+
 ## 项目 CI 与候选登记
 
 `.github/workflows/backend-ci.yml` 对固定 SHA 执行前后端、部署工具、安全扫描和构建，包含
