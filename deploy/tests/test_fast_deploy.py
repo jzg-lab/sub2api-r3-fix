@@ -1,5 +1,6 @@
 """No Docker, systemd, credentials or production connections used by this suite."""
 from contextlib import redirect_stdout
+import hashlib
 import io
 import os
 import time
@@ -311,6 +312,45 @@ class UtilityTests(unittest.TestCase):
             changed = paths + [path]
             with patch.object(b, "git", return_value="\n".join(changed)), self.assertRaises(RuntimeError):
                 b.check_contract("repo", "old", "new", {**review, "changed_paths": changed})
+
+    def test_reviewed_dependency_build_requires_exact_files_and_keeps_other_protections(self):
+        paths = ["backend/go.mod", "backend/go.sum", "deploy/handoff_deploy.py"]
+        contents = {"backend/go.mod": b"module example\n\ngo 1.27.3\nrequire example.test/network v2.0.0\n",
+                    "backend/go.sum": b"reviewed checksums\n"}
+        review = {"status": "approved", "source": "new", "previous_source": "old", "changed_paths": paths,
+                  "reviewed_by": "fixture reviewer", "evidence": "fixture only",
+                  "reviewed_files": {p: hashlib.sha256(data).hexdigest() for p, data in contents.items()}}
+        with patch.object(b, "git", return_value="\n".join(paths)), \
+             patch.object(b, "run", side_effect=lambda *args: contents[args[-1].split(":", 1)[1]]):
+            b.check_contract("repo", "old", "new", review)
+            for files in ({}, {"backend/go.mod": review["reviewed_files"]["backend/go.mod"]},
+                          {**review["reviewed_files"], "backend/go.sum": "0" * 64}):
+                with self.subTest(files=files), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", {**review, "reviewed_files": files})
+            with patch.dict(contents, {"backend/go.sum": b"unreviewed change"}), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", review)
+        for path in ("backend/migrations/266_unreviewed.sql", "backend/pkg/pluginapi/new.go",
+                     "deploy/auth-browser/launch.sh", "deploy/codex-lb-cookie-pin/VERSION"):
+            changed = paths + [path]
+            with patch.object(b, "git", return_value="\n".join(changed)), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", {**review, "changed_paths": changed,
+                                 "reviewed_files": {**review["reviewed_files"], path: "0" * 64}})
+
+    def test_reviewed_migration_must_be_additive_and_exact(self):
+        path = "backend/migrations/265_account_manual_quality_tests.sql"
+        content = (Path(__file__).resolve().parents[2] / path).read_bytes()
+        review = {"status": "approved", "source": "new", "previous_source": "old", "changed_paths": [path],
+                  "reviewed_by": "fixture reviewer", "evidence": "isolated old/new migration roundtrip",
+                  "reviewed_files": {path: hashlib.sha256(content).hexdigest()}}
+        with patch.object(b, "git", side_effect=lambda *args: path if args[1] == "diff" else ""), \
+             patch.object(b, "run", return_value=content):
+            b.check_contract("repo", "old", "new", review)
+            with patch.object(b, "git", return_value=path), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", review)
+            modified = content + b"\nDROP TABLE accounts;\n"
+            with patch.object(b, "run", return_value=modified), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", {**review, "reviewed_files": {
+                    path: hashlib.sha256(modified).hexdigest()}})
 
     def test_app_facts_ignores_volatile_version_log_timestamp(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))

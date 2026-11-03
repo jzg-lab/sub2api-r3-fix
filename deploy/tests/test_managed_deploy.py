@@ -647,6 +647,31 @@ class BuildBudgetTests(unittest.TestCase):
 
 
 class FixtureIsolationTests(unittest.TestCase):
+    def test_migration_rehearsal_checks_history_contract_and_old_startup(self):
+        name = "265_account_manual_quality_tests.sql"
+        with tempfile.TemporaryDirectory() as root:
+            fixture = v.Fixture.__new__(v.Fixture)
+            fixture.root, fixture.h = Path(root), Mock()
+            fixture.artifact = {"migrations": {name: "new-checksum"}}
+            baseline, after = {"old.sql": "old-checksum"}, {"old.sql": "old-checksum", name: "new-checksum"}
+            for histories, sql, plugin_contract in (
+                ([baseline, after, after], ["settings", "0", "settings"], [[], []]),
+                ([baseline, {**after, "old.sql": "changed"}], ["settings"], [[]]),
+                ([baseline, after, baseline], ["settings", "0", "settings"], [[], []]),
+                ([baseline, after], ["settings", "1"], [[]]),
+                ([baseline, after], ["settings", "0", "changed"], [[], []]),
+            ):
+                fixture.h.reset_mock()
+                fixture.h.migrations.side_effect, fixture.h.sql.side_effect = histories, sql
+                with patch.object(d, "plugin_contract", side_effect=plugin_contract):
+                    if histories == [baseline, after, after] and sql[-1] == "settings":
+                        fixture.verify_migration({"image": "old"}, {"image": "new"}, name)
+                        self.assertEqual(d.read(fixture.root / "migration-roundtrip.json")["status"], "passed")
+                        self.assertEqual([c.args[0]["image"] for c in fixture.h.start.call_args_list], ["new", "old"])
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            fixture.verify_migration({"image": "old"}, {"image": "new"}, name)
+
     def test_caller_inventory_ignores_transient_deployment_jobs_only(self):
         host = Mock(c={"pause_services": ["caller.service"]})
         persistent = b"caller.service enabled -\nother.timer enabled -\n"

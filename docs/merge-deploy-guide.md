@@ -96,7 +96,14 @@ data/config/plugins/runtime 分别明确 `unchanged` 或已审查的 `reviewed_c
 按 `git diff --no-renames --name-only <previous> <source>` 顺序列出的完整 `changed_paths`、
 真实 `reviewed_by` 和 `evidence`。清单/SHA 任一不符即阻断；例外仅允许 Go 同一主次版本的
 补丁升级及 Dockerfile 对应 Go 默认值，不能改变 go.mod 的模块依赖或其他 Dockerfile 内容。
-迁移、go.sum、插件协议/包、浏览器及入口脚本仍不可通过此例外放行。最终镜像依旧复用原运行层
+旧 Go 补丁例外仍不放行迁移、go.sum、插件协议/包、浏览器及入口脚本。2026-11-03 用户
+授权依赖与迁移 265 专项上线后，维护构建追加 `reviewed_files`：键必须恰好覆盖全部受保护变化，
+值为候选提交内文件原始字节的 SHA-256；只接受 Dockerfile、go.mod、go.sum 及固定摘要的
+`265_account_manual_quality_tests.sql`，且 265 必须是新增文件，历史迁移/插件/浏览器仍拒绝。
+该入口只构建，不自动执行 SQL；生产仍须在备份后另行以事务执行已审查的 265，设置短锁等待，
+原迁移账本完整一致才登记新增记录。普通准备仍核对每一条实际已应用 checksum，不能跳过。
+隔离验收自动验证仅新增 265、历史 checksum/设置/插件不变及旧版在新结构上启动后，再执行完整往返。
+最终镜像依旧复用原运行层
 和配置，构建回执封存专项审查。普通页面准备不会传此参数。安装工具/修改生产构建镜像固定值
 仍先取得用户确认，最终原签名插件隔离验收和新备份仍必须完成。
 

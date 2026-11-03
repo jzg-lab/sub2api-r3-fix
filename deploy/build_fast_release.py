@@ -37,6 +37,22 @@ def check_contract(repo, previous, commit, review=None):
             "special build review does not match the complete source diff")
     require(all(isinstance(review.get(k), str) and review[k].strip() for k in ("reviewed_by", "evidence")),
             "special build review requires reviewer and evidence")
+    if "reviewed_files" in review:
+        # This maintenance path builds reviewed inputs; prepare still requires every SQL checksum applied.
+        allowed = {"Dockerfile", "backend/go.mod", "backend/go.sum",
+                   "backend/migrations/265_account_manual_quality_tests.sql"}
+        files = review["reviewed_files"]
+        require(isinstance(files, dict) and set(files) == set(blocked) and set(blocked) <= allowed,
+                "special build requires exact reviewed dependency/migration files")
+        for path in blocked:
+            content = run("git", "-C", str(repo), "show", commit + ":" + path)
+            require(files[path] == hashlib.sha256(content).hexdigest(), "reviewed file checksum differs: " + path)
+            if path.startswith("backend/migrations/"):
+                require(hashlib.sha256(content.strip()).hexdigest() ==
+                        "7362b1b5332002b100874959d6d907668da32673eb7db9f2ef1514a84a271248" and
+                        not git(repo, "ls-tree", "--name-only", previous, "--", path),
+                        "only the reviewed additive manual quality migration is supported")
+        return
     require(set(blocked) <= {"Dockerfile", "backend/go.mod"}, "special build cannot change migrations, plugins or dependencies")
     # This exception only permits a reviewed Go patch; runtime layers still come from the old image.
     old = run("git", "-C", str(repo), "show", previous + ":backend/go.mod")
@@ -175,5 +191,5 @@ if __name__ == "__main__":
     for name in ("repo", "output", "commit", "previous", "runtime", "node-image", "go-image"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--cgroup-parent", choices=[BUILD_CGROUP])
-    parser.add_argument("--special-review", help="private approved review bound to the full diff; Go patch changes only")
+    parser.add_argument("--special-review", help="private approved review bound to the full diff and reviewed file checksums")
     build(parser.parse_args())

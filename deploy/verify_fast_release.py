@@ -174,6 +174,10 @@ class Fixture:
         old = {**h.app_facts(), "image": self.artifact["base_image_id"], "source": self.artifact["previous_source"],
                "has_readyz": True, "assets": h.assets(h.c["local_url"])}
         new = {**self.artifact, "has_readyz": True}
+        migration = "265_account_manual_quality_tests.sql"
+        reviewed = (self.artifact.get("special_review") or {}).get("reviewed_files", {})
+        if "backend/migrations/" + migration in reviewed:
+            self.verify_migration(old, new, migration)
         before = {"data": h.data_identity(), "migrations": h.migrations(), "plugins": h.plugins()}
         h.verify(old)
         d.require(h.drain(), "fixture not idle")
@@ -215,7 +219,28 @@ class Fixture:
                 "roundtrip": "passed", "accounts": 0, "network": "internal", "production_mounts": False}
         if self.mode == "handoff":
             result["handoff"] = self.run_handoff(old, new)
+        if (self.root / "migration-roundtrip.json").exists():
+            result["migration"] = d.read(self.root / "migration-roundtrip.json")
         return result
+
+    def verify_migration(self, old, new, name):
+        h = self.h
+        baseline, plugins = h.migrations(), d.plugin_contract(h.plugins())
+        settings_sql = "SELECT md5(coalesce(json_agg(s ORDER BY key)::text,'[]')) FROM settings s"
+        settings = h.sql(settings_sql)
+        h.stop(self.root / "migration-old-stop.log")
+        h.start(new)
+        after = h.migrations()
+        d.require(set(after) - set(baseline) == {name} and all(after.get(k) == v for k, v in baseline.items())
+                  and after[name] == self.artifact["migrations"][name], "unexpected isolated migration delta")
+        d.require(h.sql("SELECT count(*) FROM account_manual_quality_tests") == "0", "unexpected quality data")
+        d.require(d.plugin_contract(h.plugins()) == plugins and h.sql(settings_sql) == settings,
+                  "migration changed plugins or settings")
+        h.stop(self.root / "migration-new-stop.log")
+        h.start(old)
+        d.require(h.migrations() == after, "old startup changed migration history")
+        d.save(self.root / "migration-roundtrip.json", {"status": "passed", "new_migration": name,
+               "checksum": after[name], "old_version_on_new_schema": "passed", "production_database_used": False})
 
     def run_handoff(self, old, new):
         h = self.h
