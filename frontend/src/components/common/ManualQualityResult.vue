@@ -17,7 +17,9 @@
           <button v-if="playing" type="button" class="btn btn-secondary btn-sm" @click="playing = false">{{ t('admin.accounts.manualQuality.stopPreview') }}</button>
         </div>
       </div>
-      <iframe v-if="playing" :key="frameKey" :srcdoc="previewHTML" sandbox="allow-scripts" referrerpolicy="no-referrer" :title="t('admin.accounts.manualQuality.preview')" class="h-[28rem] w-full rounded-lg border border-gray-200 bg-white dark:border-dark-600" />
+      <div v-if="playing" class="mx-auto aspect-video w-full max-w-xl overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-dark-600">
+        <iframe :key="frameKey" :srcdoc="previewHTML" sandbox="allow-scripts" referrerpolicy="no-referrer" :title="t('admin.accounts.manualQuality.preview')" class="h-full w-full border-0 bg-white" />
+      </div>
       <p v-else class="rounded-lg bg-gray-50 p-4 text-sm text-gray-500 dark:bg-dark-900/50">{{ t('admin.accounts.manualQuality.previewStopped') }}</p>
     </div>
     <p v-else-if="result.kind === 'pelican' && result.status === 'completed'" class="text-sm text-gray-500">{{ t('admin.accounts.manualQuality.noSVG') }}</p>

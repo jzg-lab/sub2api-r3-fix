@@ -14,6 +14,7 @@ describe('ManualQualityResult', () => {
   it('isolates playback, destroys it on stop and recreates it on replay or a new result', async () => {
     const wrapper = mount(ManualQualityResult, { props: { result } })
     const frame = wrapper.get('iframe')
+    expect(wrapper.get('.aspect-video').classes()).toContain('max-w-xl')
     expect(frame.attributes('sandbox')).toBe('allow-scripts')
     expect(frame.attributes('referrerpolicy')).toBe('no-referrer')
     expect(frame.attributes('srcdoc')).toContain('requestAnimationFrame')

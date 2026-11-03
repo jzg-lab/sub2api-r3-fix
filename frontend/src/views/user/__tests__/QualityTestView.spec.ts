@@ -17,11 +17,12 @@ const templates = [
   { kind: 'pelican', prompt: 'draw SVG pelican', reference_answer: '' }
 ]
 const result = { ...templates[0], model: 'gpt-6.1-sol', answer: '21', status: 'completed', started_at: '2026-11-03T00:00:00Z', duration_ms: 1, run_id: 'run', account_id: 0, upstream_model: '' }
-function mountPage() {
+function mountPage(realKeyControl = false) {
   return mount(QualityTestView, { global: { stubs: {
     AppLayout: { template: '<div><slot /></div>' },
     RouterLink: { template: '<a><slot /></a>' },
-    Select: { props: ['modelValue', 'options', 'id'], emits: ['update:modelValue'], template: '<select :id="id" :value="modelValue" @change="$emit(\'update:modelValue\', $event.target.value)"><option v-for="item in options" :key="item.value" :value="item.value">{{ item.label }}</option></select>' }
+    Teleport: true,
+    Select: realKeyControl ? false : { props: ['modelValue', 'options', 'id'], emits: ['update:modelValue'], template: '<select :id="id" :value="modelValue" @change="$emit(\'update:modelValue\', $event.target.value)"><option v-for="item in options" :key="item.value" :value="item.value">{{ item.label }}</option></select>' }
   } } })
 }
 const button = (wrapper: ReturnType<typeof mountPage>, key: string) => wrapper.findAll('button').find(value => value.text() === key)!
@@ -37,6 +38,38 @@ beforeEach(async () => {
 })
 
 describe('QualityTestView', () => {
+  it('uses the key creation group colors in the selection and searchable options without exposing keys', async () => {
+    api.keys.mockResolvedValue({ items: [
+      { id: 2, name: 'My key', key: 'sk-own', group: { name: 'OpenAI plan', platform: 'openai', subscription_type: 'standard', rate_multiplier: 2 } },
+      { id: 3, name: 'Work key', key: 'sk-work', group: { name: 'Claude plan', platform: 'anthropic', subscription_type: 'subscription', rate_multiplier: 1.5 } },
+      { id: 4, name: 'Ungrouped key', key: 'sk-ungrouped' }
+    ], total: 3 })
+    const wrapper = mountPage(true); await flushPromises()
+    const trigger = () => wrapper.get('#self-quality-key')
+    expect(trigger().text()).toContain('My key')
+    expect(trigger().text()).toContain('OpenAI plan')
+    expect(trigger().find('.bg-green-50').exists()).toBe(true)
+    await trigger().trigger('click')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(3)
+    expect(wrapper.get('[role="option"] .bg-orange-100').text()).toContain('Claude plan')
+    expect(wrapper.html()).not.toContain('sk-own')
+    expect(wrapper.html()).not.toContain('sk-work')
+    await wrapper.get('.select-search-input').setValue('Claude')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(1)
+    await wrapper.get('[role="option"]').trigger('click')
+    expect(trigger().find('.bg-orange-100').exists()).toBe(true)
+    expect(trigger().text()).toContain('Work key')
+    expect(trigger().text()).toContain('1.5x')
+    await button(wrapper, 'admin.accounts.manualQuality.run').trigger('click'); await flushPromises()
+    expect(api.run).toHaveBeenCalledWith('sk-work', expect.any(Object), expect.any(AbortSignal))
+    await trigger().trigger('click')
+    await wrapper.get('.select-search-input').setValue('Ungrouped')
+    await wrapper.get('[role="option"]').trigger('click')
+    expect(trigger().text()).toBe('Ungrouped key')
+    expect(trigger().find('.bg-green-50, .bg-orange-100').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('defaults to 6.1 sol and saves personal prompts without sending a request or persisting keys', async () => {
     const wrapper = mountPage(); await flushPromises()
     expect((wrapper.get('#self-quality-model').element as HTMLInputElement).value).toBe('gpt-6.1-sol')

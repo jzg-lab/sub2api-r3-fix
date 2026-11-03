@@ -14,7 +14,7 @@ export function qualityPreviewHTML(answer: string): string | null {
   const nonce = document.querySelector<HTMLScriptElement>('script[nonce]')?.nonce || crypto.randomUUID()
   for (const element of template.content.querySelectorAll('script, style')) element.setAttribute('nonce', nonce)
   const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'`
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style nonce="${nonce}">html,body{margin:0;min-height:100%;}svg{max-width:100%;height:auto;}</style></head><body>${template.innerHTML}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style nonce="${nonce}">html,body{margin:0;height:100%;}body{display:grid;place-items:center;}svg{display:block;max-width:100vw!important;max-height:100vh!important;height:auto;}</style></head><body>${template.innerHTML}</body></html>`
 }
 
 // A conservative comparison hint, not a semantic grade. Never search the entire

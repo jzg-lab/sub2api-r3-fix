@@ -15,7 +15,22 @@
           <div class="space-y-5">
             <div>
               <label for="self-quality-key" class="input-label">{{ t('nav.apiKeys') }}</label>
-              <Select id="self-quality-key" v-model="keyId" :options="keyOptions" searchable :disabled="running || loading" :aria-label="t('nav.apiKeys')" />
+              <Select id="self-quality-key" v-model="keyId" :options="keyOptions" searchable :disabled="running || loading" :aria-label="t('nav.apiKeys')">
+                <template #selected="{ option }">
+                  <span v-if="option" class="flex min-w-0 flex-col items-start gap-1" :title="(option as KeyOption).label">
+                    <span class="max-w-full truncate text-sm font-medium">{{ option.name }}</span>
+                    <GroupBadge v-if="(option as KeyOption).badge.name" v-bind="(option as KeyOption).badge" always-show-rate class="max-w-full" />
+                  </span>
+                  <span v-else class="text-gray-400">{{ t('common.selectOption') }}</span>
+                </template>
+                <template #option="{ option, selected }">
+                  <span class="flex min-w-0 flex-1 flex-col items-start gap-1" :title="(option as KeyOption).label">
+                    <span class="max-w-full truncate text-sm font-medium">{{ option.name }}</span>
+                    <GroupBadge v-if="(option as KeyOption).badge.name" v-bind="(option as KeyOption).badge" always-show-rate class="max-w-full" />
+                  </span>
+                  <Icon v-if="selected" name="check" size="sm" class="shrink-0 text-primary-500" aria-hidden="true" />
+                </template>
+              </Select>
               <button v-if="keys.length < totalKeys" class="btn btn-secondary mt-2" :disabled="loadingKeys || running" @click="loadKeys()">{{ t('qualityTest.moreKeys') }}</button>
               <RouterLink v-if="!loading && !keys.length" to="/keys" class="mt-2 inline-block text-sm text-primary-600 dark:text-primary-400">{{ t('qualityTest.createKey') }}</RouterLink>
             </div>
@@ -113,13 +128,14 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import Select from '@/components/common/Select.vue'
+import Select, { type SelectOption } from '@/components/common/Select.vue'
+import GroupBadge from '@/components/common/GroupBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ManualQualityResult from '@/components/common/ManualQualityResult.vue'
 import { keysAPI } from '@/api/keys'
 import { qualityTestTemplates, runUserQualityTest } from '@/api/qualityTest'
 import type { QualityKind, QualityTemplate } from '@/api/admin/manualQuality'
-import type { ApiKey } from '@/types'
+import type { ApiKey, GroupPlatform, SubscriptionType } from '@/types'
 import { useAuthStore } from '@/stores/auth'
 import { DEFAULT_QUALITY_MODEL, useManualQualityStore } from '@/stores/manualQuality'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -145,9 +161,20 @@ let nextPage = 1
 let active = true
 const keyId = ref<number | string>(task.value?.keyId || '')
 const selectedKey = computed(() => keys.value.find(value => value.id === Number(keyId.value)))
+interface KeyOption extends SelectOption {
+  value: number
+  label: string
+  name: string
+  badge: { name: string; platform?: GroupPlatform; subscriptionType?: SubscriptionType; rateMultiplier?: number }
+}
 const keyOptions = computed(() => {
-  const options = keys.value.map(key => ({ value: key.id, label: `${key.name}${key.group ? ` · ${key.group.name} · ${key.group.rate_multiplier}×` : ''}` }))
-  if (task.value?.keyId && task.value.keyName && !options.some(value => value.value === task.value?.keyId)) options.unshift({ value: task.value.keyId, label: task.value.keyName })
+  const options: KeyOption[] = keys.value.map(key => ({
+    value: key.id,
+    label: `${key.name}${key.group ? ` · ${key.group.name} · ${key.group.rate_multiplier}×` : ''}`,
+    name: key.name,
+    badge: { name: key.group?.name || '', platform: key.group?.platform, subscriptionType: key.group?.subscription_type, rateMultiplier: key.group?.rate_multiplier }
+  }))
+  if (task.value?.keyId && task.value.keyName && !options.some(value => value.value === task.value?.keyId)) options.unshift({ value: task.value.keyId, label: task.value.keyName, name: task.value.keyName, badge: { name: '' } })
   return options
 })
 const model = ref(task.value?.input?.model || DEFAULT_QUALITY_MODEL)

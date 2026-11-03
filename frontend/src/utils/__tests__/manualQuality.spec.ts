@@ -17,6 +17,16 @@ describe('manual quality display', () => {
     expect(preview).not.toContain('Explanation')
     expect(document.body.dataset.generated).toBeUndefined()
   })
+  it('fits SVG within both viewport dimensions without changing its drawing or animation', () => {
+    const svg = '<svg width="800" height="800" viewBox="0 0 800 800"><circle r="10"/><animate attributeName="opacity" dur="1s" repeatCount="indefinite"/></svg>'
+    const preview = qualityPreviewHTML(`<style>svg{width:800px;height:800px;max-height:none}</style>${svg}`)!
+    const doc = new DOMParser().parseFromString(preview, 'text/html')
+    const rules = doc.querySelector('style')!.textContent!
+    expect(rules).toContain('html,body{margin:0;height:100%;}')
+    expect(rules).toContain('body{display:grid;place-items:center;}')
+    expect(rules).toContain('max-width:100vw!important;max-height:100vh!important;')
+    expect(doc.querySelector('svg')!.outerHTML).toBe(new DOMParser().parseFromString(svg, 'text/html').querySelector('svg')!.outerHTML)
+  })
   it('puts the restrictive policy first and removes generated policy, external scripts and nested frames', () => {
     const preview = qualityPreviewHTML('<meta http-equiv="Content-Security-Policy" content="script-src *"><base href="https://evil.invalid"><link rel="stylesheet" href="https://evil.invalid/a"><svg><circle r="10"/></svg><script src="https://evil.invalid/a.js"></script><iframe srcdoc="bad"></iframe><object data="bad"></object><embed src="bad">')!
     const doc = new DOMParser().parseFromString(preview, 'text/html')
