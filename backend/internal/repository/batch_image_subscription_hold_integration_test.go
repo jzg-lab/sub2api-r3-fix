@@ -3,6 +3,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"os"
 	"sync"
@@ -18,9 +19,27 @@ func batchSubscriptionFixture(t *testing.T, amount float64) (*service.BatchImage
 	t.Helper()
 	client := testEntClient(t)
 	user := mustCreateUser(t, client, &service.User{Email: uuid.NewString() + "@example.com", PasswordHash: "hash", Balance: 100})
+	var groupIDs []int64
+	t.Cleanup(func() {
+		ctx := context.Background() // The test context is canceled before cleanup runs.
+		for _, query := range []string{
+			`DELETE FROM batch_image_jobs WHERE user_id=$1`,
+			`DELETE FROM usage_billing_dedup WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id=$1)`,
+			`DELETE FROM users WHERE id=$1`,
+		} {
+			_, err := integrationDB.ExecContext(ctx, query, user.ID)
+			require.NoError(t, err, "clean up batch subscription fixture")
+		}
+		for _, id := range groupIDs {
+			_, err := integrationDB.ExecContext(ctx, `DELETE FROM groups WHERE id=$1`, id)
+			require.NoError(t, err, "clean up batch subscription group")
+		}
+	})
 	limit := 10.0
 	group := mustCreateGroup(t, client, &service.Group{Name: uuid.NewString(), SubscriptionType: service.SubscriptionTypeSubscription, DailyLimitUSD: &limit, WeeklyLimitUSD: &limit, MonthlyLimitUSD: &limit})
+	groupIDs = append(groupIDs, group.ID)
 	destination := mustCreateGroup(t, client, &service.Group{Name: uuid.NewString(), Platform: service.PlatformGemini})
+	groupIDs = append(groupIDs, destination.ID)
 	key := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, GroupID: &destination.ID, Key: uuid.NewString(), Name: "batch-subscription"})
 	sub := mustCreateSubscription(t, client, &service.UserSubscription{UserID: user.ID, GroupID: group.ID})
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
