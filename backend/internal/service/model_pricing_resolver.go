@@ -81,6 +81,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 		}
 		resolved := r.resolveConfiguredPricing(groupPricing, input.Model, PricingSourceGroup)
 		resolved.longContextPricingEnabled = longContextPricingEnabled
+		applyGroupLongContextThreshold(input.Group, input.Model, resolved)
 		return resolved
 	}
 
@@ -125,6 +126,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 		r.applyChannelOverrides(ctx, *input.GroupID, input.Model, resolved)
 	}
 
+	applyGroupLongContextThreshold(input.Group, input.Model, resolved)
 	return resolved
 }
 

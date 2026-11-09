@@ -22234,6 +22234,7 @@ type GroupMutation struct {
 	audio_stt_price_per_hour                *float64
 	addaudio_stt_price_per_hour             *float64
 	long_context_pricing_enabled            *bool
+	long_context_pricing                    *domain.GroupLongContextPricing
 	model_pricing                           *jsontext.Value
 	appendmodel_pricing                     jsontext.Value
 	claude_code_only                        *bool
@@ -24535,6 +24536,55 @@ func (m *GroupMutation) ResetLongContextPricingEnabled() {
 	m.long_context_pricing_enabled = nil
 }
 
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (m *GroupMutation) SetLongContextPricing(dlcp domain.GroupLongContextPricing) {
+	m.long_context_pricing = &dlcp
+}
+
+// LongContextPricing returns the value of the "long_context_pricing" field in the mutation.
+func (m *GroupMutation) LongContextPricing() (r domain.GroupLongContextPricing, exists bool) {
+	v := m.long_context_pricing
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLongContextPricing returns the old "long_context_pricing" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldLongContextPricing(ctx context.Context) (v domain.GroupLongContextPricing, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLongContextPricing is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLongContextPricing requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLongContextPricing: %w", err)
+	}
+	return oldValue.LongContextPricing, nil
+}
+
+// ClearLongContextPricing clears the value of the "long_context_pricing" field.
+func (m *GroupMutation) ClearLongContextPricing() {
+	m.long_context_pricing = nil
+	m.clearedFields[group.FieldLongContextPricing] = struct{}{}
+}
+
+// LongContextPricingCleared returns if the "long_context_pricing" field was cleared in this mutation.
+func (m *GroupMutation) LongContextPricingCleared() bool {
+	_, ok := m.clearedFields[group.FieldLongContextPricing]
+	return ok
+}
+
+// ResetLongContextPricing resets all changes to the "long_context_pricing" field.
+func (m *GroupMutation) ResetLongContextPricing() {
+	m.long_context_pricing = nil
+	delete(m.clearedFields, group.FieldLongContextPricing)
+}
+
 // SetModelPricing sets the "model_pricing" field.
 func (m *GroupMutation) SetModelPricing(j jsontext.Value) {
 	m.model_pricing = &j
@@ -26049,7 +26099,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 67)
+	fields := make([]string, 0, 68)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26172,6 +26222,9 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.long_context_pricing_enabled != nil {
 		fields = append(fields, group.FieldLongContextPricingEnabled)
+	}
+	if m.long_context_pricing != nil {
+		fields = append(fields, group.FieldLongContextPricing)
 	}
 	if m.model_pricing != nil {
 		fields = append(fields, group.FieldModelPricing)
@@ -26341,6 +26394,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.AudioSttPricePerHour()
 	case group.FieldLongContextPricingEnabled:
 		return m.LongContextPricingEnabled()
+	case group.FieldLongContextPricing:
+		return m.LongContextPricing()
 	case group.FieldModelPricing:
 		return m.ModelPricing()
 	case group.FieldClaudeCodeOnly:
@@ -26484,6 +26539,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldAudioSttPricePerHour(ctx)
 	case group.FieldLongContextPricingEnabled:
 		return m.OldLongContextPricingEnabled(ctx)
+	case group.FieldLongContextPricing:
+		return m.OldLongContextPricing(ctx)
 	case group.FieldModelPricing:
 		return m.OldModelPricing(ctx)
 	case group.FieldClaudeCodeOnly:
@@ -26831,6 +26888,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLongContextPricingEnabled(v)
+		return nil
+	case group.FieldLongContextPricing:
+		v, ok := value.(domain.GroupLongContextPricing)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLongContextPricing(v)
 		return nil
 	case group.FieldModelPricing:
 		v, ok := value.(jsontext.Value)
@@ -27425,6 +27489,9 @@ func (m *GroupMutation) ClearedFields() []string {
 	if m.FieldCleared(group.FieldAudioSttPricePerHour) {
 		fields = append(fields, group.FieldAudioSttPricePerHour)
 	}
+	if m.FieldCleared(group.FieldLongContextPricing) {
+		fields = append(fields, group.FieldLongContextPricing)
+	}
 	if m.FieldCleared(group.FieldModelPricing) {
 		fields = append(fields, group.FieldModelPricing)
 	}
@@ -27504,6 +27571,9 @@ func (m *GroupMutation) ClearField(name string) error {
 		return nil
 	case group.FieldAudioSttPricePerHour:
 		m.ClearAudioSttPricePerHour()
+		return nil
+	case group.FieldLongContextPricing:
+		m.ClearLongContextPricing()
 		return nil
 	case group.FieldModelPricing:
 		m.ClearModelPricing()
@@ -27647,6 +27717,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldLongContextPricingEnabled:
 		m.ResetLongContextPricingEnabled()
+		return nil
+	case group.FieldLongContextPricing:
+		m.ResetLongContextPricing()
 		return nil
 	case group.FieldModelPricing:
 		m.ResetModelPricing()

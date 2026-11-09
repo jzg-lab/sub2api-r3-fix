@@ -629,7 +629,13 @@ export interface Group {
   updated_at: string
 }
 
+export interface GroupLongContextPricing {
+  threshold_tokens?: number
+  model_thresholds?: Record<string, number>
+}
+
 export interface AdminGroup extends Group {
+  long_context_pricing?: GroupLongContextPricing
   // 管理端的 name / description 始终是原字段，各语言译文另放在 i18n 里
   i18n?: GroupI18n
   force_openai_fast: boolean
@@ -810,6 +816,7 @@ export interface CreateGroupRequest {
   weekly_limit_usd?: number | null
   monthly_limit_usd?: number | null
   long_context_pricing_enabled?: boolean
+  long_context_pricing?: GroupLongContextPricing
   force_openai_fast?: boolean
   free_openai_fast?: boolean
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]
@@ -877,6 +884,7 @@ export interface UpdateGroupRequest {
   weekly_limit_usd?: number | null
   monthly_limit_usd?: number | null
   long_context_pricing_enabled?: boolean
+  long_context_pricing?: GroupLongContextPricing
   force_openai_fast?: boolean
   free_openai_fast?: boolean
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -94,7 +95,14 @@ func cloneGroupMessagesDispatchModelConfig(value OpenAIMessagesDispatchModelConf
 }
 
 func cloneGroupForDuplicate(source *Group, operationID string) *Group {
+	pricing := make([]ChannelModelPricing, len(source.ModelPricing))
+	for i := range source.ModelPricing {
+		pricing[i] = source.ModelPricing[i].Clone()
+	}
 	return &Group{
+		LongContextPricingEnabled:       source.LongContextPricingEnabled,
+		LongContextPricing:              GroupLongContextPricing{ThresholdTokens: source.LongContextPricing.ThresholdTokens, ModelThresholds: maps.Clone(source.LongContextPricing.ModelThresholds)},
+		ModelPricing:                    pricing,
 		Name:                            duplicateGroupName(source.Name, 1),
 		Description:                     source.Description,
 		I18n:                            cloneGroupI18nForDuplicate(source.I18n),
