@@ -30,7 +30,9 @@ handler、middleware 回归通过，内嵌资源测试和带 embed 的服务器�
 middleware、repository unit 中后三包通过；service 包存在基线也复现的 Unix 可执行文件/插件
 文件测试失败及其他既有失败，不将全量结果记为通过。实现已提交为
 `bbf3634a`（`codex/shared-subscription-quota`）；向 GitHub 推送及两次远端 fetch 均因连接重置
-失败，尚未推送。没有执行迁移、部署或生产切换。
+失败，尚未推送。随后复查未发现阻断问题，本地 `main` 已快进至 `6347ecea`；推送时 HTTPS
+连接 GitHub 超时，SSH 因无可用公钥认证失败。最后一次成功读取的 `origin/main` 仍为
+`0a73f9b6`，本地 `main` ahead 2。没有执行迁移、部署或生产切换。
 
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
 
