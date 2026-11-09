@@ -539,6 +539,9 @@ export default {
     selectPlan: '选择套餐',
     planFeatures: '功能特性',
     planCard: {
+      universal: '全站通用',
+      pendingHolds: '已用额度包含批量图片任务的待结算预占。',
+      groupPricing: '所有可用分组共享额度，按实际分组价格和倍率扣费',
       rate: '倍率',
       peakRate: '高峰倍率',
       dailyLimit: '日限额',

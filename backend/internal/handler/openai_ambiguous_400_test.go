@@ -314,7 +314,7 @@ func TestOpenAIAmbiguous400RealRoutingAndBilling(t *testing.T) {
 							require.NoError(t, err)
 							routed.Group.SubscriptionType = service.SubscriptionTypeSubscription
 							now := time.Now()
-							sub := &service.UserSubscription{ID: 50, UserID: key.UserID, GroupID: groupID, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+							sub := &service.UserSubscription{ID: 50, UserID: key.UserID, GroupID: 900, Group: &service.Group{ID: 900, SubscriptionType: service.SubscriptionTypeSubscription}, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
 							subs = service.NewSubscriptionService(nil, smartRouteSubscriptions{sub: sub}, nil, nil, &cfg)
 							t.Cleanup(subs.Stop)
 						}

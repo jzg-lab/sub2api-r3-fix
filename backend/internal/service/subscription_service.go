@@ -970,6 +970,7 @@ func (s *SubscriptionService) EnsureWindowMaintenance(ctx context.Context, sub *
 // CheckUsageLimits 检查使用限额（返回错误如果超限）
 // 用于中间件的快速预检查，additionalCost 通常为 0
 func (s *SubscriptionService) CheckUsageLimits(ctx context.Context, sub *UserSubscription, group *Group, additionalCost float64) error {
+	group = sub.QuotaGroup(group)
 	if !sub.CheckDailyLimit(group, additionalCost) {
 		return ErrDailyLimitExceeded
 	}
@@ -986,6 +987,7 @@ func (s *SubscriptionService) CheckUsageLimits(ctx context.Context, sub *UserSub
 // 仅做内存检查，不触发 DB 写入。调用方必须在放行请求前同步完成窗口维护。
 // 返回 needsMaintenance 表示是否需要执行窗口维护并回读数据库快照。
 func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, group *Group) (needsMaintenance bool, err error) {
+	group = sub.QuotaGroup(group)
 	now := s.now()
 	// 1. 验证订阅状态
 	if sub.Status == SubscriptionStatusExpired {
@@ -1017,13 +1019,13 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 	}
 
 	// 3. 检查用量限额
-	if !sub.CheckDailyLimit(group, 0) {
+	if group.HasDailyLimit() && sub.DailyUsageUSD >= *group.DailyLimitUSD {
 		return needsMaintenance, ErrDailyLimitExceeded
 	}
-	if !sub.CheckWeeklyLimit(group, 0) {
+	if group.HasWeeklyLimit() && sub.WeeklyUsageUSD >= *group.WeeklyLimitUSD {
 		return needsMaintenance, ErrWeeklyLimitExceeded
 	}
-	if !sub.CheckMonthlyLimit(group, 0) {
+	if group.HasMonthlyLimit() && sub.MonthlyUsageUSD >= *group.MonthlyLimitUSD {
 		return needsMaintenance, ErrMonthlyLimitExceeded
 	}
 

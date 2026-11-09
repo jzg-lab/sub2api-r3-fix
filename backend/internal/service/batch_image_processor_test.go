@@ -401,6 +401,7 @@ func newFakeBatchImageRepository() *fakeBatchImageRepository {
 
 func (r *fakeBatchImageRepository) CreateBatchImageJob(_ context.Context, params CreateBatchImageJobParams) (*BatchImageJob, error) {
 	job := &BatchImageJob{
+		BillingSnapshot:         params.BillingSnapshot,
 		BatchID:                 params.BatchID,
 		UserID:                  params.UserID,
 		APIKeyID:                params.APIKeyID,

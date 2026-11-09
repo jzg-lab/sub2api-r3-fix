@@ -47,6 +47,7 @@ func (r *BatchImageAccountRepositoryResolver) ResolveBatchImageAccount(ctx conte
 }
 
 type BatchImageProviderProcessor struct {
+	Subscriptions    *SubscriptionService
 	Repo             BatchImageRepository
 	ProviderRegistry *BatchImageProviderRegistry
 	AccountResolver  BatchImageAccountResolver
@@ -235,7 +236,7 @@ func (p *BatchImageProviderProcessor) releaseTerminalHold(ctx context.Context, j
 	if job.Status != BatchImageJobStatusFailed && job.Status != BatchImageJobStatusCancelled {
 		return nil
 	}
-	if err := releaseBatchImageBalanceHold(ctx, p.BillingRepo, job, batchImageDerefString(job.RequestHash)); err != nil {
+	if err := releaseBatchImageBalanceHold(ctx, p.BillingRepo, job, batchImageDerefString(job.RequestHash), p.Subscriptions); err != nil {
 		return err
 	}
 	if p.AuthCache != nil && job.UserID > 0 {

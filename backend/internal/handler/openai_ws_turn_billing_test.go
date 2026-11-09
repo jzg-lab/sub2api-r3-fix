@@ -64,6 +64,18 @@ func TestOpenAIWSTurnBillingSnapshots(t *testing.T) {
 	require.Same(t, conn, turns.begin(t.Context(), lookup, 0, conn))
 }
 
+func TestOpenAIWSTurnSubscriptionSnapshotsDoNotMoveEarlierCharges(t *testing.T) {
+	var turns openAIWSTurnBillingAPIKeys
+	first, second := &service.UserSubscription{ID: 10}, &service.UserSubscription{ID: 20}
+	turns.pinSubscription(1, first)
+	turns.pinSubscription(2, second)
+	require.Same(t, first, turns.subscriptionForTurn(1))
+	require.Same(t, second, turns.subscriptionForTurn(2))
+	turns.pinSubscription(3, second)
+	require.Same(t, second, turns.subscriptionForTurn(2))
+	require.Len(t, turns.subscriptions, 2)
+}
+
 func TestOpenAIWSTurnBillingRejectsIdentityChanges(t *testing.T) {
 	tests := []struct {
 		name   string

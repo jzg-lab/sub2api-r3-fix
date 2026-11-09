@@ -15,12 +15,13 @@ const (
 )
 
 type BatchImageBillingRecoveryService struct {
-	Repo       BatchImageRepository
-	Billing    UsageBillingRepository
-	AuthCache  APIKeyAuthCacheInvalidator
-	Queue      BatchImageQueue
-	StaleAfter time.Duration
-	Limit      int
+	Subscriptions *SubscriptionService
+	Repo          BatchImageRepository
+	Billing       UsageBillingRepository
+	AuthCache     APIKeyAuthCacheInvalidator
+	Queue         BatchImageQueue
+	StaleAfter    time.Duration
+	Limit         int
 }
 
 func (s *BatchImageBillingRecoveryService) ReleaseStaleUnsubmittedOnce(ctx context.Context) (int, error) {
@@ -75,7 +76,7 @@ func (s *BatchImageBillingRecoveryService) ReleaseStaleUnsubmittedOnce(ctx conte
 			continue
 		}
 		job.Status = BatchImageJobStatusFailed
-		if err := releaseBatchImageBalanceHold(ctx, s.Billing, job, batchImageDerefString(job.RequestHash)); err != nil {
+		if err := releaseBatchImageBalanceHold(ctx, s.Billing, job, batchImageDerefString(job.RequestHash), s.Subscriptions); err != nil {
 			// job 已转 failed、不会再进入 stale 列表：必须给释放失败留下
 			// 自动重试路径（入队后由 worker 的 releaseTerminalHold 兜底），
 			// 否则冻结余额永久泄漏。

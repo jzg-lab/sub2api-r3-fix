@@ -1017,7 +1017,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 							return
 						}
 						fallbackAPIKey := cloneAPIKeyWithGroup(apiKey, fallbackGroup)
-						if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), fallbackAPIKey.User, fallbackAPIKey, fallbackGroup, nil, service.PlatformFromAPIKey(fallbackAPIKey)); err != nil {
+						if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), fallbackAPIKey.User, fallbackAPIKey, fallbackGroup, currentSubscription, service.PlatformFromAPIKey(fallbackAPIKey)); err != nil {
 							if skipIneligibleSmartRoute(c, err) {
 								return
 							}
@@ -1032,7 +1032,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						ctx := context.WithValue(c.Request.Context(), ctxkey.ForcePlatform, "")
 						c.Request = c.Request.WithContext(ctx)
 						currentAPIKey = fallbackAPIKey
-						currentSubscription = nil
 						fallbackUsed = true
 						retryWithFallback = true
 						break
@@ -1793,27 +1792,28 @@ func (h *GatewayHandler) usageQuotaLimited(c *gin.Context, ctx context.Context, 
 
 // usageUnrestricted 处理 unrestricted 模式的响应（向后兼容）
 func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, usageData gin.H, dailyUsage any, modelStats any) {
+	subscription, hasSubscription := middleware2.GetSubscriptionFromContext(c)
 	// 订阅模式
-	if apiKey.Group != nil && apiKey.Group.IsSubscriptionType() {
+	if hasSubscription || (apiKey.Group != nil && apiKey.Group.IsSubscriptionType()) {
+		quotaGroup := subscription.QuotaGroup(apiKey.Group)
 		resp := gin.H{
 			"mode":     "unrestricted",
 			"isValid":  true,
-			"planName": apiKey.Group.Name,
+			"planName": quotaGroup.Name,
 			"unit":     "USD",
 		}
 
 		// 订阅信息可能不在 context 中（/v1/usage 路径跳过了中间件的计费检查）
-		subscription, ok := middleware2.GetSubscriptionFromContext(c)
-		if ok {
-			remaining := h.calculateSubscriptionRemaining(apiKey.Group, subscription)
+		if hasSubscription {
+			remaining := h.calculateSubscriptionRemaining(quotaGroup, subscription)
 			resp["remaining"] = remaining
 			resp["subscription"] = gin.H{
 				"daily_usage_usd":     subscription.DailyUsageUSD,
 				"weekly_usage_usd":    subscription.WeeklyUsageUSD,
 				"monthly_usage_usd":   subscription.MonthlyUsageUSD,
-				"daily_limit_usd":     apiKey.Group.DailyLimitUSD,
-				"weekly_limit_usd":    apiKey.Group.WeeklyLimitUSD,
-				"monthly_limit_usd":   apiKey.Group.MonthlyLimitUSD,
+				"daily_limit_usd":     quotaGroup.DailyLimitUSD,
+				"weekly_limit_usd":    quotaGroup.WeeklyLimitUSD,
+				"monthly_limit_usd":   quotaGroup.MonthlyLimitUSD,
 				"weekly_window_start": subscription.WeeklyWindowStart,
 				"expires_at":          subscription.ExpiresAt,
 			}

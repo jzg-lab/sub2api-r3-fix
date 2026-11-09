@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -172,6 +173,7 @@ type UsageBillingApplyResult struct {
 
 // BatchImageBalanceHoldCommand describes an idempotent balance hold operation.
 type BatchImageBalanceHoldCommand struct {
+	BillingSnapshot    *BatchImageBillingSnapshot
 	RequestID          string
 	APIKeyID           int64
 	RequestFingerprint string
@@ -207,6 +209,11 @@ func buildBatchImageBalanceHoldFingerprint(c *BatchImageBalanceHoldCommand) stri
 	)
 	if payloadHash := strings.TrimSpace(c.RequestPayloadHash); payloadHash != "" {
 		raw += "|" + payloadHash
+	}
+	if c.BillingSnapshot != nil {
+		// Keep historical wallet fingerprints unchanged.
+		data, _ := json.Marshal(c.BillingSnapshot)
+		raw += "|subscription:" + string(data)
 	}
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])

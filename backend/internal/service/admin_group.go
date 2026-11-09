@@ -1249,16 +1249,28 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		if group.Status != StatusActive {
 			return nil, infraerrors.BadRequest("GROUP_NOT_ACTIVE", "target group is not active")
 		}
-		// 订阅类型分组：用户须持有该分组的有效订阅才可绑定
+		// 通用订阅可绑定公开订阅组；原套餐权益或显式授权仍控制专属组。
 		if group.IsSubscriptionType() {
 			if s.userSubRepo == nil {
 				return nil, infraerrors.InternalServer("SUBSCRIPTION_REPOSITORY_UNAVAILABLE", "subscription repository is not configured")
 			}
-			if _, err := s.userSubRepo.GetActiveByUserIDAndGroupID(ctx, apiKey.UserID, *groupID); err != nil {
-				if errors.Is(err, ErrSubscriptionNotFound) {
-					return nil, infraerrors.BadRequest("SUBSCRIPTION_REQUIRED", "user does not have an active subscription for this group")
-				}
+			subs, err := s.userSubRepo.ListActiveByUserID(ctx, apiKey.UserID)
+			if err != nil {
 				return nil, err
+			}
+			groups := activeSubscriptionGroups(subs, apiKey.UserID, time.Now())
+			if len(groups) == 0 {
+				return nil, infraerrors.BadRequest("SUBSCRIPTION_REQUIRED", "an active subscription is required")
+			}
+			user := apiKey.User
+			if user == nil && !groups[group.ID] {
+				user, err = s.userRepo.GetByID(ctx, apiKey.UserID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !groups[group.ID] && !canBindSubscriptionGroup(user, group, groups) {
+				return nil, infraerrors.BadRequest("SUBSCRIPTION_REQUIRED", "an active subscription and group access are required")
 			}
 		}
 

@@ -30,9 +30,11 @@ func ProvideBatchImageWorkerRuntime(
 	pricing *BatchImageModelPricingResolver,
 	authCache APIKeyAuthCacheInvalidator,
 	cfg *config.Config,
+	subscriptions *SubscriptionService,
 ) *BatchImageWorkerRuntime {
 	processor := &BatchImagePipelineProcessor{
 		ProviderProcessor: &BatchImageProviderProcessor{
+			Subscriptions:    subscriptions,
 			Repo:             repo,
 			ProviderRegistry: NewBatchImageProviderRegistryFromConfig(cfg),
 			AccountResolver:  &BatchImageAccountRepositoryResolver{Repo: accountRepo},
@@ -40,22 +42,24 @@ func ProvideBatchImageWorkerRuntime(
 			AuthCache:        authCache,
 		},
 		SettlementService: &BatchImageSettlementService{
-			Repo:         repo,
-			BillingRepo:  billingRepo,
-			UsageLogRepo: usageLogRepo,
-			Pricing:      pricing,
-			AuthCache:    authCache,
-			Config:       cfg,
+			Subscriptions: subscriptions,
+			Repo:          repo,
+			BillingRepo:   billingRepo,
+			UsageLogRepo:  usageLogRepo,
+			Pricing:       pricing,
+			AuthCache:     authCache,
+			Config:        cfg,
 		},
 	}
 	runtime := NewBatchImageWorkerRuntime(NewBatchImageWorker(queue, processor, NewBatchImageWorkerOptionsFromConfig(cfg)), cfg)
 	runtime.billingRecovery = &BatchImageBillingRecoveryService{
-		Repo:       repo,
-		Billing:    billingRepo,
-		AuthCache:  authCache,
-		Queue:      queue,
-		StaleAfter: NewBatchImageWorkerOptionsFromConfig(cfg).StaleActiveAfter,
-		Limit:      NewBatchImageWorkerOptionsFromConfig(cfg).RecoverLimit,
+		Subscriptions: subscriptions,
+		Repo:          repo,
+		Billing:       billingRepo,
+		AuthCache:     authCache,
+		Queue:         queue,
+		StaleAfter:    NewBatchImageWorkerOptionsFromConfig(cfg).StaleActiveAfter,
+		Limit:         NewBatchImageWorkerOptionsFromConfig(cfg).RecoverLimit,
 	}
 	runtime.Start()
 	return runtime

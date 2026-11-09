@@ -79,6 +79,8 @@ type fakeAPIKeyRepo struct {
 }
 
 type fakeGoogleSubscriptionRepo struct {
+	quotaGroup     *service.Group
+	listActive     func(context.Context, int64) ([]service.UserSubscription, error)
 	getByID        func(ctx context.Context, id int64) (*service.UserSubscription, error)
 	getActive      func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
 	updateStatus   func(ctx context.Context, subscriptionID int64, status string) error
@@ -205,7 +207,24 @@ func (f fakeGoogleSubscriptionRepo) ListByUserID(ctx context.Context, userID int
 	return nil, errors.New("not implemented")
 }
 func (f fakeGoogleSubscriptionRepo) ListActiveByUserID(ctx context.Context, userID int64) ([]service.UserSubscription, error) {
-	return nil, errors.New("not implemented")
+	if f.listActive != nil {
+		return f.listActive(ctx, userID)
+	}
+	if f.getActive == nil {
+		return nil, nil
+	}
+	sub, err := f.getActive(ctx, userID, f.quotaGroup.ID)
+	if errors.Is(err, service.ErrSubscriptionNotFound) {
+		return nil, nil
+	}
+	if err != nil || sub == nil {
+		return nil, err
+	}
+	copy := *sub
+	if copy.Group == nil {
+		copy.Group = f.quotaGroup
+	}
+	return []service.UserSubscription{copy}, nil
 }
 func (f fakeGoogleSubscriptionRepo) ListByGroupID(ctx context.Context, groupID int64, params pagination.PaginationParams) ([]service.UserSubscription, *pagination.PaginationResult, error) {
 	return nil, nil, errors.New("not implemented")
@@ -877,7 +896,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_SubscriptionLimitExceededReturns429(t 
 		DailyWindowStart: &now,
 		DailyUsageUSD:    10,
 	}
-	subscriptionService := service.NewSubscriptionService(nil, fakeGoogleSubscriptionRepo{
+	subscriptionService := service.NewSubscriptionService(nil, fakeGoogleSubscriptionRepo{quotaGroup: group,
 		getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
 			if userID != user.ID || groupID != group.ID {
 				return nil, service.ErrSubscriptionNotFound

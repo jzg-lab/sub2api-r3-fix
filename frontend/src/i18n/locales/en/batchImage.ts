@@ -127,6 +127,7 @@ export default {
       referenceCount: '{n} reference image | {n} reference images',
       noPrompts: 'No prompts added yet.',
       cancelNotice: 'Cancelling requests an upstream cancellation. Images already indexed as successful will still be billed, and the remaining hold will be released.',
+      subscriptionNotice: 'Available subscription quota is held first at the selected group’s price. Exhausted quota does not fall back to your balance. Adjustments apply only to the original submission windows; reset or expired quota is not extended. Without an active subscription, balance holds apply.',
       submittingNotice: 'Creating the upstream batch job. This usually takes a few seconds; please do not submit again.',
       modelNoReferenceImages: 'The current model does not support reference images.',
       refLimitReached: 'The current model allows up to {limit} reference images per prompt.',

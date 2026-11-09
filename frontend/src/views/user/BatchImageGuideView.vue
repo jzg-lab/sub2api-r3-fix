@@ -697,6 +697,7 @@
         </div>
 
 	        <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+	          <p>{{ t('batchImage.create.subscriptionNotice') }}</p>
 	          {{ t('batchImage.create.cancelNotice') }}
 	        </div>
 	        <div v-if="submitting" class="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm leading-6 text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-100">

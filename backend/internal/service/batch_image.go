@@ -36,9 +36,10 @@ const (
 )
 
 var (
-	ErrBatchImageJobNotFound = infraerrors.New(http.StatusNotFound, "BATCH_IMAGE_JOB_NOT_FOUND", "batch image job not found")
-	ErrBatchImageJobExists   = infraerrors.New(http.StatusConflict, "BATCH_IMAGE_JOB_EXISTS", "batch image job already exists")
-	ErrBatchImageItemExists  = infraerrors.New(http.StatusConflict, "BATCH_IMAGE_ITEM_EXISTS", "batch image item already exists")
+	ErrBatchImageSubscriptionWorkerUnavailable = infraerrors.New(http.StatusServiceUnavailable, "BATCH_IMAGE_SUBSCRIPTION_WORKER_UNAVAILABLE", "subscription batch worker handoff is pending; please retry shortly")
+	ErrBatchImageJobNotFound                   = infraerrors.New(http.StatusNotFound, "BATCH_IMAGE_JOB_NOT_FOUND", "batch image job not found")
+	ErrBatchImageJobExists                     = infraerrors.New(http.StatusConflict, "BATCH_IMAGE_JOB_EXISTS", "batch image job already exists")
+	ErrBatchImageItemExists                    = infraerrors.New(http.StatusConflict, "BATCH_IMAGE_ITEM_EXISTS", "batch image item already exists")
 
 	ErrBatchImageInvalidTransition = infraerrors.New(http.StatusBadRequest, "BATCH_IMAGE_INVALID_TRANSITION", "invalid batch image job status transition")
 	ErrBatchImageInvalidProvider   = infraerrors.New(http.StatusBadRequest, "BATCH_IMAGE_INVALID_PROVIDER", "invalid batch image provider")
@@ -98,7 +99,19 @@ var (
 	ErrBatchImageProviderCleanupFailed    = infraerrors.New(http.StatusBadGateway, "BATCH_IMAGE_PROVIDER_CLEANUP_FAILED", "batch image provider cleanup failed")
 )
 
+// BatchImageBillingSnapshot pins the allowance and its windows at submission.
+// Refunds only adjust matching windows, so old jobs never credit a new allowance.
+type BatchImageBillingSnapshot struct {
+	SubscriptionID int64      `json:"subscription_id"`
+	QuotaGroupID   int64      `json:"quota_group_id"`
+	GroupID        int64      `json:"group_id"`
+	DailyStart     *time.Time `json:"daily_start"`
+	WeeklyStart    *time.Time `json:"weekly_start"`
+	MonthlyStart   *time.Time `json:"monthly_start"`
+}
+
 type BatchImageJob struct {
+	BillingSnapshot   *BatchImageBillingSnapshot
 	ID                int64
 	BatchID           string
 	UserID            int64
@@ -160,6 +173,7 @@ type BatchImageJob struct {
 }
 
 type CreateBatchImageJobParams struct {
+	BillingSnapshot   *BatchImageBillingSnapshot
 	BatchID           string
 	UserID            int64
 	APIKeyID          *int64

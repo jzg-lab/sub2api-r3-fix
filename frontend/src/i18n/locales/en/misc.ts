@@ -515,6 +515,9 @@ export default {
     selectPlan: 'Select Plan',
     planFeatures: 'Features',
     planCard: {
+      universal: 'Site-wide',
+      pendingHolds: 'Used quota includes pending batch image holds.',
+      groupPricing: 'Quota is shared across accessible groups; each request uses its group pricing and rates',
       rate: 'Rate',
       peakRate: 'Peak Rate',
       dailyLimit: 'Daily',

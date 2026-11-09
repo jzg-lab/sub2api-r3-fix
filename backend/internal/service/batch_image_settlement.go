@@ -55,12 +55,13 @@ func (r *BatchImageModelPricingResolver) BatchImageUnitPrice(ctx context.Context
 }
 
 type BatchImageSettlementService struct {
-	Repo         BatchImageRepository
-	BillingRepo  UsageBillingRepository
-	UsageLogRepo UsageLogRepository
-	Pricing      BatchImagePricingResolver
-	AuthCache    APIKeyAuthCacheInvalidator
-	Config       *config.Config
+	Subscriptions *SubscriptionService
+	Repo          BatchImageRepository
+	BillingRepo   UsageBillingRepository
+	UsageLogRepo  UsageLogRepository
+	Pricing       BatchImagePricingResolver
+	AuthCache     APIKeyAuthCacheInvalidator
+	Config        *config.Config
 }
 
 type BatchImageSettlementResult struct {
@@ -149,7 +150,7 @@ func (s *BatchImageSettlementService) Settle(ctx context.Context, batchID string
 		return nil, ErrBatchImageSettlementCostExceedsHold
 	}
 
-	if err := captureBatchImageBalanceHold(ctx, s.BillingRepo, job, actualCost, manifestHash); err != nil {
+	if err := captureBatchImageBalanceHold(ctx, s.BillingRepo, job, actualCost, manifestHash, s.Subscriptions); err != nil {
 		msg := truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength)
 		if failErr := s.recordSettlementFailure(ctx, job, "SETTLEMENT_BILLING_FAILED", msg); failErr != nil {
 			return nil, failErr
@@ -220,7 +221,7 @@ func (s *BatchImageSettlementService) failExhaustedSettlement(ctx context.Contex
 	// 释放指纹必须与其余所有释放点（processor/Cancel/recovery）一致地使用 RequestHash：
 	// 它们共享同一 request id，payloadHash 不同会触发 ErrUsageBillingRequestConflict，
 	// 导致后续 Cancel/重试永远失败、terminal job 变成毒消息。
-	if err := releaseBatchImageBalanceHold(ctx, s.BillingRepo, job, batchImageDerefString(job.RequestHash)); err != nil {
+	if err := releaseBatchImageBalanceHold(ctx, s.BillingRepo, job, batchImageDerefString(job.RequestHash), s.Subscriptions); err != nil {
 		msg := truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength)
 		if _, recordErr := s.Repo.SetBatchImageJobSettlementFailed(ctx, job.BatchID, "SETTLEMENT_RELEASE_FAILED", msg); recordErr != nil {
 			logger.L().Warn("batch_image.settlement_release_failure_record_failed",
@@ -279,6 +280,11 @@ func (s *BatchImageSettlementService) recordUsageLog(ctx context.Context, job *B
 		ImageSize:             &imageSize,
 		SessionID:             job.SessionID,
 		CreatedAt:             createdAt,
+	}
+	if snapshot := job.BillingSnapshot; snapshot != nil {
+		usageLog.SubscriptionID = &snapshot.SubscriptionID
+		usageLog.GroupID = &snapshot.GroupID
+		usageLog.BillingType = BillingTypeSubscription
 	}
 	writeUsageLogBestEffort(ctx, s.UsageLogRepo, usageLog, "service.batch_image_settlement")
 }

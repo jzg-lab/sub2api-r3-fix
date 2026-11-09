@@ -486,8 +486,12 @@ func (s *APIKeyService) incrementAPIKeyErrorCount(ctx context.Context, userID in
 func (s *APIKeyService) canUserBindGroup(ctx context.Context, user *User, group *Group) bool {
 	// 订阅类型分组：需要有效订阅
 	if group.IsSubscriptionType() {
-		_, err := s.userSubRepo.GetActiveByUserIDAndGroupID(ctx, user.ID, group.ID)
-		return err == nil // 有有效订阅则允许
+		subs, err := s.userSubRepo.ListActiveByUserID(ctx, user.ID)
+		if err != nil {
+			return false
+		}
+		groups := activeSubscriptionGroups(subs, user.ID, time.Now())
+		return canBindSubscriptionGroup(user, group, groups)
 	}
 	// 标准类型分组：使用原有逻辑
 	return user.CanBindGroup(group.ID, group.IsExclusive)
@@ -1068,10 +1072,7 @@ func (s *APIKeyService) GetAvailableGroups(ctx context.Context, userID int64) ([
 	}
 
 	// 构建订阅分组 ID 集合
-	subscribedGroupIDs := make(map[int64]bool)
-	for _, sub := range activeSubscriptions {
-		subscribedGroupIDs[sub.GroupID] = true
-	}
+	subscribedGroupIDs := activeSubscriptionGroups(activeSubscriptions, userID, time.Now())
 
 	// 过滤出用户有权限的分组
 	availableGroups := make([]Group, 0)
@@ -1088,7 +1089,7 @@ func (s *APIKeyService) GetAvailableGroups(ctx context.Context, userID int64) ([
 func (s *APIKeyService) canUserBindGroupInternal(user *User, group *Group, subscribedGroupIDs map[int64]bool) bool {
 	// 订阅类型分组：需要有效订阅
 	if group.IsSubscriptionType() {
-		return subscribedGroupIDs[group.ID]
+		return canBindSubscriptionGroup(user, group, subscribedGroupIDs)
 	}
 	// 标准类型分组：使用原有逻辑
 	return user.CanBindGroup(group.ID, group.IsExclusive)

@@ -297,6 +297,17 @@ func (s *userSubRepoStubForGroupUpdate) GetActiveByUserIDAndGroupID(_ context.Co
 	return &clone, nil
 }
 
+func (s *userSubRepoStubForGroupUpdate) ListActiveByUserID(_ context.Context, userID int64) ([]UserSubscription, error) {
+	s.called, s.calledUserID = true, userID
+	if errors.Is(s.getActiveErr, ErrSubscriptionNotFound) || s.getActiveSub == nil {
+		return nil, nil
+	}
+	if s.getActiveErr != nil {
+		return nil, s.getActiveErr
+	}
+	return []UserSubscription{*s.getActiveSub}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -500,7 +511,7 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_SubscriptionGroup_Blocked(t *test
 	require.Equal(t, "SUBSCRIPTION_REQUIRED", infraerrors.Reason(err))
 	require.True(t, userSubRepo.called)
 	require.Equal(t, int64(42), userSubRepo.calledUserID)
-	require.Equal(t, int64(10), userSubRepo.calledGroupID)
+	require.Zero(t, userSubRepo.calledGroupID, "entitlement lookup is now user-wide")
 	require.False(t, userRepo.addGroupCalled)
 }
 
@@ -523,7 +534,7 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_SubscriptionGroup_AllowsActiveSub
 	groupRepo := &groupRepoStubForGroupUpdate{group: &Group{ID: 10, Name: "Sub", Status: StatusActive, IsExclusive: true, SubscriptionType: SubscriptionTypeSubscription}}
 	userRepo := &userRepoStubForGroupUpdate{}
 	userSubRepo := &userSubRepoStubForGroupUpdate{
-		getActiveSub: &UserSubscription{ID: 99, UserID: 42, GroupID: 10},
+		getActiveSub: &UserSubscription{ID: 99, UserID: 42, GroupID: 10, Status: SubscriptionStatusActive, ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := &adminServiceImpl{apiKeyRepo: apiKeyRepo, groupRepo: groupRepo, userRepo: userRepo, userSubRepo: userSubRepo}
 

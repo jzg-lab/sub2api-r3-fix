@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
@@ -175,29 +174,21 @@ func isSmartRouteEligibilityError(err error) bool {
 }
 
 func routeSubscription(ctx context.Context, subscriptions *service.SubscriptionService, key *service.APIKey, simple bool) (*service.UserSubscription, error) {
-	if simple || !key.Group.IsSubscriptionType() {
+	if simple {
 		return nil, nil
 	}
 	if subscriptions == nil {
+		if !key.Group.IsSubscriptionType() {
+			return nil, nil
+		}
 		return nil, service.ErrBillingServiceUnavailable
 	}
-	sub, err := subscriptions.GetActiveSubscription(ctx, key.UserID, key.Group.ID)
+	sub, err := subscriptions.ResolveBillingSubscription(ctx, key.User, key.Group)
 	if errors.Is(err, service.ErrSubscriptionNotFound) {
 		return nil, service.ErrSubscriptionInvalid
 	}
 	if err != nil {
 		return nil, err
-	}
-	if sub == nil || sub.UserID != key.UserID || sub.GroupID != key.Group.ID || sub.Status != service.SubscriptionStatusActive || sub.StartsAt.After(time.Now()) {
-		return nil, service.ErrSubscriptionInvalid
-	}
-	needsMaintenance, err := subscriptions.ValidateAndCheckLimits(sub, key.Group)
-	if needsMaintenance {
-		sub, err = subscriptions.EnsureWindowMaintenance(ctx, sub)
-		if err != nil {
-			return nil, err
-		}
-		_, err = subscriptions.ValidateAndCheckLimits(sub, key.Group)
 	}
 	return sub, err
 }

@@ -343,7 +343,7 @@ func TestSmartRoutesRealTextForwardAndBilling(t *testing.T) {
 							}
 							h.cfg = &gatewayCfg
 							now := time.Now()
-							sub := &service.UserSubscription{ID: 50, UserID: key.UserID, GroupID: groupID, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+							sub := &service.UserSubscription{ID: 50, UserID: key.UserID, GroupID: 900, Group: &service.Group{ID: 900, SubscriptionType: service.SubscriptionTypeSubscription}, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
 							subs = service.NewSubscriptionService(nil, smartRouteSubscriptions{sub: sub}, nil, nil, h.cfg)
 							t.Cleanup(subs.Stop)
 						}
@@ -432,11 +432,25 @@ func (r smartRouteSubscriptions) GetActiveByUserIDAndGroupID(context.Context, in
 	return r.sub, r.err
 }
 
+func (r smartRouteSubscriptions) ListActiveByUserID(context.Context, int64) ([]service.UserSubscription, error) {
+	if errors.Is(r.err, service.ErrSubscriptionNotFound) {
+		return nil, nil
+	}
+	if r.sub == nil {
+		return nil, r.err
+	}
+	sub := *r.sub
+	if sub.Group == nil {
+		sub.Group = &service.Group{ID: sub.GroupID, SubscriptionType: service.SubscriptionTypeSubscription}
+	}
+	return []service.UserSubscription{sub}, r.err
+}
+
 func TestSmartRouteSubscriptionQualification(t *testing.T) {
 	h, key, _ := smartRoutingFixture(t)
 	key.Group.SubscriptionType = service.SubscriptionTypeSubscription
 	now := time.Now()
-	sub := &service.UserSubscription{ID: 4, UserID: key.UserID, GroupID: 1, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+	sub := &service.UserSubscription{ID: 4, UserID: key.UserID, GroupID: 1, Group: key.Group, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
 	for _, tc := range []struct {
 		name   string
 		change func(*service.UserSubscription)
@@ -445,8 +459,13 @@ func TestSmartRouteSubscriptionQualification(t *testing.T) {
 		{"valid", func(*service.UserSubscription) {}, nil},
 		{"future", func(s *service.UserSubscription) { s.StartsAt = now.Add(time.Hour) }, service.ErrSubscriptionInvalid},
 		{"wrong user", func(s *service.UserSubscription) { s.UserID++ }, service.ErrSubscriptionInvalid},
-		{"wrong group", func(s *service.UserSubscription) { s.GroupID++ }, service.ErrSubscriptionInvalid},
-		{"expired", func(s *service.UserSubscription) { s.ExpiresAt = now.Add(-time.Hour) }, service.ErrSubscriptionExpired},
+		{"different quota group", func(s *service.UserSubscription) {
+			s.GroupID++
+			quota := *s.Group
+			quota.ID = s.GroupID
+			s.Group = &quota
+		}, nil},
+		{"expired", func(s *service.UserSubscription) { s.ExpiresAt = now.Add(-time.Hour) }, service.ErrSubscriptionInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			copy := *sub

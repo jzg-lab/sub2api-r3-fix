@@ -45,6 +45,7 @@ func (h *BatchImageHandler) Submit(c *gin.Context) {
 	if sessionID := service.ExtractClientSessionID(c); sessionID != "" {
 		req.SessionID = &sessionID
 	}
+	owner.Subscription, _ = middleware.GetSubscriptionFromContext(c)
 	got, err := h.service.Submit(c.Request.Context(), owner, req, c.GetHeader("Idempotency-Key"))
 	if err != nil {
 		batchImageError(c, err)
@@ -303,6 +304,7 @@ func batchImageOwnerFromContext(c *gin.Context) (service.BatchImageOwner, bool) 
 		UserID:   apiKey.UserID,
 		APIKeyID: apiKey.ID,
 		GroupID:  apiKey.GroupID,
+		APIKey:   apiKey,
 	}, true
 }
 

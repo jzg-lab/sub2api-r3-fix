@@ -3123,6 +3123,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 		var turnPricing openAIWSTurnPricing
 		var wsFailureObserved atomic.Bool
 		var turnBilling openAIWSTurnBillingAPIKeys
+		turnBilling.pinSubscription(1, subscription)
 		var turnKeyLookup openAIWSTurnAPIKeyLookup
 		if h.apiKeyService != nil {
 			turnKeyLookup = h.apiKeyService
@@ -3147,6 +3148,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
 				}
 				turnBillingKey := turnBilling.begin(ctx, turnKeyLookup, turn, apiKey)
+				if turn > 1 && routeSubscriptions != nil && (h.cfg == nil || h.cfg.RunMode != config.RunModeSimple) {
+					sub, err := routeSubscriptions.ResolveBillingSubscription(ctx, turnBillingKey.User, turnBillingKey.Group)
+					if err != nil || (subscription != nil && sub == nil) {
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "subscription allowance unavailable, please reconnect", err)
+					}
+					turnBilling.pinSubscription(turn, sub)
+				} else {
+					turnBilling.pinSubscription(turn, subscription)
+				}
 				turnBillingCtx := withOpenAIWSTurnBillingGroup(ctx, turnBillingKey)
 				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
@@ -3283,6 +3293,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				turnSubscription := turnBilling.subscriptionForTurn(turn)
 				h.gatewayService.ObserveAccountAttempt(c, account, result, turnErr)
 				if turnErr != nil || (result != nil && !result.SucceededForScheduling()) {
 					wsFailureObserved.Store(true)
@@ -3323,7 +3334,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 					turnUpstreamModel = turnRequestedModel
 				}
 				turnUsageFields := turnMapping.ToUsageFields(turnRequestedModel, turnUpstreamModel)
-				h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, turnRequestedModel, turnErr != nil, cyberBlockBody, turnUsageFields, cyberPayloadHashFn)
+				h.recordCyberPolicyIfMarked(c, apiKey, account, turnSubscription, turnRequestedModel, turnErr != nil, cyberBlockBody, turnUsageFields, cyberPayloadHashFn)
 				if service.GetOpsCyberPolicy(c) != nil && !h.cyberPolicyLogOnly(c, apiKey) {
 					cyberBlockedThisConn = true
 				}
@@ -3374,7 +3385,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocketWithSubscriptions(c *gin.Contex
 						APIKey:             turnBillingKey,
 						User:               apiKey.User,
 						Account:            account,
-						Subscription:       subscription,
+						Subscription:       turnSubscription,
 						InboundEndpoint:    inboundEndpoint,
 						UpstreamEndpoint:   upstreamEndpoint,
 						UserAgent:          userAgent,

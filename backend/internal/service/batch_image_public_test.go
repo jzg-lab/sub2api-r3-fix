@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/deployment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -459,6 +460,59 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 		require.NoError(t, err)
 		requireBatchImagePublicJSONHasNoInternals(t, string(body))
 	})
+}
+
+func TestBatchImagePublicServicePinsUniversalSubscriptionHold(t *testing.T) {
+	svc, repo, _, _, _ := newTestBatchImagePublicService(true)
+	now := time.Now()
+	owner := testBatchImageOwner()
+	groupID := int64(33)
+	owner.GroupID = &groupID
+	svc.GroupRepo = &publicBatchImageGroupRepo{groups: map[int64]*Group{groupID: {
+		ID: groupID, Platform: PlatformGemini, RateMultiplier: 1,
+		AllowBatchImageGeneration: true, BatchImageDiscountMultiplier: 0.5,
+		BatchImageHoldMultiplier: 0.6,
+	}}}
+	owner.Subscription = &UserSubscription{ID: 44, UserID: owner.UserID, GroupID: 55,
+		DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+	got, err := svc.Submit(t.Context(), owner, validBatchImageSubmitRequest(), "universal-hold")
+	require.NoError(t, err)
+	snapshot := repo.jobs[got.ID].BillingSnapshot
+	require.NotNil(t, snapshot)
+	require.Equal(t, int64(44), snapshot.SubscriptionID)
+	require.Equal(t, int64(55), snapshot.QuotaGroupID)
+	require.Equal(t, groupID, snapshot.GroupID)
+	require.Equal(t, now, *snapshot.DailyStart)
+	billing := svc.BillingRepo.(*fakeBatchImageBillingRepo)
+	require.Equal(t, snapshot, billing.reserves[0].BillingSnapshot)
+	_, err = svc.Submit(t.Context(), owner, validBatchImageSubmitRequest(), "universal-hold")
+	require.NoError(t, err)
+	require.Len(t, billing.reserves, 1, "an idempotent retry does not create a second hold")
+}
+
+func TestBatchImageSubscriptionSubmissionWaitsForWorkerHandoff(t *testing.T) {
+	t.Setenv("DEPLOYMENT_SOCKET", "/fixture/control.sock")
+	deployment.Background.SetOpen(false)
+	svc, repo, _, upstream, _ := newTestBatchImagePublicService(true)
+	now, groupID := time.Now(), int64(33)
+	owner := testBatchImageOwner()
+	owner.GroupID = &groupID
+	svc.GroupRepo = &publicBatchImageGroupRepo{groups: map[int64]*Group{groupID: {
+		ID: groupID, Platform: PlatformGemini, RateMultiplier: 1,
+		AllowBatchImageGeneration: true, BatchImageDiscountMultiplier: 0.5,
+		BatchImageHoldMultiplier: 0.6,
+	}}}
+	owner.Subscription = &UserSubscription{ID: 44, UserID: owner.UserID, GroupID: 55,
+		DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+	_, err := svc.Submit(t.Context(), owner, validBatchImageSubmitRequest(), "")
+	require.ErrorIs(t, err, ErrBatchImageSubscriptionWorkerUnavailable)
+	require.Empty(t, repo.jobs)
+	require.Empty(t, upstream.submits)
+	deployment.Background.SetOpen(true)
+	t.Cleanup(func() { deployment.Background.SetOpen(false) })
+	_, err = svc.Submit(t.Context(), owner, validBatchImageSubmitRequest(), "")
+	require.NoError(t, err)
+	require.Zero(t, deployment.Background.Pending())
 }
 
 func TestBatchImagePublicService_List(t *testing.T) {

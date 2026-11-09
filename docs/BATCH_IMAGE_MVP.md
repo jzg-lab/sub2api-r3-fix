@@ -160,6 +160,11 @@ The worker does not perform DB scan polling. Database reads happen only after a 
 
 MVP billing rules:
 
+- Active subscriptions are shared across permitted groups. Submission holds the full configured amount in one usable subscription, using the destination group's pricing; an exhausted subscription does not fall back to the wallet. Users without an active subscription retain balance holds.
+- Subscription holds save the original daily, weekly and monthly window anchors. Settlement retains the successful-output charge and releases the difference only in windows whose anchors still match. A reset window receives no old-period credit. Tasks held before expiry can finish against that hold without extending the subscription.
+- Existing jobs without `billing_snapshot` retain wallet settlement. New subscription jobs use `billing_hold_state` and transactional row locks to prevent capture/release races; their unsettled holds count toward subscription usage. Owned job management remains available after quota exhaustion or expiry.
+- Managed deployments admit new subscription batch submissions only after the new process owns the background gate. This prevents the previous worker from misreading their accounting source during handoff; normal gateway traffic keeps its existing handoff behavior.
+
 - Submit may estimate cost.
 - Settlement runs after result indexing.
 - Only successful images are charged.

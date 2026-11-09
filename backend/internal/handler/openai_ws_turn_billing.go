@@ -15,8 +15,29 @@ type openAIWSTurnAPIKeyLookup interface {
 // Retain the previous turn until its asynchronous usage submission has captured
 // its snapshot. Refresh pricing only, never the connection's routing identity.
 type openAIWSTurnBillingAPIKeys struct {
-	mu   sync.Mutex
-	keys map[int]*service.APIKey
+	mu            sync.Mutex
+	keys          map[int]*service.APIKey
+	subscriptions map[int]*service.UserSubscription
+}
+
+func (k *openAIWSTurnBillingAPIKeys) pinSubscription(turn int, sub *service.UserSubscription) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.subscriptions == nil {
+		k.subscriptions = make(map[int]*service.UserSubscription, 2)
+	}
+	for previous := range k.subscriptions {
+		if previous < turn-1 {
+			delete(k.subscriptions, previous)
+		}
+	}
+	k.subscriptions[turn] = sub
+}
+
+func (k *openAIWSTurnBillingAPIKeys) subscriptionForTurn(turn int) *service.UserSubscription {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.subscriptions[turn]
 }
 
 func (k *openAIWSTurnBillingAPIKeys) begin(ctx context.Context, lookup openAIWSTurnAPIKeyLookup, turn int, conn *service.APIKey) *service.APIKey {

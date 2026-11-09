@@ -265,7 +265,8 @@ func (s *BillingCacheService) ReserveFixedCharge(ctx context.Context, user *User
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		return nil, nil
 	}
-	subscriptionBill := group != nil && group.IsSubscriptionType() && subscription != nil
+	subscriptionBill := subscription != nil
+	quotaGroup := subscription.QuotaGroup(group)
 	if !subscriptionBill {
 		balance, err := s.GetUserBalance(ctx, user.ID)
 		if err != nil {
@@ -280,14 +281,14 @@ func (s *BillingCacheService) ReserveFixedCharge(ctx context.Context, user *User
 		return nil, err
 	}
 	var subscriptionPending, apiKeyPending float64
-	if subscriptionBill && (group.HasDailyLimit() || group.HasWeeklyLimit() || group.HasMonthlyLimit()) {
+	if subscriptionBill && (quotaGroup.HasDailyLimit() || quotaGroup.HasWeeklyLimit() || quotaGroup.HasMonthlyLimit()) {
 		res, subscriptionPending = s.reserveInflightScope(ctx, res, user.ID, inflightSubscriptionScope(subscription.ID), amount)
 	}
 	if apiKey != nil && (apiKey.Quota > 0 || apiKey.HasRateLimits()) {
 		res, apiKeyPending = s.reserveInflightScope(ctx, res, user.ID, inflightAPIKeyScope(apiKey.ID), amount)
 	}
 	if subscriptionBill {
-		err = s.checkFixedChargeSubscription(ctx, user.ID, group, amount+subscriptionPending)
+		err = s.checkFixedChargeSubscription(ctx, user.ID, quotaGroup, amount+subscriptionPending)
 	}
 	if err == nil && apiKey != nil {
 		err = s.checkFixedChargeAPIKey(ctx, apiKey, amount+apiKeyPending)
@@ -396,7 +397,7 @@ func (s *BillingCacheService) reserveInflight(ctx context.Context, user *User, g
 	if !ok || user == nil {
 		return nil, nil
 	}
-	if group != nil && group.IsSubscriptionType() && subscription != nil {
+	if subscription != nil {
 		return nil, nil
 	}
 	if capped && cfg.MaxReservationUSD > 0 && estimate > cfg.MaxReservationUSD {

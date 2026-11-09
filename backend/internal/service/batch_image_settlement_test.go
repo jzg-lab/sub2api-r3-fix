@@ -67,6 +67,22 @@ func TestBatchImageSettlementService_ZeroSuccessCanComplete(t *testing.T) {
 	require.Equal(t, 0.0, billing.captures[0].ActualAmount)
 }
 
+func TestBatchImageSettlementServiceRetainsSubscriptionAndDestination(t *testing.T) {
+	repo := newFakeBatchImageRepository()
+	job := testSettlingBatchImageJob("imgbatch_subscription")
+	job.BillingSnapshot = &BatchImageBillingSnapshot{SubscriptionID: 21, QuotaGroupID: 22, GroupID: 23}
+	job.SuccessCount = 1
+	repo.jobs[job.BatchID] = job
+	billing, logs := &fakeBatchImageBillingRepo{}, &openAIRecordUsageLogRepoStub{}
+	svc := &BatchImageSettlementService{Repo: repo, BillingRepo: billing, UsageLogRepo: logs, Pricing: &fakeBatchImagePricingResolver{unitPrice: 0.25}}
+	_, err := svc.Settle(t.Context(), job.BatchID)
+	require.NoError(t, err)
+	require.Equal(t, job.BillingSnapshot, billing.captures[0].BillingSnapshot)
+	require.Equal(t, BillingTypeSubscription, logs.lastLog.BillingType)
+	require.Equal(t, int64(21), *logs.lastLog.SubscriptionID)
+	require.Equal(t, int64(23), *logs.lastLog.GroupID)
+}
+
 func TestBatchImageSettlementService_CompletedJobReturnsAlreadySettledWithoutBilling(t *testing.T) {
 	repo := newFakeBatchImageRepository()
 	job := testSettlingBatchImageJob("imgbatch_done")

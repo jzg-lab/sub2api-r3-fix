@@ -45,6 +45,7 @@ func buildBatchImageHoldCommand(job *BatchImageJob, requestID string, actualAmou
 		actualAmount = 0
 	}
 	return &BatchImageBalanceHoldCommand{
+		BillingSnapshot:    job.BillingSnapshot,
 		RequestID:          requestID,
 		APIKeyID:           *job.APIKeyID,
 		UserID:             job.UserID,
@@ -55,7 +56,7 @@ func buildBatchImageHoldCommand(job *BatchImageJob, requestID string, actualAmou
 	}, nil
 }
 
-func reserveBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, payloadHash string) error {
+func reserveBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, payloadHash string, subscriptions ...*SubscriptionService) error {
 	if repo == nil {
 		return ErrBatchImageBillingHoldFailed.WithCause(errors.New("batch image billing repository is not configured"))
 	}
@@ -63,19 +64,20 @@ func reserveBatchImageBalanceHold(ctx context.Context, repo UsageBillingReposito
 	if err != nil {
 		return err
 	}
-	if cmd.HoldAmount <= 0 {
+	if cmd.HoldAmount <= 0 && cmd.BillingSnapshot == nil {
 		return nil
 	}
 	if _, err := repo.ReserveBatchImageBalance(ctx, cmd); err != nil {
-		if errors.Is(err, ErrBatchImageInsufficientBalance) {
-			return ErrBatchImageInsufficientBalance
+		if errors.Is(err, ErrBatchImageInsufficientBalance) || errors.Is(err, ErrDailyLimitExceeded) || errors.Is(err, ErrWeeklyLimitExceeded) || errors.Is(err, ErrMonthlyLimitExceeded) || errors.Is(err, ErrSubscriptionExpired) {
+			return err
 		}
 		return ErrBatchImageBillingHoldFailed.WithCause(err)
 	}
+	invalidateBatchSubscriptionQuota(job, subscriptions)
 	return nil
 }
 
-func captureBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, actualAmount float64, payloadHash string) error {
+func captureBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, actualAmount float64, payloadHash string, subscriptions ...*SubscriptionService) error {
 	if repo == nil {
 		return ErrBatchImageSettlementBillingFailed.WithCause(errors.New("batch image billing repository is not configured"))
 	}
@@ -86,10 +88,11 @@ func captureBatchImageBalanceHold(ctx context.Context, repo UsageBillingReposito
 	if _, err := repo.CaptureBatchImageBalance(ctx, cmd); err != nil {
 		return ErrBatchImageSettlementBillingFailed.WithCause(err)
 	}
+	invalidateBatchSubscriptionQuota(job, subscriptions)
 	return nil
 }
 
-func releaseBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, payloadHash string) error {
+func releaseBatchImageBalanceHold(ctx context.Context, repo UsageBillingRepository, job *BatchImageJob, payloadHash string, subscriptions ...*SubscriptionService) error {
 	if repo == nil || job == nil {
 		return nil
 	}
@@ -97,14 +100,14 @@ func releaseBatchImageBalanceHold(ctx context.Context, repo UsageBillingReposito
 	if err != nil {
 		return err
 	}
-	if cmd.HoldAmount <= 0 {
+	if cmd.HoldAmount <= 0 && cmd.BillingSnapshot == nil {
 		return nil
 	}
 	if _, err := repo.ReleaseBatchImageBalance(ctx, cmd); err != nil {
 		// 同一 release request id 出现指纹冲突，说明此前已有一次携带不同
 		// payloadHash 的释放成功提交（资金已归还）。视为幂等成功，
 		// 避免历史指纹不一致的 job 永远卡在释放失败的毒消息循环里。
-		if errors.Is(err, ErrUsageBillingRequestConflict) {
+		if errors.Is(err, ErrUsageBillingRequestConflict) && cmd.BillingSnapshot == nil {
 			logger.L().Warn("batch_image.release_fingerprint_conflict_treated_as_released",
 				zap.String("batch_id", job.BatchID),
 			)
@@ -112,5 +115,15 @@ func releaseBatchImageBalanceHold(ctx context.Context, repo UsageBillingReposito
 		}
 		return ErrBatchImageBillingHoldFailed.WithCause(err)
 	}
+	invalidateBatchSubscriptionQuota(job, subscriptions)
 	return nil
+}
+
+func invalidateBatchSubscriptionQuota(job *BatchImageJob, subscriptions []*SubscriptionService) {
+	if job == nil || job.BillingSnapshot == nil || len(subscriptions) == 0 || subscriptions[0] == nil {
+		return
+	}
+	if err := subscriptions[0].invalidateSubscriptionCaches(job.UserID, job.BillingSnapshot.QuotaGroupID); err != nil {
+		logger.L().Warn("batch_image.subscription_cache_invalidation_failed", zap.String("batch_id", job.BatchID), zap.Error(err))
+	}
 }

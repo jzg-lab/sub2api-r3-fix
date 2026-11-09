@@ -19,6 +19,8 @@ const i18n = createI18n({
         perMonth: "month",
         models: "Models",
         planCard: {
+          universal: "Site-wide",
+          groupPricing: "Quota is shared across accessible groups; each request uses its group pricing and rates",
           quota: "Quota",
           rate: "Rate",
           unlimited: "Unlimited",
@@ -60,12 +62,14 @@ describe("SubscriptionPlanCard", () => {
     expect(text).not.toContain("Imagen");
   });
 
-  it("shows model scopes for Antigravity plans", () => {
+  it("shows shared quota instead of restricting plans to their source platform", () => {
     const text = mountPlanCard("antigravity").text();
 
-    expect(text).toContain("Claude");
-    expect(text).toContain("Gemini");
-    expect(text).toContain("Imagen");
+    expect(text).toContain("Site-wide");
+    expect(text).toContain("each request uses its group pricing and rates");
+    expect(text).not.toContain("Claude");
+    expect(text).not.toContain("Gemini");
+    expect(text).not.toContain("Imagen");
   });
 
   // #4607：管理端保存的单位是复数（months/weeks），此前用户侧只匹配单数
@@ -114,7 +118,7 @@ describe("SubscriptionPlanCard", () => {
       description: "Includes advanced models and priority support.",
     });
     const title = wrapper.get("h3");
-    const badge = wrapper.findAll("span").find((node) => node.text() === "OpenAI");
+    const badge = wrapper.findAll("span").find((node) => node.text() === "Site-wide");
     const price = wrapper.findAll("span").find((node) => node.text() === "123.45");
 
     expect(title.element.parentElement?.classList).toContain("min-w-0");
@@ -135,7 +139,7 @@ describe("SubscriptionPlanCard", () => {
   it("keeps short plan titles compact and aligned", () => {
     const wrapper = mountPlanCard("openai", { name: "Pro", description: "" });
     const title = wrapper.get("h3");
-    const badge = wrapper.findAll("span").find((node) => node.text() === "OpenAI");
+    const badge = wrapper.findAll("span").find((node) => node.text() === "Site-wide");
 
     expect(title.text()).toBe("Pro");
     expect(title.attributes("title")).toBe("Pro");

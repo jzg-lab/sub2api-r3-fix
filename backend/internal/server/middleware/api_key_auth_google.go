@@ -3,6 +3,7 @@ package middleware
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -166,40 +167,31 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			return
 		}
 
-		isSubscriptionType := apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
-		if isSubscriptionType && subscriptionService != nil {
-			subscription, err := subscriptionService.GetActiveSubscription(
+		if apiKey.Group != nil && subscriptionService != nil {
+			subscription, err := subscriptionService.ResolveBillingSubscription(
 				c.Request.Context(),
-				apiKey.User.ID,
-				apiKey.Group.ID,
+				apiKey.User,
+				apiKey.Group,
 			)
 			if err != nil {
-				abortWithGoogleError(c, 403, "No active subscription found for this group")
+				status := http.StatusForbidden
+				message := err.Error()
+				if errors.Is(err, service.ErrDailyLimitExceeded) || errors.Is(err, service.ErrWeeklyLimitExceeded) || errors.Is(err, service.ErrMonthlyLimitExceeded) {
+					status = http.StatusTooManyRequests
+				} else if errors.Is(err, service.ErrBillingServiceUnavailable) {
+					status = http.StatusServiceUnavailable
+					message = "Billing service temporarily unavailable"
+				}
+				abortWithGoogleError(c, status, message)
 				return
 			}
 
-			needsMaintenance, err := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-			if needsMaintenance {
-				refreshed, maintenanceErr := subscriptionService.EnsureWindowMaintenance(c.Request.Context(), subscription)
-				if maintenanceErr != nil {
-					abortWithGoogleError(c, 500, "Failed to maintain subscription usage windows")
-					return
-				}
-				subscription = refreshed
-				_, err = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-			}
-			if err != nil {
-				status := 403
-				if errors.Is(err, service.ErrDailyLimitExceeded) ||
-					errors.Is(err, service.ErrWeeklyLimitExceeded) ||
-					errors.Is(err, service.ErrMonthlyLimitExceeded) {
-					status = 429
-				}
-				abortWithGoogleError(c, status, err.Error())
+			if subscription != nil {
+				c.Set(string(ContextKeySubscription), subscription)
+			} else if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
+				abortWithGoogleError(c, 403, "Insufficient account balance")
 				return
 			}
-
-			c.Set(string(ContextKeySubscription), subscription)
 		} else {
 			if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
 				abortWithGoogleError(c, 403, "Insufficient account balance")

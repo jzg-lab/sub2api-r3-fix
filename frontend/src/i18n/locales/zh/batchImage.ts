@@ -127,6 +127,7 @@ export default {
       referenceCount: '{n} 参考图',
       noPrompts: '还没有添加 prompt。',
       cancelNotice: '取消任务会请求上游取消；已被系统索引为成功的图片仍会按成功项结算扣费，其余冻结金额会释放。',
+      subscriptionNotice: '优先预占可用订阅额度，金额按所选分组定价；订阅额度不足时不会转扣余额。结算差额仅退回提交时的原周期，已刷新或到期的额度不会顺延。没有有效订阅时沿用余额预扣。',
       submittingNotice: '正在创建上游批量任务，通常需要几秒，请不要重复提交。',
       modelNoReferenceImages: '当前模型不支持参考图。',
       refLimitReached: '当前模型每条最多 {limit} 张参考图。',

@@ -169,7 +169,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// Async image task polling only reads data that already belongs to the
 		// authenticated key and must remain available after the completed
 		// generation consumes the key's remaining balance.
-		skipBilling := c.Request.URL.Path == "/v1/usage" || billingInfoRequest || isAsyncImageTaskRead(c.Request.Method, c.Request.URL.Path)
+		skipBilling := c.Request.URL.Path == "/v1/usage" || billingInfoRequest || isAsyncImageTaskRead(c.Request.Method, c.Request.URL.Path) || isBatchImageJobManagement(c.Request.Method, c.Request.URL.Path)
 
 		// ── 4. SimpleMode → early return ─────────────────────────────
 
@@ -191,23 +191,38 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// ── 5. 按端点需要加载订阅 ───────────────────────────────────
 
 		var subscription *service.UserSubscription
-		isSubscriptionType := apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
 
 		// 倍率自省不需要订阅数据；/v1/usage 仍保留原有订阅读取行为。
-		if isSubscriptionType && subscriptionService != nil && !billingInfoRequest && !deferRoute {
-			sub, subErr := subscriptionService.GetActiveSubscription(
+		if apiKey.Group != nil && subscriptionService != nil && !billingInfoRequest && !deferRoute && (!skipBilling || c.Request.URL.Path == "/v1/usage") {
+			resolve := subscriptionService.ResolveBillingSubscription
+			if skipBilling {
+				resolve = subscriptionService.ResolveSubscriptionForUsage
+			}
+			sub, subErr := resolve(
 				c.Request.Context(),
-				apiKey.User.ID,
-				apiKey.Group.ID,
+				apiKey.User,
+				apiKey.Group,
 			)
+			subscription = sub
 			if subErr != nil {
-				if !skipBilling {
-					AbortWithError(c, 403, "SUBSCRIPTION_NOT_FOUND", "No active subscription found for this group")
+				if !skipBilling || errors.Is(subErr, service.ErrBillingServiceUnavailable) {
+					status := http.StatusForbidden
+					message := subErr.Error()
+					code := "SUBSCRIPTION_NOT_FOUND"
+					if errors.Is(subErr, service.ErrDailyLimitExceeded) || errors.Is(subErr, service.ErrWeeklyLimitExceeded) || errors.Is(subErr, service.ErrMonthlyLimitExceeded) {
+						status = http.StatusTooManyRequests
+						code = "USAGE_LIMIT_EXCEEDED"
+					} else if errors.Is(subErr, service.ErrBillingServiceUnavailable) {
+						status = http.StatusServiceUnavailable
+						code = "BILLING_SERVICE_UNAVAILABLE"
+						message = "Billing service temporarily unavailable"
+					} else if errors.Is(subErr, service.ErrGroupNotAllowed) {
+						code = "GROUP_NOT_ALLOWED"
+					}
+					AbortWithError(c, status, code, message)
 					return
 				}
 				// skipBilling: 订阅不存在也放行，handler 会返回可用的数据
-			} else {
-				subscription = sub
 			}
 		}
 
@@ -234,36 +249,9 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 				return
 			}
 
-			// 订阅模式：验证订阅限额
-			if subscription != nil {
-				needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-				if needsMaintenance {
-					refreshed, maintenanceErr := subscriptionService.EnsureWindowMaintenance(c.Request.Context(), subscription)
-					if maintenanceErr != nil {
-						AbortWithError(c, 500, "SUBSCRIPTION_MAINTENANCE_FAILED", "Failed to maintain subscription usage windows")
-						return
-					}
-					subscription = refreshed
-					_, validateErr = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-				}
-				if validateErr != nil {
-					code := "SUBSCRIPTION_INVALID"
-					status := 403
-					if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
-						code = "USAGE_LIMIT_EXCEEDED"
-						status = 429
-					}
-					AbortWithError(c, status, code, validateErr.Error())
-					return
-				}
-			} else if !deferRoute {
-				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查
-				if apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
-					AbortWithError(c, 403, "INSUFFICIENT_BALANCE", "Insufficient account balance")
-					return
-				}
+			if subscription == nil && !deferRoute && apiKeyBalanceBelowAuthThreshold(apiKey.User.Balance, cfg) {
+				AbortWithError(c, 403, "INSUFFICIENT_BALANCE", "Insufficient account balance")
+				return
 			}
 		}
 
@@ -338,6 +326,17 @@ func isAsyncImageTaskRead(method, path string) bool {
 		return false
 	}
 	return strings.HasPrefix(path, "/v1/images/tasks/") || strings.HasPrefix(path, "/images/tasks/")
+}
+
+// Owners must still be able to retrieve results or release a hold after exhausting quota.
+func isBatchImageJobManagement(method, path string) bool {
+	for _, root := range []string{"/v1/images/batches", "/images/batches"} {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return method == http.MethodGet || method == http.MethodDelete ||
+				(method == http.MethodPost && strings.HasSuffix(path, "/cancel"))
+		}
+	}
+	return false
 }
 
 // GetAPIKeyFromContext 从上下文中获取API key
