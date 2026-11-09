@@ -808,6 +808,20 @@ func (_u *GroupUpdate) SetNillableLongContextPricingEnabled(v *bool) *GroupUpdat
 	return _u
 }
 
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (_u *GroupUpdate) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupUpdate {
+	_u.mutation.SetLongContextPricing(v)
+	return _u
+}
+
+// SetNillableLongContextPricing sets the "long_context_pricing" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableLongContextPricing(v *domain.GroupLongContextPricing) *GroupUpdate {
+	if v != nil {
+		_u.SetLongContextPricing(*v)
+	}
+	return _u
+}
+
 // SetModelPricing sets the "model_pricing" field.
 func (_u *GroupUpdate) SetModelPricing(v jsontext.Value) *GroupUpdate {
 	_u.mutation.SetModelPricing(v)
@@ -1802,6 +1816,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.LongContextPricingEnabled(); ok {
 		_spec.SetField(group.FieldLongContextPricingEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.LongContextPricing(); ok {
+		_spec.SetField(group.FieldLongContextPricing, field.TypeJSON, value)
 	}
 	if value, ok := _u.mutation.ModelPricing(); ok {
 		_spec.SetField(group.FieldModelPricing, field.TypeJSON, value)
@@ -3011,6 +3028,20 @@ func (_u *GroupUpdateOne) SetNillableLongContextPricingEnabled(v *bool) *GroupUp
 	return _u
 }
 
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (_u *GroupUpdateOne) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupUpdateOne {
+	_u.mutation.SetLongContextPricing(v)
+	return _u
+}
+
+// SetNillableLongContextPricing sets the "long_context_pricing" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableLongContextPricing(v *domain.GroupLongContextPricing) *GroupUpdateOne {
+	if v != nil {
+		_u.SetLongContextPricing(*v)
+	}
+	return _u
+}
+
 // SetModelPricing sets the "model_pricing" field.
 func (_u *GroupUpdateOne) SetModelPricing(v jsontext.Value) *GroupUpdateOne {
 	_u.mutation.SetModelPricing(v)
@@ -4035,6 +4066,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.LongContextPricingEnabled(); ok {
 		_spec.SetField(group.FieldLongContextPricingEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.LongContextPricing(); ok {
+		_spec.SetField(group.FieldLongContextPricing, field.TypeJSON, value)
 	}
 	if value, ok := _u.mutation.ModelPricing(); ok {
 		_spec.SetField(group.FieldModelPricing, field.TypeJSON, value)

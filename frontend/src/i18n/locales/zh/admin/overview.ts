@@ -1037,6 +1037,14 @@ export default {
         pricePlaceholder: '可选'
       },
       modelPricing: {
+        threshold: '触发阈值（K）',
+        inheritThreshold: '留空沿用模型规则',
+        thresholdHint: '1K = 1,000 Token。以本次输入（含缓存读写）判断，不含输出。只调整已有长上下文加价模型的触发门槛，倍率、边界和账号豁免保持原规则；无附加费模型不新增收费。已有渠道价格区间优先，不受此设置影响。',
+        modelThresholds: '模型例外（覆盖分组默认阈值）',
+        addModelThreshold: '添加模型例外',
+        billingModel: '计费模型名称',
+        modelThresholdHint: '填写渠道计费基准所选的完整模型名，精确匹配、不区分大小写，不支持通配符。未列出的模型使用分组默认阈值。',
+        invalidThreshold: '阈值请填写 1–2,147,483 的整数 K；模型例外需填写完整、不重复的计费模型名和阈值。',
         title: '分组逐模型定价',
         description: '匹配模型后覆盖渠道和内置价格。长上下文阶梯沿用官方/预设价卡，无需再手填区间。音频可用按次层级配置 realtime、tts、stt。',
         longContext: '启用长上下文阶梯定价',

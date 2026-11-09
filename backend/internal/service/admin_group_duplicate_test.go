@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,11 @@ func cloneGroupForDuplicateTest(group *Group) *Group {
 	cloned.SupportedModelScopes = append([]string(nil), group.SupportedModelScopes...)
 	cloned.MessagesDispatchModelConfig = cloneGroupMessagesDispatchModelConfig(group.MessagesDispatchModelConfig)
 	cloned.ModelAllowlist.Models = append([]string(nil), group.ModelAllowlist.Models...)
+	cloned.LongContextPricing.ModelThresholds = maps.Clone(group.LongContextPricing.ModelThresholds)
+	cloned.ModelPricing = make([]ChannelModelPricing, len(group.ModelPricing))
+	for i := range group.ModelPricing {
+		cloned.ModelPricing[i] = cloneGroupPricingForDuplicate(group.ModelPricing[i])
+	}
 	cloned.AccountGroups = append([]AccountGroup(nil), group.AccountGroups...)
 	return &cloned
 }
@@ -177,7 +183,44 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 			HaikuMappedModel:   "gpt-5-mini",
 			ExactModelMappings: map[string]string{"claude-special": "gpt-special"},
 		},
-		ModelAllowlist:              GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.4", "gpt-5-mini"}},
+		ModelAllowlist:            GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.4", "gpt-5-mini"}},
+		LongContextPricingEnabled: true,
+		LongContextPricing: GroupLongContextPricing{
+			ThresholdTokens: 128_000,
+			ModelThresholds: map[string]int{"gpt-5.4": 96_000},
+		},
+		ModelPricing: []ChannelModelPricing{{
+			Platform:                   PlatformOpenAI,
+			Models:                     []string{"gpt-5.4"},
+			BillingMode:                BillingModeToken,
+			InputPrice:                 groupDuplicateTestPointer(0.000003),
+			OutputPrice:                groupDuplicateTestPointer(0.000015),
+			CacheWritePrice:            groupDuplicateTestPointer(0.000004),
+			CacheWrite1hPrice:          groupDuplicateTestPointer(0.000005),
+			CacheReadPrice:             groupDuplicateTestPointer(0.000001),
+			FastMultiplier:             groupDuplicateTestPointer(1.2),
+			FlexMultiplier:             groupDuplicateTestPointer(0.8),
+			ReasoningEffortMultipliers: map[string]float64{"high": 1.5},
+			ImageInputPrice:            groupDuplicateTestPointer(0.000006),
+			ImageOutputPrice:           groupDuplicateTestPointer(0.000007),
+			PerRequestPrice:            groupDuplicateTestPointer(0.01),
+			Intervals: []PricingInterval{{
+				MinTokens:            0,
+				MaxTokens:            groupDuplicateTestPointer(200_000),
+				TierLabel:            "standard",
+				InputPrice:           groupDuplicateTestPointer(0.000003),
+				InputMultiplier:      groupDuplicateTestPointer(1.25),
+				OutputPrice:          groupDuplicateTestPointer(0.000015),
+				CacheWritePrice:      groupDuplicateTestPointer(0.000004),
+				CacheWrite1hPrice:    groupDuplicateTestPointer(0.000005),
+				CacheReadPrice:       groupDuplicateTestPointer(0.000001),
+				OutputMultiplier:     groupDuplicateTestPointer(1.5),
+				CacheWriteMultiplier: groupDuplicateTestPointer(1.75),
+				CacheReadMultiplier:  groupDuplicateTestPointer(0.5),
+				PerRequestPrice:      groupDuplicateTestPointer(0.02),
+			}},
+			TimePricing: &ChannelTimePricing{Timezone: "UTC", Periods: []ChannelTimePricingPeriod{{StartTime: "09:00", EndTime: "17:00", Multiplier: 1.1}}},
+		}},
 		RPMLimit:                    99,
 		MaxReasoningEffort:          "medium",
 		MaxReasoningEffortOverLimit: ReasoningEffortOverLimitDeny,
@@ -215,6 +258,9 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 	require.Equal(t, source.FallbackGroupID, duplicate.FallbackGroupID)
 	require.Equal(t, source.ModelRouting, duplicate.ModelRouting)
 	require.Equal(t, source.MessagesDispatchModelConfig, duplicate.MessagesDispatchModelConfig)
+	require.Equal(t, source.LongContextPricingEnabled, duplicate.LongContextPricingEnabled)
+	require.Equal(t, source.LongContextPricing, duplicate.LongContextPricing)
+	require.Equal(t, source.ModelPricing, duplicate.ModelPricing)
 	require.Equal(t, source.ForceOpenAIFast, duplicate.ForceOpenAIFast)
 	require.Equal(t, source.FreeOpenAIFast, duplicate.FreeOpenAIFast)
 	require.Equal(t, source.ModelAllowlist, duplicate.ModelAllowlist)
@@ -231,20 +277,69 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 		{AccountID: 17, GroupID: duplicate.ID, Priority: 8},
 	}, repo.createdBindings[duplicate.ID])
 
-	duplicate.ModelRouting["gpt-*"][0] = 999
-	duplicate.VideoModelPrices[VideoPriceFamilyGrokImagineVideo15][VideoBillingResolution720P] = 999
-	duplicate.SupportedModelScopes[0] = "changed"
-	duplicate.MessagesDispatchModelConfig.ExactModelMappings["claude-special"] = "changed"
-	duplicate.ModelAllowlist.Models[0] = "changed"
-	duplicate.ReasoningEffortMappings[0].To = "changed"
-	*duplicate.DailyLimitUSD = 999
-	require.Equal(t, int64(13), source.ModelRouting["gpt-*"][0])
-	require.Equal(t, 0.14, source.VideoModelPrices[VideoPriceFamilyGrokImagineVideo15][VideoBillingResolution720P])
-	require.Equal(t, "claude", source.SupportedModelScopes[0])
-	require.Equal(t, "gpt-special", source.MessagesDispatchModelConfig.ExactModelMappings["claude-special"])
-	require.Equal(t, "gpt-5.4", source.ModelAllowlist.Models[0])
-	require.Equal(t, "xhigh", source.ReasoningEffortMappings[0].To)
-	require.Equal(t, 11.0, *source.DailyLimitUSD)
+	// Check the pre-persistence clone too: repository round-trips can hide shared references.
+	for _, duplicate := range []*Group{duplicate, cloneGroupForDuplicate(source, "")} {
+		for _, pair := range [][2]*float64{
+			{source.ModelPricing[0].InputPrice, duplicate.ModelPricing[0].InputPrice},
+			{source.ModelPricing[0].OutputPrice, duplicate.ModelPricing[0].OutputPrice},
+			{source.ModelPricing[0].CacheWritePrice, duplicate.ModelPricing[0].CacheWritePrice},
+			{source.ModelPricing[0].CacheWrite1hPrice, duplicate.ModelPricing[0].CacheWrite1hPrice},
+			{source.ModelPricing[0].CacheReadPrice, duplicate.ModelPricing[0].CacheReadPrice},
+			{source.ModelPricing[0].FastMultiplier, duplicate.ModelPricing[0].FastMultiplier},
+			{source.ModelPricing[0].FlexMultiplier, duplicate.ModelPricing[0].FlexMultiplier},
+			{source.ModelPricing[0].ImageInputPrice, duplicate.ModelPricing[0].ImageInputPrice},
+			{source.ModelPricing[0].ImageOutputPrice, duplicate.ModelPricing[0].ImageOutputPrice},
+			{source.ModelPricing[0].PerRequestPrice, duplicate.ModelPricing[0].PerRequestPrice},
+			{source.ModelPricing[0].Intervals[0].InputPrice, duplicate.ModelPricing[0].Intervals[0].InputPrice},
+			{source.ModelPricing[0].Intervals[0].OutputPrice, duplicate.ModelPricing[0].Intervals[0].OutputPrice},
+			{source.ModelPricing[0].Intervals[0].CacheWritePrice, duplicate.ModelPricing[0].Intervals[0].CacheWritePrice},
+			{source.ModelPricing[0].Intervals[0].CacheWrite1hPrice, duplicate.ModelPricing[0].Intervals[0].CacheWrite1hPrice},
+			{source.ModelPricing[0].Intervals[0].CacheReadPrice, duplicate.ModelPricing[0].Intervals[0].CacheReadPrice},
+			{source.ModelPricing[0].Intervals[0].InputMultiplier, duplicate.ModelPricing[0].Intervals[0].InputMultiplier},
+			{source.ModelPricing[0].Intervals[0].OutputMultiplier, duplicate.ModelPricing[0].Intervals[0].OutputMultiplier},
+			{source.ModelPricing[0].Intervals[0].CacheWriteMultiplier, duplicate.ModelPricing[0].Intervals[0].CacheWriteMultiplier},
+			{source.ModelPricing[0].Intervals[0].CacheReadMultiplier, duplicate.ModelPricing[0].Intervals[0].CacheReadMultiplier},
+			{source.ModelPricing[0].Intervals[0].PerRequestPrice, duplicate.ModelPricing[0].Intervals[0].PerRequestPrice},
+		} {
+			require.NotSame(t, pair[0], pair[1])
+		}
+		duplicate.ModelRouting["gpt-*"][0] = 999
+		duplicate.VideoModelPrices[VideoPriceFamilyGrokImagineVideo15][VideoBillingResolution720P] = 999
+		duplicate.SupportedModelScopes[0] = "changed"
+		duplicate.MessagesDispatchModelConfig.ExactModelMappings["claude-special"] = "changed"
+		duplicate.ModelAllowlist.Models[0] = "changed"
+		duplicate.ReasoningEffortMappings[0].To = "changed"
+		*duplicate.DailyLimitUSD = 999
+		duplicate.LongContextPricing.ModelThresholds["gpt-5.4"] = 1
+		duplicate.ModelPricing[0].Platform = "changed"
+		duplicate.ModelPricing[0].Models[0] = "changed"
+		duplicate.ModelPricing[0].ReasoningEffortMultipliers["high"] = 9
+		*duplicate.ModelPricing[0].InputPrice = 9
+		duplicate.ModelPricing[0].Intervals[0].TierLabel = "changed"
+		*duplicate.ModelPricing[0].Intervals[0].MaxTokens = 1
+		*duplicate.ModelPricing[0].Intervals[0].InputPrice = 9
+		*duplicate.ModelPricing[0].Intervals[0].InputMultiplier = 9
+		duplicate.ModelPricing[0].TimePricing.Timezone = "changed"
+		duplicate.ModelPricing[0].TimePricing.Periods[0].Multiplier = 9
+		require.Equal(t, int64(13), source.ModelRouting["gpt-*"][0])
+		require.Equal(t, 0.14, source.VideoModelPrices[VideoPriceFamilyGrokImagineVideo15][VideoBillingResolution720P])
+		require.Equal(t, "claude", source.SupportedModelScopes[0])
+		require.Equal(t, "gpt-special", source.MessagesDispatchModelConfig.ExactModelMappings["claude-special"])
+		require.Equal(t, "gpt-5.4", source.ModelAllowlist.Models[0])
+		require.Equal(t, "xhigh", source.ReasoningEffortMappings[0].To)
+		require.Equal(t, 11.0, *source.DailyLimitUSD)
+		require.Equal(t, 96_000, source.LongContextPricing.ModelThresholds["gpt-5.4"])
+		require.Equal(t, PlatformOpenAI, source.ModelPricing[0].Platform)
+		require.Equal(t, "gpt-5.4", source.ModelPricing[0].Models[0])
+		require.Equal(t, 1.5, source.ModelPricing[0].ReasoningEffortMultipliers["high"])
+		require.Equal(t, 0.000003, *source.ModelPricing[0].InputPrice)
+		require.Equal(t, "standard", source.ModelPricing[0].Intervals[0].TierLabel)
+		require.Equal(t, 200_000, *source.ModelPricing[0].Intervals[0].MaxTokens)
+		require.Equal(t, 0.000003, *source.ModelPricing[0].Intervals[0].InputPrice)
+		require.Equal(t, 1.25, *source.ModelPricing[0].Intervals[0].InputMultiplier)
+		require.Equal(t, "UTC", source.ModelPricing[0].TimePricing.Timezone)
+		require.Equal(t, 1.1, source.ModelPricing[0].TimePricing.Periods[0].Multiplier)
+	}
 }
 
 func TestDuplicateGroupRecoversSameOperationAndScopesByAdmin(t *testing.T) {
@@ -263,6 +358,7 @@ func TestDuplicateGroupRecoversSameOperationAndScopesByAdmin(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, first.ID, retry.ID)
+	require.False(t, first.LongContextPricingEnabled, "copying must preserve a disabled long-context switch")
 	require.Equal(t, first.ID, recovered.ID)
 	require.NotEqual(t, first.ID, otherAdmin.ID)
 	require.Equal(t, "team (Copy 2)", otherAdmin.Name)

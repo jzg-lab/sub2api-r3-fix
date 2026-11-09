@@ -580,6 +580,20 @@ func (_c *GroupCreate) SetNillableLongContextPricingEnabled(v *bool) *GroupCreat
 	return _c
 }
 
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (_c *GroupCreate) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupCreate {
+	_c.mutation.SetLongContextPricing(v)
+	return _c
+}
+
+// SetNillableLongContextPricing sets the "long_context_pricing" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableLongContextPricing(v *domain.GroupLongContextPricing) *GroupCreate {
+	if v != nil {
+		_c.SetLongContextPricing(*v)
+	}
+	return _c
+}
+
 // SetModelPricing sets the "model_pricing" field.
 func (_c *GroupCreate) SetModelPricing(v jsontext.Value) *GroupCreate {
 	_c.mutation.SetModelPricing(v)
@@ -1133,6 +1147,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultLongContextPricingEnabled
 		_c.mutation.SetLongContextPricingEnabled(v)
 	}
+	if _, ok := _c.mutation.LongContextPricing(); !ok {
+		v := group.DefaultLongContextPricing
+		_c.mutation.SetLongContextPricing(v)
+	}
 	if _, ok := _c.mutation.ClaudeCodeOnly(); !ok {
 		v := group.DefaultClaudeCodeOnly
 		_c.mutation.SetClaudeCodeOnly(v)
@@ -1621,6 +1639,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LongContextPricingEnabled(); ok {
 		_spec.SetField(group.FieldLongContextPricingEnabled, field.TypeBool, value)
 		_node.LongContextPricingEnabled = value
+	}
+	if value, ok := _c.mutation.LongContextPricing(); ok {
+		_spec.SetField(group.FieldLongContextPricing, field.TypeJSON, value)
+		_node.LongContextPricing = value
 	}
 	if value, ok := _c.mutation.ModelPricing(); ok {
 		_spec.SetField(group.FieldModelPricing, field.TypeJSON, value)
@@ -2575,6 +2597,18 @@ func (u *GroupUpsert) SetLongContextPricingEnabled(v bool) *GroupUpsert {
 // UpdateLongContextPricingEnabled sets the "long_context_pricing_enabled" field to the value that was provided on create.
 func (u *GroupUpsert) UpdateLongContextPricingEnabled() *GroupUpsert {
 	u.SetExcluded(group.FieldLongContextPricingEnabled)
+	return u
+}
+
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (u *GroupUpsert) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupUpsert {
+	u.Set(group.FieldLongContextPricing, v)
+	return u
+}
+
+// UpdateLongContextPricing sets the "long_context_pricing" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateLongContextPricing() *GroupUpsert {
+	u.SetExcluded(group.FieldLongContextPricing)
 	return u
 }
 
@@ -3807,6 +3841,20 @@ func (u *GroupUpsertOne) SetLongContextPricingEnabled(v bool) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateLongContextPricingEnabled() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateLongContextPricingEnabled()
+	})
+}
+
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (u *GroupUpsertOne) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetLongContextPricing(v)
+	})
+}
+
+// UpdateLongContextPricing sets the "long_context_pricing" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateLongContextPricing() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateLongContextPricing()
 	})
 }
 
@@ -5267,6 +5315,20 @@ func (u *GroupUpsertBulk) SetLongContextPricingEnabled(v bool) *GroupUpsertBulk 
 func (u *GroupUpsertBulk) UpdateLongContextPricingEnabled() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateLongContextPricingEnabled()
+	})
+}
+
+// SetLongContextPricing sets the "long_context_pricing" field.
+func (u *GroupUpsertBulk) SetLongContextPricing(v domain.GroupLongContextPricing) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetLongContextPricing(v)
+	})
+}
+
+// UpdateLongContextPricing sets the "long_context_pricing" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateLongContextPricing() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateLongContextPricing()
 	})
 }
 

@@ -98,6 +98,8 @@ const (
 	FieldAudioSttPricePerHour = "audio_stt_price_per_hour"
 	// FieldLongContextPricingEnabled holds the string denoting the long_context_pricing_enabled field in the database.
 	FieldLongContextPricingEnabled = "long_context_pricing_enabled"
+	// FieldLongContextPricing holds the string denoting the long_context_pricing field in the database.
+	FieldLongContextPricing = "long_context_pricing"
 	// FieldModelPricing holds the string denoting the model_pricing field in the database.
 	FieldModelPricing = "model_pricing"
 	// FieldClaudeCodeOnly holds the string denoting the claude_code_only field in the database.
@@ -266,6 +268,7 @@ var Columns = []string{
 	FieldAudioTtsPricePerMillionChars,
 	FieldAudioSttPricePerHour,
 	FieldLongContextPricingEnabled,
+	FieldLongContextPricing,
 	FieldModelPricing,
 	FieldClaudeCodeOnly,
 	FieldFallbackGroupID,
@@ -389,6 +392,8 @@ var (
 	AudioSttPricePerHourValidator func(float64) error
 	// DefaultLongContextPricingEnabled holds the default value on creation for the "long_context_pricing_enabled" field.
 	DefaultLongContextPricingEnabled bool
+	// DefaultLongContextPricing holds the default value on creation for the "long_context_pricing" field.
+	DefaultLongContextPricing domain.GroupLongContextPricing
 	// DefaultClaudeCodeOnly holds the default value on creation for the "claude_code_only" field.
 	DefaultClaudeCodeOnly bool
 	// DefaultModelRoutingEnabled holds the default value on creation for the "model_routing_enabled" field.

@@ -1040,6 +1040,14 @@ export default {
         pricePlaceholder: 'optional'
       },
       modelPricing: {
+        threshold: 'Trigger threshold (K)',
+        inheritThreshold: 'Leave blank to use model rules',
+        thresholdHint: '1K = 1,000 tokens. Counts request input including cache reads/writes, excluding output. Only changes the threshold for models with an existing long-context surcharge; rates, boundary rules and account exemptions stay unchanged. Explicit channel pricing intervals take precedence.',
+        modelThresholds: 'Model overrides (take precedence over the group default)',
+        addModelThreshold: 'Add model override',
+        billingModel: 'Billing model name',
+        modelThresholdHint: 'Enter the exact model name selected by the channel billing basis. Matching is case-insensitive; wildcards are not supported. Other models inherit the group default.',
+        invalidThreshold: 'Enter a whole number from 1 to 2,147,483 K. Each override requires a unique exact billing model name and a threshold.',
         title: 'Per-model group pricing',
         description: 'Overrides channel and built-in prices for matching models. Long-context tiers come from official presets — do not enter custom intervals. Use per-request tiers such as realtime, tts, and stt for audio.',
         longContext: 'Enable long-context tier pricing',

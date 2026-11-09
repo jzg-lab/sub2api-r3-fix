@@ -35,6 +35,42 @@ middleware、repository unit 中后三包通过；service 包存在基线也复�
 同时报告 `Everything up-to-date`；随后远端 `ls-remote` 再次超时，故推送结果待远端核验，不能
 确认已推送。本地 `origin/main` 跟踪引用仍停在 `0a73f9b6`。没有执行迁移、部署或生产切换。
 
+## 分组长上下文计费阈值（2026-11-09，已推送至功能分支、未部署）
+
+工作区起点为 `0a73f9b6bb82fc9800aba87d7e6eb63ff4f3aecb`，本地功能提交为
+`761939f3`（`feat(groups): configure long-context billing thresholds`），分支
+`codex/group-long-context-threshold`；未合并上游。保留既有开关和模型费率/账号豁免，仅新增分组
+默认阈值与精确计费模型覆盖，1K 为 1,000 tokens。空配置沿用原模型门槛；不具有原长上下文附加费的
+模型不增加费用；存在显式渠道区间时继续由区间定价优先。阈值字段存于新增迁移
+`267_group_long_context_pricing.sql`，API Key 鉴权快照更新为版本 25。
+
+行为对照：相同 129,000 输入、1,000 输出，模型原门槛 200,000、倍率 2/1.5、分组门槛 128,000，
+基线输出输入费 0.387、输出费 0.015、未触发；修改后输入费 0.774、输出费 0.0225、触发。
+模型倍率及共享价格目录保持不变。前端中英文表单测试、GroupsView 实际表单测试、模型广场/账号计费回归
+共 8 文件 76 项通过；定向 ESLint、vue-tsc、Vite 生产构建通过。桌面、390px 手机和深色界面浏览器
+核对了分组值和模型覆盖的加载/编辑，未发生横向溢出。PostgreSQL/Redis 隔离服务中分组写读/清空、
+鉴权投影和 GroupRepo/APIKeyRepo 回归通过。Go service 全包、管理员/DTO/handler/server/migrations
+测试通过；repository 全包另有 `TestInflightReservation_RenewalKeepsStreamingReservationAlive`
+单项失败，基线同一测试也复现同一租约断言失败，跳过该基线失败项后的其余 repository 测试通过。
+最后的定向计费、管理 handler、web embed 测试及 `-tags=embed` 服务端构建通过。
+
+初次 fetch 和两次 push 遇连接超时/重置；连接恢复后以普通非强制推送成功上传，
+`git ls-remote` 核对 `origin/codex/group-long-context-threshold` 固定为
+`f45c2d686a4389548f5f996cec26f6b458100aa5`。随后成功 fetch 并核实 `origin/main` 仍为起点
+`0a73f9b6bb82fc9800aba87d7e6eb63ff4f3aecb`，没有需要合并的新主线提交。本轮没有部署或运行生产迁移；正式回退保留新增迁移、
+本产品规则和历史记录，不通过恢复数据库来回退应用代码。
+
+同日用户要求修复审查发现的问题，结果提交为 `6510e8b674eedc76d848ca953b5e532da0a71d53`，
+沿用上述功能分支。分组复制为模型定价的价格指针和区间价格指针创建独立副本，保留其它
+`ChannelModelPricing.Clone()` 调用的只读约定；补齐完整复制流程、持久化前拷贝及关闭状态回归。
+Ent schema 与生成代码统一为非空、默认 `{}`，包含 PostgreSQL 默认表达式；修复时未改当时的迁移内容，合并时将分组阈值迁移顺延至 267，保留订阅批量计费的迁移 266。
+以 `f25970923f7aad1c95dc4850706624cf6053621b` 的原复制调用和 schema 叠加新回归作对照，
+分别复现共享价格指针与可空字段断言失败；为测试替身附加的深拷贝 helper 不参与基线的复制调用。
+修复后在 Docker Go 1.27.3、`GOMAXPROCS=2`、`go test -p 1` 环境下，service、管理 handler 和
+Ent schema 的 20 个顶层测试、含子测试共 48 项通过；格式与差异检查通过。补丁在独立文件副本上
+执行回退并逐文件比对原内容通过。首次共享目录生成失败和容器并发编译资源中断均已修正后重验；
+本轮没有重跑前端、数据库集成或全量测试，没有合并主分支或部署。
+
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
 
 用户验收本地效果后授权提交推送；本次在现有 main 上直接提交，无新上游合并。
