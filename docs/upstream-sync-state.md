@@ -28,8 +28,9 @@
 预占、结算、退款、窗口刷新、并发和回退前置检查并通过；修正测试夹具后，定向 service、
 handler、middleware 回归通过，内嵌资源测试和带 embed 的服务器编译通过。全量 service、handler、
 middleware、repository unit 中后三包通过；service 包存在基线也复现的 Unix 可执行文件/插件
-文件测试失败及其他既有失败，不将全量结果记为通过。工作分支 `codex/shared-subscription-quota`
-尚未提交或推送，远端同步首次因连接重置失败；没有执行迁移、部署或生产切换。
+文件测试失败及其他既有失败，不将全量结果记为通过。实现已提交为
+`bbf3634a`（`codex/shared-subscription-quota`）；向 GitHub 推送及两次远端 fetch 均因连接重置
+失败，尚未推送。没有执行迁移、部署或生产切换。
 
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
 
