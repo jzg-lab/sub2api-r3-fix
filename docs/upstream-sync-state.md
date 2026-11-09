@@ -31,7 +31,9 @@ middleware、repository unit 中后三包通过；service 包存在基线也复�
 文件测试失败及其他既有失败，不将全量结果记为通过。实现已提交为
 `bbf3634a`（`codex/shared-subscription-quota`）。早期远端 fetch/push 遇到连接重置，之后成功
 读取 `origin/main` 为 `0a73f9b6`。复查未发现阻断问题，本地 `main` 已快进合入功能及审查记录；
-后续 HTTPS 推送超时，SSH 推送因无可用公钥认证失败，尚未推送。没有执行迁移、部署或生产切换。
+此前 HTTPS 推送超时，SSH 推送因无可用公钥认证失败。最后一次 HTTPS 推送连接重置且客户端
+同时报告 `Everything up-to-date`；随后远端 `ls-remote` 再次超时，故推送结果待远端核验，不能
+确认已推送。本地 `origin/main` 跟踪引用仍停在 `0a73f9b6`。没有执行迁移、部署或生产切换。
 
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
 
