@@ -1147,6 +1147,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultLongContextPricingEnabled
 		_c.mutation.SetLongContextPricingEnabled(v)
 	}
+	if _, ok := _c.mutation.LongContextPricing(); !ok {
+		v := group.DefaultLongContextPricing
+		_c.mutation.SetLongContextPricing(v)
+	}
 	if _, ok := _c.mutation.ClaudeCodeOnly(); !ok {
 		v := group.DefaultClaudeCodeOnly
 		_c.mutation.SetClaudeCodeOnly(v)
@@ -2608,12 +2612,6 @@ func (u *GroupUpsert) UpdateLongContextPricing() *GroupUpsert {
 	return u
 }
 
-// ClearLongContextPricing clears the value of the "long_context_pricing" field.
-func (u *GroupUpsert) ClearLongContextPricing() *GroupUpsert {
-	u.SetNull(group.FieldLongContextPricing)
-	return u
-}
-
 // SetModelPricing sets the "model_pricing" field.
 func (u *GroupUpsert) SetModelPricing(v jsontext.Value) *GroupUpsert {
 	u.Set(group.FieldModelPricing, v)
@@ -3857,13 +3855,6 @@ func (u *GroupUpsertOne) SetLongContextPricing(v domain.GroupLongContextPricing)
 func (u *GroupUpsertOne) UpdateLongContextPricing() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateLongContextPricing()
-	})
-}
-
-// ClearLongContextPricing clears the value of the "long_context_pricing" field.
-func (u *GroupUpsertOne) ClearLongContextPricing() *GroupUpsertOne {
-	return u.Update(func(s *GroupUpsert) {
-		s.ClearLongContextPricing()
 	})
 }
 
@@ -5338,13 +5329,6 @@ func (u *GroupUpsertBulk) SetLongContextPricing(v domain.GroupLongContextPricing
 func (u *GroupUpsertBulk) UpdateLongContextPricing() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateLongContextPricing()
-	})
-}
-
-// ClearLongContextPricing clears the value of the "long_context_pricing" field.
-func (u *GroupUpsertBulk) ClearLongContextPricing() *GroupUpsertBulk {
-	return u.Update(func(s *GroupUpsert) {
-		s.ClearLongContextPricing()
 	})
 }
 

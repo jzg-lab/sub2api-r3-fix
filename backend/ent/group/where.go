@@ -2075,16 +2075,6 @@ func LongContextPricingEnabledNEQ(v bool) predicate.Group {
 	return predicate.Group(sql.FieldNEQ(FieldLongContextPricingEnabled, v))
 }
 
-// LongContextPricingIsNil applies the IsNil predicate on the "long_context_pricing" field.
-func LongContextPricingIsNil() predicate.Group {
-	return predicate.Group(sql.FieldIsNull(FieldLongContextPricing))
-}
-
-// LongContextPricingNotNil applies the NotNil predicate on the "long_context_pricing" field.
-func LongContextPricingNotNil() predicate.Group {
-	return predicate.Group(sql.FieldNotNull(FieldLongContextPricing))
-}
-
 // ModelPricingIsNil applies the IsNil predicate on the "model_pricing" field.
 func ModelPricingIsNil() predicate.Group {
 	return predicate.Group(sql.FieldIsNull(FieldModelPricing))

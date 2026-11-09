@@ -24567,22 +24567,9 @@ func (m *GroupMutation) OldLongContextPricing(ctx context.Context) (v domain.Gro
 	return oldValue.LongContextPricing, nil
 }
 
-// ClearLongContextPricing clears the value of the "long_context_pricing" field.
-func (m *GroupMutation) ClearLongContextPricing() {
-	m.long_context_pricing = nil
-	m.clearedFields[group.FieldLongContextPricing] = struct{}{}
-}
-
-// LongContextPricingCleared returns if the "long_context_pricing" field was cleared in this mutation.
-func (m *GroupMutation) LongContextPricingCleared() bool {
-	_, ok := m.clearedFields[group.FieldLongContextPricing]
-	return ok
-}
-
 // ResetLongContextPricing resets all changes to the "long_context_pricing" field.
 func (m *GroupMutation) ResetLongContextPricing() {
 	m.long_context_pricing = nil
-	delete(m.clearedFields, group.FieldLongContextPricing)
 }
 
 // SetModelPricing sets the "model_pricing" field.
@@ -27489,9 +27476,6 @@ func (m *GroupMutation) ClearedFields() []string {
 	if m.FieldCleared(group.FieldAudioSttPricePerHour) {
 		fields = append(fields, group.FieldAudioSttPricePerHour)
 	}
-	if m.FieldCleared(group.FieldLongContextPricing) {
-		fields = append(fields, group.FieldLongContextPricing)
-	}
 	if m.FieldCleared(group.FieldModelPricing) {
 		fields = append(fields, group.FieldModelPricing)
 	}
@@ -27571,9 +27555,6 @@ func (m *GroupMutation) ClearField(name string) error {
 		return nil
 	case group.FieldAudioSttPricePerHour:
 		m.ClearAudioSttPricePerHour()
-		return nil
-	case group.FieldLongContextPricing:
-		m.ClearLongContextPricing()
 		return nil
 	case group.FieldModelPricing:
 		m.ClearModelPricing()

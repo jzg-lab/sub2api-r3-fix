@@ -1147,6 +1147,10 @@ func init() {
 	groupDescLongContextPricingEnabled := groupFields[37].Descriptor()
 	// group.DefaultLongContextPricingEnabled holds the default value on creation for the long_context_pricing_enabled field.
 	group.DefaultLongContextPricingEnabled = groupDescLongContextPricingEnabled.Default.(bool)
+	// groupDescLongContextPricing is the schema descriptor for long_context_pricing field.
+	groupDescLongContextPricing := groupFields[38].Descriptor()
+	// group.DefaultLongContextPricing holds the default value on creation for the long_context_pricing field.
+	group.DefaultLongContextPricing = groupDescLongContextPricing.Default.(domain.GroupLongContextPricing)
 	// groupDescClaudeCodeOnly is the schema descriptor for claude_code_only field.
 	groupDescClaudeCodeOnly := groupFields[40].Descriptor()
 	// group.DefaultClaudeCodeOnly holds the default value on creation for the claude_code_only field.

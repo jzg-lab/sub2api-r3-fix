@@ -94,10 +94,38 @@ func cloneGroupMessagesDispatchModelConfig(value OpenAIMessagesDispatchModelConf
 	return cloned
 }
 
+func cloneGroupPricingForDuplicate(value ChannelModelPricing) ChannelModelPricing {
+	cloned := value.Clone()
+	cloned.InputPrice = cloneGroupValuePointer(value.InputPrice)
+	cloned.OutputPrice = cloneGroupValuePointer(value.OutputPrice)
+	cloned.CacheWritePrice = cloneGroupValuePointer(value.CacheWritePrice)
+	cloned.CacheWrite1hPrice = cloneGroupValuePointer(value.CacheWrite1hPrice)
+	cloned.CacheReadPrice = cloneGroupValuePointer(value.CacheReadPrice)
+	cloned.FastMultiplier = cloneGroupValuePointer(value.FastMultiplier)
+	cloned.FlexMultiplier = cloneGroupValuePointer(value.FlexMultiplier)
+	cloned.ImageInputPrice = cloneGroupValuePointer(value.ImageInputPrice)
+	cloned.ImageOutputPrice = cloneGroupValuePointer(value.ImageOutputPrice)
+	cloned.PerRequestPrice = cloneGroupValuePointer(value.PerRequestPrice)
+	for i := range cloned.Intervals {
+		cloned.Intervals[i].MaxTokens = cloneGroupValuePointer(value.Intervals[i].MaxTokens)
+		cloned.Intervals[i].InputPrice = cloneGroupValuePointer(value.Intervals[i].InputPrice)
+		cloned.Intervals[i].OutputPrice = cloneGroupValuePointer(value.Intervals[i].OutputPrice)
+		cloned.Intervals[i].CacheWritePrice = cloneGroupValuePointer(value.Intervals[i].CacheWritePrice)
+		cloned.Intervals[i].CacheWrite1hPrice = cloneGroupValuePointer(value.Intervals[i].CacheWrite1hPrice)
+		cloned.Intervals[i].CacheReadPrice = cloneGroupValuePointer(value.Intervals[i].CacheReadPrice)
+		cloned.Intervals[i].InputMultiplier = cloneGroupValuePointer(value.Intervals[i].InputMultiplier)
+		cloned.Intervals[i].OutputMultiplier = cloneGroupValuePointer(value.Intervals[i].OutputMultiplier)
+		cloned.Intervals[i].CacheWriteMultiplier = cloneGroupValuePointer(value.Intervals[i].CacheWriteMultiplier)
+		cloned.Intervals[i].CacheReadMultiplier = cloneGroupValuePointer(value.Intervals[i].CacheReadMultiplier)
+		cloned.Intervals[i].PerRequestPrice = cloneGroupValuePointer(value.Intervals[i].PerRequestPrice)
+	}
+	return cloned
+}
+
 func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 	pricing := make([]ChannelModelPricing, len(source.ModelPricing))
 	for i := range source.ModelPricing {
-		pricing[i] = source.ModelPricing[i].Clone()
+		pricing[i] = cloneGroupPricingForDuplicate(source.ModelPricing[i])
 	}
 	return &Group{
 		LongContextPricingEnabled:       source.LongContextPricingEnabled,

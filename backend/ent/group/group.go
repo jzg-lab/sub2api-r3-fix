@@ -392,6 +392,8 @@ var (
 	AudioSttPricePerHourValidator func(float64) error
 	// DefaultLongContextPricingEnabled holds the default value on creation for the "long_context_pricing_enabled" field.
 	DefaultLongContextPricingEnabled bool
+	// DefaultLongContextPricing holds the default value on creation for the "long_context_pricing" field.
+	DefaultLongContextPricing domain.GroupLongContextPricing
 	// DefaultClaudeCodeOnly holds the default value on creation for the "claude_code_only" field.
 	DefaultClaudeCodeOnly bool
 	// DefaultModelRoutingEnabled holds the default value on creation for the "model_routing_enabled" field.
