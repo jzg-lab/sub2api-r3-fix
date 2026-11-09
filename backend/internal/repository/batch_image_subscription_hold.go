@@ -32,7 +32,7 @@ FROM batch_image_jobs WHERE batch_id = $1 AND user_id = $2 AND api_key_id = $3 F
 		!sameBatchQuotaWindow(snapshot.DailyStart, want.DailyStart) || !sameBatchQuotaWindow(snapshot.WeeklyStart, want.WeeklyStart) || !sameBatchQuotaWindow(snapshot.MonthlyStart, want.MonthlyStart) {
 		return nil, service.ErrUsageBillingRequestConflict
 	}
-	next := state
+	var next string
 	switch operation {
 	case "reserve":
 		if state != "" {

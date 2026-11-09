@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql/schema"
 	"github.com/Wei-Shaw/sub2api/ent/migrate"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +32,10 @@ func TestGroupLongContextPricingSchemaMatchesMigration(t *testing.T) {
 		}
 		foundColumn = true
 		require.False(t, column.Nullable, "generated schema must preserve migration 267's NOT NULL")
-		require.EqualValues(t, "'{}'::jsonb", column.Default, "generated database default must match migration 267")
+		require.Equal(t, map[string]schema.Expr{
+			dialect.Postgres: "'{}'::jsonb",
+			dialect.SQLite:   "'{}'",
+		}, column.Default, "generated defaults must preserve migration 267 and SQLite compatibility")
 	}
 	require.True(t, foundColumn)
 }

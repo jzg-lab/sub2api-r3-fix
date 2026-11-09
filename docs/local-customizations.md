@@ -40,6 +40,8 @@ Vue I18n 和消息编译器统一为 11.4.14，沿用 Composition API、运行�
 `runtimeCompatibility.spec.ts` 覆盖两份真实语言包、插值/复数与禁止动态 Function 的 CSP 场景；
 套餐卡片回归断言真实翻译后的显示。既有 overrides 将 decode-uri-component 固定到 0.5.1、
 follow-redirects 固定到 1.16.2，x/net 升至 0.62.0 及其必需关联 x/* 模块。
+压缩依赖 brotli 固定到 1.2.7、compress 固定到 1.20.2，修复可达通告
+`GO-2026-6888`、`GO-2026-6865`；现有 zstd/brotli 编解码兼容回归保留。
 实际安全扫描与部署身份见版本记录和部署状态，不以源码依赖更新代替线上升级。
 
 ## 项目 CI 与候选登记
@@ -437,7 +439,10 @@ r17.4 已部署；未追加该页面的生产浏览器逐项验收，提交与�
 
 迁移为新增 `267_group_long_context_pricing.sql`，以避开订阅批量计费使用的迁移 266；历史迁移保持原样。回归覆盖阈值边界、倍率/豁免保留、
 渠道区间优先、模型广场阶梯、分组及鉴权快照持久化、管理员增改清空，以及分组复制时阈值和模型
-定价配置的独立深拷贝。Ent schema 的非空约束和空对象默认值与迁移一致。源码尚未部署；
+定价配置的独立深拷贝。Ent schema 的非空约束和空对象默认值与迁移一致；数据库默认表达式
+按方言区分，PostgreSQL 使用 `'{}'::jsonb`，SQLite 测试使用 `'{}'`，避免建表时将 PostgreSQL
+类型转换语法传给 SQLite。`TestGroupLongContextPricingSQLiteDefault` 实际建表、写入并核对默认值。
+源码尚未部署；
 本次具体提交及验证记录见[版本与合并记录](upstream-sync-state.md#分组长上下文计费阈值)。
 
 ## 用量表缓存命中率与 TPS
