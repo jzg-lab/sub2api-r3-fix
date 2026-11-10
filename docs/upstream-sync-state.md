@@ -130,8 +130,27 @@ repository 的既有过期/续租计时测试出现失败，定向重复运行�
 依赖为 reviewed_change，配置/插件不变，回退为 conditional；审批由 Codex 按本次用户授权实际
 完成候选审查，不冒充用户亲自审源码。已通过的当前 main CI 为
 [42639763520](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/42639763520)，但登记 skipped。
-审核元数据推送后须显式手动触发 publish_special，并对冻结后的完整 SHA 执行全量 CI；
-登记结果待完成后追加，不手改 VERSION 或候选清单。生产工具当前仅支持迁移 265，
+专项审核提交 `fabb66eaf51d641fe345990c1a768277c8c488a2` 已推送；显式手动触发
+`publish_special=true` 后，[CI 42646565822](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/42646565822)
+于 2026-11-09 15:54 UTC 完整通过，`Register candidate (never deploy)` 为 success。
+全量 unit、PostgreSQL 18/Redis 8 integration、真实 Nginx SSE/WS race、前端全量检查/构建、
+embed/Linux 编译、Go lint、双端安全和部署/候选工具均通过；本地 Windows 的 21 项工具测试中
+20 项通过，另 1 项导入 Linux `fcntl` 报错，远端 macOS 对应整套已通过，不将本地结果改写为通过。
+
+流水线自动登记专项候选 **`v0.2.17+r17.10`**：固定源码
+`7ed539db47aaad7545c3679e5ed444d6274083ae`，永久标签 `deployment-candidate/r17.10`，
+是已审源码 `9d81be7c702ca91f5ebd279b818b1bc720f58a74` 的仅 VERSION 变化子提交。
+清单追加提交 `604026810a10ded6513f9aea902cbd0f5f4fe7e1` 已核对，基线 r17.9、专项通道、
+候选/输入源码和 CI 链接彼此一致。未手工修改 VERSION 或清单，原候选与标签保留。
+普通 Git HTTPS 连接反复超时/重置，故通过 GitHub Git database API 上传相同 blob/tree/commit，
+逐级核对完整 SHA 后非强制快进；机器人提交与标签也按原始对象摘要导入并快进本地 main，未重写提交。
+2026-11-10 再核验已登记状态时，生产 SSH 在 banner exchange 超时，未取得控制器刷新回执，
+故只确认 GitHub 清单已登记，不能据此声称线上页面已刷新或新程序已运行。
+同日从控制器所用的公开 raw 清单网址取得 HTTP 200，并匹配 r17.10 的完整源码；
+这证明发布清单可取，仍不替代生产服务器自身的网络与页面刷新验证。
+本轮原件、修改归档、补丁、原样命令/输出/退出码和独立副本回退验证保存于
+`D:\WorkSpace\sub2api-candidate-registration-evidence`；五个审核/文档文件的补丁重建及回退摘要一致。
+生产工具当前仅支持迁移 265，
 266/267 的专项工具适配、最终镜像隔离验证、生产备份/迁移/准备及上线均未执行且不在此次授权内。
 
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
