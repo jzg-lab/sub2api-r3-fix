@@ -58,6 +58,12 @@ Linux amd64 签名候选包 SHA-256：`30aa67ad15bf71d469c50749150a201404b96c3df
 `golangci-lint v2.14.0` 与 `--new-from-rev=669ec02c6d720d86e3afe6a97a750dad776fad84`
 完整检查报告 `0 issues`。新一轮远程 CI 结果完成后追加；本次不部署。
 
+CI 修复结果：提交 `2bfc6f1cbc58263760144b3a5c255ada75e520ad` 已推送 main。
+北京时间 2026-11-11 04:05 后核验 [CI 42888922496](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/42888922496)
+整体 `Success`，耗时 17 分 10 秒；Go lint、后端全量单元/集成测试、真实 Nginx SSE/WebSocket 切换、
+前端 lint/类型/全量测试/构建、内嵌资源及 Linux 编译、Shell 与前后端安全扫描全部通过。
+候选登记按现有审核门槛跳过，没有生成本次部署候选或执行生产切换；通知与运行环境迁移提示不是检查失败。
+
 ## 全站通用订阅额度（已实现，未部署）
 
 本轮从 `0a73f9b6bb82fc9800aba87d7e6eb63ff4f3aecb` 开始，无上游合并。按用户确认，订阅额度跨
