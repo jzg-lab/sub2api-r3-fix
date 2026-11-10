@@ -352,6 +352,29 @@ class UtilityTests(unittest.TestCase):
                 b.check_contract("repo", "old", "new", {**review, "reviewed_files": {
                     path: hashlib.sha256(modified).hexdigest()}})
 
+    def test_billing_capture_review_rejects_modified_sql_and_unlisted_protocol_files(self):
+        root = Path(__file__).resolve().parents[2]
+        paths = ["backend/migrations/266_batch_image_subscription_billing.sql",
+                 "backend/migrations/267_group_long_context_pricing.sql", b.ROLLBACK_CHECK,
+                 "backend/pkg/pluginapi/v1/plugin.proto"]
+        contents = {p: (root / p).read_bytes() for p in paths}
+        review = {"status": "approved", "source": "new", "previous_source": "old", "changed_paths": paths,
+                  "reviewed_by": "fixture", "evidence": "isolated checks",
+                  "reviewed_files": {p: hashlib.sha256(c).hexdigest() for p, c in contents.items()}}
+        with patch.object(b, "git", side_effect=lambda *a: "\n".join(paths) if a[1] == "diff" else ""), \
+             patch.object(b, "run", side_effect=lambda *a: contents[a[-1].split(":", 1)[1]]):
+            b.check_contract("repo", "old", "new", review)
+            for path in paths[:3]:
+                changed = contents[path] + b"\nDROP TABLE accounts;\n"
+                with patch.dict(contents, {path: changed}), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", {**review, "reviewed_files": {
+                        **review["reviewed_files"], path: hashlib.sha256(changed).hexdigest()}})
+            with patch.dict(contents, {paths[-1]: b"changed protocol"}), self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", review)
+            paths.append("backend/pkg/pluginapi/unreviewed.go")
+            with self.assertRaises(RuntimeError):
+                b.check_contract("repo", "old", "new", review)
+
     def test_app_facts_ignores_volatile_version_log_timestamp(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))
         host = d.Host(config)

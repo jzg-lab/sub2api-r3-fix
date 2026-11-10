@@ -174,10 +174,11 @@ class Fixture:
         old = {**h.app_facts(), "image": self.artifact["base_image_id"], "source": self.artifact["previous_source"],
                "has_readyz": True, "assets": h.assets(h.c["local_url"])}
         new = {**self.artifact, "has_readyz": True}
-        migration = "265_account_manual_quality_tests.sql"
         reviewed = (self.artifact.get("special_review") or {}).get("reviewed_files", {})
-        if "backend/migrations/" + migration in reviewed:
-            self.verify_migration(old, new, migration)
+        migrations = sorted(Path(path).name for path in reviewed
+                            if Path(path).parent.as_posix() == "backend/migrations")
+        if migrations:
+            self.verify_migration(old, new, migrations)
         before = {"data": h.data_identity(), "migrations": h.migrations(), "plugins": h.plugins()}
         h.verify(old)
         d.require(h.drain(), "fixture not idle")
@@ -224,6 +225,7 @@ class Fixture:
         return result
 
     def verify_migration(self, old, new, name):
+        names = [name] if isinstance(name, str) else name
         h = self.h
         baseline, plugins = h.migrations(), d.plugin_contract(h.plugins())
         settings_sql = "SELECT md5(coalesce(json_agg(s ORDER BY key)::text,'[]')) FROM settings s"
@@ -231,16 +233,23 @@ class Fixture:
         h.stop(self.root / "migration-old-stop.log")
         h.start(new)
         after = h.migrations()
-        d.require(set(after) - set(baseline) == {name} and all(after.get(k) == v for k, v in baseline.items())
-                  and after[name] == self.artifact["migrations"][name], "unexpected isolated migration delta")
-        d.require(h.sql("SELECT count(*) FROM account_manual_quality_tests") == "0", "unexpected quality data")
+        d.require(set(after) - set(baseline) == set(names) and all(after.get(k) == v for k, v in baseline.items())
+                  and all(after[n] == self.artifact["migrations"][n] for n in names), "unexpected isolated migration delta")
+        if "265_account_manual_quality_tests.sql" in names:
+            d.require(h.sql("SELECT count(*) FROM account_manual_quality_tests") == "0", "unexpected quality data")
+        if "266_batch_image_subscription_billing.sql" in names:
+            d.require(h.sql("SELECT count(*) FROM information_schema.columns WHERE table_name='batch_image_jobs' "
+                            "AND column_name IN ('billing_snapshot','billing_hold_state')") == "2", "batch columns missing")
+        if "267_group_long_context_pricing.sql" in names:
+            d.require(h.sql("SELECT count(*) FROM groups WHERE long_context_pricing IS DISTINCT FROM '{}'::jsonb") == "0",
+                      "migration changed existing group pricing")
         d.require(d.plugin_contract(h.plugins()) == plugins and h.sql(settings_sql) == settings,
                   "migration changed plugins or settings")
         h.stop(self.root / "migration-new-stop.log")
         h.start(old)
         d.require(h.migrations() == after, "old startup changed migration history")
-        d.save(self.root / "migration-roundtrip.json", {"status": "passed", "new_migration": name,
-               "checksum": after[name], "old_version_on_new_schema": "passed", "production_database_used": False})
+        d.save(self.root / "migration-roundtrip.json", {"status": "passed", "new_migrations": {n: after[n] for n in names},
+               "old_version_on_new_schema": "passed", "production_database_used": False})
 
     def run_handoff(self, old, new):
         h = self.h

@@ -209,6 +209,23 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("blue:serve", self.host.events)
         self.assertTrue(self.host.marker.exists())
 
+    def test_billing_rollback_requires_manual_settlement_before_any_slot_changes(self):
+        self.switch.p["candidate"]["special_review"] = {"reviewed_files": {
+            "backend/migrations/266_batch_image_subscription_billing.sql": "reviewed"}}
+        self.switch.s["mode"] = "rollback"
+        with self.assertRaisesRegex(RuntimeError, "manual admission"):
+            h.Switch.preflight(self.switch)
+        self.assertEqual(self.host.events, [])
+        self.switch.s["mode"] = "activate"
+        self.host.states = {"blue": "standby", "green": "active"}
+        self.switch.state("RECOVERING", touched=True)
+        d.atomic(self.host.pending, str(self.attempt).encode())
+        with self.assertRaisesRegex(RuntimeError, "manual admission"):
+            self.switch.recover()
+        self.assertEqual(self.switch.s["phase"], "NEEDS_ATTENTION")
+        self.assertNotIn("blue:serve", self.host.events)
+        self.assertEqual(self.host.states["green"], "active")
+
     def test_rollback_reverses_slot_names(self):
         path = self.root / "rollback"
         path.mkdir()

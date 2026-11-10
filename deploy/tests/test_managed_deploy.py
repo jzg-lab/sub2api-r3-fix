@@ -672,6 +672,25 @@ class FixtureIsolationTests(unittest.TestCase):
                         with self.assertRaises(RuntimeError):
                             fixture.verify_migration({"image": "old"}, {"image": "new"}, name)
 
+    def test_billing_migrations_are_rehearsed_together_and_old_history_is_preserved(self):
+        names = ["266_batch_image_subscription_billing.sql", "267_group_long_context_pricing.sql"]
+        with tempfile.TemporaryDirectory() as root:
+            fixture = v.Fixture.__new__(v.Fixture)
+            fixture.root, fixture.h = Path(root), Mock()
+            fixture.artifact = {"migrations": {n: n + "-checksum" for n in names}}
+            baseline = {"old.sql": "old-checksum"}
+            after = {**baseline, **fixture.artifact["migrations"]}
+            fixture.h.migrations.side_effect = [baseline, after, after]
+            fixture.h.sql.side_effect = ["settings", "2", "0", "settings"]
+            with patch.object(d, "plugin_contract", return_value=[]):
+                fixture.verify_migration({"image": "old"}, {"image": "new"}, names)
+            self.assertEqual(d.read(fixture.root / "migration-roundtrip.json")["new_migrations"],
+                             fixture.artifact["migrations"])
+            fixture.h.migrations.side_effect = [baseline, {**after, "old.sql": "modified"}]
+            fixture.h.sql.side_effect = ["settings"]
+            with patch.object(d, "plugin_contract", return_value=[]), self.assertRaises(RuntimeError):
+                fixture.verify_migration({"image": "old"}, {"image": "new"}, names)
+
     def test_caller_inventory_ignores_transient_deployment_jobs_only(self):
         host = Mock(c={"pause_services": ["caller.service"]})
         persistent = b"caller.service enabled -\nother.timer enabled -\n"

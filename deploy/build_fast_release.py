@@ -12,6 +12,18 @@ import time
 import fast_deploy
 from fast_deploy import digest, require, run, save
 
+REVIEWED_MIGRATIONS = {
+    "265_account_manual_quality_tests.sql": "7362b1b5332002b100874959d6d907668da32673eb7db9f2ef1514a84a271248",
+    "266_batch_image_subscription_billing.sql": "3a17ddfa015fe3ad596d22218d8a1108d8db38eedd9082e1f0e76011ae270542",
+    "267_group_long_context_pricing.sql": "deebc9fbd0ed085dc539a14ecf12a937a16ffa1f2660116fad3642e4a6a00f9b",
+}
+ROLLBACK_CHECK = "backend/migrations/rollback/266_batch_image_subscription_billing_check.sql"
+CAPTURE_PROTOCOL_FILES = {
+    "backend/pkg/pluginapi/README.md", "backend/pkg/pluginapi/docs/ui-bridge.md",
+    "backend/pkg/pluginapi/v1/manifest.schema.json", "backend/pkg/pluginapi/v1/plugin.proto",
+    "backend/pkg/pluginapi/v1/plugin.pb.go", "backend/pkg/pluginapi/v1/plugin_grpc.pb.go",
+}
+
 
 def git(repo, *args):
     return run("git", "-C", str(repo), *args).decode().strip()
@@ -39,8 +51,8 @@ def check_contract(repo, previous, commit, review=None):
             "special build review requires reviewer and evidence")
     if "reviewed_files" in review:
         # This maintenance path builds reviewed inputs; prepare still requires every SQL checksum applied.
-        allowed = {"Dockerfile", "backend/go.mod", "backend/go.sum",
-                   "backend/migrations/265_account_manual_quality_tests.sql"}
+        allowed = {"Dockerfile", "backend/go.mod", "backend/go.sum", ROLLBACK_CHECK} | CAPTURE_PROTOCOL_FILES | {
+            "backend/migrations/" + name for name in REVIEWED_MIGRATIONS}
         files = review["reviewed_files"]
         require(isinstance(files, dict) and set(files) == set(blocked) and set(blocked) <= allowed,
                 "special build requires exact reviewed dependency/migration files")
@@ -48,10 +60,12 @@ def check_contract(repo, previous, commit, review=None):
             content = run("git", "-C", str(repo), "show", commit + ":" + path)
             require(files[path] == hashlib.sha256(content).hexdigest(), "reviewed file checksum differs: " + path)
             if path.startswith("backend/migrations/"):
+                expected = ("6288f716ceace7816f76015b38f743c927fd678f97cdd3d99801f661953a9630"
+                            if path == ROLLBACK_CHECK else REVIEWED_MIGRATIONS.get(Path(path).name))
                 require(hashlib.sha256(content.strip()).hexdigest() ==
-                        "7362b1b5332002b100874959d6d907668da32673eb7db9f2ef1514a84a271248" and
+                        expected and
                         not git(repo, "ls-tree", "--name-only", previous, "--", path),
-                        "only the reviewed additive manual quality migration is supported")
+                        "only the exact reviewed new migration or rollback check is supported")
         return
     require(set(blocked) <= {"Dockerfile", "backend/go.mod"}, "special build cannot change migrations, plugins or dependencies")
     # This exception only permits a reviewed Go patch; runtime layers still come from the old image.
