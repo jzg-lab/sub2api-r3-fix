@@ -16,6 +16,7 @@ import (
 
 const (
 	PluginCapabilityOpenAIOAuthOutbound = "openai.oauth.outbound_transport.v1"
+	PluginCapabilityCaptureRecords      = "data.capture.v1"
 	PluginStateDisabled                 = "disabled"
 	PluginStateStarting                 = "starting"
 	PluginStateEnabled                  = "enabled"
@@ -168,9 +169,14 @@ func (m PluginManifest) Validate() error {
 	if len(m.Capabilities) == 0 {
 		return errors.New("插件必须声明至少一个能力")
 	}
+	if m.HasCapability(PluginCapabilityCaptureRecords) && m.HasCapability(PluginCapabilityOpenAIOAuthOutbound) {
+		return errors.New("采集与出站能力必须分别使用独立插件")
+	}
 	for _, capability := range m.Capabilities {
-		if capability.ID != PluginCapabilityOpenAIOAuthOutbound || capability.Platform != PlatformOpenAI || capability.AccountType != AccountTypeOAuth {
-			return fmt.Errorf("初期仅支持能力 %s", PluginCapabilityOpenAIOAuthOutbound)
+		validOutbound := capability.ID == PluginCapabilityOpenAIOAuthOutbound && capability.Platform == PlatformOpenAI && capability.AccountType == AccountTypeOAuth
+		validCapture := capability.ID == PluginCapabilityCaptureRecords && capability.Platform == "*" && capability.AccountType == "*"
+		if !validOutbound && !validCapture {
+			return fmt.Errorf("不支持插件能力 %s", capability.ID)
 		}
 	}
 	runtimeEntry, ok := m.Runtimes[m.RuntimeKey()]
@@ -211,4 +217,13 @@ func (m PluginManifest) SortedCapabilities() []PluginCapability {
 	out := append([]PluginCapability(nil), m.Capabilities...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+func (m PluginManifest) HasCapability(id string) bool {
+	for _, capability := range m.Capabilities {
+		if capability.ID == id {
+			return true
+		}
+	}
+	return false
 }

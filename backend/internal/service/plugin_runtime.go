@@ -58,7 +58,7 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		return nil, errors.New("插件二进制哈希无效")
 	}
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), installation.BinaryPath)
-	if installation.PluginKey == "lyunlong.codex.lb-cookie-pin" {
+	if installation.PluginKey == "lyunlong.codex.lb-cookie-pin" || installation.Manifest.HasCapability(PluginCapabilityCaptureRecords) {
 		dir, err := pluginEvidenceDir(socketDir, installation.PluginKey)
 		if err != nil {
 			return nil, fmt.Errorf("prepare plugin evidence: %w", err)
@@ -71,7 +71,10 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		Plugins:          pluginv1.ClientPluginMap(),
 		Cmd:              cmd,
 		AllowedProtocols: []hcplugin.Protocol{hcplugin.ProtocolGRPC},
-		StartTimeout:     startTimeout,
+		GRPCDialOptions: []grpc.DialOption{grpc.WithDefaultCallOptions(
+			grpc.MaxCallSendMsgSize(64<<20), grpc.MaxCallRecvMsgSize(64<<20),
+		)},
+		StartTimeout: startTimeout,
 		SecureConfig: &hcplugin.SecureConfig{
 			Checksum: checksum,
 			Hash:     sha256.New(),
@@ -118,6 +121,18 @@ func startPluginRuntime(ctx context.Context, installation *PluginInstallation, s
 		info.ProtocolVersion != pluginv1.ProtocolVersion || info.TransportApiVersion != pluginv1.TransportAPIVersion {
 		runtime.kill()
 		return nil, errors.New("插件运行时信息与已校验清单不一致")
+	}
+	if installation.Manifest.HasCapability(PluginCapabilityCaptureRecords) {
+		supportsCapture := false
+		for _, capability := range info.Capabilities {
+			if capability == PluginCapabilityCaptureRecords {
+				supportsCapture = true
+			}
+		}
+		if !supportsCapture {
+			runtime.kill()
+			return nil, errors.New("插件运行时未提供清单声明的采集能力")
+		}
 	}
 	runtime.capabilities = append([]string(nil), info.Capabilities...)
 	if err := runtime.checkHealth(infoCtx); err != nil {

@@ -839,6 +839,7 @@ type GatewayService struct {
 	billingCacheService   *BillingCacheService
 	identityService       *IdentityService
 	httpUpstream          HTTPUpstream
+	pluginManager         *PluginManager
 	deferredService       *DeferredService
 	concurrencyService    *ConcurrencyService
 	claudeTokenProvider   *ClaudeTokenProvider

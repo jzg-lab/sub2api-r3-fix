@@ -32,7 +32,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	body []byte,
 	promptCacheKey string,
 	defaultMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, err error) {
+	ctx, finishCapture := s.pluginManager.beginCapture(ctx, c, account)
+	defer func() { finishCapture(err == nil && result != nil && !result.ClientDisconnect) }()
+
 	rememberOpenCodeInboundBody(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
@@ -513,7 +516,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// 9. Handle normal response
 	// Upstream is always streaming; choose response format based on client preference.
-	var result *OpenAIForwardResult
 	var handleErr error
 	if clientStream {
 		result, handleErr = s.handleAnthropicStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)

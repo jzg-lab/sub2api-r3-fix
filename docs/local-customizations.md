@@ -8,6 +8,16 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 2026-11-03 r17.4 已部署本页所述手动测试、安全修复、协议 3、模糊 400 跨组恢复和广场改动；
 下文保留的早期验证数字及“当时未部署”不作为本轮完整验收证据。
 
+## 数据采集插件（本地，未部署）
+
+支持独立的 `data.capture.v1` 槽位、三个可选 RPC，以及管理员列表/下载和 UI Bridge。网关六个业务入口
+通过 `plugin_capture.go` 共用出站观察器，覆盖 Claude/OpenAI HTTP 透传和协议转换；失败、读错误、
+缺少 SSE 成功终态、客户端取消/写出失败均不入队。内存、并发、排队和后台 RPC 有界，保存故障不改模型响应。
+`sub-data-save` 使用稳定插件状态目录下的 `archive`，空配置可启用，签名公钥只授权其包 ID；Cookie Pin
+保持独立出站槽位与原信任。实现和限制见[插件开发](PLUGIN_DEVELOPMENT.md#12-数据采集插件本地实现未部署)。
+回归入口：`plugin_capture*_test.go`、`plugin_package_test.go`、`PluginsView.spec.ts`；真实进程测试需要
+`SUB2API_TEST_CAPTURE_PACKAGE` 指向当前操作系统的签名包。插件自身测试在 `sub-data-save` 仓库。
+
 ## 通用订阅与批量图片预占
 
 订阅可用于用户有权限的所有分组。实际目标组决定价格与倍率，原订阅分组继续提供日／周／月
@@ -600,7 +610,6 @@ HTML 内以 SVG 绘制鹈鹕骑自行车的 2D 动画题，包含不测试、不
 
 
 
-
 ## 密钥智能路由
 
 2026-10-10 智能路由及后续会话粘性/超时修复已部署；下文按 2026-10-11 本地适配后的源码描述。
@@ -849,7 +858,6 @@ OpenAI 代理临时隔离沿用 r17bm：候选耗尽不提前放行隔离代理�
 
 对应回归位于 `backend/internal/repository/openai_quality_scope_test.go`；
 运行方法及通用检查见 [开发指南](../DEV_GUIDE.md)。
-
 
 ## r17bj 适配与 Linux TOTP
 

@@ -13,6 +13,8 @@ const {
   stepUpRun,
   getPluginConfig,
   cancelStepUp,
+  listCaptureRecords,
+  downloadCaptureRecord,
 } = vi.hoisted(() => ({
   listPlugins: vi.fn(),
   uploadPlugin: vi.fn(),
@@ -22,6 +24,8 @@ const {
   stepUpRun: vi.fn((action: () => Promise<unknown>) => action()),
   getPluginConfig: vi.fn(),
   cancelStepUp: vi.fn(),
+  listCaptureRecords: vi.fn(),
+  downloadCaptureRecord: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -37,6 +41,8 @@ vi.mock('@/api/admin', () => ({
       saveConfig: savePluginConfig,
       test: vi.fn().mockResolvedValue({ success: true, message: 'ok', latency_ms: 1 }),
       createUISession,
+      listCaptureRecords,
+      downloadCaptureRecord,
     },
   },
 }))
@@ -172,6 +178,49 @@ describe('管理员插件页二次验证', () => {
       ui_bridge_version: 1,
       expires_at: '2026-08-22T01:00:00Z',
     })
+  })
+
+  it('采集插件无灰度滑块，按当前插件身份列出档案', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    listCaptureRecords.mockResolvedValue([{ date: '2026-11-11', instance_id: 'gateway', record_id: 'record-1', size: 12 }])
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('input[type="range"]').exists()).toBe(false)
+    const { send, post } = await openUI(wrapper)
+    send({ type: 'archive.list', date: '2026-11-11', plugin_id: 999 })
+    await flushPromises()
+    expect(listCaptureRecords).toHaveBeenCalledWith(7, '2026-11-11')
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'archive.list.result', ok: true, records: expect.any(Array) }), '*')
+  })
+
+  it('非采集插件和非当前窗口不能读取档案', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const { send } = await openUI(wrapper)
+    send({ type: 'archive.list', date: '2026-11-11' })
+    await flushPromises()
+    send({ type: 'archive.list', date: '2026-11-11', request_id: 'other-frame' }, window)
+    await flushPromises()
+    expect(listCaptureRecords).not.toHaveBeenCalled()
+  })
+
+  it('下载档案使用当前插件的管理员 API，关闭窗口后不下载迟到结果', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    let resolveDownload!: (blob: Blob) => void
+    downloadCaptureRecord.mockReturnValue(new Promise<Blob>(resolve => { resolveDownload = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    const { send } = await openUI(wrapper)
+    const record = { date: '2026-11-11', instance_id: 'gateway', record_id: 'record-1' }
+    send({ type: 'archive.download', record })
+    await flushPromises()
+    expect(downloadCaptureRecord).toHaveBeenCalledWith(7, { ...record, size: 0 })
+    wrapper.unmount()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    resolveDownload(new Blob(['{}']))
+    await flushPromises()
+    expect(click).not.toHaveBeenCalled()
+    click.mockRestore()
   })
 
   it('启用插件通过 step-up 控制器执行', async () => {

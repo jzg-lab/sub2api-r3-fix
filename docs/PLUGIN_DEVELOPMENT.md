@@ -139,7 +139,7 @@ UI 是插件包内的静态页面，不需要修改 Sub2API 前端源码。宿�
 }
 ```
 
-打包器会自动填充目标平台运行时、UI 和运行时文件的 SHA-256。清单中的 `requires.sub2api` 是硬兼容范围；`tested_sub2api_versions` 应只填写真实验证过的版本；`recommended_sub2api_version` 用于管理页面展示。当前宿主仅处理 `openai.oauth.outbound_transport.v1`，声明其他能力不会自动产生新路由。后续增加 Provider 支持时，会在协议、能力清单和宿主路由完成适配后，再补充对应的清单示例。
+打包器会自动填充目标平台运行时、UI 和运行时文件的 SHA-256。清单中的 `requires.sub2api` 是硬兼容范围；`tested_sub2api_versions` 应只填写真实验证过的版本；`recommended_sub2api_version` 用于管理页面展示。当前宿主支持 `openai.oauth.outbound_transport.v1` 和独立的 `data.capture.v1`；后者的 `platform`、`account_type` 均为 `*`，实际采集范围限 Claude/OpenAI HTTP。两种能力使用独立插件，不在同一包中混合声明。未知能力不会自动产生新路由。后续增加 Provider 支持时，会在协议、能力清单和宿主路由完成适配后，再补充对应的清单示例。
 
 ## 7. 生成密钥并签名
 
@@ -231,3 +231,31 @@ Sub2API 后续会持续补充更多 Provider 的插件适配说明，包括能�
 ## 12. 示例仓库预留
 
 后续计划提供独立的插件示例仓库，用于存放可复用的运行时骨架、UI 组件、打包工具和各 Provider 的最小实现。目前示例仓库尚未准备完成，因此暂不提供地址；正式发布后会在这里补充仓库地址、适用的 Sub2API 版本、示例插件版本和构建说明。
+
+## 12. 数据采集插件（本地实现，未部署）
+
+`data.capture.v1` 复用现有插件安装、加密配置与 UI Bridge，独立于 Cookie Pin 出站槽位。
+插件实现新增可选 RPC `CaptureRecord`、`ListCaptureRecords`、`DownloadCaptureRecord`；旧出站插件
+不会收到这些 RPC，不需要重编译。完整字段见 `backend/pkg/pluginapi/v1/plugin.proto`。
+
+宿主只在 Claude/OpenAI 六个 HTTP 业务入口安装采集上下文，共用出站层捕获实际请求与原始响应；
+覆盖透传与协议转换。JSON 须读完且有效；SSE 须有成功终态、无错误帧/读错误；业务处理成功且
+客户端未取消、写出未失败后，才入有界队列。探针、账号测试、WebSocket 和专用媒体/异步任务不采集。
+不保存 HTTP 头部、Cookie、令牌或代理凭据；正文仍可能包含敏感对话。
+
+并发采集最多 128 条，排队最多 128 条/128 MiB；请求及响应各最多 60 MiB，最终 JSON 最多 60 MiB。
+缓冲与编码先申请现有请求内存预算；无入口预算时使用 128 MiB 共享预算。编码、JSON 转义也占预算，
+所以内存紧张时未到单条上限也会跳过。单个后台 worker 以 5 秒 RPC 限时发送；退出释放队列与预算。
+队满、插件停用/替换、内存不足或磁盘失败均可漏存，不更改模型响应，不承诺无损审计。
+
+采集插件收到 `SUB2API_PLUGIN_STATE_DIR`，指向宿主插件数据目录下稳定的 `state/<插件ID的SHA256>`。
+`sub-data-save` 默认在其中的 `archive` 保存；空配置可直接启用，目录随版本升级保留。既有插件数据目录
+必须位于持久卷中；自定义路径是高级选项，不要求普通安装者填写。卸载不删除该存档目录。
+
+UI 使用 `archive.list`（`date=YYYY-MM-DD`，UTC）及 `archive.download`（`record` 对象含
+`date/instance_id/record_id`）。宿主核对当前 iframe、令牌、采集能力和插件 ID，经现有管理员 API
+访问；iframe 不获得管理员凭据或文件系统入口。下载标记 `private, no-store`。
+
+本项目采集包使用专用发布者 `jzg-lab-sub-data-save-v1`，宿主内置公钥只授权 `jzg-lab.sub-data-save`。
+保留原有未签名包拒绝规则与 Cookie Pin 信任配置。宿主升级一次后，兼容的签名采集包可在插件页
+上传、启用；版本未列入实测清单时仍保留现有兼容性确认。

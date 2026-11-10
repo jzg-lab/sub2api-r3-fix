@@ -18,7 +18,10 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, err error) {
+	ctx, finishCapture := s.pluginManager.beginCapture(ctx, c, account)
+	defer func() { finishCapture(err == nil && result != nil && !result.ClientDisconnect) }()
+
 	InitOpenAIAmbiguous400Recovery(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)

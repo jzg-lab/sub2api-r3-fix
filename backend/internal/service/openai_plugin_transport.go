@@ -8,6 +8,7 @@ import (
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
+	s.httpUpstream = withCaptureUpstream(s.httpUpstream)
 }
 
 // roundTripOpenAIUpstream 只在 OpenAI OAuth 能力绑定已启用时把真实请求交给插件。
@@ -19,6 +20,7 @@ func (s *OpenAIGatewayService) roundTripOpenAIUpstream(request *http.Request, pr
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {
+			captureHTTPResponse(request, response, err)
 			return response, err
 		}
 	}

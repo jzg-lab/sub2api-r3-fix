@@ -11,6 +11,10 @@ service TransportPlugin {
   rpc ApplyConfig(ApplyConfigRequest) returns (ApplyConfigResponse);
   rpc TestConfig(TestConfigRequest) returns (TestConfigResponse);
   rpc Forward(stream ForwardRequest) returns (stream ForwardResponse);
+  // CaptureRecord is additive; older plugins are never sent this RPC.
+  rpc CaptureRecord(CaptureRecordRequest) returns (CaptureRecordResponse);
+  rpc ListCaptureRecords(ListCaptureRecordsRequest) returns (ListCaptureRecordsResponse);
+  rpc DownloadCaptureRecord(DownloadCaptureRecordRequest) returns (DownloadCaptureRecordResponse);
   // InitHostServices hands the plugin a go-plugin broker stream id it can dial
   // back to reach the host-provided HostService. It is an optional, generic
   // lifecycle hook: plugins built against an older contract leave it
@@ -36,6 +40,43 @@ service HostService {
   // ResolveOutboundIdentity, the dedicated (equally sensitive) credential channel.
   rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
   rpc ResolveOutboundIdentity(ResolveOutboundIdentityRequest) returns (ResolveOutboundIdentityResponse);
+}
+
+message CaptureRecordRequest {
+  string record_id = 1;
+  string instance_id = 2;
+  int64 completed_at_unix_nano = 3;
+  bytes record_json = 4;
+}
+
+message CaptureRecordResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message ListCaptureRecordsRequest {
+  string date = 1;
+}
+
+message CaptureRecordInfo {
+  string date = 1;
+  string instance_id = 2;
+  string record_id = 3;
+  int64 size = 4;
+}
+
+message ListCaptureRecordsResponse {
+  repeated CaptureRecordInfo records = 1;
+}
+
+message DownloadCaptureRecordRequest {
+  string date = 1;
+  string instance_id = 2;
+  string record_id = 3;
+}
+
+message DownloadCaptureRecordResponse {
+  bytes record_json = 1;
 }
 
 message GetInfoRequest {}

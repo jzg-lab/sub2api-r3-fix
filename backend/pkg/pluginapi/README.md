@@ -19,9 +19,9 @@
 
 独立进程是代码和发布边界，不是操作系统安全沙箱。插件拥有 Sub2API 服务用户所拥有的文件和网络权限，因此只应安装可信发布者的签名包。闭源二进制可提高源码分发门槛，但不能承诺无法反编译。
 
-## 初期能力边界
+## 能力边界
 
-当前只接受 `openai.oauth.outbound_transport.v1`：
+出站能力 `openai.oauth.outbound_transport.v1`：
 
 - 仅匹配 `platform=openai` 且 `account_type=oauth` 的上游 HTTP 请求。
 - API Key 账号、其他 provider、OAuth 登录与 Token 刷新流程不进入插件。
@@ -29,6 +29,16 @@
 - 命中插件的 OAuth WebSocket 账号会使用 Sub2API 现有 HTTP Bridge，不直接建立上游 WebSocket，避免绕过 v1 HTTP 插件协议。
 - Sub2API 继续负责响应状态处理、SSE 解析、错误映射、用量统计、计费和下游输出。
 - 灰度比例以账号 ID 稳定分桶，未命中的 OAuth 账号继续使用原有内置路径。
+
+独立采集能力 `data.capture.v1`（本地实现，未部署）：
+
+- 清单为 `platform=*`、`account_type=*`；仅采集 Claude/OpenAI HTTP，包含完整成功的 SSE。
+- `CaptureRecord` 接收完整 JSON；`ListCaptureRecords` 按 UTC 日期列出记录，`DownloadCaptureRecord` 返回 JSON。
+- 宿主提供稳定的 `SUB2API_PLUGIN_STATE_DIR`，插件可使用空配置和默认目录；不向插件 UI 提供文件系统入口。
+- UI Bridge 新增 `archive.list`、`archive.download`，通过当前管理员权限代理；采集与出站各有独立槽位。
+- 这是可选的新增协议，旧插件不收到采集 RPC；不支持一个包同时占用采集和出站槽位。
+- 保存为尽力而为，队满/超限/停用/退出可漏存。具体限制、生命周期与安装说明见
+  [插件开发教程](../../../docs/PLUGIN_DEVELOPMENT.md#12-数据采集插件本地实现未部署)。
 
 ## 可选 HostService v2
 
@@ -89,6 +99,8 @@ UI 可以发送以下消息：
 - `config.test`
 - `ui.resize`
 - `ui.notify`
+- `archive.list`（仅采集插件）
+- `archive.download`（仅采集插件）
 
 每个请求消息带 `request_id`，宿主以 `<type>.result` 返回结果。配置整体使用 Sub2API 的密钥加密后存入数据库；运行中插件会先验证并应用新配置，数据库写入失败时恢复旧配置。
 

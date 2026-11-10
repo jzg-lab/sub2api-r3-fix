@@ -284,6 +284,12 @@ func trustedPluginPublisherKey(cfg *config.Config, keyID, pluginID string) strin
 		}
 		return builtInOpenAITransportPublisherKeyBase64
 	}
+	if keyID == "jzg-lab-sub-data-save-v1" {
+		if pluginID != "jzg-lab.sub-data-save" {
+			return ""
+		}
+		return "7Vmw+FaG7muaH0nqY+Hx5YwSR8KP5ieREtOJDiQZ2T4="
+	}
 	if cfg == nil {
 		return ""
 	}

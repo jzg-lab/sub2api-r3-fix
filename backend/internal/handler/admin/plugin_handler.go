@@ -198,6 +198,34 @@ func (h *PluginHandler) Status(c *gin.Context) {
 	response.Success(c, status)
 }
 
+func (h *PluginHandler) ListCaptureRecords(c *gin.Context) {
+	id, ok := pluginIDParam(c)
+	if !ok {
+		return
+	}
+	records, err := h.manager.ListCaptureRecords(c.Request.Context(), id, c.Query("date"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, records)
+}
+
+func (h *PluginHandler) DownloadCaptureRecord(c *gin.Context) {
+	id, ok := pluginIDParam(c)
+	if !ok {
+		return
+	}
+	data, err := h.manager.DownloadCaptureRecord(c.Request.Context(), id, c.Param("date"), c.Param("instance"), c.Param("record"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": c.Param("record") + ".json"}))
+	c.Header("Cache-Control", "private, no-store")
+	c.Data(http.StatusOK, "application/json; charset=utf-8", data)
+}
+
 func (h *PluginHandler) CreateUISession(c *gin.Context) {
 	id, ok := pluginIDParam(c)
 	if !ok {

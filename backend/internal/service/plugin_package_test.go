@@ -115,6 +115,15 @@ func TestPluginPackageInstallerKeepsHostVersionMismatchDisabled(t *testing.T) {
 	assert.False(t, installation.Compatibility.Compatible)
 }
 
+func TestPluginManifestAllowsDataCaptureCapability(t *testing.T) {
+	manifest := testPluginManifest(nil)
+	manifest.Capabilities = []PluginCapability{{
+		ID: PluginCapabilityCaptureRecords, Platform: "*", AccountType: "*",
+	}}
+
+	require.NoError(t, manifest.Validate())
+}
+
 func TestPluginPackageInstallerRejectsHashMismatch(t *testing.T) {
 	cfg := testPluginConfig(t.TempDir(), true)
 	installer := NewPluginPackageInstaller(cfg, PluginHostInfo{Version: "0.1.179"})

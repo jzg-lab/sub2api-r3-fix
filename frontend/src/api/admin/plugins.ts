@@ -95,6 +95,13 @@ export interface PluginUISession {
   expires_at: string
 }
 
+export interface CaptureRecordInfo {
+  date: string
+  instance_id: string
+  record_id: string
+  size: number
+}
+
 export async function list(): Promise<PluginInstallation[]> {
   const { data } = await apiClient.get<PluginInstallation[]>('/admin/plugins')
   return data
@@ -160,6 +167,19 @@ export async function createUISession(id: number): Promise<PluginUISession> {
   return data
 }
 
+export async function listCaptureRecords(id: number, date: string): Promise<CaptureRecordInfo[]> {
+  const { data } = await apiClient.get<CaptureRecordInfo[]>(`/admin/plugins/${id}/capture-records`, { params: { date } })
+  return data
+}
+
+export async function downloadCaptureRecord(id: number, record: CaptureRecordInfo): Promise<Blob> {
+  const { data } = await apiClient.get<Blob>(
+    `/admin/plugins/${id}/capture-records/${encodeURIComponent(record.date)}/${encodeURIComponent(record.instance_id)}/${encodeURIComponent(record.record_id)}`,
+    { responseType: 'blob' }
+  )
+  return data
+}
+
 export default {
   list,
   upload,
@@ -170,5 +190,7 @@ export default {
   saveConfig,
   test,
   getStatus,
-  createUISession
+  createUISession,
+  listCaptureRecords,
+  downloadCaptureRecord
 }

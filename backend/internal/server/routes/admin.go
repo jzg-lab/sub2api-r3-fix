@@ -806,6 +806,8 @@ func registerPluginRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 		plugins.POST("/:id/test", gin.HandlerFunc(stepUpAuth), h.Admin.Plugin.Test)
 		plugins.GET("/:id/status", h.Admin.Plugin.Status)
 		plugins.POST("/:id/ui-session", h.Admin.Plugin.CreateUISession)
+		plugins.GET("/:id/capture-records", h.Admin.Plugin.ListCaptureRecords)
+		plugins.GET("/:id/capture-records/:date/:instance/:record", h.Admin.Plugin.DownloadCaptureRecord)
 	}
 }
 

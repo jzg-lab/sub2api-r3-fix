@@ -211,7 +211,7 @@
               </p>
             </div>
 
-            <div class="md:col-span-2">
+            <div v-if="plugin.manifest.capabilities.some((capability) => capability.id === 'openai.oauth.outbound_transport.v1')" class="md:col-span-2">
               <label
                 class="flex items-center justify-between gap-4 text-xs font-medium text-gray-600 dark:text-gray-300"
               >
@@ -367,6 +367,8 @@ interface PluginBridgeMessage {
   height?: unknown;
   level?: unknown;
   message?: unknown;
+  date?: unknown;
+  record?: unknown;
 }
 
 interface BridgeRequest {
@@ -661,7 +663,9 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
     message.type === "config.load" ||
     message.type === "config.save" ||
     message.type === "config.test" ||
-    message.type === "plugin.status";
+    message.type === "plugin.status" ||
+    message.type === "archive.list" ||
+    message.type === "archive.download";
   const sensitive = message.type === "config.save" || message.type === "config.test";
   let binding: BridgeRequest | undefined;
   if (expectsResponse) {
@@ -717,6 +721,33 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
         // 插件 UI 每 5s 轮询一次：宿主读 30s 状态桥缓存应答，不压插件进程。
         const status = await adminAPI.plugins.getStatus(binding!.pluginID);
         postBridgeResult(message, binding, { ok: true, result: status });
+        break;
+      }
+      case "archive.list": {
+        if (!configPlugin.value.manifest.capabilities.some(capability => capability.id === "data.capture.v1")) throw new Error(t("admin.plugins.bridgeRejected"));
+        if (typeof message.date !== "string") throw new Error(t("admin.plugins.bridgeRejected"));
+        const records = await adminAPI.plugins.listCaptureRecords(binding!.pluginID, message.date);
+        postBridgeResult(message, binding, { ok: true, records });
+        break;
+      }
+      case "archive.download": {
+        if (!configPlugin.value.manifest.capabilities.some(capability => capability.id === "data.capture.v1")) throw new Error(t("admin.plugins.bridgeRejected"));
+        if (!message.record || typeof message.record !== "object" || Array.isArray(message.record))
+          throw new Error(t("admin.plugins.bridgeRejected"));
+        const record = message.record as { date?: unknown; instance_id?: unknown; record_id?: unknown };
+        if (typeof record.date !== "string" || typeof record.instance_id !== "string" || typeof record.record_id !== "string")
+          throw new Error(t("admin.plugins.bridgeRejected"));
+        const blob = await adminAPI.plugins.downloadCaptureRecord(binding!.pluginID, {
+          date: record.date, instance_id: record.instance_id, record_id: record.record_id, size: 0,
+        });
+        if (!isCurrentBridgeRequest(requestID, binding!)) break;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${record.record_id}.json`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        postBridgeResult(message, binding, { ok: true });
         break;
       }
       case "ui.resize": {

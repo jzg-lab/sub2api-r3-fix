@@ -104,6 +104,7 @@ func ProvideAdminHandlers(
 
 func ProvideGatewayHandler(
 	gatewayService *service.GatewayService,
+	pluginManager *service.PluginManager,
 	openAIGatewayService *service.OpenAIGatewayService,
 	geminiCompatService *service.GeminiMessagesCompatService,
 	antigravityGatewayService *service.AntigravityGatewayService,
@@ -121,6 +122,7 @@ func ProvideGatewayHandler(
 	coordinator *securityaudit.Coordinator,
 	geminiCachedContentService *service.GeminiCachedContentService,
 ) *GatewayHandler {
+	gatewayService.SetPluginManager(pluginManager)
 	h := NewGatewayHandler(gatewayService, openAIGatewayService, geminiCompatService, antigravityGatewayService,
 		userService, concurrencyService, billingCacheService, usageService, apiKeyService, usageRecordWorkerPool,
 		errorPassthroughService, contentModerationService, userMsgQueueService, cfg, settingService)

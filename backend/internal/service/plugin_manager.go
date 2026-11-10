@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -61,6 +62,12 @@ type PluginManager struct {
 	operationMu        sync.Mutex
 	mu                 sync.Mutex
 	runtimes           map[int64]*pluginRuntime
+	captureRuntime     atomic.Pointer[pluginRuntime]
+	captureQueue       chan queuedCapture
+	captureSlots       chan struct{}
+	captureQueuedBytes atomic.Int64
+	captureDone        chan struct{}
+	captureMemory      *pkghttputil.BodyMemoryBudget
 	localInstallations map[int64]*PluginInstallation
 	started            bool
 	reconcileCancel    context.CancelFunc
@@ -80,6 +87,9 @@ func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *con
 		hostInfo:           hostInfo,
 		installer:          NewPluginPackageInstaller(cfg, hostInfo),
 		runtimes:           make(map[int64]*pluginRuntime),
+		captureQueue:       make(chan queuedCapture, 128),
+		captureSlots:       make(chan struct{}, 128),
+		captureMemory:      pkghttputil.NewBodyMemoryBudget(captureQueueMaxBytes),
 		localInstallations: make(map[int64]*PluginInstallation),
 		statusCache:        make(map[int64]*PluginStatus),
 	}
@@ -112,11 +122,14 @@ func (m *PluginManager) Start(ctx context.Context) error {
 	done := m.reconcileDone
 	statusDone := make(chan struct{})
 	m.statusDone = statusDone
+	captureDone := make(chan struct{})
+	m.captureDone = captureDone
 	m.mu.Unlock()
 	m.operationMu.Unlock()
 
 	go m.statusLoop(reconcileCtx, statusDone)
 	go m.reconcileLoop(reconcileCtx, done)
+	go m.captureLoop(reconcileCtx, captureDone)
 	if err := m.reconcileOnce(reconcileCtx); err != nil {
 		slog.Warn("plugin_initial_reconcile_failed", "error", err)
 	}
@@ -128,6 +141,9 @@ func (m *PluginManager) Stop() {
 	cancel := m.reconcileCancel
 	done := m.reconcileDone
 	statusDone := m.statusDone
+	captureDone := m.captureDone
+	m.captureDone = nil
+	m.captureRuntime.Store(nil)
 	m.reconcileCancel = nil
 	m.reconcileDone = nil
 	m.statusDone = nil
@@ -141,6 +157,9 @@ func (m *PluginManager) Stop() {
 	if statusDone != nil {
 		<-statusDone
 	}
+	if captureDone != nil {
+		<-captureDone
+	}
 	m.operationMu.Lock()
 	m.mu.Lock()
 	runtimes := make([]*pluginRuntime, 0, len(m.runtimes))
@@ -149,6 +168,7 @@ func (m *PluginManager) Stop() {
 	}
 	m.runtimes = make(map[int64]*pluginRuntime)
 	m.route.Store(nil)
+	m.captureRuntime.Store(nil)
 	m.started = false
 	m.mu.Unlock()
 	m.operationMu.Unlock()
@@ -207,7 +227,7 @@ func (m *PluginManager) Install(ctx context.Context, reader io.Reader, installed
 	}
 	var previous *PluginInstallation
 	if existing, getErr := m.repo.GetByKey(ctx, packageInfo.PluginKey); getErr == nil {
-		if existing.State == PluginStateEnabled || hasEnabledOpenAIBinding(existing.Bindings) {
+		if existing.State == PluginStateEnabled || hasEnabledOpenAIBinding(existing.Bindings) || hasEnabledCaptureBinding(existing.Bindings) {
 			cleanupErr := m.cleanupInstallationFiles(packageInfo)
 			return nil, errors.Join(errors.New("请先停用当前插件，再上传同 ID 的新版本"), cleanupErr)
 		}
@@ -294,7 +314,14 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 	}
 	m.cleanupStaleLocalInstallations(installations)
 	var enabled *PluginInstallation
+	var capture *PluginInstallation
 	for _, installation := range installations {
+		if hasEnabledCaptureBinding(installation.Bindings) {
+			if capture != nil {
+				return errors.New("检测到多个采集插件同时启用")
+			}
+			capture = installation
+		}
 		if !hasEnabledOpenAIBinding(installation.Bindings) {
 			continue
 		}
@@ -304,6 +331,9 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 			return err
 		}
 		enabled = installation
+	}
+	if err := m.reconcileCaptureRuntime(ctx, capture); err != nil {
+		slog.Warn("plugin_capture_reconcile_failed", "error", err)
 	}
 	if enabled == nil {
 		for _, installation := range installations {
@@ -317,9 +347,11 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 				return fmt.Errorf("恢复超时插件状态: %w", err)
 			}
 		}
-		runtimes := m.detachAllRuntimes()
-		for _, runtime := range runtimes {
-			runtime.drain(10 * time.Second)
+		if current := m.route.Swap(nil); current != nil && current.runtime != nil {
+			m.mu.Lock()
+			delete(m.runtimes, current.pluginID)
+			m.mu.Unlock()
+			current.runtime.drain(10 * time.Second)
 		}
 		return nil
 	}
@@ -410,12 +442,12 @@ func (m *PluginManager) reconcileOnce(ctx context.Context) error {
 	m.mu.Lock()
 	stale := make([]*pluginRuntime, 0, len(m.runtimes))
 	for id, candidate := range m.runtimes {
-		if candidate != runtime {
+		if candidate != runtime && !hasEnabledCaptureBinding(candidate.installation.Bindings) {
 			candidate.draining.Store(true)
 			stale = append(stale, candidate)
-		}
-		if id != enabled.ID {
-			delete(m.runtimes, id)
+			if id != enabled.ID {
+				delete(m.runtimes, id)
+			}
 		}
 	}
 	m.runtimes[enabled.ID] = runtime
@@ -452,6 +484,7 @@ func (m *PluginManager) detachAllRuntimes() []*pluginRuntime {
 		delete(m.runtimes, id)
 	}
 	m.route.Store(nil)
+	m.captureRuntime.Store(nil)
 	return runtimes
 }
 
@@ -459,6 +492,9 @@ func (m *PluginManager) publishUnavailableRoute(pluginID int64, rollout int, mes
 	m.mu.Lock()
 	stale := make([]*pluginRuntime, 0, len(m.runtimes))
 	for id, runtime := range m.runtimes {
+		if hasEnabledCaptureBinding(runtime.installation.Bindings) {
+			continue
+		}
 		runtime.draining.Store(true)
 		stale = append(stale, runtime)
 		delete(m.runtimes, id)
@@ -604,10 +640,17 @@ func (m *PluginManager) Enable(ctx context.Context, id int64, acceptUntested boo
 	if err != nil {
 		return nil, err
 	}
-	if active := m.route.Load(); active != nil && active.pluginID != id {
-		return nil, errors.New("OpenAI OAuth 出站能力已有启用插件，请先停用当前插件")
+	if installation.Manifest.HasCapability(PluginCapabilityOpenAIOAuthOutbound) {
+		if active := m.route.Load(); active != nil && active.pluginID != id {
+			return nil, errors.New("OpenAI OAuth 出站能力已有启用插件，请先停用当前插件")
+		}
 	}
-	if installation.State == PluginStateEnabled && hasEnabledOpenAIBinding(installation.Bindings) {
+	if installation.Manifest.HasCapability(PluginCapabilityCaptureRecords) {
+		if active := m.captureRuntime.Load(); active != nil && active.installation.ID != id {
+			return nil, errors.New("采集能力已有启用插件，请先停用当前插件")
+		}
+	}
+	if installation.State == PluginStateEnabled && (hasEnabledOpenAIBinding(installation.Bindings) || hasEnabledCaptureBinding(installation.Bindings)) {
 		installation.Compatibility = EvaluatePluginCompatibility(installation.Manifest, m.hostInfo)
 		m.mu.Lock()
 		runtime := m.runtimes[id]
@@ -704,7 +747,7 @@ func (m *PluginManager) Delete(ctx context.Context, id int64) error {
 		m.mu.Unlock()
 		return err
 	}
-	if installation.State == PluginStateEnabled || hasEnabledOpenAIBinding(installation.Bindings) {
+	if installation.State == PluginStateEnabled || hasEnabledOpenAIBinding(installation.Bindings) || hasEnabledCaptureBinding(installation.Bindings) {
 		m.mu.Unlock()
 		return errors.New("请先停用插件，再执行卸载")
 	}
@@ -1271,11 +1314,16 @@ func (m *PluginManager) publishRuntimeLocked(installation *PluginInstallation, r
 		old.kill()
 	}
 	m.runtimes[installation.ID] = runtime
-	m.route.Store(&pluginRoute{
-		pluginID:       installation.ID,
-		runtime:        runtime,
-		rolloutPercent: bindingRollout(installation.Bindings),
-	})
+	if hasEnabledCaptureBinding(installation.Bindings) {
+		m.captureRuntime.Store(runtime)
+	}
+	if hasEnabledOpenAIBinding(installation.Bindings) {
+		m.route.Store(&pluginRoute{
+			pluginID:       installation.ID,
+			runtime:        runtime,
+			rolloutPercent: bindingRollout(installation.Bindings),
+		})
+	}
 }
 
 func (m *PluginManager) newRuntime(ctx context.Context, installation *PluginInstallation) (*pluginRuntime, error) {
@@ -1364,6 +1412,9 @@ func pluginAccountScopeFromManifest(manifest PluginManifest) PluginAccountScope 
 func (m *PluginManager) removeRuntimeLocked(id int64) *pluginRuntime {
 	runtime := m.runtimes[id]
 	delete(m.runtimes, id)
+	if capture := m.captureRuntime.Load(); capture != nil && capture.installation.ID == id {
+		m.captureRuntime.Store(nil)
+	}
 	if route := m.route.Load(); route != nil && route.pluginID == id {
 		m.route.Store(nil)
 	}

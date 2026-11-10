@@ -34,7 +34,10 @@ func (s *GatewayService) ForwardAsResponses(
 	account *Account,
 	body []byte,
 	parsed *ParsedRequest,
-) (*ForwardResult, error) {
+) (captureResult *ForwardResult, captureErr error) {
+	ctx, finishCapture := s.pluginManager.beginCapture(ctx, c, account)
+	defer func() { finishCapture(captureErr == nil && captureResult != nil && !captureResult.ClientDisconnect) }()
+
 	startTime := time.Now()
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngressWithConfig(s.cfg, body)

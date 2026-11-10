@@ -32,7 +32,10 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	account *Account,
 	body []byte,
 	parsed *ParsedRequest,
-) (*ForwardResult, error) {
+) (captureResult *ForwardResult, captureErr error) {
+	ctx, finishCapture := s.pluginManager.beginCapture(ctx, c, account)
+	defer func() { finishCapture(captureErr == nil && captureResult != nil && !captureResult.ClientDisconnect) }()
+
 	startTime := time.Now()
 
 	// 1. Parse Chat Completions request
