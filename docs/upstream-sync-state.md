@@ -50,6 +50,14 @@ HTTP 的 JSON/SSE 原始上游正文；管理员列表/下载与 UI Bridge；默
 Linux amd64 签名候选包 SHA-256：`30aa67ad15bf71d469c50749150a201404b96c3df826b1f737f1ef9c0974e88d`。
 远程全量 CI 结果未在本轮核验，不等于候选发布或生产验收通过；未变更部署审核、候选清单或生产环境。
 
+本轮 CI 更正：首次远程运行 `42885767477` 的 Go lint 失败，报告采集 SSE 的两处
+`strings.Builder` 写入和真实插件测试的文件关闭/目录清理共 4 处未处理返回值。
+前端、Shell 与安全扫描已通过；不能把最初专项测试通过解释为整个 CI 通过。
+已显式处理 Builder 的恒为 nil 返回值，并对测试清理结果作断言，未关闭检查或更改 lint 基线。
+修复后本地重跑带真实签名包的 `TestCapture|TestPlugin` race 通过；使用 CI 相同的
+`golangci-lint v2.14.0` 与 `--new-from-rev=669ec02c6d720d86e3afe6a97a750dad776fad84`
+完整检查报告 `0 issues`。新一轮远程 CI 结果完成后追加；本次不部署。
+
 ## 全站通用订阅额度（已实现，未部署）
 
 本轮从 `0a73f9b6bb82fc9800aba87d7e6eb63ff4f3aecb` 开始，无上游合并。按用户确认，订阅额度跨

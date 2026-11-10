@@ -302,9 +302,9 @@ func captureResponseComplete(contentType string, body []byte, eof bool) bool {
 		}
 		if bytes.HasPrefix(line, []byte("data:")) {
 			if frame.Len() > 0 {
-				frame.WriteByte('\n')
+				_ = frame.WriteByte('\n')
 			}
-			frame.Write(bytes.TrimPrefix(line[5:], []byte(" ")))
+			_, _ = frame.Write(bytes.TrimPrefix(line[5:], []byte(" ")))
 		}
 	}
 	// Incomplete trailing frames do not establish successful termination.
