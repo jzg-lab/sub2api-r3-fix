@@ -232,7 +232,9 @@ Sub2API 后续会持续补充更多 Provider 的插件适配说明，包括能�
 
 后续计划提供独立的插件示例仓库，用于存放可复用的运行时骨架、UI 组件、打包工具和各 Provider 的最小实现。目前示例仓库尚未准备完成，因此暂不提供地址；正式发布后会在这里补充仓库地址、适用的 Sub2API 版本、示例插件版本和构建说明。
 
-## 12. 数据采集插件（本地实现，未部署）
+## 12. 数据采集插件
+
+宿主支持已随 r17.11 上线；生产尚未安装或启用采集插件包，实际部署证据见[部署状态](deployment-state.md)。
 
 `data.capture.v1` 复用现有插件安装、加密配置与 UI Bridge，独立于 Cookie Pin 出站槽位。
 插件实现新增可选 RPC `CaptureRecord`、`ListCaptureRecords`、`DownloadCaptureRecord`；旧出站插件
