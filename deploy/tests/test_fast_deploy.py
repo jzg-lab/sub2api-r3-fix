@@ -16,6 +16,34 @@ import fast_deploy as d
 import build_fast_release as b
 
 
+class DNSProbeRetryTests(unittest.TestCase):
+    def test_dns_failure_retries_once_with_original_deadline(self):
+        for code, error in ((6, b"Could not resolve host"), (28, b"Resolving timed out after 5000 milliseconds")):
+            failed = subprocess.CompletedProcess([], code, b"", error)
+            passed = subprocess.CompletedProcess([], 0, b"healthy", b"")
+            with self.subTest(code=code), patch.object(d.subprocess, "run", side_effect=[failed, passed]) as call:
+                self.assertEqual(d.run("curl", "https://example.test/health", timeout=5.1, retry_dns=True), b"healthy")
+                self.assertEqual(call.call_count, 2)
+                self.assertEqual(call.call_args_list[0], call.call_args_list[1])
+                self.assertEqual(call.call_args.kwargs["timeout"], 5.1)
+
+    def test_dns_failure_stops_after_second_attempt(self):
+        failed = subprocess.CompletedProcess([], 6, b"", b"Could not resolve host")
+        with patch.object(d.subprocess, "run", return_value=failed) as call, self.assertRaises(RuntimeError):
+            d.run("curl", retry_dns=True)
+        self.assertEqual(call.call_count, 2)
+
+    def test_other_failures_and_non_opted_in_commands_never_retry(self):
+        cases = [("curl", True, 28, b"Operation timed out"), ("curl", True, 60, b"TLS error"),
+                 ("curl", True, 22, b"HTTP 403"), ("curl", False, 6, b"DNS error"),
+                 ("docker", True, 6, b"DNS error")]
+        for executable, enabled, code, error in cases:
+            with self.subTest(case=(executable, enabled, code)), patch.object(d.subprocess, "run", return_value=
+                    subprocess.CompletedProcess([], code, b"", error)) as call, self.assertRaises(RuntimeError):
+                d.run(executable, retry_dns=enabled)
+            self.assertEqual(call.call_count, 1)
+
+
 class FakeHost:
     def __init__(self, root):
         self.c = {"pause_services": ["active.service", "inactive.service"], "app_container": "app"}

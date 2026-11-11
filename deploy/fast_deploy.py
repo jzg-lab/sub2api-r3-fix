@@ -34,12 +34,18 @@ def command_ok(result, executable):
     require(result.returncode == 0, "command failed: " + executable + "; inspect private command-errors.log/build.log")
 
 
-def run(*args, timeout=60, stdout=None, merge_stderr=False):
-    result = subprocess.run(args, stdout=stdout or subprocess.PIPE, stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
-                            timeout=timeout, check=False)
-    # Command output can contain secrets; keep it out of exception messages/journal.
-    command_ok(result, args[0])
-    return result.stdout
+def run(*args, timeout=60, stdout=None, merge_stderr=False, retry_dns=False):
+    for attempt in range(2 if retry_dns else 1):
+        result = subprocess.run(args, stdout=stdout or subprocess.PIPE, stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+                                timeout=timeout, check=False)
+        # Only opted-in read-only HTTP probes retry DNS failure, never HTTP/TLS errors.
+        if retry_dns and attempt == 0 and args[0] == "curl" and (result.returncode == 6 or
+                (result.returncode == 28 and b"Resolving timed out" in (result.stderr or b""))):
+            print("Public probe DNS resolution failed; retrying once", flush=True)
+            continue
+        # Command output can contain secrets; keep it out of exception messages/journal.
+        command_ok(result, args[0])
+        return result.stdout
 
 
 def digest(path):
@@ -182,7 +188,8 @@ class Host:
         if admin:
             require(origin == self.c["local_url"], "admin credentials must stay on loopback")
             args += ["--header", "@" + self.c["admin_header_file"]]
-        body, code = run(*args, origin.rstrip("/") + path, timeout=timeout + 0.1).rsplit(b"\n", 1)
+        body, code = run(*args, origin.rstrip("/") + path, timeout=timeout + 0.1,
+                         retry_dns=origin in self.c["public_urls"]).rsplit(b"\n", 1)
         require(int(code) == expected, "HTTP check failed: " + path + " status=" + code.decode())
         return body
 

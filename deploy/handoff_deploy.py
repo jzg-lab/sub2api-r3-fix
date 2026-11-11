@@ -142,7 +142,8 @@ class Host(d.Host):
         origins = [self.handoff["stable_url"], *self.c["public_urls"]]
         for origin in origins:
             headers = d.run("curl", "-q", "--noproxy", "*", "-fsS", "--max-time", "5",
-                            "-H", "Connection: close", "-D", "-", "-o", "/dev/null", origin.rstrip("/") + "/health")
+                            "-H", "Connection: close", "-D", "-", "-o", "/dev/null", origin.rstrip("/") + "/health",
+                            timeout=5.1, retry_dns=origin in self.c["public_urls"])
             ids = re.findall(rb"(?im)^x-sub2api-instance:\s*([^\r\n]+)", headers)
             d.require(ids == [boot.encode()], "ingress does not target expected instance: " + origin)
         d.require(self.selected() == slot, "upstream pointer changed")
