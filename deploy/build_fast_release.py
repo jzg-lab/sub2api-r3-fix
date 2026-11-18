@@ -16,6 +16,12 @@ REVIEWED_MIGRATIONS = {
     "265_account_manual_quality_tests.sql": "7362b1b5332002b100874959d6d907668da32673eb7db9f2ef1514a84a271248",
     "266_batch_image_subscription_billing.sql": "3a17ddfa015fe3ad596d22218d8a1108d8db38eedd9082e1f0e76011ae270542",
     "267_group_long_context_pricing.sql": "deebc9fbd0ed085dc539a14ecf12a937a16ffa1f2660116fad3642e4a6a00f9b",
+    '268_enable_gemini_image_generation_groups.sql': '87267be7ab657173768989e2b0b105c5569c5930a7f1ed124f4cf81e5198297c',
+    '269_scoped_admin_api_keys.sql': '03445774e2dfad32da9e23279193d1bca02953896bc3d3b8a87ba0b36b6ed577',
+    '270_group_image_count_billing.sql': 'a872dde339b19f311feb5fa6fd85c8ff7b11d69794c35a18e2086d9846b3499c',
+    '271_mcp_oauth.sql': '751a1dcee6108afcecbd580b6e3140cca3480853fecd2174861b02f3a71e54a1',
+    '272_default_openai_api_key_long_context_billing.sql': 'cfdc704c27c2ed38c164a9799201bfec4160fe7200daa96a0665f2777a51cdc5',
+    '273_affiliate_ledger_operation_id.sql': '3823bfea5f64feb58f5fcebc341c6877eaefc97834b4cd652c8e83ad08ed78da',
 }
 ROLLBACK_CHECK = "backend/migrations/rollback/266_batch_image_subscription_billing_check.sql"
 CAPTURE_PROTOCOL_FILES = {
@@ -30,6 +36,9 @@ def git(repo, *args):
 
 
 def protected(path):
+    # Migration test sources do not run in the deployed application.
+    if path.startswith("backend/migrations/") and path.endswith("_test.go"):
+        return False
     # Fail closed on dependencies/protocol/runtime changes; these need review.
     return (path in ("Dockerfile", "backend/go.mod", "backend/go.sum") or
             path.startswith(("backend/migrations/", "backend/pkg/pluginapi/",

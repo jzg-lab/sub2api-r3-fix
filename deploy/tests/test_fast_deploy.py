@@ -403,6 +403,26 @@ class UtilityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 b.check_contract("repo", "old", "new", review)
 
+    def test_v020_migrations_require_exact_new_sql_and_reject_history_changes(self):
+        root = Path(__file__).resolve().parents[2]
+        paths = ["backend/migrations/" + name for name in b.REVIEWED_MIGRATIONS if 268 <= int(name[:3]) <= 273]
+        self.assertEqual(len(paths), 6)
+        for path in paths:
+            content = (root / path).read_bytes()
+            review = {"status": "approved", "source": "new", "previous_source": "old",
+                      "changed_paths": [path], "reviewed_by": "fixture", "evidence": "isolated rehearsal",
+                      "reviewed_files": {path: hashlib.sha256(content).hexdigest()}}
+            with self.subTest(path=path), patch.object(b, "git", side_effect=lambda *a: path if a[1] == "diff" else ""), patch.object(b, "run", return_value=content):
+                b.check_contract("repo", "old", "new", review)
+                with patch.object(b, "git", return_value=path), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", review)
+                changed = content + b"\nDELETE FROM accounts;\n"
+                with patch.object(b, "run", return_value=changed), self.assertRaises(RuntimeError):
+                    b.check_contract("repo", "old", "new", {**review, "reviewed_files": {path: hashlib.sha256(changed).hexdigest()}})
+        self.assertFalse(b.protected("backend/migrations/example_test.go"))
+        self.assertTrue(b.protected("backend/migrations/example.go"))
+        self.assertTrue(b.protected("backend/migrations/274_unreviewed.sql"))
+
     def test_app_facts_ignores_volatile_version_log_timestamp(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))
         host = d.Host(config)
