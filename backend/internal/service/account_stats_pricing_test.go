@@ -1104,7 +1104,7 @@ func TestOpenAIGatewayServiceRecordUsage_AccountStatsLongContextFollowsAccountGa
 		{
 			name:            "group_off_account_on",
 			accountExtra:    map[string]any{"openai_long_context_billing_enabled": true},
-			wantTotalCost:   longContextCost,
+			wantTotalCost:   baseCost,
 			wantAccountCost: longContextCost,
 		},
 	} {

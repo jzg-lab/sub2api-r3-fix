@@ -200,7 +200,7 @@ func TestReasoningEffortBillingNoResolverPreservesCatalogPolicies(t *testing.T) 
 				require.NoError(t, err)
 				got, err := bs.CalculateCostUnified(CostInput{
 					Model: "gpt-5.4", Tokens: tokens, RateMultiplier: rateMultiplier,
-					ServiceTier: serviceTier, LongContextBillingEnabled: &applyLongContext, ReasoningEffort: "max",
+					ServiceTier: serviceTier, DisableModelLongContextPricing: !applyLongContext, ReasoningEffort: "max",
 				})
 				require.NoError(t, err)
 				require.Equal(t, want, got)

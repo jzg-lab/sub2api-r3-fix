@@ -1260,7 +1260,7 @@ func swapInOpenAILadderCatalog(t *testing.T, svc *OpenAIGatewayService) {
 	svc.billingService = NewBillingService(cfg, newStubPricingServiceFromJSON(t, openAILadderCatalogJSON))
 }
 
-func TestOpenAIGatewayServiceRecordUsage_Gpt54LongContextBillingEnabledPerAccount(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_Gpt54LongContextBillingEnabledByGroup(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
 	subRepo := &openAIRecordUsageSubRepoStub{}
@@ -1299,7 +1299,7 @@ func TestOpenAIGatewayServiceRecordUsage_Gpt54LongContextBillingEnabledPerAccoun
 	require.True(t, usageRepo.lastLog.LongContextBillingApplied)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_GroupOrAccountLongContextAllows(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_LongContextFollowsGroupOnly(t *testing.T) {
 	tokens := OpenAIUsage{InputTokens: 300000, OutputTokens: 2000}
 	baseInput := 300000 * 2.5e-6
 	baseOutput := 2000 * 15e-6
@@ -1334,9 +1334,9 @@ func TestOpenAIGatewayServiceRecordUsage_GroupOrAccountLongContextAllows(t *test
 			},
 		})
 		require.NoError(t, err)
-		require.True(t, usageRepo.lastLog.LongContextBillingApplied)
-		require.InDelta(t, baseInput*2, usageRepo.lastLog.InputCost, 1e-10)
-		require.InDelta(t, baseOutput*1.5, usageRepo.lastLog.OutputCost, 1e-10)
+		require.False(t, usageRepo.lastLog.LongContextBillingApplied)
+		require.InDelta(t, baseInput, usageRepo.lastLog.InputCost, 1e-10)
+		require.InDelta(t, baseOutput, usageRepo.lastLog.OutputCost, 1e-10)
 	})
 
 	t.Run("group on account on", func(t *testing.T) {
@@ -1358,7 +1358,7 @@ func TestOpenAIGatewayServiceRecordUsage_GroupOrAccountLongContextAllows(t *test
 		require.InDelta(t, baseOutput*1.5, usageRepo.lastLog.OutputCost, 1e-10)
 	})
 
-	t.Run("account off overrides group on", func(t *testing.T) {
+	t.Run("account off cannot override group on", func(t *testing.T) {
 		usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 		svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
 		swapInOpenAILadderCatalog(t, svc)
@@ -1370,9 +1370,9 @@ func TestOpenAIGatewayServiceRecordUsage_GroupOrAccountLongContextAllows(t *test
 				Extra: map[string]any{"openai_long_context_billing_enabled": false}},
 		})
 		require.NoError(t, err)
-		require.False(t, usageRepo.lastLog.LongContextBillingApplied)
-		require.InDelta(t, baseInput, usageRepo.lastLog.InputCost, 1e-10)
-		require.InDelta(t, baseOutput, usageRepo.lastLog.OutputCost, 1e-10)
+		require.True(t, usageRepo.lastLog.LongContextBillingApplied)
+		require.InDelta(t, baseInput*2, usageRepo.lastLog.InputCost, 1e-10)
+		require.InDelta(t, baseOutput*1.5, usageRepo.lastLog.OutputCost, 1e-10)
 	})
 }
 
@@ -1428,13 +1428,13 @@ func TestOpenAIGatewayServiceRecordUsage_GrokLongContextFollowsGroupToggleOnly(t
 	})
 }
 
-func TestOpenAIGatewayServiceRecordUsage_SparkShadowUsesCurrentParentBillingSetting(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_SparkShadowCannotOverrideGroupBilling(t *testing.T) {
 	tests := []struct {
 		name          string
 		parentEnabled bool
 	}{
-		{name: "parent opt out overrides stale enabled shadow", parentEnabled: false},
-		{name: "parent opt in overrides stale disabled shadow", parentEnabled: true},
+		{name: "parent opt out keeps group disabled", parentEnabled: false},
+		{name: "parent opt in cannot enable group", parentEnabled: true},
 	}
 
 	for _, tt := range tests {
@@ -1479,7 +1479,7 @@ func TestOpenAIGatewayServiceRecordUsage_SparkShadowUsesCurrentParentBillingSett
 
 			require.NoError(t, err)
 			require.Equal(t, 1, accountRepo.calls)
-			require.Equal(t, tt.parentEnabled, usageRepo.lastLog.LongContextBillingApplied)
+			require.False(t, usageRepo.lastLog.LongContextBillingApplied)
 		})
 	}
 }

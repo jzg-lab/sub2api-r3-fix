@@ -1112,7 +1112,7 @@ export default {
       modelPricing: {
         threshold: 'Trigger threshold (K)',
         inheritThreshold: 'Leave blank to use model rules',
-        thresholdHint: '1K = 1,000 tokens. Counts request input including cache reads/writes, excluding output. Only changes the threshold for models with an existing long-context surcharge; rates, boundary rules and account exemptions stay unchanged. Explicit channel pricing intervals take precedence.',
+        thresholdHint: '1K = 1,000 tokens. Counts request input including cache reads/writes, excluding output. Only changes the threshold for models with an existing long-context surcharge; customer surcharges follow this group only, ignoring legacy account switches. Rates, boundary rules and model subscription exemptions stay unchanged. Explicit channel pricing intervals take precedence.',
         modelThresholds: 'Model overrides (take precedence over the group default)',
         addModelThreshold: 'Add model override',
         billingModel: 'Billing model name',

@@ -1109,7 +1109,7 @@ export default {
       modelPricing: {
         threshold: '触发阈值（K）',
         inheritThreshold: '留空沿用模型规则',
-        thresholdHint: '1K = 1,000 Token。以本次输入（含缓存读写）判断，不含输出。只调整已有长上下文加价模型的触发门槛，倍率、边界和账号豁免保持原规则；无附加费模型不新增收费。已有渠道价格区间优先，不受此设置影响。',
+        thresholdHint: '1K = 1,000 Token。以本次输入（含缓存读写）判断，不含输出。只调整已有长上下文加价模型的触发门槛，客户加价只由本分组控制，账号旧开关不覆盖；倍率、边界和模型订阅豁免保持原规则；无附加费模型不新增收费。已有渠道价格区间优先，不受此设置影响。',
         modelThresholds: '模型例外（覆盖分组默认阈值）',
         addModelThreshold: '添加模型例外',
         billingModel: '计费模型名称',

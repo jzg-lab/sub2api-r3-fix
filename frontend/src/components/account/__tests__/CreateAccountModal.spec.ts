@@ -185,7 +185,6 @@ async function selectButtonByText(wrapper: ReturnType<typeof mountModal>, text: 
 
 async function submitApiKeyAccount(
   platform: 'openai' | 'anthropic',
-  disableLongContextBilling = false,
   disableUpstreamBillingProbe = false
 ) {
   const wrapper = mountModal()
@@ -195,9 +194,6 @@ async function submitApiKeyAccount(
   }
   await wrapper.get('form#create-account-form input[type="text"]').setValue(`${platform} account`)
   await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
-  if (disableLongContextBilling) {
-    await wrapper.get('[data-testid="openai-long-context-billing-toggle"]').trigger('click')
-  }
   if (disableUpstreamBillingProbe) {
     await wrapper.get('[data-testid="upstream-billing-auto-probe"]').trigger('click')
   }
@@ -207,16 +203,12 @@ async function submitApiKeyAccount(
 }
 
 async function openCodexImportStep(
-  longContextToggleClicks = 0,
   tlsToggleClicks = 0,
   tlsProfileId?: string
 ) {
   const wrapper = mountModal()
   await selectButtonByText(wrapper, 'OpenAI')
   await flushPromises()
-  for (let click = 0; click < longContextToggleClicks; click += 1) {
-    await wrapper.get('[data-testid="openai-long-context-billing-toggle"]').trigger('click')
-  }
   for (let click = 0; click < tlsToggleClicks; click += 1) {
     await wrapper.get('[data-testid="create-openai-tls-fingerprint-toggle"]').trigger('click')
   }
@@ -581,7 +573,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     createOpenAICodexPATMock.mockReset().mockResolvedValue({})
   })
 
-  it('hides only the redundant account toggle when every selected group enables tier pricing', async () => {
+  it('keeps group pricing as the only customer pricing control', async () => {
     authIsSimpleMode.value = false
     const wrapper = mountModal([
       { id: 1, long_context_pricing_enabled: true },
@@ -596,7 +588,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(wrapper.find('[data-testid="create-openai-ws-mode"]').exists()).toBe(true)
   })
 
-  it('keeps the account toggle when any selected group disables tier pricing', async () => {
+  it('never exposes an account override even when some groups disable tier pricing', async () => {
     authIsSimpleMode.value = false
     const wrapper = mountModal([
       { id: 1, long_context_pricing_enabled: true },
@@ -607,15 +599,15 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await selectButtonByText(wrapper, 'API Key')
     await wrapper.get('[data-testid="select-pricing-groups"]').trigger('click')
 
-    expect(wrapper.find('[data-testid="openai-long-context-billing-toggle"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="openai-long-context-billing-toggle"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="create-openai-ws-mode"]').exists()).toBe(true)
   })
 
-  it('uses the official enabled default for OpenAI API Key creation', async () => {
+  it('does not submit account pricing on OpenAI API Key creation', async () => {
     await submitApiKeyAccount('openai')
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
-    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(true)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
   })
 
   it('omits the upstream request id header from extra when left empty', async () => {
@@ -785,7 +777,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   it('sends an explicit disabled state when the create toggle is turned off', async () => {
-    await submitApiKeyAccount('openai', false, true)
+    await submitApiKeyAccount('openai', true)
 
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
     expect(probeUpstreamBillingMock).not.toHaveBeenCalled()
@@ -1139,11 +1131,11 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(importCodexSessionMock).toHaveBeenCalledTimes(1)
   })
 
-  it('sends true explicitly when OpenAI long-context billing is enabled', async () => {
+  it('leaves group pricing out of account creation payloads', async () => {
     await submitApiKeyAccount('openai')
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
-    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(true)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
   })
 
   it('omits the OpenAI setting for non-OpenAI account creation', async () => {
@@ -1156,7 +1148,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   it('sends an explicit disabled state when the non-OpenAI create toggle is turned off', async () => {
-    await submitApiKeyAccount('anthropic', false, true)
+    await submitApiKeyAccount('anthropic', true)
 
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
   })
@@ -1215,7 +1207,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   it('sends a selected TLS fingerprint profile for OpenAI OAuth imports', async () => {
-    const wrapper = await openCodexImportStep(0, 0, '12')
+    const wrapper = await openCodexImportStep(0, '12')
     await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
     await flushPromises()
 
@@ -1224,7 +1216,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   })
 
   it('sends an explicit TLS fingerprinting opt-out for OpenAI OAuth imports', async () => {
-    const wrapper = await openCodexImportStep(0, 1)
+    const wrapper = await openCodexImportStep(1)
     await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
     await flushPromises()
 

@@ -1421,6 +1421,7 @@ func (a *Account) IsOpenAI() bool {
 	return a.Platform == PlatformOpenAI
 }
 
+// IsOpenAILongContextBillingEnabled is legacy upstream-cost metadata, never a customer pricing override.
 func (a *Account) IsOpenAILongContextBillingEnabled() bool {
 	if a == nil || !a.IsOpenAI() || (a.Type != AccountTypeAPIKey && a.QuotaDimension != QuotaDimensionSpark) || a.Extra == nil {
 		return false

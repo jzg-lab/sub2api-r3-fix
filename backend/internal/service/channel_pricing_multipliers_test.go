@@ -255,16 +255,6 @@ func TestCalculateTokenCostContextTierEnablement(t *testing.T) {
 		require.InDelta(t, 400e-6, cost.TotalCost, 1e-12)
 	})
 
-	t.Run("account enabled overrides disabled group", func(t *testing.T) {
-		resolved.longContextPricingEnabled = false
-		accountEnabled := true
-		cost, err := service.calculateTokenCost(resolved, CostInput{
-			Model: "custom", Tokens: tokens, RateMultiplier: 1, Resolver: resolver,
-			LongContextBillingEnabled: &accountEnabled,
-		})
-		require.NoError(t, err)
-		require.InDelta(t, 400e-6, cost.TotalCost, 1e-12)
-	})
 }
 
 func TestCalculateTokenCostCombinesIntervalAndFastMultiplier(t *testing.T) {

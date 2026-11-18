@@ -8,23 +8,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAstraAccountLongContextOptOutMatchesProductionBaseline(t *testing.T) {
+func TestAstraLongContextFollowsGroupAcrossServiceTiers(t *testing.T) {
 	billing := NewBillingService(&config.Config{}, nil)
 	resolver := NewModelPricingResolver(nil, billing)
-	disabled, enabled := false, true
 	for _, tier := range []string{"", "priority", "flex"} {
-		for name, gate := range map[string]*bool{"disabled": &disabled, "enabled": &enabled, "other_platform": nil} {
+		for name, enabled := range map[string]bool{"disabled": false, "enabled": true} {
 			t.Run(name+"/"+tier, func(t *testing.T) {
 				tokens := UsageTokens{InputTokens: 815, CacheReadTokens: 302592, OutputTokens: 709}
 				result, err := billing.CalculateCostUnified(CostInput{
 					Ctx: context.Background(), Model: "gpt-6-astra", Tokens: tokens,
 					RateMultiplier: 1, ServiceTier: tier, Resolver: resolver,
-					Group:                     &Group{LongContextPricingEnabled: true},
-					LongContextBillingEnabled: gate,
+					Group: &Group{LongContextPricingEnabled: enabled},
 				})
 				require.NoError(t, err)
-				expected, err := billing.calculateCostWithServiceTierPolicy(
-					"gpt-6-astra", tokens, 1, tier, gate == nil || *gate,
+				expected, err := billing.calculateCostInternalWithPolicy(
+					"gpt-6-astra", tokens, 1, tier, nil, enabled,
 				)
 				require.NoError(t, err)
 				require.InDelta(t, expected.InputCost, result.InputCost, 1e-10)
@@ -39,22 +37,4 @@ func TestAstraAccountLongContextOptOutMatchesProductionBaseline(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestAstraOAuthExplicitLongContextOptOutDoesNotApplyPremium(t *testing.T) {
-	billing := NewBillingService(&config.Config{}, nil)
-	tokens := UsageTokens{InputTokens: 278598, CacheReadTokens: 3584, OutputTokens: 1273}
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{openAILongContextBillingEnabledKey: false}}
-	gate := openAILongContextBillingGate(account, account)
-	require.NotNil(t, gate)
-	require.False(t, *gate)
-	cost, err := billing.CalculateCostUnified(CostInput{
-		Ctx: context.Background(), Model: "gpt-6-astra", Tokens: tokens,
-		RateMultiplier: 1, Resolver: NewModelPricingResolver(nil, billing),
-		Group: &Group{LongContextPricingEnabled: true}, LongContextBillingEnabled: gate,
-	})
-	require.NoError(t, err)
-	require.False(t, cost.LongContextBillingApplied)
-	// Production row 194690 previously recorded $5.674603.
-	require.InDelta(t, 2.853214, cost.TotalCost, 1e-10)
 }

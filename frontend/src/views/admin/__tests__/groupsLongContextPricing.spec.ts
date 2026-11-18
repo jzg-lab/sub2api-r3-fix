@@ -28,7 +28,7 @@ describe('group long-context thresholds', () => {
   })
 
   it('documents preserved rates, exemptions and channel precedence in both languages', () => {
-    expect(zh.groups.modelPricing.thresholdHint).toContain('倍率、边界和账号豁免保持原规则')
+    expect(zh.groups.modelPricing.thresholdHint).toContain('客户加价只由本分组控制，账号旧开关不覆盖')
     expect(en.groups.modelPricing.thresholdHint).toContain('Explicit channel pricing intervals take precedence')
   })
 })

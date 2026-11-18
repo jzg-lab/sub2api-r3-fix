@@ -84,8 +84,7 @@ func tryModelFilePricing(billingService *BillingService, model string, tokens Us
 	}
 	resolver := NewModelPricingResolver(nil, billingService)
 	resolved := resolver.Resolve(context.Background(), PricingInput{Model: model})
-	// 无分组的解析结果默认开启长上下文，CostInput.LongContextBillingEnabled=false 无法否决，
-	// 因此直接覆写解析结果。
+	// 上游成本独立于客户分组售价，在解析结果上应用成本策略。
 	resolved.longContextPricingEnabled = longContextPricingEnabled
 	breakdown, err := billingService.CalculateCostUnified(CostInput{
 		Ctx:             context.Background(),
