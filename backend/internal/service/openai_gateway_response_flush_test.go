@@ -508,7 +508,7 @@ func TestOpenAIResponseFlush_BareErrorTimeoutSynthesizesFailed(t *testing.T) {
 		},
 		{
 			name: "first output timeout",
-			cfg:  config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1, OpenAIOAuthFirstOutputTimeoutSeconds: 1},
+			cfg:  config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 1},
 		},
 	}
 
@@ -590,11 +590,11 @@ func TestOpenAIResponseFlush_ClientDisconnectStillDrainsUsage(t *testing.T) {
 }
 
 func runOpenAIResponseFlushTest(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig) (*openaiStreamingResult, error) {
-	return runOpenAIResponseFlushTestWithAccount(recorder, body, gatewayCfg, &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+	return runOpenAIResponseFlushTestWithAccount(recorder, body, gatewayCfg, &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 }
 
 func runOpenAIResponseFlushTestWithAccount(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig, account *Account) (*openaiStreamingResult, error) {
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	svc := &OpenAIGatewayService{
@@ -643,4 +643,48 @@ func waitOpenAIResponseFlushSignal(t *testing.T, signal <-chan struct{}) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for stream signal")
 	}
+}
+
+// hangingOpenAISSEAfterTerminal 模拟上游在发完 terminal 事件后拖延关闭连接
+// （keep-alive/HTTP2 复用连接上观测到 8~46s 不 EOF）。
+type hangingOpenAISSEAfterTerminal struct {
+	payload   []byte
+	sent      bool
+	release   chan struct{}
+	closeOnce sync.Once
+}
+
+func (r *hangingOpenAISSEAfterTerminal) Read(data []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(data, r.payload), nil
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+func (r *hangingOpenAISSEAfterTerminal) Close() error {
+	r.closeOnce.Do(func() { close(r.release) })
+	return nil
+}
+
+func TestOpenAIResponseFlush_TerminalEventEndsStreamWithoutEOF(t *testing.T) {
+	body := "data: {\"type\":\"response.completed\",\"response\":{\"created_at\":1700000000,\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":5}}}\n\n"
+	reader := &hangingOpenAISSEAfterTerminal{payload: []byte(body), release: make(chan struct{})}
+	recorder := newOpenAIResponseFlushRecorder()
+	resultCh, errCh := runOpenAIResponseFlushTestAsync(recorder, reader, config.GatewayConfig{StreamKeepaliveInterval: 1, StreamDataIntervalTimeout: 30})
+	t.Cleanup(func() { _ = reader.Close() })
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+		result := <-resultCh
+		require.NotNil(t, result)
+		require.Equal(t, 7, result.usage.InputTokens)
+		require.Equal(t, 5, result.usage.OutputTokens)
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream did not end after terminal event; still waiting for upstream EOF")
+	}
+	gotBody, _ := recorder.snapshot()
+	require.Equal(t, body, gotBody)
 }

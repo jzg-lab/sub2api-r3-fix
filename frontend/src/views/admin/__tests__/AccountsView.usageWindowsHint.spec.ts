@@ -18,8 +18,6 @@ const {
   getAllGroups: vi.fn()
 }))
 
-vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
-
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
@@ -136,7 +134,6 @@ function mountView() {
 
 describe('admin AccountsView usage windows hint', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     localStorage.clear()
 
     listAccounts.mockReset()
@@ -241,3 +238,5 @@ describe('admin AccountsView usage windows hint', () => {
     expect(indicator.attributes('title')).toBe('admin.accounts.upstreamBilling.syncedRateTooltip')
   })
 })
+
+beforeEach(() => setActivePinia(createPinia()))

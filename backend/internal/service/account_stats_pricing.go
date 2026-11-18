@@ -302,3 +302,12 @@ func applyAccountStatsCost(
 func accountStatsLongContextPricingEnabled(accountGate *bool) bool {
 	return accountGate == nil || *accountGate
 }
+
+// OpenAI account stats follow the account's upstream pricing switch. Other
+// platforms have no such switch and use their published long-context ladder.
+func accountStatsLongContextPricingEnabledForAccount(account *Account) bool {
+	if account == nil || !account.IsOpenAI() {
+		return true
+	}
+	return account.IsOpenAILongContextBillingEnabled()
+}

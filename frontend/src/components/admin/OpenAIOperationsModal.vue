@@ -65,7 +65,7 @@
             <label>{{ t('admin.openaiOperations.fingerprintMode') }}
               <select v-model="settings.new_account_defaults.codex_fingerprint_mode" class="input mt-1">
                 <option :value="null">{{ t('admin.openaiOperations.unset') }}</option>
-                <option v-for="mode in ['off', 'device', 'session', 'full', 'machine']" :key="mode" :value="mode">{{ mode }}</option>
+                <option v-for="mode in ['off', 'device', 'session', 'full']" :key="mode" :value="mode">{{ mode }}</option>
               </select>
             </label>
             <label>{{ t('admin.openaiOperations.concurrency') }}

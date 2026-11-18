@@ -150,7 +150,7 @@ func (s *UsageCleanupService) CreateTask(ctx context.Context, filters UsageClean
 		return nil, fmt.Errorf("create cleanup task: %w", err)
 	}
 	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] create_task persisted: task=%d operator=%d status=%s deleted_rows=%d %s", task.ID, createdBy, task.Status, task.DeletedRows, describeUsageCleanupFilters(filters))
-	runDeploymentAsync(s.runOnce)
+	runDeploymentAsync(func() { s.runOnce() })
 	return task, nil
 }
 

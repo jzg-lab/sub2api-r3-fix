@@ -52,16 +52,14 @@ func (s *sparkShadowRepoStub) CreateWithAccountGroups(ctx context.Context, accou
 	if err := s.Create(ctx, account); err != nil {
 		return err
 	}
-	account.GroupIDs = make([]int64, len(groups))
-	account.AccountGroups = append([]AccountGroup(nil), groups...)
-	for i := range account.AccountGroups {
-		account.AccountGroups[i].AccountID = account.ID
-		account.GroupIDs[i] = groups[i].GroupID
+	groupIDs := make([]int64, 0, len(groups))
+	for i := range groups {
+		groups[i].AccountID = account.ID
+		groupIDs = append(groupIDs, groups[i].GroupID)
 	}
-	s.groupsOf[account.ID] = append([]int64(nil), account.GroupIDs...)
-	cp := *account
-	s.accounts[account.ID] = &cp
-	s.mockAccountRepoForGemini.accountsByID[account.ID] = &cp
+	account.AccountGroups = append([]AccountGroup(nil), groups...)
+	account.GroupIDs = append([]int64(nil), groupIDs...)
+	s.groupsOf[account.ID] = groupIDs
 	return nil
 }
 
@@ -210,7 +208,7 @@ func TestCreateShadowInheritsParentEffectiveOpenAILongContextBillingValue(t *tes
 	}
 }
 
-// TestCreateShadow_BindGroups verifies the committed group association.
+// TestCreateShadow_BindGroups は BindGroups の後置呼び出しを検証する。
 // 影子账号が指定グループに属し、ListSchedulableByGroupID で取得可能であること。
 func TestCreateShadow_BindGroups(t *testing.T) {
 	ctx := context.Background()
@@ -243,7 +241,11 @@ func TestCreateShadow_BindGroups(t *testing.T) {
 	require.Equal(t, shadow.ID, accounts[0].ID)
 }
 
-func TestCreateShadow_PreservesConcurrencySettings(t *testing.T) {
+// TestDeleteAccount_CascadeToShadow verifies that deleting a parent account also
+// deletes its spark shadow account.
+// TestCreateShadow_InheritsParentConcurrency 验证外审 F3:未指定并发时
+// 影子继承母账号并发,避免 Concurrency=0 被限流器当作"无限并发"。
+func TestCreateShadow_InheritsParentConcurrency(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("unspecified_inherits_parent", func(t *testing.T) {
@@ -258,11 +260,11 @@ func TestCreateShadow_PreservesConcurrencySettings(t *testing.T) {
 
 		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "conc-shadow"})
 		require.NoError(t, err)
-		require.Equal(t, 3, shadow.Concurrency)
+		require.Equal(t, 3, shadow.Concurrency, "未指定并发应继承母账号(非 0=无限)")
 		require.Equal(t, 3, repo.accounts[shadow.ID].Concurrency)
 	})
 
-	t.Run("explicit_value_is_preserved", func(t *testing.T) {
+	t.Run("explicit_positive_kept", func(t *testing.T) {
 		repo := newSparkShadowRepoStub()
 		svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 		parent := &Account{
@@ -274,7 +276,7 @@ func TestCreateShadow_PreservesConcurrencySettings(t *testing.T) {
 
 		shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{Name: "conc-shadow2", Concurrency: 2})
 		require.NoError(t, err)
-		require.Equal(t, 2, shadow.Concurrency)
+		require.Equal(t, 2, shadow.Concurrency, "显式正并发应保留")
 	})
 }
 
@@ -750,7 +752,7 @@ type raceCreateRepoStub struct {
 	*sparkShadowRepoStub
 }
 
-func (s *raceCreateRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+func (s *raceCreateRepoStub) Create(ctx context.Context, account *Account) error {
 	if account.ParentAccountID != nil {
 		// 模拟另一并发请求已抢先建成影子:注入底层 map,本次 Create 撞唯一索引失败。
 		s.sparkShadowRepoStub.nextID++
@@ -759,15 +761,15 @@ func (s *raceCreateRepoStub) CreateWithAccountGroups(ctx context.Context, accoun
 		s.sparkShadowRepoStub.accounts[phantom.ID] = &phantom
 		return errors.New(`duplicate key value violates unique constraint "uq_accounts_spark_shadow_per_parent"`)
 	}
-	return s.sparkShadowRepoStub.CreateWithAccountGroups(ctx, account, groups)
+	return s.sparkShadowRepoStub.Create(ctx, account)
 }
 
-// bindFailRepoStub simulates a failed group write in the atomic transaction.
+// bindFailRepoStub 让 BindGroups 失败,用于验证绑组失败时补偿删除刚建的影子(外审 C/P1)。
 type bindFailRepoStub struct {
 	*sparkShadowRepoStub
 }
 
-func (s *bindFailRepoStub) CreateWithAccountGroups(context.Context, *Account, []AccountGroup) error {
+func (s *bindFailRepoStub) BindGroups(_ context.Context, _ int64, _ []int64) error {
 	return errors.New("simulated bind failure")
 }
 
@@ -842,7 +844,8 @@ func TestCreateShadow_InvalidGroupRejectedNoOrphan(t *testing.T) {
 	require.Empty(t, shadows, "无效分组应在创建前被拒,不应建出影子")
 }
 
-// A failed atomic group write must not leave an orphan or require compensation.
+// TestCreateShadow_BindFailureRollsBackShadow 验证外审 C/P1:绑组失败时补偿删除
+// 刚建的影子,不留孤儿(否则一母一影唯一索引会挡住重试)。
 func TestCreateShadow_BindFailureRollsBackShadow(t *testing.T) {
 	ctx := context.Background()
 	base := newSparkShadowRepoStub()
@@ -860,7 +863,7 @@ func TestCreateShadow_BindFailureRollsBackShadow(t *testing.T) {
 
 	shadows, qerr := base.ListShadowsByParent(ctx, parent.ID)
 	require.NoError(t, qerr)
-	require.Empty(t, shadows, "failed atomic creation must not leave a shadow")
+	require.Empty(t, shadows, "绑组失败后应补偿删除影子,不留孤儿")
 }
 
 // TestUpdateAccount_RejectsParentTypeChangeWithShadow 验证外审 D/P1:母账号有 spark 影子时,
@@ -1045,4 +1048,12 @@ func TestForceOpenAIPrivacy_SkipsShadow(t *testing.T) {
 	pid := int64(1)
 	shadow := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &pid}
 	require.Equal(t, "", svc.ForceOpenAIPrivacy(context.Background(), shadow), "影子隐私设置应跳过")
+}
+
+func (s *raceCreateRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+	return s.Create(ctx, account)
+}
+func (s *bindFailRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+	// The repository now commits account and bindings atomically; bind failure publishes neither.
+	return s.BindGroups(ctx, account.ID, nil)
 }

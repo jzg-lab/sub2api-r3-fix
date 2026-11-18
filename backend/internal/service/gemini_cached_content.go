@@ -277,7 +277,7 @@ func geminiCachedContentBoundFromContext(ctx context.Context) bool {
 }
 
 // isGeminiBoundCacheUpstreamPassthrough 判断绑定缓存的请求在上游网关账号上收到的错误是否只反映
-// 上游持有缓存的那个账号的状态（429 / 5xx），不应据此限流或重试本账号。
+// 上游持有缓存的那个账号的状态（429 / 5xx），不应据此限流或封禁本账号。
 func isGeminiBoundCacheUpstreamPassthrough(ctx context.Context, account *Account, statusCode int) bool {
 	if statusCode != http.StatusTooManyRequests && statusCode < http.StatusInternalServerError {
 		return false
@@ -629,11 +629,10 @@ type GeminiCachedContentService struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
-	doneCh    chan struct{}
 }
 
 func NewGeminiCachedContentService(repo GeminiCachedContentRepository, compat *GeminiMessagesCompatService, cfg *config.Config) *GeminiCachedContentService {
-	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now, stopCh: make(chan struct{})}
 }
 
 // Start 启动后台回滚恢复：定期处理租约已过期仍未清除的修改意图。
@@ -641,7 +640,7 @@ func (s *GeminiCachedContentService) Start() {
 	if s == nil || s.repo == nil {
 		return
 	}
-	s.startOnce.Do(func() { go func() { defer close(s.doneCh); s.runMutationRecovery() }() })
+	s.startOnce.Do(func() { go s.runMutationRecovery() })
 }
 
 // Stop 停止后台回滚恢复。
@@ -649,19 +648,7 @@ func (s *GeminiCachedContentService) Stop() {
 	if s == nil {
 		return
 	}
-	s.stopOnce.Do(func() {
-		if s.stopCh != nil {
-			close(s.stopCh)
-		}
-	})
-	s.startOnce.Do(func() {
-		if s.doneCh != nil {
-			close(s.doneCh)
-		}
-	})
-	if s.doneCh != nil {
-		<-s.doneCh
-	}
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 func (s *GeminiCachedContentService) runMutationRecovery() {

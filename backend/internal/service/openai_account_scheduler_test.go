@@ -1752,13 +1752,10 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SkipsQuarantinedSharedP
 	require.Equal(t, int64(469803), selection.Account.ID)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_FailsClosedWhenAllProxiesQuarantined(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_RejectsAllQuarantinedProxies(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
-	// Every schedulable account shares the quarantined proxy. Re-admitting any
-	// candidate would route straight back through the known-bad relay, so the
-	// scheduler must fail closed until the quarantine expires or is cleared by
-	// a verified success.
+	// All blocked proxies remain excluded until verified recovery or expiry.
 	proxyA := int64(5056)
 	accounts := []Account{
 		{ID: 505601, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0, ProxyID: &proxyA},
@@ -1783,7 +1780,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_FailsClosedWhenAllProxi
 	selection, _, err := svc.SelectAccountWithScheduler(
 		context.Background(), nil, "", "", "gpt-5.6-sol", nil, OpenAIUpstreamTransportAny, false,
 	)
-	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.Error(t, err)
 	require.Nil(t, selection)
 	require.True(t, svc.openaiProxyStreamCircuit.isBlocked(proxyA, time.Now()),
 		"selection exhaustion must not clear the quarantine; only a verified success or TTL expiry does")

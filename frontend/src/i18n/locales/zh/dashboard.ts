@@ -1,10 +1,5 @@
 export default {
   dashboard: {
-    overview: '用量概览',
-    totalUsage: '总用量',
-    tokenDetails: 'Token 明细',
-    details: '明细',
-
     title: '仪表盘',
     welcomeMessage: '欢迎回来！这是您账户的概览。',
     balance: '余额',
@@ -61,7 +56,12 @@ export default {
     viewUsage: '查看使用记录',
     checkDetailedLogs: '查看详细的使用日志',
     redeemCode: '兑换码',
-    addBalanceWithCode: '使用兑换码充值'
+    addBalanceWithCode: '使用兑换码充值',
+overview: '用量概览',
+totalUsage: '总用量',
+tokenDetails: 'Token 明细',
+details: '明细',
+
   },
 
   // Groups (shared)
@@ -71,14 +71,6 @@ export default {
 
   // API Keys
   keys: {
-    smartRouting: '智能路由',
-    smartRoutingHint: '按顺序尝试兼容分组，遇到可重试故障自动切换。按实际使用分组计费，备用组费用可能不同。',
-    routeAdd: '添加备用分组',
-    routeMoveUp: '上移分组',
-    routeMoveDown: '下移分组',
-    routeRemove: '移除分组',
-    routeLimit: '最多 10 个分组，第一项优先',
-
     title: 'API 密钥',
     description: '管理您的 API 密钥和访问令牌',
     searchPlaceholder: '搜索名称或Key...',
@@ -96,6 +88,21 @@ export default {
     columnAlwaysVisible: '该列固定显示，不可隐藏',
     createKey: '创建密钥',
     editKey: '编辑密钥',
+    bulkEdit: {
+      title: '批量编辑',
+      selectedCount: '已选择 {count} 个密钥',
+      selectKey: '选择密钥 {name}',
+      clearSelection: '取消选择',
+      hint: '勾选需要修改的字段，未勾选的字段保持原值。',
+      limitHint: '输入 0 表示不限制；已用额度保持不变。',
+      ipHint: '每行一个 IP 或 CIDR；留空将清空所选密钥的此项名单。',
+      invalidLimit: '请输入大于或等于 0 的有效金额。',
+      invalidExpiration: '请选择有效的过期时间，或勾选永久有效。',
+      apply: '应用到 {count} 个密钥',
+      success: '已更新 {count} 个密钥',
+      partialFailure: '已更新 {success} 个密钥，{failed} 个失败',
+      failureHint: '以下密钥更新失败，可修改设置后重试。再次提交只会更新失败的密钥。'
+    },
     deleteKey: '删除密钥',
     deleteConfirmMessage: "确定要删除 '{name}' 吗？此操作无法撤销。",
     id: 'ID',
@@ -115,8 +122,18 @@ export default {
     namePlaceholder: '我的 API 密钥',
     groupLabel: '分组',
     providerLabel: '厂商',
-    providerCN: '国产模型',
-    providerOther: '其他',
+    providers: {
+      anthropic: 'Anthropic',
+      openai: 'OpenAI',
+      domestic: '国产模型',
+      other: '其他'
+    },
+    providerHints: {
+      anthropic: '选择 Anthropic / Claude 的可用分组',
+      openai: '选择 OpenAI / GPT 的可用分组',
+      domestic: '包含 DeepSeek、Kimi、智谱 GLM、MiniMax',
+      other: '包含 Gemini、Grok、Antigravity、OpenCode 和混合分组'
+    },
     selectGroup: '选择分组',
     statusLabel: '状态',
     selectStatus: '选择状态',
@@ -156,10 +173,10 @@ export default {
       openai: {
         description: '将以下配置文件添加到 Codex CLI 配置目录中。',
         authModeTitle: 'Codex 认证模式',
-        authModeDescription: '兼容模式保留旧版 Codex 配置；API Key Mode 用于授权客户端图片执行器。',
+        authModeDescription: '配置默认启用实时联网搜索；API Key 模式支持 Codex 原生生图，旧版客户端可选择兼容模式。',
         authModeLegacy: '兼容模式',
-        authModeApiKey: 'API Key Mode',
-        authModeApiKeyRestartNotice: '保存此配置后，必须完全退出并重启 Codex Desktop 或 CLI，然后新建 task，让客户端重新构建工具注册表。',
+        authModeApiKey: 'API Key 模式（推荐）',
+        authModeApiKeyRestartNotice: '此配置包含 API 密钥，请勿共享或提交到仓库。保存后新建会话验证；若配置未加载，再重启 Codex。生图仍需分组权限、可用余额和上游支持。',
         configTomlHint: '请确保以下内容位于 config.toml 文件的开头部分',
         note: '请确保配置目录存在。macOS/Linux 用户可运行 mkdir -p ~/.codex 创建目录。',
         noteWindows:
@@ -319,7 +336,17 @@ export default {
       inactive: '已停用',
       quota_exhausted: '额度耗尽',
       expired: '已过期'
-    }
+    },
+smartRouting: '智能路由',
+smartRoutingHint: '按顺序尝试兼容分组，遇到可重试故障自动切换。按实际使用分组计费，备用组费用可能不同。',
+routeAdd: '添加备用分组',
+routeMoveUp: '上移分组',
+routeMoveDown: '下移分组',
+routeRemove: '移除分组',
+routeLimit: '最多 10 个分组，第一项优先',
+providerCN: '国产模型',
+providerOther: '其他',
+
   },
 
   // Usage
@@ -388,6 +415,8 @@ export default {
     latency: '延迟',
     latencyFirstToken: '首字',
     latencyDuration: '总耗时',
+    outputTps: '输出 TPS',
+    outputTpsHint: '输出 Token ÷ 总耗时（包含首字等待），单位 tok/s。输出 Token 可能包含推理 Token。',
     time: '时间',
     ws: 'WS',
     stream: '流式',
@@ -404,7 +433,6 @@ export default {
     cacheHit: '缓存命中',
     cacheCreate: '缓存创建',
     cacheHitRate: '缓存命中率',
-    cacheMetricLabel: '缓存',
     inputTokenPrice: '输入单价',
     outputTokenPrice: '输出单价',
     perMillionTokens: '/ 1M Token',
@@ -446,6 +474,7 @@ export default {
     noDataToExport: '没有可导出的数据',
     exportSuccess: '使用数据导出成功',
     exportFailed: '使用数据导出失败',
+    exportRateLimited: '请求过于频繁，{seconds} 秒后自动继续导出',
     exportExcelSuccess: '使用数据导出成功（Excel格式）',
     exportExcelFailed: '使用数据导出失败',
     imageUnit: '张',
@@ -484,6 +513,8 @@ export default {
         loadFailed: '加载详情失败，请稍后重试',
       },
     },
+    cacheMetricLabel: '缓存',
+
   },
 
   // Shared keys for channel monitor (admin + user views)
@@ -623,6 +654,8 @@ export default {
       billingModePerRequest: '按次',
       billingModeImage: '按图片',
       billingModeVideo: '按视频',
+      videoPrice: '视频单价',
+      unitPerSecond: '/ 秒',
       inputPrice: '输入',
       outputPrice: '输出',
       cacheWritePrice: '缓存写入',
@@ -640,7 +673,65 @@ export default {
 
   // Model Plaza (public group/model pricing showcase)
   modelPlaza: {
-    catalog: {
+    title: '模型广场',
+    description: '按分组浏览可用模型与价格',
+    loading: '加载中...',
+    empty: '暂无可展示的分组',
+    loadFailed: '加载模型广场失败',
+    noSearchResult: '没有匹配的模型',
+    anonymousHint: '登录后可查看你的专属分组与专属倍率',
+    filters: {
+      platformLabel: '平台',
+      groupLabel: '分组',
+      rateLabel: '倍率',
+      modelLabel: '模型',
+      searchPlaceholder: '搜索模型名称',
+      all: '全部'
+    },
+    badges: {
+      exclusive: '专属分组',
+      subscription: '订阅'
+    },
+    detail: {
+      noModels: '该分组暂未配置模型',
+      noPricing: '未配置定价',
+      peakNote: '高峰时段 {window} 计费倍率 ×{multiplier}',
+      longContextDisabledNote: '该分组未启用长上下文阶梯计费，超阈值请求仍按基础档计费，官方阶梯仅供参考'
+    },
+    table: {
+      model: '模型',
+      input: '输入',
+      output: '输出',
+      cache: '缓存',
+      cacheWrite: '写入',
+      cacheRead: '读取',
+      cacheWriteShort: '写',
+      cacheReadShort: '读',
+      tierHint: '按单次请求的总上下文（输入 + 缓存写入 + 缓存读取）所在档位对整单计价',
+      tierHintMarginal: '仅超过阈值的部分按该档计价，输出不加价',
+      reasoningMultiplierBadge: '{effort} ×{multiplier}',
+      reasoningMultiplierHint: '最终转发的思考等级为 {effort} 时，整次请求的计费与额度消耗乘以 {multiplier}；未配置的等级按 1 倍计费',
+      marginalBadge: '超出部分计价',
+      timePricingRowHint: '按 {timezone} 时间，在该时段内发起的请求按本行价格计费',
+      timePricingRowHintWeekdays:
+        '按 {timezone} 时间，仅工作日（周一至周五）在该时段内发起的请求按本行价格计费，周末全天按标准价',
+      timePricingRowHintPeak: '；本行价格未含高峰倍率，与高峰时段 {window} 重叠的部分实付再乘 ×{multiplier}',
+      timePricingWeekdays: '工作日',
+      timePricingRateHint: '生效倍率 {rate} × 时段倍率 {multiplier}',
+      paidPrice: '实付价格(折后)',
+      officialPrice: '官方价格',
+      rate: '折扣倍率',
+      unitPerMillion: '$ / 1M token',
+      perUnitRequest: '/ 次',
+      perUnitImage: '/ 张',
+      perRequest: '按次计费',
+      perImage: '按图片计费'
+    },
+    nav: {
+      login: '登录',
+      backToDashboard: '回到后台'
+    },
+catalog: {
       imageInput: '图片输入 Token',
       imageOutput: '图片输出 Token',
       filters: '筛选',
@@ -719,64 +810,7 @@ export default {
       unit_per_request: '/ 次',
       unit_video: '/ 秒',
     },
-    title: '模型广场',
-    description: '按分组浏览可用模型与价格',
-    loading: '加载中...',
-    empty: '暂无可展示的分组',
-    loadFailed: '加载模型广场失败',
-    noSearchResult: '没有匹配的模型',
-    anonymousHint: '登录后可查看你的专属分组与专属倍率',
-    filters: {
-      platformLabel: '平台',
-      groupLabel: '分组',
-      rateLabel: '倍率',
-      modelLabel: '模型',
-      searchPlaceholder: '搜索模型名称',
-      all: '全部'
-    },
-    badges: {
-      exclusive: '专属分组',
-      subscription: '订阅'
-    },
-    detail: {
-      noModels: '该分组暂未配置模型',
-      noPricing: '未配置定价',
-      peakNote: '高峰时段 {window} 计费倍率 ×{multiplier}',
-      longContextDisabledNote: '该分组未启用长上下文阶梯计费，超阈值请求仍按基础档计费，官方阶梯仅供参考'
-    },
-    table: {
-      model: '模型',
-      input: '输入',
-      output: '输出',
-      cache: '缓存',
-      cacheWrite: '写入',
-      cacheRead: '读取',
-      cacheWriteShort: '写',
-      cacheReadShort: '读',
-      tierHint: '按单次请求的总上下文（输入 + 缓存写入 + 缓存读取）所在档位对整单计价',
-      tierHintMarginal: '仅超过阈值的部分按该档计价，输出不加价',
-      reasoningMultiplierBadge: '{effort} ×{multiplier}',
-      reasoningMultiplierHint: '最终转发的思考等级为 {effort} 时，整次请求的计费与额度消耗乘以 {multiplier}；未配置的等级按 1 倍计费',
-      marginalBadge: '超出部分计价',
-      timePricingRowHint: '按 {timezone} 时间，在该时段内发起的请求按本行价格计费',
-      timePricingRowHintWeekdays:
-        '按 {timezone} 时间，仅工作日（周一至周五）在该时段内发起的请求按本行价格计费，周末全天按标准价',
-      timePricingRowHintPeak: '；本行价格未含高峰倍率，与高峰时段 {window} 重叠的部分实付再乘 ×{multiplier}',
-      timePricingWeekdays: '工作日',
-      timePricingRateHint: '生效倍率 {rate} × 时段倍率 {multiplier}',
-      paidPrice: '实付价格(折后)',
-      officialPrice: '官方价格',
-      rate: '折扣倍率',
-      unitPerMillion: '$ / 1M token',
-      perUnitRequest: '/ 次',
-      perUnitImage: '/ 张',
-      perRequest: '按次计费',
-      perImage: '按图片计费'
-    },
-    nav: {
-      login: '登录',
-      backToDashboard: '回到后台'
-    }
+
   },
 
   affiliate: {
@@ -865,6 +899,8 @@ export default {
     days: '天',
     codeRedeemSuccess: '兑换成功！',
     failedToRedeem: '兑换失败，请检查兑换码后重试。',
+    historyLoadFailed: '加载兑换记录失败，请重试。',
+    userRefreshFailed: '兑换成功，但账户信息刷新失败。',
     subscriptionRefreshFailed: '兑换成功，但订阅状态刷新失败。',
     pleaseEnterCode: '请输入兑换码'
   },

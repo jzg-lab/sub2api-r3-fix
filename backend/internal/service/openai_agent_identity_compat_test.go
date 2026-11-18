@@ -18,9 +18,9 @@ import (
 )
 
 func TestAccountTestServiceOpenAICompactAgentIdentityUsesFreshAssertion(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := Account{
-
 		ID:          21,
 		Name:        "agent-identity",
 		Platform:    PlatformOpenAI,
@@ -57,9 +57,9 @@ func TestAccountTestServiceOpenAICompactAgentIdentityUsesFreshAssertion(t *testi
 }
 
 func TestAccountTestServiceOpenAICompactAgentIdentityRecoversInvalidTaskOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
-
 		ID:          22,
 		Name:        "agent-identity-recovery",
 		Platform:    PlatformOpenAI,
@@ -105,9 +105,9 @@ func TestAccountTestServiceOpenAICompactAgentIdentityRecoversInvalidTaskOnce(t *
 }
 
 func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
-
 		ID:       24,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -144,7 +144,6 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 	// behavior. Compare the same request with the existing OAuth path instead
 	// of pinning this test to an implementation-specific hash.
 	oauthAccount := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       26,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -166,7 +165,6 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 func TestOpenAIAgentIdentityErrorRedactionDoesNotLeakCredentialValues(t *testing.T) {
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
-
 		ID:       25,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -195,10 +193,8 @@ func TestOpenAIAuthenticationHeadersPreserveOAuthPATAndAPIKeyBearerModes(t *test
 		account *Account
 		token   string
 	}{
-		{name: "oauth", account: &Account{
-			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}, token: "oauth-runtime-token"},
-		{name: "personal access token", account: &Account{
-			Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModePersonalAccessToken}}, token: "pat-runtime-token"},
+		{name: "oauth", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, token: "oauth-runtime-token"},
+		{name: "personal access token", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"auth_mode": OpenAIAuthModePersonalAccessToken}}, token: "pat-runtime-token"},
 		{name: "api key", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, token: "api-key-runtime-token"},
 	}
 	for _, tt := range tests {
@@ -224,7 +220,6 @@ func TestOpenAIWSAgentIdentityRecoveryRequiresTaskInvalidBody(t *testing.T) {
 func TestValidateOpenAIWSBearerTokenAllowsAgentIdentityWithoutStoredToken(t *testing.T) {
 	t.Run("Given Agent Identity When a WS path receives no bearer token Then dial-time assertion auth is allowed", func(t *testing.T) {
 		account := &Account{
-
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
@@ -260,11 +255,8 @@ func TestOpenAIWSConnPoolHeadersFactoryRunsAtDialAndStalePrewarmIsDiscarded(t *t
 	factoryCalls := 0
 	latestHeader := ""
 	req := openAIWSAcquireRequest{
-		ProxyURL: openAITransportTestRoute(&Account{
-			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth}),
-		Account: &Account{
-			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
-		WSURL: "wss://example.com/v1/responses",
+		Account: &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		WSURL:   "wss://example.com/v1/responses",
 		HeadersFactory: func(_ context.Context, headers http.Header) (http.Header, error) {
 			factoryCalls++
 			latestHeader = "AgentAssertion dial-" + string(rune('0'+factoryCalls))
@@ -299,9 +291,9 @@ func TestOpenAIWSConnPoolHeadersFactoryRunsAtDialAndStalePrewarmIsDiscarded(t *t
 }
 
 func TestOpenAIAgentIdentityTaskInvalidRetriesExactlyOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
-
 		ID:          23,
 		Name:        "agent-identity",
 		Platform:    PlatformOpenAI,
@@ -377,6 +369,7 @@ func TestOpenAIAgentIdentityTaskInvalidRetriesExactlyOnce(t *testing.T) {
 }
 
 func TestOpenAIAgentIdentityCompatRoutesRecoverInvalidTaskOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		name string
 		path string
@@ -405,7 +398,6 @@ func TestOpenAIAgentIdentityCompatRoutesRecoverInvalidTaskOnce(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			key, privateKey := newTestAgentIdentityKey(t)
 			account := &Account{
-
 				ID:          int64(40 + index),
 				Name:        "agent-identity-compat",
 				Platform:    PlatformOpenAI,
@@ -451,9 +443,9 @@ func TestOpenAIAgentIdentityCompatRoutesRecoverInvalidTaskOnce(t *testing.T) {
 }
 
 func TestOpenAIAgentIdentityChatRecoveryKeepsAutoDerivedSessionIsolationStable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	key, privateKey := newTestAgentIdentityKey(t)
 	account := &Account{
-
 		ID: 52, Name: "agent-identity", Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 		Status: StatusActive, Schedulable: true, Concurrency: 1,
 		Credentials: map[string]any{

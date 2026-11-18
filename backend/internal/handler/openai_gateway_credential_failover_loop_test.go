@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -260,11 +260,11 @@ func (c *grokCredentialHandlerTokenCache) DeleteAccessToken(context.Context, str
 	return c.deleteErr
 }
 
-func (c *grokCredentialHandlerTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
-	return "fixture-lock", nil
+func (c *grokCredentialHandlerTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
 }
 
-func (c *grokCredentialHandlerTokenCache) ReleaseRefreshLock(context.Context, string, string) error {
+func (c *grokCredentialHandlerTokenCache) ReleaseRefreshLock(context.Context, string) error {
 	return nil
 }
 
@@ -321,10 +321,6 @@ type grokCredentialHandlerUpstream struct {
 	rateLimitIDs  map[int64]bool
 	failureStatus map[int64]int
 	cancelRequest context.CancelFunc
-}
-
-func (u *grokCredentialHandlerUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.Do(req, proxyURL, accountID, concurrency)
 }
 
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -962,6 +958,10 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 		billingCache.Stop()
 	}
 	return h, repo, upstream, router, cleanup
+}
+
+func (u *grokCredentialHandlerUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, concurrency)
 }
 
 func (u *grokCredentialHandlerUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {

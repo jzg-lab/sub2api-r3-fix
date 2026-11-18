@@ -56,10 +56,10 @@ type OpsService struct {
 	concurrencyService          *ConcurrencyService
 	gatewayService              *GatewayService
 	openAIGatewayService        *OpenAIGatewayService
+	openAIDowngradeStore        OpenAIDowngradeProbeStore
 	geminiCompatService         *GeminiMessagesCompatService
 	antigravityGatewayService   *AntigravityGatewayService
 	systemLogSink               *OpsSystemLogSink
-	openAIDowngradeStore        OpenAIDowngradeProbeStore
 	ingressRejectAggregator     *OpsIngressRejectAggregator
 	authCacheInvalidationWorker *AuthCacheInvalidationWorker
 	apiKeyService               *APIKeyService
@@ -151,16 +151,6 @@ func (s *OpsService) RequireMonitoringEnabled(ctx context.Context) error {
 	return ErrOpsDisabled
 }
 
-// SetOpenAIDowngradeProbeStore injects the read-only probe store used by the
-// OpenAI downgrade dashboard. Optional: when nil the dashboard endpoint
-// reports OPS_OPENAI_PROBE_UNAVAILABLE.
-func (s *OpsService) SetOpenAIDowngradeProbeStore(store OpenAIDowngradeProbeStore) {
-	if s == nil {
-		return
-	}
-	s.openAIDowngradeStore = store
-}
-
 func (s *OpsService) IsMonitoringEnabled(ctx context.Context) bool {
 	_ = ctx
 	// Hard switch: disable ops entirely.
@@ -188,7 +178,7 @@ func (s *OpsService) initRuntimeSettings(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	defaults := defaultOpsAdvancedSettings()
+	defaults := defaultOpsAdvancedSettingsForConfig(s.cfg)
 	s.runtimeSettings.Store(&opsRuntimeSettingsSnapshot{monitoringEnabled: true, advanced: *defaults})
 	_ = s.RefreshRuntimeSettings(ctx)
 }
@@ -209,6 +199,7 @@ func (s *OpsService) RefreshRuntimeSettings(ctx context.Context) error {
 	values, err := s.settingRepo.GetMultiple(ctx, []string{
 		SettingKeyOpsMonitoringEnabled,
 		SettingKeyOpsAdvancedSettings,
+		SettingKeyOpsRuntimeLogConfig,
 	})
 	if err != nil {
 		return err
@@ -218,15 +209,27 @@ func (s *OpsService) RefreshRuntimeSettings(ctx context.Context) error {
 	if raw, ok := values[SettingKeyOpsMonitoringEnabled]; ok {
 		monitoringEnabled = parseOpsMonitoringEnabled(raw)
 	}
-	advanced := defaultOpsAdvancedSettings()
+	advanced := defaultOpsAdvancedSettingsForConfig(s.cfg)
 	if raw, ok := values[SettingKeyOpsAdvancedSettings]; ok {
 		if err := json.Unmarshal([]byte(raw), advanced); err != nil {
-			advanced = defaultOpsAdvancedSettings()
+			advanced = defaultOpsAdvancedSettingsForConfig(s.cfg)
 		}
 	}
 	normalizeOpsAdvancedSettings(advanced)
 
 	s.runtimeSettings.Store(&opsRuntimeSettingsSnapshot{monitoringEnabled: monitoringEnabled, advanced: *advanced})
+	if s.systemLogSink != nil {
+		persistAccessLogs := false
+		if raw, ok := values[SettingKeyOpsRuntimeLogConfig]; ok {
+			var runtimeCfg struct {
+				PersistAccessLogs bool `json:"persist_access_logs"`
+			}
+			if json.Unmarshal([]byte(raw), &runtimeCfg) == nil {
+				persistAccessLogs = runtimeCfg.PersistAccessLogs
+			}
+		}
+		s.systemLogSink.SetPersistAccessLogs(persistAccessLogs)
+	}
 	return nil
 }
 
@@ -371,7 +374,7 @@ func (s *OpsService) SetMonitoringEnabled(enabled bool) {
 	}
 	s.runtimeSettingsMu.Lock()
 	current := s.runtimeSettings.Load()
-	next := &opsRuntimeSettingsSnapshot{monitoringEnabled: enabled, advanced: *defaultOpsAdvancedSettings()}
+	next := &opsRuntimeSettingsSnapshot{monitoringEnabled: enabled, advanced: *defaultOpsAdvancedSettingsForConfig(s.cfg)}
 	if current != nil {
 		next.advanced = current.advanced
 	}
@@ -550,32 +553,53 @@ func (s *OpsService) prepareErrorLogInput(ctx context.Context, entry *OpsInsertE
 	return entry, true, nil
 }
 
+const (
+	// opsUpstreamErrorsBodyWindow is how many of the newest attempts keep their
+	// larger detail / upstream_response_body payloads while queued.
+	opsUpstreamErrorsBodyWindow = 16
+	// Attempts older than the body window keep scalar metadata only, with URL
+	// and message trimmed harder than the newest attempts (2048).
+	opsUpstreamErrorsOlderURLMaxLen     = 512
+	opsUpstreamErrorsOlderMessageMaxLen = 512
+	// Hard bounds for the upstream_errors array of one queued entry. Newest
+	// attempts win; the oldest retained attempt records the dropped count.
+	opsUpstreamErrorsMaxEvents     = 256
+	opsUpstreamErrorsQueueMaxBytes = 512 * 1024
+)
+
 func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 	if entry == nil || len(entry.UpstreamErrors) == 0 {
 		return nil
 	}
 
-	events := entry.UpstreamErrors
-	const maxEventsWithBodies = 16
-	firstEventWithBody := len(events) - maxEventsWithBodies
+	events := make([]*OpsUpstreamErrorEvent, 0, len(entry.UpstreamErrors))
+	for _, ev := range entry.UpstreamErrors {
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+	firstEventWithBody := len(events) - opsUpstreamErrorsBodyWindow
 	if firstEventWithBody < 0 {
 		firstEventWithBody = 0
 	}
 
 	sanitized := make([]*OpsUpstreamErrorEvent, 0, len(events))
 	for i, ev := range events {
-		if ev == nil {
-			continue
-		}
 		out := *ev
 		normalizeOpsUpstreamProxyAttribution(&out)
+		// Only boundOpsUpstreamErrors may stamp this; never trust caller input.
+		out.DroppedEarlierAttempts = 0
+		keepBody := i >= firstEventWithBody
+		urlMaxLen, messageMaxLen := 2048, 2048
+		if !keepBody {
+			urlMaxLen, messageMaxLen = opsUpstreamErrorsOlderURLMaxLen, opsUpstreamErrorsOlderMessageMaxLen
+		}
 
 		out.Platform = truncateString(strings.TrimSpace(out.Platform), 32)
 		out.AccountName = truncateString(strings.TrimSpace(out.AccountName), 128)
 		out.ProxyName = truncateString(strings.TrimSpace(out.ProxyName), 128)
 		out.UpstreamRequestID = truncateString(strings.TrimSpace(out.UpstreamRequestID), 128)
-		out.UpstreamURL = truncateString(strings.TrimSpace(out.UpstreamURL), 2048)
-		keepBody := i >= firstEventWithBody
+		out.UpstreamURL = truncateString(strings.TrimSpace(out.UpstreamURL), urlMaxLen)
 		if body := strings.TrimSpace(out.UpstreamResponseBody); keepBody && body != "" {
 			out.UpstreamResponseBody, _ = sanitizeErrorBodyForStorage(body, OpsErrorLogQueueBodyMaxBytes)
 		} else {
@@ -597,10 +621,16 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		}
 
 		msg := sanitizeUpstreamErrorMessage(strings.TrimSpace(out.Message))
-		msg = truncateString(msg, 2048)
+		msg = truncateString(msg, messageMaxLen)
 		out.Message = msg
 
 		detail := strings.TrimSpace(out.Detail)
+		// Drop fully-empty events (can happen if only status code was known).
+		// Judged on the original detail so an older attempt whose detail is
+		// cleared by the body window below is still retained.
+		if out.UpstreamStatusCode == 0 && out.Message == "" && detail == "" {
+			continue
+		}
 		if keepBody && detail != "" {
 			// Keep upstream detail small while the event waits in the queue.
 			sanitizedDetail, _ := sanitizeErrorBodyForStorage(detail, OpsErrorLogQueueBodyMaxBytes)
@@ -613,9 +643,45 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		sanitized = append(sanitized, &evCopy)
 	}
 
+	sanitized, _ = boundOpsUpstreamErrors(sanitized)
 	entry.UpstreamErrorsJSON = marshalOpsUpstreamErrors(sanitized)
 	entry.UpstreamErrors = nil
 	return nil
+}
+
+// boundOpsUpstreamErrors enforces the per-entry event count and serialized
+// byte budget. It walks from the newest attempt backwards so the final,
+// outcome-deciding attempts are always retained (the newest event is kept even
+// if it alone exceeds the budget), and stamps the oldest retained event with
+// the number of dropped earlier attempts. Events must already be sanitized
+// copies owned by the caller.
+func boundOpsUpstreamErrors(events []*OpsUpstreamErrorEvent) ([]*OpsUpstreamErrorEvent, int) {
+	if len(events) == 0 {
+		return events, 0
+	}
+	keepFrom := len(events)
+	budget := opsUpstreamErrorsQueueMaxBytes
+	for i := len(events) - 1; i >= 0; i-- {
+		if len(events)-i > opsUpstreamErrorsMaxEvents {
+			break
+		}
+		raw, err := json.Marshal(events[i])
+		size := 0
+		if err == nil {
+			size = len(raw) + 1 // trailing comma / bracket share
+		}
+		if i != len(events)-1 && size > budget {
+			break
+		}
+		budget -= size
+		keepFrom = i
+	}
+	kept := events[keepFrom:]
+	dropped := keepFrom
+	if dropped > 0 {
+		kept[0].DroppedEarlierAttempts = dropped
+	}
+	return kept, dropped
 }
 
 func (s *OpsService) GetErrorLogs(ctx context.Context, filter *OpsErrorLogFilter) (*OpsErrorLogList, error) {

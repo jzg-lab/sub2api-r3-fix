@@ -219,6 +219,21 @@ func (c *openAIProxyStreamCircuit) isBlocked(proxyID int64, now time.Time) bool 
 	return true
 }
 
+func (c *openAIProxyStreamCircuit) activeBlockCount(now time.Time) int {
+	if c == nil || c.settings.disabled {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, entry := range c.entries {
+		if !entry.blockedUntil.IsZero() && now.Before(entry.blockedUntil) {
+			count++
+		}
+	}
+	return count
+}
+
 func (c *openAIProxyStreamCircuit) ensureCapacityLocked(now time.Time) {
 	if len(c.entries) < c.settings.maxEntries {
 		return
@@ -312,6 +327,23 @@ func (s *OpenAIGatewayService) isOpenAIProxyStreamQuarantined(ctx context.Contex
 	if !ok {
 		return false
 	}
+	if openAIProxyStreamQuarantineBypassed(ctx) {
+		return false
+	}
 	circuit := s.getOpenAIProxyStreamCircuit()
 	return circuit != nil && circuit.isBlocked(proxyID, time.Now())
+}
+
+type openAIProxyStreamQuarantineBypassKey struct{}
+
+func withOpenAIProxyStreamQuarantineBypass(ctx context.Context) context.Context {
+	return context.WithValue(ctx, openAIProxyStreamQuarantineBypassKey{}, true)
+}
+
+func openAIProxyStreamQuarantineBypassed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	bypassed, _ := ctx.Value(openAIProxyStreamQuarantineBypassKey{}).(bool)
+	return bypassed
 }

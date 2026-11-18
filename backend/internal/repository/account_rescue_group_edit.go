@@ -7,6 +7,7 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	dbaccountgroup "github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
@@ -73,6 +74,10 @@ func validateAccountRescueGroupEdit(ctx context.Context, client *dbent.Client, i
 }
 
 func replaceAccountGroupsInTx(ctx context.Context, client *dbent.Client, id int64, groupIDs []int64) error {
+	if adminaccess.RestrictedFromContext(ctx) != nil {
+		repo := newAccountRepositoryWithSQL(client, client, nil)
+		return repo.scopedAdminBindGroups(ctx, id, groupIDs)
+	}
 	if len(groupIDs) > 0 {
 		var found int
 		if err := scanSingleRow(ctx, client, `SELECT COUNT(*) FROM (

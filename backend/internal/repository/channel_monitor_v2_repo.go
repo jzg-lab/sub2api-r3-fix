@@ -701,8 +701,7 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 	}
 	filter = channelMonitorV2CommonCoverageFilter(filter, *coverage)
 	where, args, _ := channelMonitorV2WhereWithRollup(filter, cfg, "e")
-	// Older buckets keep their original category version until recomputed.
-	rows, err := r.db.QueryContext(ctx, `SELECT e.platform,e.model,e.error_category,SUM(e.error_requests) FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e `+where+` AND e.taxonomy_version <= `+fmt.Sprint(service.ChannelMonitorV2TaxonomyVersion)+` GROUP BY e.platform,e.model,e.error_category`, args...)
+	rows, err := r.db.QueryContext(ctx, `SELECT e.platform,e.model,e.error_category,SUM(e.error_requests) FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e `+where+` AND e.taxonomy_version = `+fmt.Sprint(service.ChannelMonitorV2TaxonomyVersion)+` GROUP BY e.platform,e.model,e.error_category`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -748,7 +747,7 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 		}
 		items = append(items, row)
 	}
-	// Stable: non-ignored categories first (by count) before service filtering.
+	// Stable: counted categories first (by count), then ignored (grey in UI).
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Ignored != items[j].Ignored {
 			return !items[i].Ignored && items[j].Ignored
@@ -964,7 +963,7 @@ func (r *channelMonitorV2Repository) loadFacts(ctx context.Context, filter servi
 		} else {
 			args = append([]any{fmt.Sprintf("%d seconds", int(filter.Bucket.Seconds()))}, args...)
 			where = shiftSQLPlaceholders(where, 1)
-			bucketExpr = "date_bin($1::interval,m.bucket_start,TIMESTAMPTZ '1970-01-01')"
+			bucketExpr = channelMonitorV2DateBinExpr("m.bucket_start")
 			group = bucketExpr + "," + group
 		}
 	}
@@ -1006,7 +1005,7 @@ func (r *channelMonitorV2Repository) loadHistograms(ctx context.Context, filter 
 			args = []any{fmt.Sprintf("%d seconds", int(filter.Bucket.Seconds()))}
 			args = append(args, oldArgs...)
 			where = shiftSQLPlaceholders(where, 1)
-			bucketExpr = "date_bin($1::interval,h.bucket_start,TIMESTAMPTZ '1970-01-01')"
+			bucketExpr = channelMonitorV2DateBinExpr("h.bucket_start")
 			group = bucketExpr + "," + group
 		}
 	}
@@ -1459,7 +1458,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCounts(
 	if filter.Bucket > 0 && bucketSeconds == 0 {
 		args = append([]any{fmt.Sprintf("%d seconds", int(filter.Bucket.Seconds()))}, args...)
 		where = shiftSQLPlaceholders(where, 1)
-		bucketExpr = "date_bin($1::interval,e.bucket_start,TIMESTAMPTZ '1970-01-01')"
+		bucketExpr = channelMonitorV2DateBinExpr("e.bucket_start")
 		groupBy = bucketExpr + ", e.platform, e.model"
 	}
 	args = append(args, pq.Array(cfg.IgnoredErrorCategories), service.ChannelMonitorV2TaxonomyVersion)
@@ -1468,7 +1467,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCounts(
 	query := fmt.Sprintf(
 		`SELECT %s, e.platform, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
 		 GROUP BY %s`,
 		bucketExpr, where, catIdx, taxIdx, groupBy,
 	)
@@ -1511,7 +1510,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByPlatformModel(
 	query := fmt.Sprintf(
 		`SELECT e.platform, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
 		 GROUP BY e.platform, e.model`,
 		where, catIdx, taxIdx,
 	)
@@ -1555,7 +1554,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 	if filter.Bucket > 0 && bucketSeconds == 0 {
 		args = append([]any{fmt.Sprintf("%d seconds", int(filter.Bucket.Seconds()))}, args...)
 		where = shiftSQLPlaceholders(where, 1)
-		bucketExpr = "date_bin($1::interval,e.bucket_start,TIMESTAMPTZ '1970-01-01')"
+		bucketExpr = channelMonitorV2DateBinExpr("e.bucket_start")
 		groupSQL = bucketExpr + ", e.platform, e.group_id, e.model"
 	}
 	args = append(args, pq.Array(cfg.IgnoredErrorCategories), service.ChannelMonitorV2TaxonomyVersion)
@@ -1564,7 +1563,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 	query := fmt.Sprintf(
 		`SELECT %s, e.platform, e.group_id, e.model, SUM(e.error_requests)
 		 FROM `+channelMonitorV2ErrorMetricsTable(filter)+` e %s
-		 AND e.error_category = ANY($%d) AND e.taxonomy_version <= $%d
+		 AND e.error_category = ANY($%d) AND e.taxonomy_version = $%d
 		 GROUP BY %s`,
 		bucketExpr, where, catIdx, taxIdx, groupSQL,
 	)
@@ -1594,8 +1593,6 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 	return byDimBucket, byDim, rows.Err()
 }
 
-// Model speed uses valid text request timings, not fleet TPM. Reuse monitor scope
-// and model keys so a card can never pick up another group's/model's measurements.
 func (r *channelMonitorV2Repository) loadModelOutputTPS(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) (map[channelMonitorV2MatrixKey]float64, error) {
 	result := make(map[channelMonitorV2MatrixKey]float64)
 	if !filter.End.After(filter.Start) || filter.End.Sub(filter.Start) > 24*time.Hour || channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
@@ -1606,11 +1603,9 @@ func (r *channelMonitorV2Repository) loadModelOutputTPS(ctx context.Context, fil
  SELECT ul.created_at AS bucket_start, ` + channelMonitorV2PlatformSQL + ` AS platform,
  ul.group_id, ` + channelMonitorV2ModelSQL + ` AS model,
  ul.output_tokens * 1000.0 / NULLIF(ul.duration_ms::double precision - ul.first_token_ms, 0) AS output_tps
- FROM usage_logs ul
- LEFT JOIN groups g ON g.id = ul.group_id LEFT JOIN accounts a ON a.id = ul.account_id
- WHERE ul.created_at >= $1 AND ul.created_at < $2
- AND ul.output_tokens > 0 AND ul.first_token_ms >= 0 AND ul.duration_ms > ul.first_token_ms
- AND ul.image_count = 0 AND ul.image_output_tokens = 0 AND ul.group_id > 0
+ FROM usage_logs ul LEFT JOIN groups g ON g.id = ul.group_id LEFT JOIN accounts a ON a.id = ul.account_id
+ WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.output_tokens > 0 AND ul.first_token_ms >= 0
+ AND ul.duration_ms > ul.first_token_ms AND ul.image_count = 0 AND ul.image_output_tokens = 0 AND ul.group_id > 0
  AND COALESCE(ul.billing_mode, '') NOT IN ('image', 'video', 'audio')
  AND ul.request_type IN (1, 2, 3) AND ` + usageLogSuccessFilterUL + `
  ) m ` + where + ` GROUP BY 1, 2, 3`
@@ -1618,7 +1613,6 @@ func (r *channelMonitorV2Repository) loadModelOutputTPS(ctx context.Context, fil
 	defer cancel()
 	rows, err := r.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
-		// shortcut: TPS scans at most 24h with a 2s budget; add rollup columns if production volume outgrows this query.
 		if queryCtx.Err() != nil && ctx.Err() == nil {
 			return result, nil
 		}

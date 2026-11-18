@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -144,7 +145,7 @@ func TestOpenAIUnauthorizedRecoveryBoundaries(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(a, repo, executor, gateway, req)
 			}
-			resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
+			resp, err := gateway.doOpenAIUpstreamWithContext(req.Context(), req, a.Proxy.URL(), a)
 			if tt.stateError {
 				require.ErrorIs(t, err, errOAuthRefreshAccountStateChanged)
 				require.Nil(t, resp)
@@ -180,7 +181,7 @@ func TestOpenAIUnauthorizedRecoveryReusesAlreadyRotatedCredential(t *testing.T) 
 	req, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{}`))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer local-before")
-	resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
+	resp, err := gateway.doOpenAIUpstreamWithContext(req.Context(), req, a.Proxy.URL(), a)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -208,7 +209,7 @@ func TestOpenAIUnauthorizedRecoveryConcurrentSingleRotation(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{}`))
 			require.NoError(t, err)
 			req.Header.Set("Authorization", "Bearer local-before")
-			resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
+			resp, err := gateway.doOpenAIUpstreamWithContext(req.Context(), req, a.Proxy.URL(), a)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -232,7 +233,7 @@ func TestOpenAIUnauthorizedRecoveryDoesNotLoop(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{}`))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer local-before")
-	resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
+	resp, err := gateway.doOpenAIUpstreamWithContext(req.Context(), req, a.Proxy.URL(), a)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
@@ -321,7 +322,7 @@ func TestOpenAIUnauthorizedRecoveryCancellationWithDetachedTransport(t *testing.
 			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL, strings.NewReader(`{}`))
 			require.NoError(t, err)
 			req.Header.Set("Authorization", "Bearer local-before")
-			resp, err := gateway.doOpenAIUpstream(ctx, req, a.Proxy.URL(), a)
+			resp, err := gateway.doOpenAIUpstreamWithContext(ctx, req, a.Proxy.URL(), a)
 			require.ErrorIs(t, err, context.Canceled)
 			require.Nil(t, resp)
 			if phase == "during_replay" {
@@ -357,7 +358,7 @@ func TestOpenAIUnauthorizedRecoveryCancellationDuringErrorRead(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer local-before")
 	timer := time.AfterFunc(50*time.Millisecond, cancel)
 	defer timer.Stop()
-	resp, err := gateway.doOpenAIUpstream(ctx, req, a.Proxy.URL(), a)
+	resp, err := gateway.doOpenAIUpstreamWithContext(ctx, req, a.Proxy.URL(), a)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, resp)
 	require.Zero(t, executor.calls.Load())
@@ -409,7 +410,7 @@ func TestOpenAIUnauthorizedRecoveryDistributedWinner(t *testing.T) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, strings.NewReader(`{}`))
 			require.NoError(t, err)
 			req.Header.Set("Authorization", "Bearer local-before")
-			resp, err := gateway.doOpenAIUpstream(ctx, req, a.Proxy.URL(), a)
+			resp, err := gateway.doOpenAIUpstreamWithContext(ctx, req, a.Proxy.URL(), a)
 			switch outcome {
 			case "rotated":
 				require.NoError(t, err)
@@ -694,7 +695,7 @@ func TestOpenAIUnauthorizedRecoveryFutureExpiry(t *testing.T) {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL, strings.NewReader(`{"model":"local-fixture","input":"hello"}`))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer local-before")
-	resp, err := gateway.doOpenAIUpstream(req.Context(), req, a.Proxy.URL(), a)
+	resp, err := gateway.doOpenAIUpstreamWithContext(req.Context(), req, a.Proxy.URL(), a)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
@@ -702,4 +703,44 @@ func TestOpenAIUnauthorizedRecoveryFutureExpiry(t *testing.T) {
 	require.Zero(t, executor.calls.Load())
 	require.Zero(t, repo.writes)
 	require.Equal(t, []string{a.Proxy.URL()}, upstream.routes)
+}
+
+func TestOpenAIUnauthorizedRecoveryCapturesOnlySuccessfulReplay(t *testing.T) {
+	a, repo, _, gateway := newUnauthorizedRecoveryFixture()
+	repo.account.Credentials["access_token"] = "local-after"
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer local-after" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"code":"invalid_token"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"ok","output":[]}`)
+	}))
+	defer server.Close()
+	gateway.httpUpstream = &unauthorizedRecoveryHTTP{client: server.Client()}
+	manager := NewPluginManager(nil, nil, nil, PluginHostInfo{})
+	manager.captureRuntime.Store(&pluginRuntime{})
+	gateway.SetPluginManager(manager)
+	ctx, finish := manager.beginCapture(context.Background(), nil, a)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, strings.NewReader(`{"model":"gpt-5"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer local-before")
+	resp, err := gateway.doOpenAIUpstreamWithContext(ctx, req, a.Proxy.URL(), a)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	finish(true)
+	require.EqualValues(t, 2, attempts.Load())
+	require.Len(t, manager.captureQueue, 1)
+	item := <-manager.captureQueue
+	defer item.release()
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
+	require.Equal(t, string(body), record["response"])
+	require.NotContains(t, string(item.request.RecordJson), "local-before")
+	require.NotContains(t, string(item.request.RecordJson), "local-after")
 }

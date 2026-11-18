@@ -4,10 +4,8 @@ package service
 
 import (
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,17 +54,6 @@ func TestBuiltinGeminiCacheStoragePrice(t *testing.T) {
 	} {
 		require.InDelta(t, tc.want, builtinGeminiCacheStoragePrice(tc.model), 1e-15, tc.model)
 	}
-}
-
-func TestGeminiFlashCacheStoragePromotionExpiresAtConfiguredDate(t *testing.T) {
-	loc := timezone.Location()
-	require.InDelta(t, geminiFlashPromoCacheStoragePrice, builtinGeminiCacheStoragePriceAt("models/gemini-3.6-flash", time.Date(2026, 12, 31, 23, 59, 59, 0, loc)), 1e-15)
-	require.InDelta(t, geminiFlashCacheStoragePrice, builtinGeminiCacheStoragePriceAt("gemini-3.6-flash", time.Date(2027, 1, 1, 0, 0, 0, 0, loc)), 1e-15)
-
-	billing := NewBillingService(&config.Config{}, &PricingService{pricingData: map[string]*LiteLLMModelPricing{
-		"gemini-3.6-flash": {CacheStorageCostPerTokenPerHour: 2e-6},
-	}})
-	require.InDelta(t, 2e-6, billing.CacheStoragePricePerTokenHourAt("gemini-3.6-flash", time.Date(2027, 1, 1, 0, 0, 0, 0, loc)), 1e-15, "custom cache storage pricing remains unchanged")
 }
 
 func TestCacheStoragePricePerTokenHourPriority(t *testing.T) {

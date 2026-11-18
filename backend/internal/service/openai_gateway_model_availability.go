@@ -33,10 +33,6 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 	if s.accountRepo == nil {
 		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
 	}
-	candidateRepo, ok := s.accountRepo.(ModelAvailabilityCandidateRepository)
-	if !ok {
-		return ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: true}
-	}
 
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	queryGroupID := groupID
@@ -45,7 +41,7 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 		queryGroupID = nil
 		includeGrouped = true
 	}
-	accounts, err := candidateRepo.ListModelAvailabilityCandidates(
+	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(
 		ctx,
 		queryGroupID,
 		[]string{platform},

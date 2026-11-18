@@ -13,8 +13,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const sub2APINoAvailableAccountsHeader = "X-Sub2API-No-Available-Accounts"
-
 // noAccountErrorClassification describes the HTTP response to emit when
 // account selection failed with ErrNoAvailableAccounts. Handlers obtain it
 // via classifyNoAccountError and choose between:
@@ -35,6 +33,8 @@ type noAccountErrorClassification struct {
 	Message       string
 	ModelNotFound bool // true when this is a 404 model_not_found classification
 }
+
+const sub2APINoAvailableAccountsHeader = "X-Sub2API-No-Available-Accounts"
 
 var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited|rate_limited)=(\d+)`)
 
@@ -136,7 +136,6 @@ func classifyNoAccountError(
 			ModelNotFound: true,
 		}
 	}
-	fallback.Message = "No available accounts in this pool. Check account status and usage limits."
 	return fallback
 }
 
@@ -183,10 +182,6 @@ func classifyOpenAICompatibleNoAccountErrorFromGin(
 	)
 }
 
-// markSub2APINoAvailableAccounts exposes a local, machine-readable signal for
-// the outer continuity proxy. Callers must invoke it only after account
-// selection has positively returned ErrNoAvailableAccounts (or a nil
-// selection). Model configuration errors intentionally remain unmarked.
 func markSub2APINoAvailableAccounts(c *gin.Context, cls noAccountErrorClassification) {
 	if c == nil || cls.Status != http.StatusServiceUnavailable || cls.ModelNotFound {
 		return

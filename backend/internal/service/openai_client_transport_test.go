@@ -9,6 +9,7 @@ import (
 )
 
 func TestOpenAIClientTransport_SetAndGet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
@@ -22,6 +23,7 @@ func TestOpenAIClientTransport_SetAndGet(t *testing.T) {
 }
 
 func TestOpenAIClientTransport_GetNormalizesRawContextValue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name     string
@@ -74,6 +76,7 @@ func TestOpenAIClientTransport_NilAndUnknownInput(t *testing.T) {
 	SetOpenAIClientTransport(nil, OpenAIClientTransportHTTP)
 	require.Equal(t, OpenAIClientTransportUnknown, GetOpenAIClientTransport(nil))
 
+	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 

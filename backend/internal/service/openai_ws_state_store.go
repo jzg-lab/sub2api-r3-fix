@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+var (
+	ErrHTTPResponseOwnerConflict         = errors.New("response already belongs to another user")
+	ErrHTTPResponseOwnerCacheUnsupported = errors.New("cache does not support atomic response ownership")
+)
+
+// OpenAIHTTPResponseOwnerCache preserves the owner pair as one atomic binding.
+type OpenAIHTTPResponseOwnerCache interface {
+	SetHTTPResponseOwner(ctx context.Context, groupID int64, userKey, apiKeyKey string, userID, apiKeyID int64, ttl time.Duration) error
+	GetHTTPResponseOwnerPair(ctx context.Context, groupID int64, userKey, apiKeyKey string) (int64, int64, error)
+}
+
 const (
 	openAIWSResponseAccountCachePrefix = "openai:response:"
 	openAIHTTPResponseOwnerUserPrefix  = "openai:http-response-owner:user:"
@@ -46,17 +57,6 @@ type openAIWSTurnStateBinding struct {
 type openAIWSSessionConnBinding struct {
 	connID    string
 	expiresAt time.Time
-}
-
-var (
-	ErrHTTPResponseOwnerConflict         = errors.New("response already belongs to another user")
-	ErrHTTPResponseOwnerCacheUnsupported = errors.New("cache does not support atomic response ownership")
-)
-
-// OpenAIHTTPResponseOwnerCache preserves the owner pair as one atomic binding.
-type OpenAIHTTPResponseOwnerCache interface {
-	SetHTTPResponseOwner(ctx context.Context, groupID int64, userKey, apiKeyKey string, userID, apiKeyID int64, ttl time.Duration) error
-	GetHTTPResponseOwnerPair(ctx context.Context, groupID int64, userKey, apiKeyKey string) (int64, int64, error)
 }
 
 // openAIWSInvalidEncryptedBinding 记录一个会话中已被上游判定失效的

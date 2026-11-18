@@ -101,6 +101,13 @@ func (m *handlerInflightCache) GetUserBalance(context.Context, int64) (float64, 
 	return m.balance, nil
 }
 
+func (m *handlerInflightCache) DeductUserBalance(_ context.Context, _ int64, amount float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.balance -= amount
+	return nil
+}
+
 func (m *handlerInflightCache) GetUserPlatformQuotaCache(context.Context, int64, string) (*service.UserPlatformQuotaCacheEntry, bool, error) {
 	return nil, false, nil
 }
@@ -117,7 +124,9 @@ func (m *handlerInflightCache) ReserveInflightBalance(_ context.Context, _ int64
 	}
 	m.res[id] = amount
 	m.reserved = append(m.reserved, amount)
-	m.maxActive = max(m.maxActive, len(m.res))
+	if len(m.res) > m.maxActive {
+		m.maxActive = len(m.res)
+	}
 	return true, sum, nil
 }
 
@@ -205,14 +214,4 @@ func TestWebSearch_RejectsWhenInflightExceedsBalance(t *testing.T) {
 	require.NotEqual(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "balance")
 	require.Equal(t, 1, cache.count(), "rejected request must not leave a reservation behind")
-}
-
-func (m *handlerInflightCache) DeductUserBalance(_ context.Context, _ int64, amount float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.balance -= amount
-	return nil
-}
-func (m *handlerInflightCache) IncrUserPlatformQuotaUsageCache(context.Context, int64, string, float64, time.Duration, bool) error {
-	return nil
 }

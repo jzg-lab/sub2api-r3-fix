@@ -78,19 +78,6 @@ func sameAccountRetryDelayFor(failoverErr *service.UpstreamFailoverError, retryC
 	return delay
 }
 
-func retrySameAccountAllowed(platform string, failoverErr *service.UpstreamFailoverError) bool {
-	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
-		return false
-	}
-	// A generic OpenAI pool 429 is an account/pool quota signal, not a
-	// request-local transient. OAuth 429 handling may opt into one bounded
-	// retry window by attaching a deadline derived from the upstream signal.
-	if platform == service.PlatformOpenAI && failoverErr.StatusCode == http.StatusTooManyRequests {
-		return !failoverErr.SameAccountRetryDeadline.IsZero()
-	}
-	return true
-}
-
 func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCount, retryLimit int) bool {
 	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
 		return false
@@ -115,6 +102,16 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 		return true
 	}
 	return retryLimit > 0 && retryCount < retryLimit
+}
+
+func retrySameAccountAllowed(platform string, failoverErr *service.UpstreamFailoverError) bool {
+	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
+		return false
+	}
+	if platform == service.PlatformOpenAI && failoverErr.StatusCode == http.StatusTooManyRequests {
+		return !failoverErr.SameAccountRetryDeadline.IsZero()
+	}
+	return true
 }
 
 // sameAccountRetryDeadlineAllows prevents a retry from starting after the
@@ -250,7 +247,6 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// 同账号重试用尽，执行统一终态处置。
 	applyRetryExhaustedDisposition(ctx, gatewayService, accountID, failoverErr)
 
 	// 加入失败列表
@@ -281,12 +277,7 @@ func (s *FailoverState) HandleFailoverError(
 	return FailoverContinue
 }
 
-func applyRetryExhaustedDisposition(
-	ctx context.Context,
-	gatewayService TempUnscheduler,
-	accountID int64,
-	failoverErr *service.UpstreamFailoverError,
-) {
+func applyRetryExhaustedDisposition(ctx context.Context, gatewayService TempUnscheduler, accountID int64, failoverErr *service.UpstreamFailoverError) {
 	if failoverErr == nil || !failoverErr.RetryableOnSameAccount || gatewayService == nil {
 		return
 	}
@@ -306,9 +297,7 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 	if ctx.Err() != nil {
 		return FailoverCanceled
 	}
-
-	// Re-selecting the same exhausted pool does not reset a capacity incident.
-	if s.LastFailoverErr.IsOpenAICapacityShed() {
+	if s.LastFailoverErr != nil && s.LastFailoverErr.IsOpenAICapacityShed() && s.capacityRetryBudget.failures >= 3 {
 		return FailoverExhausted
 	}
 

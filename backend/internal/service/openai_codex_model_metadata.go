@@ -21,8 +21,6 @@ func applyCodexToolCapabilities(dst, src map[string]json.RawMessage, overwrite b
 		if len(value) == 0 {
 			continue
 		}
-		// Codex decodes service_tiers as a required array and rejects the whole
-		// models manifest on null, so an undeclared tier list is advertised as [].
 		if field == "service_tiers" && bytes.Equal(value, []byte("null")) {
 			value = []byte("[]")
 		}
@@ -75,7 +73,7 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 	parsed, err := url.Parse(baseURL)
 	official := err == nil && (strings.EqualFold(parsed.Hostname(), "api.openai.com") ||
 		(account.IsOpenAIOAuth() && strings.EqualFold(parsed.Hostname(), "chatgpt.com")))
-	if account.IsOpenAI() && (isOpenAIGPT6AstraModel(modelID) || openai.IsGPT61SolModelSpelling(modelID)) && official {
+	if account.IsOpenAI() && (isOpenAIGPT6AstraModel(modelID) || openai.IsGPT61SolModelSpelling(modelID) || openai.IsGPT61TerraModelSpelling(modelID)) && official {
 		defaults := map[string]json.RawMessage{
 			"supports_search_tool":  json.RawMessage("true"),
 			"apply_patch_tool_type": json.RawMessage(`"freeform"`),
@@ -293,7 +291,6 @@ func intersectUpstreamModelMetadata(modelID string, candidates []UpstreamModelMe
 			case "supports_search_tool", "use_responses_lite":
 				fallback = json.RawMessage("false")
 			case "service_tiers":
-				// Conflicting peers must not advertise any tier, and Codex requires an array.
 				fallback = json.RawMessage("[]")
 			}
 			result.CodexToolCapabilities[field] = fallback

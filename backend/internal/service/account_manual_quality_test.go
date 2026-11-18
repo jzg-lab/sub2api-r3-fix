@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,12 @@ type manualQualityTestRepo struct {
 func (r *manualQualityTestRepo) GetByID(context.Context, int64) (*Account, error) {
 	return r.account, nil
 }
+func (r *manualQualityTestRepo) SetError(context.Context, int64, string) error { return nil }
+func (r *manualQualityTestRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
+	return nil
+}
+func (r *manualQualityTestRepo) UpdateExtra(context.Context, int64, map[string]any) error { return nil }
+func (r *manualQualityTestRepo) SetRateLimited(context.Context, int64, time.Time) error   { return nil }
 func (r *manualQualityTestRepo) BeginManualQuality(_ context.Context, result *ManualQualityResult) (bool, error) {
 	r.begins++
 	return !r.busy, nil
@@ -43,7 +50,7 @@ func (r *manualQualityTestRepo) ListManualQuality(context.Context, []int64) ([]M
 	return nil, nil
 }
 
-// Unimplemented mutation methods intentionally panic: a diagnostic must not call them.
+// Other account mutations remain unimplemented because this diagnostic does not use them.
 
 func TestManualQualityProtocolRequestsAndStateIsolation(t *testing.T) {
 	for _, tc := range []struct{ name, platform, protocol, stream string }{
@@ -242,4 +249,38 @@ func TestManualQualityTemplatesPersistSeparatelyFromDefaults(t *testing.T) {
 	require.Equal(t, changed, templates[0])
 	require.Equal(t, DefaultManualQualityTemplates()[1], templates[1])
 	require.NotEqual(t, "modified candy", DefaultManualQualityTemplates()[0].Prompt)
+}
+
+func TestManualQualityBedrockUsesQuestionAndRequiresCompleteBoundedAnswer(t *testing.T) {
+	for _, tc := range []struct{ name, body, status string }{
+		{"complete", `{"stop_reason":"end_turn","content":[{"type":"text","text":"21"}],"usage":{"input_tokens":5,"output_tokens":2}}`, "completed"},
+		{"truncated", `{"stop_reason":"max_tokens","content":[{"type":"text","text":"21"}]}`, "failed"},
+		{"oversized", strings.Repeat(" ", 2<<20) + `{}`, "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &Account{ID: 42, Platform: PlatformAnthropic, Type: AccountTypeBedrock,
+				Credentials: map[string]any{"auth_mode": "apikey", "api_key": "secret", "aws_region": "us-east-1"}}
+			repo := &manualQualityTestRepo{account: account}
+			calls := 0
+			upstream := &systemOneHTTPUpstream{do: func(req *http.Request) (*http.Response, error) {
+				calls++
+				body, err := io.ReadAll(req.Body)
+				require.NoError(t, err)
+				require.Contains(t, string(body), "my complete question")
+				require.NotContains(t, string(body), "reference not sent")
+				require.Contains(t, req.URL.Path, "/invoke")
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			}}
+			svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: &config.Config{}}
+			result, err := svc.RunManualQuality(context.Background(), 42, ManualQualityRequest{Model: "anthropic.claude-sonnet-4-20250514-v1:0", ManualQualityTemplate: ManualQualityTemplate{Kind: "candy", Prompt: "my complete question", ReferenceAnswer: "reference not sent"}})
+			require.NoError(t, err)
+			require.Equal(t, 1, calls)
+			require.Equal(t, tc.status, result.Status, result.Error)
+			require.Equal(t, 1, repo.finishes)
+			if tc.status == "completed" {
+				require.Equal(t, "21", result.Answer)
+				require.Equal(t, "anthropic.claude-sonnet-4-20250514-v1:0", result.UpstreamModel)
+			}
+		})
+	}
 }

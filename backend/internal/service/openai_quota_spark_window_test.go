@@ -81,24 +81,10 @@ func (c *stubQuotaTokenCache) SetAccessToken(_ context.Context, _ string, _ stri
 func (c *stubQuotaTokenCache) DeleteAccessToken(_ context.Context, _ string) error { return nil }
 
 func (c *stubQuotaTokenCache) AcquireRefreshLock(_ context.Context, _ string, _ time.Duration) (string, error) {
-	return "test-lease", nil
+	return "lease", nil
 }
 
-func (c *stubQuotaTokenCache) ReleaseRefreshLock(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func newQuotaTestTokenProvider(repo *stubQuotaAccountRepo, cache *stubQuotaTokenCache) *OpenAITokenProvider {
-	for _, account := range repo.accounts {
-		if token := cache.tokens[OpenAITokenCacheKey(account)]; token != "" {
-			if account.Credentials == nil {
-				account.Credentials = make(map[string]any)
-			}
-			account.Credentials["access_token"] = token
-		}
-	}
-	return NewOpenAITokenProvider(repo, cache, nil)
-}
+func (c *stubQuotaTokenCache) ReleaseRefreshLock(_ context.Context, _, _ string) error { return nil }
 
 // newQuotaRedirectingFactory 返回 PrivacyClientFactory，将请求重定向到 httptest.Server。
 func newQuotaRedirectingFactory(srv *httptest.Server) PrivacyClientFactory {
@@ -211,8 +197,10 @@ func TestResetCreditTargetedSendsStableCreditAndRedeemIDs(t *testing.T) {
 		Credentials: map[string]any{"chatgpt_account_id": "account-targeted"},
 	}
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+	account.Credentials["access_token"] = "fake-token"
+	account.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "fake-token"}}
-	tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 	var body map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/backend-api/wham/rate-limit-reset-credits/consume", r.URL.Path)
@@ -222,7 +210,7 @@ func TestResetCreditTargetedSendsStableCreditAndRedeemIDs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	result, err := svc.ResetCreditTargeted(context.Background(), account.ID, "credit-123", "redeem-456")
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
@@ -275,7 +263,7 @@ func TestResetCreditAgentIdentityUsesAssertionAndRecoversInvalidTaskOnce(t *test
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
 	invalidator := &agentIdentityWSInvalidationRecorder{}
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	svc.agentIdentityWS = invalidator
 
 	result, err := svc.ResetCredit(context.Background(), account.ID)
@@ -337,7 +325,7 @@ func TestResetCreditAgentIdentityReusesConcurrentlyRecoveredTask(t *testing.T) {
 	openAIAgentIdentityAuthAPIBaseURL = srv.URL
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	result, err := svc.ResetCredit(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.Equal(t, "ok", result.Code)
@@ -382,16 +370,17 @@ func TestPrepareUpstreamCallShadowResolve(t *testing.T) {
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{200: shadow, 100: parent}}
 
 	// stubTokenCache 为母账号 cache key 提供 fake token（走缓存命中路径，无需真实刷新）
+	parent.Credentials["access_token"] = "fake-access-token"
+	parent.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-access-token",
 	}}
-	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
-	tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// privacyClientFactory 可以是任意合法工厂；prepareUpstreamCall 在返回前不调用它
 	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, func(_ string) (*req.Client, error) {
 		return req.C(), nil
-	})
+	}, nil)
 
 	_, chatGPTAccountID, _, _, err := svc.prepareUpstreamCall(ctx, 200)
 	require.NoError(t, err, "shadow resolve should succeed; got error: %v", err)
@@ -429,7 +418,7 @@ func TestQueryUsageAgentIdentityUsesAssertionWithoutOAuthToken(t *testing.T) {
 		_, _ = w.Write([]byte(`{"plan_type":"pro","rate_limit":{"allowed":true}}`))
 	}))
 	defer srv.Close()
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(context.Background(), account.ID)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -483,7 +472,7 @@ func TestQueryUsageAgentIdentityRecoversInvalidTaskOnce(t *testing.T) {
 	t.Cleanup(func() { openAIAgentIdentityAuthAPIBaseURL = oldBase })
 
 	invalidator := &agentIdentityWSInvalidationRecorder{}
-	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, nil, newQuotaRedirectingFactory(srv), nil)
 	svc.agentIdentityWS = invalidator
 	usage, err := svc.QueryUsage(context.Background(), account.ID)
 	require.NoError(t, err)
@@ -554,10 +543,12 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 		},
 	}
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: account}}
+	account.Credentials["access_token"] = "fake-token"
+	account.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(account): "fake-token",
 	}}
-	tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	var capturedBeta string
 	var detailCalls int
@@ -579,7 +570,7 @@ func TestQueryUsageIncludesResetCreditExpirations_EndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 100)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -617,10 +608,12 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 		},
 	}
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: account}}
+	account.Credentials["access_token"] = "fake-token"
+	account.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(account): "fake-token",
 	}}
-	tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	var detailCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -640,7 +633,7 @@ func TestQueryUsageResetCreditDetails401NonFatal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 100)
 	require.NoError(t, err)
 	require.NotNil(t, usage)
@@ -715,7 +708,10 @@ func TestCachePostResetSnapshot(t *testing.T) {
 	repo := &stubQuotaAccountRepo{}
 	svc := &OpenAIQuotaService{accountRepo: repo}
 	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
+	balance := "1200.50"
 	usage := &OpenAIQuotaUsage{
+		Credits:               &OpenAICredits{HasCredits: true, Balance: &balance},
+		FetchedAt:             123,
 		RateLimitResetCredits: credits,
 		RateLimit: &OpenAIRateLimit{
 			PrimaryWindow: &OpenAIRateLimitWindow{
@@ -730,6 +726,7 @@ func TestCachePostResetSnapshot(t *testing.T) {
 	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
 	require.Equal(t, 1, repo.extraUpdateCalls)
 	require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
+	require.Equal(t, openAICreditsSnapshot{Credits: usage.Credits, FetchedAt: 123}, repo.extraUpdates[100][openaiQuotaCreditsKey])
 	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_5h_used_percent"])
 	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_7d_used_percent"])
 }
@@ -771,11 +768,12 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	}
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{200: shadow, 100: parent}}
 
+	parent.Credentials["access_token"] = "fake-token-e2e"
+	parent.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-token-e2e",
 	}}
-	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
-	tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// httptest server 记录收到的 chatgpt-account-id header，返回空 usage JSON
 	var capturedAccountID string
@@ -786,7 +784,7 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	usage, err := svc.QueryUsage(ctx, 200)
 	require.NoError(t, err)
 	require.NotNil(t, usage)

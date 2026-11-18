@@ -331,6 +331,11 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 func (s *ModelPlazaService) fillDisplayPricing(ctx context.Context, m *PlazaModel, g *Group) {
 	if groupPricing := matchGroupModelPricing(g, m.Name); groupPricing != nil {
 		m.Pricing = groupPricing
+		// Explicit model prices precede group image fallback tiers.
+		if groupPricing.BillingMode == BillingModeImage || groupPricing.BillingMode == BillingModePerRequest {
+			m.CurrentTimeMultiplier = 1
+			return
+		}
 	}
 	m.CurrentTimeMultiplier = 1
 	if s.billingService != nil && s.resolver != nil {

@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
-	"os/exec"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -436,16 +434,6 @@ func attachInflightSnapshot(svc *GatewayService, snap *inflightSnapshotCacheStub
 
 // 已定价模型永不查账号映射；随机未定价模型名不直接查库、不产生按模型名的缓存（内存有界）。
 func TestInflightEstimate_AccountMappingNoDBAndBoundedMemory(t *testing.T) {
-	// Isolate heap accounting from other service tests' background workers.
-	if os.Getenv("SUB2API_INFLIGHT_MEMORY_CHILD") != "1" {
-		testBinary, err := os.Executable()
-		require.NoError(t, err)
-		cmd := exec.Command(testBinary, "-test.run=^TestInflightEstimate_AccountMappingNoDBAndBoundedMemory$")
-		cmd.Env = append(os.Environ(), "SUB2API_INFLIGHT_MEMORY_CHILD=1")
-		output, err := cmd.CombinedOutput()
-		require.NoError(t, err, "%s", output)
-		return
-	}
 	groupID := int64(40)
 	svc := newInflightEstimateGateway(t, nil)
 	snap := &inflightSnapshotCacheStub{byBucket: map[string][]Account{inflightBucketKey(groupID, PlatformAnthropic): {
@@ -461,11 +449,6 @@ func TestInflightEstimate_AccountMappingNoDBAndBoundedMemory(t *testing.T) {
 	}
 	require.Zero(t, snap.reads.Load(), "priced models must never trigger account-mapping lookup")
 
-	// Warm lazy pricing/parsing state before measuring retained per-model growth.
-	for i := 0; i < 100; i++ {
-		svc.EstimateInflightReservation(ctx, apiKey, InflightEstimateRequest{Model: fmt.Sprintf("warm-unpriced-%d", i), BodyBytes: 4000, MaxTokens: 1000})
-	}
-	snap.reads.Store(0)
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)

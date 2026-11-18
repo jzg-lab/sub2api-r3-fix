@@ -30,7 +30,7 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Verify Go version
         run: |
-          go version | grep -q 'go1.27.3'
+          go version | grep -q 'go1.27.4'
       - name: Run govulncheck
         working-directory: backend
         run: |
@@ -58,7 +58,7 @@ jobs:
       - name: Run pnpm audit
         working-directory: frontend
         run: |
-          pnpm audit --prod --audit-level=high --json > audit.json || true
+          pnpm audit --audit-level=high --json > audit.json || true
       - name: Check audit exceptions
         run: |
           python tools/check_pnpm_audit_exceptions.py \

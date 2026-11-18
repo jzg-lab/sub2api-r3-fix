@@ -52,6 +52,7 @@ func bindPassthroughRule(c *gin.Context, platform string, keywords []string, res
 }
 
 func TestForwardAsChatCompletions_ResponseFailed_PassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()
@@ -87,6 +88,7 @@ func TestForwardAsChatCompletions_ResponseFailed_PassthroughRule(t *testing.T) {
 }
 
 func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	stream := "event: response.failed\n" +
 		`data: {"type":"response.failed","response":{"status":"failed","error":{"code":"account_disabled","message":"Your account is disabled"}}}` + "\n\n"
 	tests := []struct {
@@ -120,8 +122,7 @@ func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T)
 				Body:       io.NopCloser(strings.NewReader(stream)),
 			}
 			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
-			err := tt.run(svc, c, resp, &Account{
-				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+			err := tt.run(svc, c, resp, &Account{ID: 11, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 
 			var failoverErr *UpstreamFailoverError
 			require.ErrorAs(t, err, &failoverErr)
@@ -135,6 +136,7 @@ func TestResponsesStreamAccessStateFailoverPrecedesPassthroughRule(t *testing.T)
 }
 
 func TestResponsesStreamCyberPolicyPrecedesPassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	stream := "event: error\n" +
 		`data: {"type":"error","error":{"code":"cyber_policy","message":"blocked by cyber policy"}}` + "\n\n"
 	tests := []struct {
@@ -168,8 +170,7 @@ func TestResponsesStreamCyberPolicyPrecedesPassthroughRule(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(stream)),
 			}
 			svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
-			err := tt.run(svc, c, resp, &Account{
-				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+			err := tt.run(svc, c, resp, &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 
 			require.Error(t, err)
 			var failoverErr *UpstreamFailoverError
@@ -182,6 +183,7 @@ func TestResponsesStreamCyberPolicyPrecedesPassthroughRule(t *testing.T) {
 }
 
 func TestForwardAsAnthropic_ResponseFailed_PassthroughRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()
@@ -213,6 +215,7 @@ func TestForwardAsAnthropic_ResponseFailed_PassthroughRule(t *testing.T) {
 }
 
 func TestForwardAsChatCompletions_ResponseFailed_NoRule_Still502(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()
@@ -258,6 +261,7 @@ func bindStatusCodePassthroughRule(c *gin.Context, platform string, statusCode i
 }
 
 func TestForwardAsChatCompletions_ResponseFailed_ErrorCodeRuleMatchesViaSemanticStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()
@@ -288,6 +292,7 @@ func TestForwardAsChatCompletions_ResponseFailed_ErrorCodeRuleMatchesViaSemantic
 }
 
 func TestForwardAsAnthropic_ResponseFailed_ErrorCodeRuleMatchesViaSemanticStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()

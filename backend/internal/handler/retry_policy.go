@@ -20,5 +20,8 @@ func shouldRetrySameAccount(account *service.Account, failoverErr *service.Upstr
 	if account == nil {
 		return false
 	}
+	if account.Type == service.AccountTypeAPIKey && account.IsPoolMode() && failoverErr != nil && account.IsPoolModeRetryableStatus(failoverErr.StatusCode) {
+		return failoverErr.RetryableOnSameAccount
+	}
 	return retrySameAccountAllowed(account.Platform, failoverErr)
 }

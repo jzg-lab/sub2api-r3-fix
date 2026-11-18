@@ -68,6 +68,8 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ isSimpleMode: false }) }))
+
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError,

@@ -43,6 +43,7 @@ func (s *geminiCompatHTTPUpstreamStub) DoWithTLS(req *http.Request, proxyURL str
 }
 
 func TestGeminiForwardAsChatCompletions_OAuthRoutesToGeminiAndReturnsChatFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstreamBody := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello from gemini"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}}` + "\n\n" +
 		"data: [DONE]\n\n"
@@ -117,6 +118,7 @@ func TestGeminiForwardAsChatCompletions_OAuthRoutesToGeminiAndReturnsChatFormat(
 }
 
 func TestGeminiForwardAsChatCompletions_StreamsOpenAIChunksFromGeminiSSE(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstreamBody := `data: {"candidates":[{"content":{"parts":[{"text":"hel"}]}}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}` + "\n\n" +
 		`data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":2}}` + "\n\n" +
@@ -169,6 +171,7 @@ func TestGeminiForwardAsChatCompletions_StreamsOpenAIChunksFromGeminiSSE(t *test
 }
 
 func TestGeminiForwardAsChatCompletions_FunctionNamedWebSearchStaysClientSide(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	httpStub := &geminiCompatHTTPUpstreamStub{
 		response: &http.Response{
@@ -506,6 +509,226 @@ func TestCleanToolSchema_DropsEnumWithNonScalarValue(t *testing.T) {
 	require.NotContains(t, cleaned, "enum")
 }
 
+func TestCleanToolSchema_PreservesSchemaKeywordNamedProperties(t *testing.T) {
+	schema := map[string]any{
+		"type":     "object",
+		"examples": []any{"root example"},
+		"properties": map[string]any{
+			"const": map[string]any{
+				"type":  "string",
+				"const": "property const",
+			},
+			"enum": map[string]any{
+				"type":  "string",
+				"const": "property enum",
+			},
+			"examples": map[string]any{
+				"type": "string",
+			},
+			"type": map[string]any{
+				"type": "string",
+			},
+		},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, cleaned, "examples")
+
+	properties, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, properties, "const")
+	require.Contains(t, properties, "enum")
+	require.Contains(t, properties, "examples")
+	require.Contains(t, properties, "type")
+
+	constSchema, ok := properties["const"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"property const"}, constSchema["enum"])
+
+	enumPropertySchema, ok := properties["enum"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"property enum"}, enumPropertySchema["enum"])
+}
+
+func TestCleanToolSchema_NormalizesConstAndExamplesAtNestedSchemaNodes(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"values": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":     "string",
+					"examples": []any{"item example"},
+					"anyOf": []any{
+						map[string]any{"type": "string", "const": "a"},
+						map[string]any{"type": "string", "examples": []any{"branch example"}},
+					},
+				},
+			},
+		},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	properties, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+	values, ok := properties["values"].(map[string]any)
+	require.True(t, ok)
+	items, ok := values["items"].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, items, "examples")
+	anyOf, ok := items["anyOf"].([]any)
+	require.True(t, ok)
+	require.Len(t, anyOf, 2)
+	firstBranch, ok := anyOf[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"a"}, firstBranch["enum"])
+	secondBranch, ok := anyOf[1].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, secondBranch, "examples")
+}
+
+func TestCleanToolSchema_TraversesRetainedSchemaValuedKeywords(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"additionalItems": map[string]any{
+			"type":     "string",
+			"const":    "additional",
+			"examples": []any{"additional example"},
+		},
+		"unevaluatedItems": map[string]any{
+			"type":     "string",
+			"const":    "unevaluated item",
+			"examples": []any{"item example"},
+		},
+		"unevaluatedProperties": map[string]any{
+			"type":     "string",
+			"const":    "unevaluated property",
+			"examples": []any{"property example"},
+		},
+		"dependencies": map[string]any{
+			"schema dependency": map[string]any{
+				"type":     "string",
+				"const":    "dependency",
+				"examples": []any{"dependency example"},
+			},
+			"required dependency": []any{"first", "second"},
+		},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	expectedEnums := map[string][]any{
+		"additionalItems":       {"additional"},
+		"unevaluatedItems":      {"unevaluated item"},
+		"unevaluatedProperties": {"unevaluated property"},
+	}
+	for keyword, expectedEnum := range expectedEnums {
+		child, ok := cleaned[keyword].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, expectedEnum, child["enum"])
+		require.NotContains(t, child, "const")
+		require.NotContains(t, child, "examples")
+	}
+
+	dependencies, ok := cleaned["dependencies"].(map[string]any)
+	require.True(t, ok)
+	dependencySchema, ok := dependencies["schema dependency"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"dependency"}, dependencySchema["enum"])
+	require.NotContains(t, dependencySchema, "const")
+	require.NotContains(t, dependencySchema, "examples")
+	require.Equal(t, []any{"first", "second"}, dependencies["required dependency"])
+}
+
+func TestCleanToolSchema_IntersectsStringConstWithEnum(t *testing.T) {
+	tests := []struct {
+		name       string
+		constValue string
+		enum       []any
+		expected   []any
+	}{
+		{name: "matching", constValue: "browser", enum: []any{"browser", "shell"}, expected: []any{"browser"}},
+		{name: "contradictory", constValue: "browser", enum: []any{"shell"}, expected: []any{}},
+		{name: "numeric string collision", constValue: "7", enum: []any{float64(7)}, expected: []any{}},
+		{name: "empty string", constValue: "", enum: []any{"", "shell"}, expected: []any{""}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			schema := map[string]any{
+				"type":  "string",
+				"const": test.constValue,
+				"enum":  test.enum,
+			}
+
+			cleaned, ok := cleanToolSchema(schema).(map[string]any)
+			require.True(t, ok)
+			require.NotContains(t, cleaned, "const")
+			require.Equal(t, test.expected, cleaned["enum"])
+		})
+	}
+
+	cleaned, ok := cleanToolSchema(map[string]any{"const": "browser"}).(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "STRING", cleaned["type"])
+	require.Equal(t, []any{"browser"}, cleaned["enum"])
+}
+
+func TestCleanToolSchema_DropsNonStringConstWithoutInferringType(t *testing.T) {
+	for _, constValue := range []any{true, float64(7), map[string]any{"value": "x"}} {
+		cleaned, ok := cleanToolSchema(map[string]any{"const": constValue}).(map[string]any)
+		require.True(t, ok)
+		require.NotContains(t, cleaned, "const")
+		require.NotContains(t, cleaned, "type")
+		require.NotContains(t, cleaned, "enum")
+	}
+}
+
+func TestCleanToolSchema_DropsNonStringConstAndRetainsExistingTypeAndEnum(t *testing.T) {
+	schema := map[string]any{
+		"type":  "integer",
+		"const": float64(7),
+		"enum":  []any{float64(8)},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, cleaned, "const")
+	require.Equal(t, "INTEGER", cleaned["type"])
+	require.Equal(t, []any{"8"}, cleaned["enum"])
+}
+
+func TestCleanToolSchema_PreservesNestedOneOfCombinator(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{
+				"oneOf": []any{
+					map[string]any{"const": "a"},
+					map[string]any{"type": "string", "const": "b"},
+				},
+			},
+		},
+	}
+
+	cleaned, ok := cleanToolSchema(schema).(map[string]any)
+	require.True(t, ok)
+	properties, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok)
+	valueSchema, ok := properties["value"].(map[string]any)
+	require.True(t, ok)
+	oneOf, ok := valueSchema["oneOf"].([]any)
+	require.True(t, ok)
+	require.Len(t, oneOf, 2)
+	firstBranch, ok := oneOf[0].(map[string]any)
+	require.True(t, ok)
+	secondBranch, ok := oneOf[1].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"a"}, firstBranch["enum"])
+	require.Equal(t, []any{"b"}, secondBranch["enum"])
+}
+
 func TestConvertClaudeToolsToGeminiTools_PreservesWebSearchAlongsideFunctions(t *testing.T) {
 	tools := []any{
 		map[string]any{
@@ -536,6 +759,7 @@ func TestConvertClaudeToolsToGeminiTools_PreservesWebSearchAlongsideFunctions(t 
 }
 
 func TestGeminiHandleNativeNonStreamingResponse_DebugDisabledDoesNotEmitHeaderLogs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	logSink, restore := captureStructuredLog(t)
 	defer restore()
 
@@ -567,6 +791,7 @@ func TestGeminiHandleNativeNonStreamingResponse_DebugDisabledDoesNotEmitHeaderLo
 }
 
 func TestGeminiMessagesCompatServiceForward_PreservesRequestedModelAndMappedUpstreamModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -602,6 +827,7 @@ func TestGeminiMessagesCompatServiceForward_PreservesRequestedModelAndMappedUpst
 }
 
 func TestGeminiMessagesCompatServiceForward_NormalizesWebSearchToolForAIStudio(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -685,7 +911,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_AddsThoughtSignatureForToo
 	}
 	b, _ := json.Marshal(claudeReq)
 
-	out, err := convertClaudeMessagesToGeminiGenerateContent(b)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(b, "gemini-2.5-flash")
 	if err != nil {
 		t.Fatalf("convert failed: %v", err)
 	}
@@ -753,7 +979,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_ExtractsToolResultImages(t
 	body, err := json.Marshal(claudeReq)
 	require.NoError(t, err)
 
-	converted, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	converted, err := convertClaudeMessagesToGeminiGenerateContent(body, "gemini-2.5-flash")
 	require.NoError(t, err)
 
 	var geminiReq map[string]any
@@ -942,6 +1168,16 @@ func TestExtractGeminiUsage(t *testing.T) {
 			},
 		},
 		{
+			name:    "prompt 被拦截只报 cachedContentTokenCount — input 下限为 0",
+			input:   `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"cachedContentTokenCount":12980}}`,
+			wantNil: false,
+			wantUsage: &ClaudeUsage{
+				InputTokens:          0,
+				OutputTokens:         0,
+				CacheReadInputTokens: 12980,
+			},
+		},
+		{
 			name:    "无 usageMetadata",
 			input:   `{"candidates":[]}`,
 			wantNil: true,
@@ -1110,6 +1346,40 @@ func TestParseGeminiRateLimitResetTime(t *testing.T) {
 			wantNil:     false,
 			approxDelta: 10,
 		},
+		{
+			name:        "Vertex RetryInfo retryDelay",
+			input:       `{"error":{"code":429,"message":"Resource exhausted. Please try again later.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"39s"}]}}`,
+			wantNil:     false,
+			approxDelta: 39,
+		},
+		{
+			name:        "Vertex RetryInfo 小数秒向上取整",
+			input:       `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}`,
+			wantNil:     false,
+			approxDelta: 2,
+		},
+		{
+			name:        "Vertex RetryInfo 超过上限被截断到 15 分钟",
+			input:       `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3600s"}]}}`,
+			wantNil:     false,
+			approxDelta: 900,
+		},
+		{
+			name:    "retryDelay 存在但 @type 不是 RetryInfo 则忽略",
+			input:   `{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","retryDelay":"39s"}]}}`,
+			wantNil: true,
+		},
+		{
+			name:    "RetryInfo retryDelay 非法值忽略",
+			input:   `{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"soon"}]}}`,
+			wantNil: true,
+		},
+		{
+			name:        "quotaResetDelay 与 RetryInfo 并存时先到者优先",
+			input:       `{"error":{"code":429,"details":[{"metadata":{"quotaResetDelay":"120s"}},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"39s"}]}}`,
+			wantNil:     false,
+			approxDelta: 120,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1154,6 +1424,7 @@ func TestParseGeminiRateLimitResetTime(t *testing.T) {
 // stream contains overlapping content blocks. The chat-completions sibling
 // already enforces this via closeOpenTool().
 func TestGeminiMessagesHandleStreamingResponse_ClosesToolBlockBeforeText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstreamBody := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]}}]}` + "\n\n" +
 		`data: {"candidates":[{"content":{"parts":[{"text":"All done."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}` + "\n\n" +

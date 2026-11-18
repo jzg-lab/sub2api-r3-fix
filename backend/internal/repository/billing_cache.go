@@ -423,7 +423,6 @@ func parseUserPlatformQuotaHash(m map[string]string) *service.UserPlatformQuotaC
 		return n
 	}
 	return &service.UserPlatformQuotaCacheEntry{
-		QuotaID:            parseInt64(m["quota_id"]),
 		DailyUsageUSD:      parseFloat(m["daily_usage"]),
 		WeeklyUsageUSD:     parseFloat(m["weekly_usage"]),
 		MonthlyUsageUSD:    parseFloat(m["monthly_usage"]),
@@ -505,7 +504,7 @@ func (c *billingCache) DeleteUserPlatformQuotaCache(ctx context.Context, userID 
 // KEYS[2] = 脏集 key（dirty set）
 // ARGV[1] = cost (string float)
 // ARGV[2] = ttl seconds
-// ARGV[3] = expected schema_version (Go 侧 UserPlatformQuotaCacheSchemaV2)
+// ARGV[3] = expected schema_version (Go 侧 UserPlatformQuotaCacheSchemaV1)
 // ARGV[4] = dirty set member（空串则不 SADD）
 // ARGV[5] = 脏集兜底 TTL 秒
 const updateUserPlatformQuotaUsageScript = `
@@ -550,7 +549,7 @@ func (c *billingCache) IncrUserPlatformQuotaUsageCache(ctx context.Context, user
 		[]string{userPlatformQuotaCacheKey(userID, platform), userPlatformQuotaDirtySetKey()},
 		strconv.FormatFloat(cost, 'f', -1, 64),
 		int(ttl.Seconds()),
-		service.UserPlatformQuotaCacheSchemaV2,
+		service.UserPlatformQuotaCacheSchemaV1,
 		member,
 		userPlatformQuotaDirtyTTLSeconds,
 	).Result()

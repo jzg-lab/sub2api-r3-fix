@@ -141,6 +141,36 @@ func EffectiveResponsesTools(req *ResponsesRequest) ([]ResponsesTool, error) {
 		}
 		tools = append(tools, item.Tools...)
 	}
+
+	// A completed client tool search can introduce tools for the remainder of
+	// the turn. Promote them before lowering to ChatCompletions, using the same
+	// dedupe, conflict, namespace, and custom-tool rules as the native adapter.
+	toolsRaw, err := json.Marshal(tools)
+	if err != nil {
+		return nil, fmt.Errorf("encode responses tools for discovery promotion: %w", err)
+	}
+	var rawTools, rawInput []any
+	if err := json.Unmarshal(toolsRaw, &rawTools); err != nil {
+		return nil, fmt.Errorf("decode responses tools for discovery promotion: %w", err)
+	}
+	if err := json.Unmarshal(inputRaw, &rawInput); err != nil {
+		return nil, fmt.Errorf("parse responses input for discovery promotion: %w", err)
+	}
+	promoted, err := promotedResponsesToolSearchDiscoveries(rawTools, rawInput)
+	if err != nil {
+		return nil, err
+	}
+	if len(promoted) > 0 {
+		promotedRaw, err := json.Marshal(promoted)
+		if err != nil {
+			return nil, fmt.Errorf("encode promoted responses tools: %w", err)
+		}
+		var discovered []ResponsesTool
+		if err := json.Unmarshal(promotedRaw, &discovered); err != nil {
+			return nil, fmt.Errorf("decode promoted responses tools: %w", err)
+		}
+		tools = append(tools, discovered...)
+	}
 	return tools, nil
 }
 
@@ -309,7 +339,63 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 	if err != nil {
 		return nil, err
 	}
-	return normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID), nil
+	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
+	return normalizeResponsesDerivedChatMessageRoles(normalized), nil
+}
+
+// normalizeResponsesDerivedChatMessageRoles rewrites the Chat Completions
+// message list produced by the Responses bridge so that strict upstreams which
+// only accept system content at the very start of the conversation accept it.
+//
+// The bridge turns the Responses `instructions` field and every role:"developer"
+// item into a system message. Codex always sends both instructions and a leading
+// developer item, and it also injects developer notices into the middle of the
+// message history (for example when the user switches models). Forwarded as-is
+// that produces two leading system messages and mid-conversation system
+// messages, which Qwen-family upstreams reject with
+// "System message must be at the beginning." (HTTP 400).
+//
+// Leading system/developer messages are therefore merged into a single leading
+// system message, while later ones keep their position but are downgraded to
+// user messages so the same text still reaches the model.
+func normalizeResponsesDerivedChatMessageRoles(messages []ChatMessage) []ChatMessage {
+	isInstructionRole := func(role string) bool {
+		return role == "system" || role == "developer"
+	}
+
+	leading := 0
+	for leading < len(messages) && isInstructionRole(messages[leading].Role) {
+		leading++
+	}
+
+	out := make([]ChatMessage, 0, len(messages))
+	switch leading {
+	case 0:
+		// No leading instructions, nothing to merge.
+	case 1:
+		// A single leading prompt is already valid; keep its content byte for
+		// byte instead of round-tripping it through the text merge below.
+		out = append(out, messages[0])
+	default:
+		merged := make([]string, 0, leading)
+		for _, m := range messages[:leading] {
+			if text := strings.TrimSpace(chatMessageContentText(m.Content)); text != "" {
+				merged = append(merged, text)
+			}
+		}
+		if len(merged) > 0 {
+			content, _ := json.Marshal(strings.Join(merged, "\n\n"))
+			out = append(out, ChatMessage{Role: "system", Content: content})
+		}
+	}
+
+	for _, m := range messages[leading:] {
+		if isInstructionRole(m.Role) {
+			m.Role = "user"
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // buildChatMessagesFromItems walks the Responses input items and appends the
@@ -456,6 +542,11 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			continue
 		case "function_call_output", "custom_tool_call_output", "tool_search_output":
 			outputRaw := bytesTrimSpace(item["output"])
+			if itemType == "tool_search_output" && (len(outputRaw) == 0 || string(outputRaw) == "null") {
+				// Newer clients return discoveries in tools[] without a separate
+				// output field. Keep that useful result in Chat tool history.
+				outputRaw = bytesTrimSpace(item["tools"])
+			}
 			callID := rawString(item["call_id"])
 			if callID == "" && invalidEmptyFunctionCallOutputs > 0 {
 				invalidEmptyFunctionCallOutputs--
@@ -487,6 +578,21 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 				Content:    content,
 			})
 			pendingReasoning = ""
+			continue
+		case "agent_message":
+			// Codex multi_agent_v2 用 agent_message 在父线程与子智能体之间传递任务和回复：
+			// input_text 是信封（消息类型、任务名、发送者），正文放在 encrypted_content 片段里
+			// （自定义 provider 下为明文）。chat 上游没有对应条目，按原顺序拼成一条 user 消息，
+			// 否则子智能体收不到任务却仍返回 200。
+			text := AgentMessageText(item["content"])
+			if text == "" {
+				pendingReasoning = ""
+				continue
+			}
+			content, _ := json.Marshal(text)
+			messages = append(messages, ChatMessage{Role: "user", Content: content})
+			pendingReasoning = ""
+			lastTurnReasoning = ""
 			continue
 		case "input_text", "text":
 			content, _ := json.Marshal(rawString(item["text"]))
@@ -545,6 +651,33 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 	}
 
 	return messages, mediaByCallID, nil
+}
+
+// AgentMessageText concatenates agent_message text and plaintext encrypted_content
+// parts in their original order without attempting to decrypt their contents.
+func AgentMessageText(raw json.RawMessage) string {
+	raw = bytesTrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		switch rawString(part["type"]) {
+		case "input_text", "text":
+			_, _ = b.WriteString(rawString(part["text"]))
+		case "encrypted_content":
+			_, _ = b.WriteString(rawString(part["encrypted_content"]))
+		}
+	}
+	return b.String()
 }
 
 // extractToolOutputMedia rewrites only recognized image nodes. Media-free
@@ -1461,9 +1594,10 @@ type ChatCompletionsToResponsesStreamState struct {
 	Reasoning strings.Builder
 
 	// Tool-call lifecycle, keyed by the upstream tool_call index.
-	ToolCalls       map[int]*ChatToolCall
-	ToolItemIDs     map[int]string
-	ToolOutputIndex map[int]int
+	ToolCalls           map[int]*ChatToolCall
+	ToolItemIDs         map[int]string
+	ToolOutputIndex     map[int]int
+	toolArgumentBuffers map[int]*strings.Builder
 
 	// CustomTools 是客户端请求中 custom/freeform 工具的名字集合（见
 	// CustomToolNames）。命中的调用按 custom_tool_call 生命周期下发，codex 才能
@@ -1623,7 +1757,7 @@ func ChatCompletionsChunkToResponsesEvents(
 				// emitted delta and the stored value stay in sync. Some upstreams
 				// (e.g. GLM/Zhipu) pack id+name+arguments into the first tool_call
 				// chunk; without this reset the first chunk's arguments would be
-				// counted twice (once from this copy, once from the += below),
+				// counted twice (once from this copy, once from the append below),
 				// producing a doubled, invalid JSON like {"a":1}{"a":1}.
 				copyCall.Function.Arguments = ""
 				state.ToolCalls[idx] = &copyCall
@@ -1640,7 +1774,7 @@ func ChatCompletionsChunkToResponsesEvents(
 			}
 			events = append(events, announceChatToolItem(state, idx, stored, false)...)
 			if toolCall.Function.Arguments != "" {
-				stored.Function.Arguments += toolCall.Function.Arguments
+				stored.Function.Arguments = appendIndexedStreamString(&state.toolArgumentBuffers, idx, stored.Function.Arguments, toolCall.Function.Arguments)
 				// 未宣告（名字未到）时仅累积，宣告时统一补发；custom 调用的
 				// arguments 是包裹 input 的 JSON 片段，无法增量还原为自由文本
 				// 输入，缓冲整份 arguments 收尾时一次性下发（见 closeChatToolItems）；

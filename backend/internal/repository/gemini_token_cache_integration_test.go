@@ -34,7 +34,7 @@ func (s *GeminiTokenCacheSuite) TestDeleteAccessToken() {
 
 	got, err = s.cache.GetAccessToken(s.ctx, cacheKey)
 	require.NoError(s.T(), err)
-	require.Empty(s.T(), got, "deleted token must be a normal cache miss")
+	require.Empty(s.T(), got)
 }
 
 func (s *GeminiTokenCacheSuite) TestDeleteAccessToken_MissingKey() {

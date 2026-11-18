@@ -10,7 +10,7 @@ import (
 )
 
 func mkProxy(id int64, mode string, backup *int64, expiresInDays *int, now time.Time) Proxy {
-	p := Proxy{ID: id, FallbackMode: mode, BackupProxyID: backup}
+	p := Proxy{ID: id, Status: StatusActive, FallbackMode: mode, BackupProxyID: backup}
 	if expiresInDays != nil {
 		t := now.AddDate(0, 0, *expiresInDays)
 		p.ExpiresAt = &t
@@ -54,6 +54,15 @@ func TestResolveFallbackTarget(t *testing.T) {
 		require.True(t, change)
 		require.Equal(t, int64(3), *target)
 	})
+	t.Run("already marked expired continues fallback", func(t *testing.T) {
+		c := mkProxy(3, FallbackModeNone, nil, di(30), now)
+		b := mkProxy(2, FallbackModeProxy, i64(3), nil, now)
+		b.Status = StatusExpired
+		a := mkProxy(1, FallbackModeProxy, i64(2), di(-1), now)
+		target, change := ResolveProxyFallbackTarget(a, map[int64]Proxy{1: a, 2: b, 3: c}, now)
+		require.True(t, change)
+		require.Equal(t, i64(3), target)
+	})
 	t.Run("cycle A->B->A keeps original", func(t *testing.T) {
 		b := mkProxy(2, FallbackModeProxy, i64(1), di(-1), now)
 		a := mkProxy(1, FallbackModeProxy, i64(2), di(-1), now)
@@ -68,6 +77,29 @@ func TestResolveFallbackTarget(t *testing.T) {
 		by := map[int64]Proxy{1: a, 2: b}
 		target, change := ResolveProxyFallbackTarget(a, by, now)
 		require.True(t, change)
+		require.Nil(t, target)
+	})
+}
+
+func TestResolveFallbackStopsAtInactiveBackup(t *testing.T) {
+	now := time.Now()
+	for _, mode := range []string{FallbackModeNone, FallbackModeProxy, FallbackModeDirect} {
+		t.Run(mode, func(t *testing.T) {
+			source := mkProxy(1, FallbackModeProxy, i64(2), di(-1), now)
+			disabled := mkProxy(2, mode, i64(3), di(30), now)
+			disabled.Status = "inactive"
+			healthy := mkProxy(3, FallbackModeNone, nil, di(30), now)
+			target, change := ResolveProxyFallbackTarget(source, map[int64]Proxy{1: source, 2: disabled, 3: healthy}, now)
+			require.False(t, change)
+			require.Nil(t, target)
+		})
+	}
+	t.Run("inactive cycle", func(t *testing.T) {
+		source := mkProxy(1, FallbackModeProxy, i64(2), di(-1), now)
+		disabled := mkProxy(2, FallbackModeProxy, i64(1), nil, now)
+		disabled.Status = "inactive"
+		target, change := ResolveProxyFallbackTarget(source, map[int64]Proxy{1: source, 2: disabled}, now)
+		require.False(t, change)
 		require.Nil(t, target)
 	})
 }

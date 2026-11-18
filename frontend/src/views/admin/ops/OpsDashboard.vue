@@ -39,14 +39,6 @@
         @exit-fullscreen="exitFullscreen"
       />
 
-      <router-link
-        v-if="opsEnabled && !(loading && !hasLoadedOnce)"
-        to="/admin/openai-downgrade"
-        class="btn btn-secondary"
-      >
-        {{ t('admin.ops.openaiDowngrade.title') }} →
-      </router-link>
-
       <!-- Row: Concurrency + Throughput -->
       <div v-if="opsEnabled && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6 lg:grid-cols-4">
         <div class="lg:col-span-1 min-h-[360px]">
@@ -92,7 +84,7 @@
         />
       </div>
 
-      <!-- Row: OpenAI Token Stats -->
+      <!-- Row: Token Stats -->
       <div v-if="opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
         <OpsOpenAITokenStatsCard
           :platform-filter="platform"

@@ -187,6 +187,8 @@ export default {
     queryFailed: '查询失败',
     queryFailedRetry: '查询失败，请稍后重试',
     noDailyUsage: '暂无按日用量数据',
+billingType: '计费方式',
+
   },
 
   // Setup Wizard

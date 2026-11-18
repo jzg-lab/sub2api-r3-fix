@@ -326,8 +326,7 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 	if s.accountRepo == nil {
 		return errors.New("scheduler account repository unavailable")
 	}
-	// The caller may hold a request-start snapshot with a locally edited
-	// field. Publish the committed account and its database revision instead.
+	// Publish the committed revision, never the caller's older request snapshot.
 	current, err := s.accountRepo.GetByID(ctx, account.ID)
 	if err != nil {
 		return err
@@ -866,9 +865,21 @@ func schedulerBucketsForGroup(groupID int64) []SchedulerBucket {
 	return schedulerCanonicalBuckets(groupID)
 }
 
-func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
-	buckets := make([]SchedulerBucket, 0, 18)
+func schedulerCanonicalBucketCount() int {
+	count := 0
 	for _, platform := range schedulerSnapshotPlatforms() {
+		count += 2
+		if platform == PlatformAnthropic || platform == PlatformGemini {
+			count++
+		}
+	}
+	return count
+}
+
+func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
+	platforms := schedulerSnapshotPlatforms()
+	buckets := make([]SchedulerBucket, 0, len(platforms)*2+2)
+	for _, platform := range platforms {
 		buckets = append(buckets,
 			SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeSingle},
 			SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeForced},
@@ -885,7 +896,7 @@ func (s *SchedulerSnapshotService) rebuildByGroupIDs(ctx context.Context, groupI
 	if len(groupIDs) == 0 {
 		return nil
 	}
-	buckets := make([]SchedulerBucket, 0, len(groupIDs)*18)
+	buckets := make([]SchedulerBucket, 0, len(groupIDs)*schedulerCanonicalBucketCount())
 	for _, platform := range schedulerSnapshotPlatforms() {
 		buckets = append(buckets, s.bucketsForPlatform(platform, groupIDs, seen)...)
 	}

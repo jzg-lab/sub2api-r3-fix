@@ -92,7 +92,7 @@ export default {
         location: 'Location',
         status: 'Status',
         accounts: 'Accounts',
-        latency: 'Probe TTFB',
+        latency: 'Latency',
         expiry: 'Validity',
         createdAt: 'Created',
         actions: 'Actions',
@@ -123,7 +123,6 @@ export default {
       batchTest: 'Test All Proxies',
       testFailed: 'Failed',
       latencyFailed: 'Connection failed',
-      latencyMeasurement: 'Time until the probe target returns response headers, including connection setup; not pure IP round-trip latency.',
       batchTestEmpty: 'No proxies available for testing',
       batchTestDone: 'Batch test completed for {count} proxies',
       batchTestFailed: 'Batch test failed',
@@ -134,7 +133,6 @@ export default {
       batchDeleteSkipped: 'Skipped {skipped} proxies',
       batchDeleteFailed: 'Batch delete failed',
       deleteBlockedInUse: 'This proxy is in use and cannot be deleted',
-      historyBindingProtected: 'Current or historical OpenAI authorization records still reference this proxy. Deletion and unverified connection changes are blocked. You can deactivate or renew it in Edit; historical bindings and the original login IP are retained.',
       accountsTitle: 'Accounts using this IP',
       accountsEmpty: 'No accounts are using this proxy',
       accountsFailed: 'Failed to load accounts list',
@@ -184,7 +182,7 @@ export default {
       proxyUpdated: 'Proxy updated successfully',
       proxyDeleted: 'Proxy deleted successfully',
       proxyWorking: 'Proxy is working!',
-      proxyWorkingWithLatency: 'Proxy is working! Probe TTFB: {latency}ms',
+      proxyWorkingWithLatency: 'Proxy is working! Latency: {latency}ms',
       proxyTestFailed: 'Proxy test failed',
       qualityCheckDone: 'Quality check completed: score {score} ({grade})',
       qualityCheckFailed: 'Failed to run proxy quality check',
@@ -238,6 +236,9 @@ export default {
       fallbackProxy: 'Backup proxy',
       fallbackDirect: 'Direct connection',
       backupProxy: 'Backup proxy',
+latencyMeasurement: 'Time until the probe target returns response headers, including connection setup; not pure IP round-trip latency.',
+historyBindingProtected: 'Current or historical OpenAI authorization records still reference this proxy. Deletion and unverified connection changes are blocked. You can deactivate or renew it in Edit; historical bindings and the original login IP are retained.',
+
     },
 
     // Redeem Codes

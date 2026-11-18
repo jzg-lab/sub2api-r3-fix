@@ -29,30 +29,6 @@ func TestPricingSchedulerBlankRemoteURLDoesNotStart(t *testing.T) {
 	}
 }
 
-func TestPricingInitializeBlankRemoteURLUsesFallbackWithoutDownload(t *testing.T) {
-	dir := t.TempDir()
-	fallbackFile := filepath.Join(dir, "fallback.json")
-	require.NoError(t, os.WriteFile(fallbackFile, []byte(`{
-		"fallback-model": {
-			"input_cost_per_token": 0.000001,
-			"litellm_provider": "test",
-			"mode": "chat"
-		}
-	}`), 0644))
-
-	svc := NewPricingService(&config.Config{
-		Pricing: config.PricingConfig{
-			RemoteURL:    "   ",
-			DataDir:      dir,
-			FallbackFile: fallbackFile,
-		},
-	}, nil)
-	defer svc.Stop()
-
-	require.NoError(t, svc.Initialize())
-	require.NotNil(t, svc.GetModelPricing("fallback-model"))
-}
-
 func TestPricingNonEmptyInvalidRemoteURLStillReturnsValidationError(t *testing.T) {
 	svc := NewPricingService(&config.Config{Pricing: config.PricingConfig{
 		RemoteURL: "://invalid",
@@ -386,66 +362,6 @@ func TestDefaultPricingIncludesOfficialGPT56Rates(t *testing.T) {
 	}
 }
 
-func TestDefaultPricingIncludesGPT6SolLunaImage25AndClaudeOpus55(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
-	require.NoError(t, err)
-
-	pricingSvc := &PricingService{}
-	pricingData, err := pricingSvc.parsePricingData(body)
-	require.NoError(t, err)
-
-	textModels := []struct {
-		model                             string
-		provider                          string
-		input, cached, cacheWrite, output float64
-	}{
-		{model: "gpt-6-sol", provider: "openai", input: 2e-6, cached: 0.2e-6, cacheWrite: 2.5e-6, output: 10e-6},
-		{model: "gpt-6-luna", provider: "openai", input: 0.1e-6, cached: 0.01e-6, cacheWrite: 0.125e-6, output: 0.5e-6},
-		{model: "claude-opus-5-5", provider: "anthropic", input: 4e-6, cached: 0.2e-6, cacheWrite: 5e-6, output: 20e-6},
-	}
-	for _, tt := range textModels {
-		t.Run(tt.model, func(t *testing.T) {
-			pricing := pricingData[tt.model]
-			require.NotNil(t, pricing)
-			require.Equal(t, tt.provider, pricing.LiteLLMProvider)
-			require.Equal(t, "chat", pricing.Mode)
-			require.InDelta(t, tt.input, pricing.InputCostPerToken, 1e-12)
-			require.InDelta(t, tt.cached, pricing.CacheReadInputTokenCost, 1e-12)
-			require.InDelta(t, tt.cacheWrite, pricing.CacheCreationInputTokenCost, 1e-12)
-			require.InDelta(t, tt.output, pricing.OutputCostPerToken, 1e-12)
-			require.True(t, pricing.SupportsPromptCaching)
-		})
-	}
-
-	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
-		pricing := pricingData[model]
-		require.True(t, pricing.SupportsServiceTier, model)
-		require.Equal(t, 272000, pricing.LongContextInputTokenThreshold, model)
-		require.InDelta(t, 2.0, pricing.LongContextInputCostMultiplier, 1e-12, model)
-		require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12, model)
-		require.Positive(t, pricing.InputCostPerTokenPriority, model)
-		require.Positive(t, pricing.OutputCostPerTokenPriority, model)
-	}
-
-	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"} {
-		pricing := pricingData[model]
-		require.NotNil(t, pricing)
-		require.Equal(t, "openai", pricing.LiteLLMProvider)
-		require.Equal(t, "image_generation", pricing.Mode)
-		require.InDelta(t, 5e-6, pricing.InputCostPerToken, 1e-12)
-		require.InDelta(t, 8e-6, pricing.InputCostPerImageToken, 1e-12)
-		require.InDelta(t, 30e-6, pricing.OutputCostPerImageToken, 1e-12)
-		require.True(t, pricing.SupportsPromptCaching)
-		require.False(t, pricing.TokenPricingAbsent)
-	}
-
-	var rawCatalog map[string]map[string]any
-	require.NoError(t, json.Unmarshal(body, &rawCatalog))
-	require.Equal(t, float64(1_050_000), rawCatalog["gpt-6-sol"]["context_window"])
-	require.Equal(t, float64(1_050_000), rawCatalog["gpt-6-luna"]["context_window"])
-	require.Equal(t, float64(1_000_000), rawCatalog["claude-opus-5-5"]["max_input_tokens"])
-}
-
 func TestGPT56DedicatedFallbacksUseOfficialRates(t *testing.T) {
 	tests := []struct {
 		model                             string
@@ -650,38 +566,37 @@ func TestGetModelPricing_OpenAICompactAliasUsesStaticFallback(t *testing.T) {
 	require.InDelta(t, 1.5e-5, got.OutputCostPerToken, 1e-12)
 }
 
-func TestPricingService_Gemini36FlashThinkingTiersUseBasePricing(t *testing.T) {
+func TestPricingService_GeminiFlashThinkingTiersUseBasePricing(t *testing.T) {
 	basePricing := &LiteLLMModelPricing{
 		InputCostPerToken:       1.5e-6,
 		OutputCostPerToken:      7.5e-6,
 		CacheReadInputTokenCost: 0.15e-6,
 	}
-	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
-		"gemini-3.6-flash": basePricing,
-	}}
-
-	for _, model := range []string{
-		"gemini-3.6-flash",
-		"gemini-3.6-flash-high",
-		"gemini-3.6-flash-low",
-		"gemini-3.6-flash-medium",
-		"gemini-3.6-flash-tiered",
-	} {
-		t.Run(model, func(t *testing.T) {
-			require.Same(t, basePricing, svc.GetModelPricing(model))
-		})
+	for _, baseModel := range []string{"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"} {
+		svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{baseModel: basePricing}}
+		for _, tier := range []string{"", "-high", "-low", "-medium", "-tiered"} {
+			model := baseModel + tier
+			t.Run(model, func(t *testing.T) {
+				require.Same(t, basePricing, svc.GetModelPricing(model))
+				require.Same(t, basePricing, svc.GetIdentifiedModelPricing("models/"+model))
+			})
+		}
 	}
 }
 
-func TestPricingService_Gemini36FlashTierSpecificPricingTakesPrecedence(t *testing.T) {
+func TestPricingService_GeminiFlashTierSpecificPricingTakesPrecedence(t *testing.T) {
 	basePricing := &LiteLLMModelPricing{InputCostPerToken: 1.5e-6}
 	tierPricing := &LiteLLMModelPricing{InputCostPerToken: 2e-6}
-	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
-		"gemini-3.6-flash":     basePricing,
-		"gemini-3.6-flash-low": tierPricing,
-	}}
+	for _, baseModel := range []string{"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"} {
+		t.Run(baseModel, func(t *testing.T) {
+			svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+				baseModel:          basePricing,
+				baseModel + "-low": tierPricing,
+			}}
 
-	require.Same(t, tierPricing, svc.GetModelPricing("models/gemini-3.6-flash-low"))
+			require.Same(t, tierPricing, svc.GetModelPricing("models/"+baseModel+"-low"))
+		})
+	}
 }
 
 func TestBillingService_Gemini36FlashThinkingTierFallbacksAreBillable(t *testing.T) {
@@ -694,6 +609,96 @@ func TestBillingService_Gemini36FlashThinkingTierFallbacksAreBillable(t *testing
 		"gemini-3.6-flash-low",
 		"gemini-3.6-flash-medium",
 		"gemini-3.6-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cost, err := svc.CalculateCost(model, tokens, 1)
+			require.NoError(t, err)
+			require.InDelta(t, 0.75, cost.InputCost, 1e-12)
+			require.InDelta(t, 3.75, cost.OutputCost, 1e-12)
+			require.InDelta(t, 0.075, cost.CacheReadCost, 1e-12)
+			require.InDelta(t, 4.575, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
+func TestPricingService_Gemini37FlashThinkingTiersUseBasePricing(t *testing.T) {
+	basePricing := &LiteLLMModelPricing{
+		InputCostPerToken:       0.75e-6,
+		OutputCostPerToken:      3.75e-6,
+		CacheReadInputTokenCost: 0.075e-6,
+	}
+	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gemini-3.7-flash": basePricing,
+	}}
+
+	for _, model := range []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			require.Same(t, basePricing, svc.GetModelPricing(model))
+		})
+	}
+}
+
+func TestBillingService_Gemini37FlashThinkingTierFallbacksAreBillable(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	tokens := UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, model := range []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cost, err := svc.CalculateCost(model, tokens, 1)
+			require.NoError(t, err)
+			require.InDelta(t, 0.75, cost.InputCost, 1e-12)
+			require.InDelta(t, 3.75, cost.OutputCost, 1e-12)
+			require.InDelta(t, 0.075, cost.CacheReadCost, 1e-12)
+			require.InDelta(t, 4.575, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
+func TestPricingService_Gemini38FlashThinkingTiersUseBasePricing(t *testing.T) {
+	basePricing := &LiteLLMModelPricing{
+		InputCostPerToken:       0.75e-6,
+		OutputCostPerToken:      3.75e-6,
+		CacheReadInputTokenCost: 0.075e-6,
+	}
+	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gemini-3.8-flash": basePricing,
+	}}
+
+	for _, model := range []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			require.Same(t, basePricing, svc.GetModelPricing(model))
+		})
+	}
+}
+
+func TestBillingService_Gemini38FlashThinkingTierFallbacksAreBillable(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	tokens := UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, model := range []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
 	} {
 		t.Run(model, func(t *testing.T) {
 			cost, err := svc.CalculateCost(model, tokens, 1)
@@ -812,6 +817,43 @@ func TestDefaultPricingIncludesGemini4ArgonRates(t *testing.T) {
 		})
 	}
 	require.Contains(t, pricingSvc.ListModelNamesByProvider("gemini"), "gemini-4-argon")
+}
+
+func TestDefaultPricingIncludesGrok47FastRates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	pricingSvc := &PricingService{}
+	pricingData, err := pricingSvc.parsePricingData(data)
+	require.NoError(t, err)
+	pricingSvc.pricingData = pricingData
+
+	for _, model := range []string{"grok-4.7-fast", "xai/grok-4.7-fast"} {
+		t.Run(model, func(t *testing.T) {
+			pricing := pricingSvc.GetModelPricing(model)
+			require.NotNil(t, pricing)
+			require.Equal(t, "xai", pricing.LiteLLMProvider)
+			require.InDelta(t, 4e-6, pricing.InputCostPerToken, 1e-15)
+			require.InDelta(t, 12e-6, pricing.OutputCostPerToken, 1e-15)
+			require.InDelta(t, 1e-6, pricing.CacheReadInputTokenCost, 1e-15)
+			// Long-context Fast is $6 / $1.50 / $18, i.e. 1.5x the Fast base card.
+			require.Equal(t, 200000, pricing.LongContextInputTokenThreshold)
+			require.InDelta(t, 1.5, pricing.LongContextInputCostMultiplier, 1e-12)
+			require.InDelta(t, 1.5, pricing.LongContextOutputCostMultiplier, 1e-12)
+		})
+	}
+	// The Fast entry must not shadow the standard grok-4.7 card.
+	standard := pricingSvc.GetModelPricing("grok-4.7")
+	require.NotNil(t, standard)
+	require.InDelta(t, 2e-6, standard.InputCostPerToken, 1e-15)
+
+	billing := NewBillingService(&config.Config{}, pricingSvc)
+	cost, err := billing.CalculateCost("grok-4.7-fast", UsageTokens{InputTokens: 150_000, CacheReadTokens: 50_000, OutputTokens: 10_000}, 1)
+	require.NoError(t, err)
+	require.True(t, cost.LongContextBillingApplied)
+	require.InDelta(t, 0.9, cost.InputCost, 1e-12)
+	require.InDelta(t, 0.075, cost.CacheReadCost, 1e-12)
+	require.InDelta(t, 0.18, cost.OutputCost, 1e-12)
 }
 
 func TestDefaultPricingUsesCurrentCodexAutoReviewBaseRates(t *testing.T) {

@@ -76,13 +76,13 @@ func (s *openAITokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey 
 	if s.simulateLockRace {
 		return "", nil
 	}
-	if !s.lockAcquired {
-		return "", nil
+	if s.lockAcquired {
+		return "lease", nil
 	}
-	return "test-lease", nil
+	return "", nil
 }
 
-func (s *openAITokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, _ string) error {
+func (s *openAITokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey, lease string) error {
 	atomic.AddInt32(&s.unlockCalled, 1)
 	return s.releaseLockErr
 }
@@ -144,18 +144,18 @@ func TestOpenAITokenProvider_CacheHit(t *testing.T) {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{
-			"access_token": "db-token",
+			"access_token": "cached-token",
+			"expires_at":   time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
-	account.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 	cacheKey := OpenAITokenCacheKey(account)
-	cache.tokens[cacheKey] = account.GetCredential("access_token")
+	cache.tokens[cacheKey] = "cached-token"
 
 	provider := NewOpenAITokenProvider(nil, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, account.GetCredential("access_token"), token)
+	require.Equal(t, "cached-token", token)
 	require.Equal(t, int32(1), atomic.LoadInt32(&cache.getCalled))
 	require.Equal(t, int32(0), atomic.LoadInt32(&cache.setCalled))
 }
@@ -252,9 +252,9 @@ func (p *testOpenAITokenProvider) GetAccessToken(ctx context.Context, account *A
 	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew
 	refreshFailed := false
 	if needsRefresh && p.tokenCache != nil {
-		lease, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
-		if err == nil && lease != "" {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease) }()
+		lease, acquired, err := acquireGeminiRefreshLock(ctx, p.tokenCache, cacheKey, 30*time.Second)
+		if err == nil && acquired {
+			defer func() { _ = releaseGeminiRefreshLock(ctx, p.tokenCache, cacheKey, lease) }()
 
 			// Check cache again after acquiring lock
 			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && token != "" {
@@ -661,7 +661,7 @@ func TestOpenAITokenProvider_Real_LockFailedWait(t *testing.T) {
 		},
 	}
 
-	// Set token in cache after lock wait period (simulate other worker refreshing)
+	// An uncommitted cache write cannot prove that another worker refreshed the token.
 	cacheKey := OpenAITokenCacheKey(account)
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -670,11 +670,11 @@ func TestOpenAITokenProvider_Real_LockFailedWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	repo := &freshnessAccountRepo{account: account}
+	provider := NewOpenAITokenProvider(repo, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
-	require.NoError(t, err)
-	// Should get either the fallback token or the refreshed one
-	require.NotEmpty(t, token)
+	require.Error(t, err)
+	require.Empty(t, token)
 }
 
 func TestOpenAITokenProvider_Real_CacheHitAfterWait(t *testing.T) {
@@ -694,7 +694,7 @@ func TestOpenAITokenProvider_Real_CacheHitAfterWait(t *testing.T) {
 	}
 
 	cacheKey := OpenAITokenCacheKey(account)
-	// Set token in cache immediately after wait starts
+	// A cache-only winner is not authoritative without a matching database update.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cache.mu.Lock()
@@ -702,10 +702,11 @@ func TestOpenAITokenProvider_Real_CacheHitAfterWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	repo := &freshnessAccountRepo{account: account}
+	provider := NewOpenAITokenProvider(repo, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
-	require.NotEmpty(t, token)
+	require.Equal(t, "original-token", token)
 }
 
 func TestOpenAITokenProvider_Real_ExpiredWithoutRefreshToken(t *testing.T) {
@@ -839,13 +840,11 @@ func TestOpenAITokenProvider_Real_LockRace_PollingHitsCache(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	latest := *account
-	latest.Credentials = map[string]any{"access_token": "winner-token"}
-	latest.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
-	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
+	repo := &freshnessAccountRepo{account: account}
+	provider := NewOpenAITokenProvider(repo, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
-	require.NoError(t, err)
-	require.Equal(t, "winner-token", token)
+	require.Error(t, err)
+	require.Empty(t, token)
 }
 
 func TestOpenAITokenProvider_Real_LockRace_ContextCanceled(t *testing.T) {
@@ -899,19 +898,16 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockWaitHitAndSnapshot(t *testing.T)
 		cache.mu.Unlock()
 	}()
 
-	latest := *account
-	latest.Credentials = map[string]any{"access_token": "winner-token"}
-	latest.Credentials["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
-	provider := NewOpenAITokenProvider(&oauthCacheRecoveryRepo{account: &latest}, cache, nil)
+	provider := NewOpenAITokenProvider(nil, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
-	require.NoError(t, err)
-	require.Equal(t, "winner-token", token)
+	require.Error(t, err)
+	require.Empty(t, token)
 
 	metrics := provider.SnapshotRuntimeMetrics()
 	require.GreaterOrEqual(t, metrics.RefreshRequests, int64(1))
 	require.GreaterOrEqual(t, metrics.LockContention, int64(1))
 	require.GreaterOrEqual(t, metrics.LockWaitSamples, int64(1))
-	require.GreaterOrEqual(t, metrics.LockWaitHit, int64(1))
+	require.Zero(t, metrics.LockWaitHit, "cache-only winner without durable state is rejected")
 	require.GreaterOrEqual(t, metrics.LockWaitTotalMs, int64(0))
 	require.GreaterOrEqual(t, metrics.LastObservedUnixMs, int64(1))
 }
@@ -934,7 +930,7 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockAcquireFailure(t *testing.T) {
 
 	provider := NewOpenAITokenProvider(nil, cache, nil)
 	_, err := provider.GetAccessToken(context.Background(), account)
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	metrics := provider.SnapshotRuntimeMetrics()
 	require.GreaterOrEqual(t, metrics.LockAcquireFailure, int64(1))

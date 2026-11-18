@@ -83,9 +83,8 @@ func TestLockAndMergeAccountProbeExtraUsesCurrentDatabaseSnapshot(t *testing.T) 
 
 			mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 				WithArgs(int64(27), service.PlatformOpenAI, service.AccountTypeAPIKey, `{"api_key":"sk-test"}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
-					AddRow(tt.identityUnchanged, false, true, tt.databaseEnabled, nil, tt.databaseSnapshot, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil))
-
+				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra"}).
+					AddRow(tt.identityUnchanged, false, true, tt.databaseEnabled, nil, tt.databaseSnapshot, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 			account := &service.Account{
 				ID:          27,
 				Platform:    service.PlatformOpenAI,
@@ -106,6 +105,39 @@ func TestLockAndMergeAccountProbeExtraUsesCurrentDatabaseSnapshot(t *testing.T) 
 	}
 }
 
+func TestLockAndMergeAccountProbeExtraPreservesCurrentModelMetadata(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+
+	mock.ExpectQuery(`(?s)SELECT.*FOR NO KEY UPDATE`).
+		WithArgs(int64(27), service.PlatformGrok, service.AccountTypeOAuth, `{}`, nil).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"identity", "group", "proxy", "probe", "sync", "snapshot", "session", "auto", "usage",
+			"opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification",
+			"model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra",
+		}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil,
+			[]byte(`{"models":["grok-4"]}`), []byte(`{"models":{"grok-4":{"reasoning":true}}}`), []byte(`{"custom":"current"}`)))
+
+	account := &service.Account{
+		ID: 27, Platform: service.PlatformGrok, Type: service.AccountTypeOAuth,
+		Extra: map[string]any{
+			"custom":                              "edited",
+			"grok_observed_models":                map[string]any{"models": []any{"stale"}},
+			service.UpstreamModelMetadataExtraKey: map[string]any{"models": map[string]any{"stale": true}},
+		},
+	}
+
+	got, err := lockAndMergeAccountProbeExtra(t.Context(), client, account, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "edited", got["custom"])
+	require.Equal(t, map[string]any{"models": []any{"grok-4"}}, got["grok_observed_models"])
+	require.Equal(t, map[string]any{"models": map[string]any{"grok-4": map[string]any{"reasoning": true}}}, got[service.UpstreamModelMetadataExtraKey])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func probeBoolPtr(value bool) *bool {
 	return &value
 }
@@ -121,8 +153,8 @@ func TestLockAndMergeAccountProbeExtraPreservesCurrentRescueState(t *testing.T) 
 				WithArgs(int64(77), service.PlatformOpenAI, service.AccountTypeOAuth, "{}", nil).
 				WillReturnRows(sqlmock.NewRows([]string{
 					"identity", "group", "proxy", "probe", "sync", "snapshot", "session",
-					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra",
-				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, []byte(current)))
+					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra",
+				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, []byte(current)))
 			account := &service.Account{ID: 77, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 				Extra: map[string]any{"custom": "edited", "openai_rescue_lane": "stale", "openai_rescue_future_key": false},
 			}
@@ -202,8 +234,8 @@ func TestLockAndMergeAccountProbeExtraNeverInfersProbeFromRateSync(t *testing.T)
 
 			mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 				WithArgs(int64(31), service.PlatformOpenAI, service.AccountTypeAPIKey, `{"api_key":"sk-test"}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
-					AddRow(true, false, true, tt.databaseEnabled, tt.databaseRateSync, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil))
+				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra"}).
+					AddRow(true, false, true, tt.databaseEnabled, tt.databaseRateSync, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 
 			account := &service.Account{
 				ID:          31,
@@ -241,8 +273,8 @@ func TestLockAndMergeAccountProbeExtraProtectsOllamaManagedFields(t *testing.T) 
 
 			mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 				WithArgs(int64(29), service.PlatformAnthropic, service.AccountTypeAPIKey, `{"api_key":"key","base_url":"https://ollama.com"}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
-					AddRow(identityUnchanged, identityUnchanged, true, nil, nil, nil, []byte(`"local-ciphertext"`), []byte(`true`), []byte(`{"status":"ok"}`), false, nil, nil, nil, nil, nil, nil, nil))
+				WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra"}).
+					AddRow(identityUnchanged, identityUnchanged, true, nil, nil, nil, []byte(`"local-ciphertext"`), []byte(`true`), []byte(`{"status":"ok"}`), false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 
 			account := &service.Account{
 				ID: 29, Platform: service.PlatformAnthropic, Type: service.AccountTypeAPIKey,
@@ -403,8 +435,8 @@ func TestUpdateWithAccountBillingSettingsRollsBackWhenOutboxFails(t *testing.T) 
 	expectNonBrowserOpenAIOAuthAccountLock(mock, 27)
 	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(27), service.PlatformOpenAI, service.AccountTypeAPIKey, `{"api_key":"sk-test"}`, nil).
-		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
-			AddRow(true, false, true, []byte(`true`), []byte(`true`), []byte(`{"status":"ok"}`), nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group_unchanged", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra"}).
+			AddRow(true, false, true, []byte(`true`), []byte(`true`), []byte(`{"status":"ok"}`), nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	mock.ExpectExec(`(?s)UPDATE .*accounts.*SET.*WHERE .*id.*`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`(?s)SELECT .* FROM "accounts" WHERE "id" = \$1`).
@@ -506,7 +538,10 @@ func TestBulkUpdateRollsBackWhenOutboxFails(t *testing.T) {
 }
 
 func updatedAccountRows(id int64, extra string) *sqlmock.Rows {
-	now := time.Now()
+	return updatedAccountRowsAt(id, extra, time.Now())
+}
+
+func updatedAccountRowsAt(id int64, extra string, now time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows(dbaccount.Columns).AddRow(
 		id, now, now, nil, "test", nil, service.PlatformOpenAI, service.AccountTypeAPIKey,
 		[]byte(`{"api_key":"sk-test"}`), []byte(extra), nil, nil, 1, nil, 1, 1.0,
@@ -557,8 +592,8 @@ func TestLockAndMergeAccountProbeExtraPreservesCurrentModelLimits(t *testing.T) 
 				WithArgs(int64(77), service.PlatformOpenAI, service.AccountTypeOAuth, "{}", nil).
 				WillReturnRows(sqlmock.NewRows([]string{
 					"identity", "group", "proxy", "probe", "sync", "snapshot", "session",
-					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra",
-				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, current, nil, nil))
+					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra",
+				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, current, nil, nil, nil, nil))
 			account := &service.Account{
 				ID: 77, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 				Extra: map[string]any{"model_rate_limits": map[string]any{"stale-model": true}, "custom": "edited"},
@@ -593,8 +628,8 @@ func TestAccountUpdateDoesNotWriteRuntimeCooldowns(t *testing.T) {
 				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, `{"auth_mode":"personalAccessToken"}`, nil).
 				WillReturnRows(sqlmock.NewRows([]string{
 					"identity", "group", "proxy", "probe", "sync", "snapshot", "session",
-					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra",
-				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil))
+					"auto", "usage", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra",
+				}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 			mock.ExpectRollback()
 			stop := errors.New("stop after inspecting update mutation")
 			repo.client.Account.Use(func(next dbent.Mutator) dbent.Mutator {
@@ -623,7 +658,7 @@ func TestLockAndMergeAccountProbeExtraRetiresBrowserQualification(t *testing.T) 
 
 	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
 		WithArgs(int64(77), service.PlatformOpenAI, service.AccountTypeOAuth, `{"api_key":"sk"}`, nil).
-		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, []byte(`true`), nil, nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"identity_unchanged", "ollama_group_unchanged", "ollama_proxy_unchanged", "enabled", "rate_sync_enabled", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_group", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "grok_observed_models", "upstream_model_metadata", "extra"}).AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, []byte(`true`), nil, nil, nil, nil, nil))
 
 	// 陈旧表单：带旧 sol_fallback=true（行内已无）、不带 qualification
 	account := &service.Account{

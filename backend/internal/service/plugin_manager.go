@@ -79,8 +79,8 @@ type PluginManager struct {
 	statusDone  chan struct{}
 }
 
-func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config, hostInfo PluginHostInfo) *PluginManager {
-	return &PluginManager{
+func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config, hostInfo PluginHostInfo, kvStores ...PluginKVStore) *PluginManager {
+	manager := &PluginManager{
 		repo:               repo,
 		encryptor:          encryptor,
 		cfg:                cfg,
@@ -93,6 +93,10 @@ func NewPluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *con
 		localInstallations: make(map[int64]*PluginInstallation),
 		statusCache:        make(map[int64]*PluginStatus),
 	}
+	if len(kvStores) > 0 {
+		manager.kvStore = kvStores[0]
+	}
+	return manager
 }
 
 func (m *PluginManager) MaxUploadBytes() int64 {
@@ -1021,6 +1025,9 @@ func (m *PluginManager) probeStatus(ctx context.Context, id int64) (*PluginStatu
 
 func (m *PluginManager) cacheStatus(status *PluginStatus) {
 	m.statusMu.Lock()
+	if m.statusCache == nil {
+		m.statusCache = make(map[int64]*PluginStatus)
+	}
 	m.statusCache[status.PluginID] = status
 	m.statusMu.Unlock()
 }

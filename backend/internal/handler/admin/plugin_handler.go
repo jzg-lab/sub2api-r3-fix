@@ -183,19 +183,20 @@ func (h *PluginHandler) Test(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// Status 返回插件运行时状态快照（含 status_json：插件自定义的状态区段，
-// 救治区标签与插件 UI 状态面板的数据源）。只读观测，不触发任何插件生命周期。
+// Status returns the plugin's passive runtime status for the config UI. It is
+// read-only (no config apply, no upstream call) and therefore not step-up gated,
+// so a status UI can poll it without a 2FA prompt or a "test" side effect.
 func (h *PluginHandler) Status(c *gin.Context) {
 	id, ok := pluginIDParam(c)
 	if !ok {
 		return
 	}
-	status, err := h.manager.Status(c.Request.Context(), id)
+	result, err := h.manager.Status(c.Request.Context(), id)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, status)
+	response.Success(c, result)
 }
 
 func (h *PluginHandler) ListCaptureRecords(c *gin.Context) {

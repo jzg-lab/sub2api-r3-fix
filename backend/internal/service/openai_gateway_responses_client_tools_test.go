@@ -98,6 +98,7 @@ func TestResponsesFunctionUpstreamsLowerToolSearchDiscoveryOutput(t *testing.T) 
 }
 
 func TestClearOpenAIResponsesClientToolMappingRemovesStaleContextState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Set(openAIResponsesClientToolMappingContextKey, apicompat.ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}})
 
@@ -108,6 +109,7 @@ func TestClearOpenAIResponsesClientToolMappingRemovesStaleContextState(t *testin
 }
 
 func TestDeepSeekResponsesForwardRestoresClientToolsStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(true)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -149,6 +151,7 @@ func TestDeepSeekResponsesForwardRestoresClientToolsStreaming(t *testing.T) {
 }
 
 func TestDeepSeekAdaptiveResponsesForwardRestoresClientToolsNonStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(false)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -189,6 +192,7 @@ func TestDeepSeekAdaptiveResponsesForwardRestoresClientToolsNonStreaming(t *test
 }
 
 func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(false)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -219,6 +223,7 @@ func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
 }
 
 func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(false)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -246,6 +251,7 @@ func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {
 }
 
 func TestOpenAIPassthroughAPIKeyPreservesCustomToolOutputContentParts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-5.4","stream":false,"tools":[{"type":"custom","name":"exec"}],"input":[{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"result"},{"type":"input_file","file_id":"file_123"}]}]}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -273,6 +279,7 @@ func TestOpenAIPassthroughAPIKeyPreservesCustomToolOutputContentParts(t *testing
 }
 
 func TestOpenAIPassthroughAPIKeyRestoresClientToolsStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(true)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

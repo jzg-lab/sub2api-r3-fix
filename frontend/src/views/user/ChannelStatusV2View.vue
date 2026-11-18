@@ -215,7 +215,7 @@
           :value="formatMs(snapshot.metrics.ttft.p50_ms)"
           :detail="latencyKpiSecondary(snapshot.metrics.ttft)"
           :title="latencyDetail(snapshot.metrics.ttft)"
-          :state="snapshot.health.ttft"
+          :state="ttftCellState(snapshot.health.ttft, snapshot.metrics.ttft)"
         />
         <MetricCell
           v-if="showThroughput"
@@ -477,7 +477,7 @@ import RelayPulseMatrix from '@/features/channel-monitor-v2/RelayPulseMatrix.vue
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { isChannelMonitorThroughputHidden } from '@/utils/featureFlags'
+import { isChannelMonitorThroughputHidden, isChannelMonitorUserRankingHidden } from '@/utils/featureFlags'
 import * as api from '@/api/channelMonitorV2'
 import type {
   HealthState,
@@ -502,6 +502,7 @@ import {
   tokensPerSecondFromTpm,
   healthScoreClass,
   monitorErrorCategoryLabel,
+  ttftDisplayState,
 } from '@/features/channel-monitor-v2/monitorFormat'
 
 type Tab = 'models' | 'errors' | 'users'
@@ -516,6 +517,8 @@ const { t, te, locale } = useI18n()
 const isAdmin = computed(() => authStore.isAdmin)
 /** Admins always see RPM/TPM; users honor the hide-throughput system setting. */
 const showThroughput = computed(() => isAdmin.value || !isChannelMonitorThroughputHidden())
+/** Admins always see ranking; users honor the hide-user-ranking system setting. */
+const showUserRanking = computed(() => isAdmin.value || !isChannelMonitorUserRankingHidden())
 
 const ranges = computed(() => [
   { value: '90m' as MonitorRange, label: t('channelMonitorV2.ranges.90m') },
@@ -523,11 +526,16 @@ const ranges = computed(() => [
   { value: '7d' as MonitorRange, label: t('channelMonitorV2.ranges.7d') },
   { value: '30d' as MonitorRange, label: t('channelMonitorV2.ranges.30d') },
 ])
-const tabs = computed(() => [
-  { value: 'models' as Tab, label: t('channelMonitorV2.tabs.models') },
-  { value: 'errors' as Tab, label: t('channelMonitorV2.tabs.errors') },
-  { value: 'users' as Tab, label: t('channelMonitorV2.tabs.users') },
-])
+const tabs = computed(() => {
+  const items: Array<{ value: Tab; label: string }> = [
+    { value: 'models', label: t('channelMonitorV2.tabs.models') },
+    { value: 'errors', label: t('channelMonitorV2.tabs.errors') },
+  ]
+  if (showUserRanking.value) {
+    items.push({ value: 'users', label: t('channelMonitorV2.tabs.users') })
+  }
+  return items
+})
 const matrixGroupOptions = computed(() => [
   { value: 'platform' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platform') },
   { value: 'platform_group' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platformGroup') },
@@ -547,9 +555,7 @@ const filter = ref<MonitorFilter>({
   groupIds: csv(route.query.group).map(Number).filter(Boolean),
   models: csv(route.query.model),
 })
-const activeTab = ref<Tab>(
-  (['models', 'errors', 'users'].includes(String(route.query.tab)) ? route.query.tab : 'models') as Tab
-)
+const activeTab = ref<Tab>(parseTab(route.query.tab, showUserRanking.value))
 const matrixGroupBy = ref<MonitorMatrixGroupBy>(parseMatrixGroupBy(route.query.group_by))
 const healthMode = ref<HealthMode>(parseHealthMode(route.query.health_mode))
 const trendView = ref<TrendView>(parseTrendView(route.query.trend_view))
@@ -676,6 +682,10 @@ function parseMatrixGroupBy(value: unknown): MonitorMatrixGroupBy {
     ? (value as MonitorMatrixGroupBy)
     : 'platform_group'
 }
+function parseTab(value: unknown, allowUsers: boolean): Tab {
+  const allowed: Tab[] = allowUsers ? ['models', 'errors', 'users'] : ['models', 'errors']
+  return allowed.includes(value as Tab) ? (value as Tab) : 'models'
+}
 function parseHealthMode(value: unknown): HealthMode {
   const allowed: HealthMode[] = ['overall', 'success', 'ttft', 'cache']
   return allowed.includes(value as HealthMode) ? (value as HealthMode) : 'overall'
@@ -779,8 +789,10 @@ async function loadTab(signal?: AbortSignal, id = sequence) {
       modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal)).items || []
     } else if (activeTab.value === 'errors') {
       errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal)).items || []
-    } else {
+    } else if (showUserRanking.value) {
       userRows.value = (await api.getUsers(filter.value, isAdmin.value, signal)).items || []
+    } else {
+      userRows.value = []
     }
   } catch (error) {
     const e = error as { name?: string; code?: string }
@@ -841,6 +853,9 @@ function formatPercent(value: number) {
 function formatMs(value: number | null) {
   return formatMonitorMs(value)
 }
+function ttftCellState(state: HealthState | undefined, metric: { p50_ms: number | null; sample_count?: number }) {
+  return ttftDisplayState(state, metric)
+}
 function latencyDetail(metric: {
   p50_ms: number | null
   p90_ms?: number | null
@@ -888,21 +903,6 @@ function toggleError(category: string) {
   expandedErrors.value = next
 }
 
-// Restore state for browser history and links into the existing analysis view.
-watch(() => route.query, (query) => {
-  const next: MonitorFilter = {
-    range: parseRange(query.range),
-    platforms: csv(query.platform),
-    groupIds: csv(query.group).map(Number).filter(Boolean),
-    models: csv(query.model),
-  }
-  if (JSON.stringify(next) !== JSON.stringify(filter.value)) filter.value = next
-  matrixGroupBy.value = parseMatrixGroupBy(query.group_by)
-  healthMode.value = parseHealthMode(query.health_mode)
-  trendView.value = parseTrendView(query.trend_view)
-  activeTab.value = (['models', 'errors', 'users'].includes(String(query.tab)) ? query.tab : 'models') as Tab
-})
-
 let lastRange: MonitorRange = filter.value.range
 watch(
   filter,
@@ -924,6 +924,27 @@ watch(trendView, syncQuery)
 watch(activeTab, () => {
   syncQuery()
   void loadTab()
+})
+// Restore state for browser history and links into the existing analysis view.
+watch(() => route.query, (query) => {
+  const next: MonitorFilter = {
+    range: parseRange(query.range),
+    platforms: csv(query.platform),
+    groupIds: csv(query.group).map(Number).filter(Boolean),
+    models: csv(query.model),
+  }
+  if (JSON.stringify(next) !== JSON.stringify(filter.value)) filter.value = next
+  matrixGroupBy.value = parseMatrixGroupBy(query.group_by)
+  healthMode.value = parseHealthMode(query.health_mode)
+  trendView.value = parseTrendView(query.trend_view)
+  activeTab.value = parseTab(query.tab, showUserRanking.value)
+})
+
+
+watch(showUserRanking, (allowed) => {
+  if (!allowed && activeTab.value === 'users') {
+    activeTab.value = 'models'
+  }
 })
 onMounted(() => void reload(false))
 onBeforeUnmount(() => {

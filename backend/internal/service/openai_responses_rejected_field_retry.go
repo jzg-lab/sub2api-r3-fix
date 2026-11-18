@@ -177,19 +177,19 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 			}
 			return retryBody, "max_output_tokens parameter rejection", true, nil
 		}
+		if param == "prompt_cache_options" && gjson.GetBytes(body, param).Exists() {
+			retryBody, err := sjson.DeleteBytes(body, param)
+			if err != nil {
+				return nil, "", false, fmt.Errorf("delete rejected prompt_cache_options: %w", err)
+			}
+			return retryBody, "prompt_cache_options parameter rejection", true, nil
+		}
 		if param == "truncation" && gjson.GetBytes(body, "truncation").Exists() {
 			retryBody, err := sjson.DeleteBytes(body, "truncation")
 			if err != nil {
 				return nil, "", false, fmt.Errorf("delete rejected truncation: %w", err)
 			}
 			return retryBody, "truncation parameter rejection", true, nil
-		}
-		if param == "prompt_cache_options" && gjson.GetBytes(body, "prompt_cache_options").Exists() {
-			retryBody, err := sjson.DeleteBytes(body, "prompt_cache_options")
-			if err != nil {
-				return nil, "", false, fmt.Errorf("delete rejected prompt_cache_options: %w", err)
-			}
-			return retryBody, "prompt_cache_options parameter rejection", true, nil
 		}
 	}
 

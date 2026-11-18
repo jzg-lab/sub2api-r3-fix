@@ -50,33 +50,6 @@ var persistentUpstreamTransportErrorMarkers = []string{
 	"no such host", // DNS resolution failure (bad/expired proxy hostname)
 }
 
-// isOpenAIProxyChainTransportError identifies an HTTP proxy CONNECT failure
-// where the local proxy chain returned an HTTP gateway status before the
-// upstream request was established. net/http exposes this as an error rather
-// than an *http.Response, so the response-header marker handled by the normal
-// HTTP path is unavailable here.
-func isOpenAIProxyChainTransportError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var connectErr *proxyutil.ConnectError
-	if errors.As(err, &connectErr) {
-		switch connectErr.StatusCode {
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
-		default:
-			return false
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	if !strings.Contains(msg, "proxyconnect") && !strings.Contains(msg, "proxy connect failed:") {
-		return false
-	}
-	return strings.Contains(msg, "502 bad gateway") ||
-		strings.Contains(msg, "503 service unavailable") ||
-		strings.Contains(msg, "504 gateway timeout")
-}
-
 // classifyUpstreamTransportError decides whether a transport-level upstream error
 // is durable (Persistent — evict the account + alert) or a transient blip
 // (fail over to a healthy account but keep this one schedulable).
@@ -122,6 +95,28 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 	return upstreamTransportErrorClass{}
 }
 
+func isOpenAIProxyChainTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var connectErr *proxyutil.ConnectError
+	if errors.As(err, &connectErr) {
+		switch connectErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "proxyconnect") && !strings.Contains(msg, "proxy connect failed:") {
+		return false
+	}
+	return strings.Contains(msg, "502 bad gateway") ||
+		strings.Contains(msg, "503 service unavailable") ||
+		strings.Contains(msg, "504 gateway timeout")
+}
+
 // isClientCanceledTransportError reports whether a transport-level failure was
 // caused by the client disconnecting: the request context itself is canceled
 // and the round-trip aborted with context.Canceled. Such a failure says nothing
@@ -137,8 +132,9 @@ func isClientCanceledTransportError(ctx context.Context, err error) bool {
 //  2. for durable faults (expired/rejected proxy creds, dead proxy, DNS/routing)
 //     temporarily unschedules the account (DB + in-memory) and logs a stable
 //     warn event that alert rules can key on;
-//  3. allows failover only when safe; canceled requests, shared plugin outages
-//     and plugin requests already sent upstream do not cycle accounts.
+//  3. returns an error that is *UpstreamFailoverError (so the handler fails over
+//     to a healthy account) for all non-canceled errors, or a plain error for
+//     context.Canceled (client gone — no failover, no eviction).
 //
 // It deliberately does NOT write to the response: the handler owns the response
 // (failover, or a protocol-correct error once failover is exhausted).
@@ -234,11 +230,15 @@ func (s *OpenAIGatewayService) tempUnscheduleOpenAITransportError(ctx context.Co
 	if s == nil || account == nil {
 		return
 	}
+	if s.cfg != nil && s.cfg.Gateway.DisableOpenAITransportErrorCooldown {
+		return
+	}
 	until := time.Now().Add(openAITransportErrorTempUnschedDuration)
 	reason := "upstream transport error (proxy/network): " + safeErr
 
-	// Immediate in-memory block (honoured by the scheduler at selection time),
-	// effective even if the DB write below fails or the account cache lags.
+	// Immediate in-memory block so this process skips the account until the
+	// persisted cooldown is visible on the scheduling Account. Selection is
+	// fail-open: empty snapshot/DB cooldown fields drop a stale local block.
 	s.BlockAccountScheduling(account, until, "transport_error")
 
 	if s.accountRepo == nil {

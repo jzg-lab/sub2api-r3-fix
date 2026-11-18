@@ -10,13 +10,11 @@ import (
 )
 
 func TestShouldFlattenOpenAIResponsesNamespaces(t *testing.T) {
-	oauth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	grokOAuth := &Account{Platform: PlatformGrok, Type: AccountTypeOAuth}
 	// 账号级兼容开关：为不认识 namespace 的兼容上游恢复旧的摊平行为。
 	flattenOAuth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{"openai_responses_flatten_namespaces": true},
@@ -66,12 +64,10 @@ func TestShouldFlattenOpenAIResponsesNamespaces(t *testing.T) {
 }
 
 func TestShouldKeepOpenAIResponsesToolCallNamespaces(t *testing.T) {
-	oauth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	setupToken := &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}
 	flattenOAuth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{"openai_responses_flatten_namespaces": true},
@@ -103,6 +99,9 @@ func TestShouldKeepOpenAIResponsesToolCallNamespaces(t *testing.T) {
 		{name: "apikey_without_namespace_tool_strips", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, want: false},
 		{name: "apikey_with_namespace_tool_keeps", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"tools":[{"type":"namespace","name":"mcp__codex_app","tools":[]}]}`), want: true},
 		{name: "apikey_with_mixed_case_namespace_tool_keeps", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"tools":[{"type":" Namespace ","name":"mcp__codex_app","tools":[]}]}`), want: true},
+		{name: "apikey_with_lite_additional_namespace_tool_keeps", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"mcp__cua_repl","tools":[{"type":"function","name":"js"}]}]}]}`), want: true},
+		{name: "apikey_with_mixed_case_lite_carrier_keeps", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"input":[{"type":" Additional_Tools ","tools":[{"type":" Namespace ","name":"mcp__cua_repl","tools":[]}]}]}`), want: true},
+		{name: "apikey_with_lite_function_only_strips", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"input":[{"type":"additional_tools","tools":[{"type":"function","name":"js","namespace":"mcp__cua_repl"}]}]}`), want: false},
 		{name: "apikey_function_tool_with_namespace_field_strips", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, body: []byte(`{"tools":[{"type":"function","name":"automation_update","namespace":"mcp__codex_app"}]}`), want: false},
 		{name: "apikey_compact_with_namespace_tool_strips", account: apiKey, transport: OpenAIUpstreamTransportHTTPSSE, compactPath: true, body: []byte(`{"tools":[{"type":"namespace","name":"mcp__codex_app","tools":[]}]}`), want: false},
 		{name: "setup_token_keeps", account: setupToken, transport: OpenAIUpstreamTransportHTTPSSE, want: true},
@@ -118,8 +117,7 @@ func TestShouldKeepOpenAIResponsesToolCallNamespaces(t *testing.T) {
 }
 
 func TestShouldStripOpenAIResponsesInputNamespaces(t *testing.T) {
-	oauth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 	setupToken := &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}
 	grokOAuth := &Account{Platform: PlatformGrok, Type: AccountTypeOAuth}

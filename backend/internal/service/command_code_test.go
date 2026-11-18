@@ -50,7 +50,7 @@ func TestCommandCodeProfileRoutesByModel(t *testing.T) {
 }
 
 func TestCommandCodeNativeAnthropicTargetURL(t *testing.T) {
-	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+	svc := &OpenAIGatewayService{}
 	targetURL, err := svc.nativeAnthropicTargetURL(commandCodeTestAccount(2))
 	require.NoError(t, err)
 	require.Equal(t, "https://api.commandcode.ai/provider/v1/messages", targetURL)

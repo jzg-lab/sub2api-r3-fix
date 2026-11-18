@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -23,8 +24,7 @@ func TestIsOpenAIOAuthLike(t *testing.T) {
 		want    bool
 		codex   bool
 	}{
-		{name: "openai_oauth", account: &Account{
-			ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}, want: true, codex: true},
+		{name: "openai_oauth", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, want: true, codex: true},
 		{name: "openai_setup_token", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}, want: true, codex: true},
 		{name: "openai_api_key", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, want: false, codex: false},
 		{name: "anthropic_setup_token", account: &Account{Platform: PlatformAnthropic, Type: AccountTypeSetupToken}, want: false, codex: false},
@@ -69,6 +69,7 @@ func TestOpenAIGatewayServiceGetAccessTokenSetupToken(t *testing.T) {
 }
 
 func TestOpenAISetupTokenImagesUsesOAuthDirectPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 
@@ -104,6 +105,7 @@ func TestOpenAISetupTokenImagesUsesOAuthDirectPath(t *testing.T) {
 }
 
 func TestOpenAISetupTokenWSCompatibility(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
 	c.Request.Header.Set("session_id", "session-one")
@@ -143,6 +145,7 @@ func TestOpenAISetupTokenWSCompatibility(t *testing.T) {
 }
 
 func TestOpenAISetupTokenChatCompletionsUsesCodexTransform(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"setup instructions"},{"role":"user","content":"hello"}],"stream":false}`)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -173,6 +176,7 @@ func TestOpenAISetupTokenChatCompletionsUsesCodexTransform(t *testing.T) {
 }
 
 func TestOpenAISetupTokenMessagesUsesCodexBridgeAndTurnState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	firstResp := openAICompatSSECompletedResponse("resp_setup_first", "gpt-5.4")
 	firstResp.Header.Set("x-codex-turn-state", "turn_state_setup")
@@ -209,7 +213,7 @@ func TestOpenAISetupTokenMessagesUsesCodexBridgeAndTurnState(t *testing.T) {
 	require.Equal(t, chatgptCodexURL, upstream.requests[0].URL.String())
 	require.Equal(t, "Bearer setup-token-value", upstream.requests[0].Header.Get("Authorization"))
 	require.Equal(t, "chatgpt-setup", upstream.requests[0].Header.Get("chatgpt-account-id"))
-	requireOpenAIMessagesCodexIdentity(t, upstream.requests[0], codexCLIUserAgent, "codex-tui")
+	requireOpenAIMessagesCodexIdentity(t, upstream.requests[0], codexCLIUserAgent, openai.CodexCLIOriginator)
 	require.Empty(t, upstream.requests[0].Header.Get("x-codex-turn-state"))
 
 	secondBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"next"}],"stream":false}`)
@@ -226,7 +230,7 @@ func TestOpenAISetupTokenMessagesUsesCodexBridgeAndTurnState(t *testing.T) {
 	require.Equal(t, "turn_state_setup", upstream.requests[1].Header.Get("x-codex-turn-state"))
 	require.Equal(t, generateSessionUUID(isolateOpenAIUpstreamSessionID(0, account, "stable-cache-key")), upstream.requests[1].Header.Get("session_id"))
 	require.Empty(t, upstream.requests[1].Header.Get("conversation_id"))
-	requireOpenAIMessagesCodexIdentity(t, upstream.requests[1], codexCLIUserAgent, "codex-tui")
+	requireOpenAIMessagesCodexIdentity(t, upstream.requests[1], codexCLIUserAgent, openai.CodexCLIOriginator)
 }
 
 func openAISetupTokenCompatAccount(id int64) *Account {

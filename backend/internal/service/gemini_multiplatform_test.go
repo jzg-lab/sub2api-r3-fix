@@ -63,6 +63,21 @@ func (m *mockAccountRepoForGemini) ListSchedulableByGroupIDAndPlatform(ctx conte
 
 // Stub methods to implement AccountRepository interface
 func (m *mockAccountRepoForGemini) Create(ctx context.Context, account *Account) error { return nil }
+func (m *mockAccountRepoForGemini) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.Create(ctx, account); err != nil {
+		return err
+	}
+	account.AccountGroups = append([]AccountGroup(nil), groups...)
+	account.GroupIDs = make([]int64, len(groups))
+	for i := range groups {
+		account.AccountGroups[i].AccountID = account.ID
+		account.GroupIDs[i] = groups[i].GroupID
+	}
+	return nil
+}
 func (m *mockAccountRepoForGemini) GetByCRSAccountID(ctx context.Context, crsAccountID string) (*Account, error) {
 	return nil, nil
 }

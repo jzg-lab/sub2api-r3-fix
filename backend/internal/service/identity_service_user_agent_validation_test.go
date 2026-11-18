@@ -104,10 +104,10 @@ func TestGetOrCreateFingerprintRejectsMalformedUserAgentOnCreate(t *testing.T) {
 
 // 升级路径：哨兵版本号不得覆盖已缓存的真实指纹。
 // isNewerVersion 是纯数值比较，999.0.0 恒大于任何真实版本，一旦写入永远无法夺回。
-// 缓存值取高于版本下限的 2.9.0，确保零写断言不被 floor 抬升混入。
 func TestGetOrCreateFingerprintRejectsSentinelVersionOnUpgrade(t *testing.T) {
+	// 缓存版本取 CLICurrentVersion（>= 下限），使本用例只验证哨兵拒绝，不与版本下限抬升耦合。
 	cached := &Fingerprint{
-		UserAgent: "claude-cli/2.9.0 (external, cli)",
+		UserAgent: "claude-cli/" + claude.CLICurrentVersion + " (external, cli)",
 		ClientID:  "cid-1",
 		UpdatedAt: time.Now().Unix(),
 	}
@@ -120,13 +120,12 @@ func TestGetOrCreateFingerprintRejectsSentinelVersionOnUpgrade(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	require.Equal(t, "claude-cli/2.9.0 (external, cli)", fp.UserAgent,
+	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent,
 		"真实指纹不得被哨兵版本覆盖")
 	require.Zero(t, cache.setCalls, "被拒的 UA 不应触发任何写入")
 }
 
 // 合法的真实版本升级必须照常生效，校验不能把正常升级一起挡掉。
-// 新版本取高于下限的 2.9.0，升级结果即客户端值本身（floor 不再二次改写）。
 func TestGetOrCreateFingerprintStillUpgradesOnValidNewerVersion(t *testing.T) {
 	cache := &stubIdentityCache{fingerprint: &Fingerprint{
 		UserAgent: "claude-cli/2.1.22 (external, cli)",
@@ -135,6 +134,8 @@ func TestGetOrCreateFingerprintStillUpgradesOnValidNewerVersion(t *testing.T) {
 	}}
 	svc := NewIdentityService(cache)
 
+	// 客户端版本取高于 CLICurrentVersion 的合法值，使本用例只验证常规升级，
+	// 不与版本下限抬升耦合（低于下限的客户端升级由 version_floor 测试覆盖）。
 	newUA := "claude-cli/2.9.0 (external, cli)"
 	fp, err := svc.GetOrCreateFingerprint(context.Background(), 1, headersWithUA(newUA))
 
@@ -160,7 +161,7 @@ func TestGetOrCreateFingerprintAcceptsValidUserAgentOnCreate(t *testing.T) {
 // 不变式：默认指纹自身必须能通过校验，否则自愈路径会在每次读取时反复重写。
 func TestDefaultFingerprintUserAgentIsAcceptable(t *testing.T) {
 	require.True(t, isAcceptableFingerprintUserAgent(defaultFingerprint().UserAgent),
-		"defaultFingerprint.UserAgent 必须自洽，否则自愈会陷入反复重写")
+		"defaultFingerprint().UserAgent 必须自洽，否则自愈会陷入反复重写")
 }
 
 // 存量自愈：本次加固之前写入的畸形指纹在读取时被纠正。
@@ -174,13 +175,14 @@ func TestGetOrCreateFingerprintHealsPoisonedCacheUsingValidClientUA(t *testing.T
 	}}
 	svc := NewIdentityService(cache)
 
-	// 客户端取高于版本下限的真实版本，自愈夺回的值即客户端值本身（floor 不再二次改写）。
-	realUA := "claude-cli/2.9.0 (external, cli)"
+	realUA := "claude-cli/2.1.22 (external, cli)"
 	fp, err := svc.GetOrCreateFingerprint(context.Background(), 1, headersWithUA(realUA))
 
 	require.NoError(t, err)
-	require.Equal(t, realUA, fp.UserAgent,
-		"真实客户端必须能从被毒化的指纹手中夺回账号身份")
+	// 真实客户端从被毒化的指纹手中夺回账号身份，但版本下限在自愈的同一读取内生效：
+	// 合法而过旧的 UA 不能先以过旧版本落库、等下次读取才被抬升。
+	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent)
+	require.Equal(t, fp.UserAgent, cache.lastSet.UserAgent, "自愈与下限抬升应合并为同一次落库")
 	require.Equal(t, 1, cache.setCalls)
 	require.NotContains(t, cache.lastSet.UserAgent, "999.0.0")
 	require.Equal(t, "cid-1", fp.ClientID, "自愈不应重置 ClientID")
@@ -205,7 +207,8 @@ func TestGetOrCreateFingerprintHealsPoisonedCacheWithoutValidClientUA(t *testing
 	require.Equal(t, 1, cache.setCalls)
 }
 
-// 自愈只针对畸形缓存：合法缓存（版本不低于下限）+ 非更新版本的合法 UA 不得触发额外写入。
+// 自愈只针对畸形缓存：合法缓存 + 非更新版本的合法 UA 不得触发额外写入。
+// 缓存版本取 CLICurrentVersion（>= 下限），低于下限的缓存抬升由 version_floor 测试覆盖。
 func TestGetOrCreateFingerprintDoesNotRewriteHealthyCache(t *testing.T) {
 	cache := &stubIdentityCache{fingerprint: &Fingerprint{
 		UserAgent: "claude-cli/" + claude.CLICurrentVersion + " (external, cli)",
@@ -222,106 +225,6 @@ func TestGetOrCreateFingerprintDoesNotRewriteHealthyCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent)
 	require.Zero(t, cache.setCalls)
-}
-
-// floorClaudeCLIUserAgentVersion 单元测试：版本下限抬升的各种形态（上游 v0.2.6 移植，
-// 基线随常量走）。
-func TestFloorClaudeCLIUserAgentVersion(t *testing.T) {
-	floorUA := "claude-cli/" + claude.CLICurrentVersion
-	cases := []struct {
-		name        string
-		ua          string
-		want        string
-		wantChanged bool
-	}{
-		// 线上故障形态：历史版本低于 CLICurrentVersion，就地抬到下限。
-		{"old_version_upgraded", "claude-cli/2.1.220 (external, cli)", floorUA + " (external, cli)", true},
-		// 只替换版本号段，括号内的真实客户端形态原样保留。
-		{"old_version_with_desktop_3p_suffix",
-			"claude-cli/2.1.100 (external, claude-desktop-3p, agent-sdk/0.3.100)",
-			floorUA + " (external, claude-desktop-3p, agent-sdk/0.3.100)", true},
-		// 等于下限：不得改动。
-		{"equal_to_floor", floorUA + " (external, cli)", floorUA + " (external, cli)", false},
-		// 高于下限：只升不降，不得把客户端上报的更新版本压回去。
-		{"newer_than_floor_not_downgraded", "claude-cli/2.9.0 (external, cli)", "claude-cli/2.9.0 (external, cli)", false},
-		// 非 claude-cli 产品：一律不动。
-		{"other_product_untouched", "opencode/1.2.3 (external, cli)", "opencode/1.2.3 (external, cli)", false},
-		// 空串 / 畸形：一律不动。
-		{"empty", "", "", false},
-		{"no_version", "claude-cli (external, cli)", "claude-cli (external, cli)", false},
-		{"unparseable_version", "claude-cli/abc (external, cli)", "claude-cli/abc (external, cli)", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, changed := floorClaudeCLIUserAgentVersion(tc.ua)
-			require.Equal(t, tc.want, got)
-			require.Equal(t, tc.wantChanged, changed)
-		})
-	}
-}
-
-// GetOrCreateFingerprint 集成行为，直接对应上游线上故障：缓存指纹停留在历史版本
-// （生产 Redis 中账号 147 的实际值 2.1.220），客户端送来更旧的 2.1.75。
-// 修复前：isNewerVersion 不触发、UA 形态合法不触发自愈，旧指纹被原样返回并
-// 近乎永不过期——上游按指纹 UA 做客户端版本闸门（Fable 5.1 要求 >= 2.1.251），
-// 仅升 CLICurrentVersion 对存量账号完全无效。
-func TestGetOrCreateFingerprintFloorsStaleCachedUserAgent(t *testing.T) {
-	cache := &stubIdentityCache{fingerprint: &Fingerprint{
-		UserAgent:               "claude-cli/2.1.220 (external, cli)",
-		ClientID:                "cid-1",
-		StainlessPackageVersion: "0.91.1",
-		UpdatedAt:               time.Now().Unix(),
-	}}
-	svc := NewIdentityService(cache)
-
-	fp, err := svc.GetOrCreateFingerprint(
-		context.Background(), 147,
-		headersWithUA("claude-cli/2.1.75 (external, cli)"),
-	)
-
-	require.NoError(t, err)
-	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent)
-	require.Equal(t, 1, cache.setCalls, "下限抬升必须持久化写回缓存")
-	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", cache.lastSet.UserAgent)
-	// X-Stainless-* 维持既有 merge 语义：客户端未携带时保留缓存中的真实值，不被下限逻辑覆盖。
-	require.Equal(t, "0.91.1", fp.StainlessPackageVersion)
-	// 下限抬升不重置账号身份。
-	require.Equal(t, "cid-1", fp.ClientID)
-}
-
-// 缓存版本高于下限：不得被降级，也不得触发多余写入。
-func TestGetOrCreateFingerprintDoesNotTouchCacheAboveFloor(t *testing.T) {
-	ua := "claude-cli/2.9.0 (external, cli)"
-	cache := &stubIdentityCache{fingerprint: &Fingerprint{
-		UserAgent: ua,
-		ClientID:  "cid-1",
-		UpdatedAt: time.Now().Unix(),
-	}}
-	svc := NewIdentityService(cache)
-
-	fp, err := svc.GetOrCreateFingerprint(
-		context.Background(), 1,
-		headersWithUA("claude-cli/2.1.75 (external, cli)"),
-	)
-
-	require.NoError(t, err)
-	require.Equal(t, ua, fp.UserAgent)
-	require.Zero(t, cache.setCalls)
-}
-
-// 首次创建路径同样过下限：合法但过旧的客户端 UA 不得原样落库成长期身份。
-func TestCreateFingerprintFloorsAcceptableButOldUserAgent(t *testing.T) {
-	cache := &stubIdentityCache{}
-	svc := NewIdentityService(cache)
-
-	fp, err := svc.GetOrCreateFingerprint(
-		context.Background(), 1,
-		headersWithUA("claude-cli/2.1.75 (external, cli)"),
-	)
-
-	require.NoError(t, err)
-	require.Equal(t, "claude-cli/"+claude.CLICurrentVersion+" (external, cli)", fp.UserAgent)
 }
 
 // 无 UA 时的既有行为（回退默认指纹）保持不变。

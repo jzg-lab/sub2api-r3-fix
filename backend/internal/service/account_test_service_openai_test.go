@@ -43,6 +43,10 @@ func (u *queuedHTTPUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ i
 	return resp, nil
 }
 
+func (u *queuedHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.DoWithTLS(req, proxyURL, 0, concurrency, profile)
+}
+
 func newJSONResponse(status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
@@ -54,6 +58,7 @@ func newJSONResponse(status int, body string) *http.Response {
 // --- test functions ---
 
 func newTestContext() (*gin.Context, *httptest.ResponseRecorder) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/1/test", nil)
@@ -100,15 +105,8 @@ func (r *openAIAccountTestRepo) SetError(_ context.Context, id int64, errorMsg s
 	return nil
 }
 
-func (r *openAIAccountTestRepo) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
-	if !matchesAuthFailureTestAccount(r.accountsByID[before.ID], before) || change.ErrorMessage == nil {
-		return false, nil
-	}
-	err := r.SetError(ctx, before.ID, *change.ErrorMessage)
-	return err == nil, err
-}
-
 func TestAccountTestService_OpenAISuccessPersistsSnapshotFromHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -126,7 +124,6 @@ func TestAccountTestService_OpenAISuccessPersistsSnapshotFromHeaders(t *testing.
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          89,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -145,6 +142,7 @@ func TestAccountTestService_OpenAISuccessPersistsSnapshotFromHeaders(t *testing.
 }
 
 func TestAccountTestService_OpenAIOAuthTestNormalizesGPT56Alias(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -155,7 +153,6 @@ func TestAccountTestService_OpenAIOAuthTestNormalizesGPT56Alias(t *testing.T) {
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          90,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -173,6 +170,7 @@ func TestAccountTestService_OpenAIOAuthTestNormalizesGPT56Alias(t *testing.T) {
 }
 
 func TestAccountTestService_OpenAIShadowUsesParentCredentialsAndShadowModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -182,7 +180,6 @@ func TestAccountTestService_OpenAIShadowUsesParentCredentialsAndShadowModel(t *t
 
 	parentID := int64(100)
 	parent := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       parentID,
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
@@ -193,7 +190,6 @@ func TestAccountTestService_OpenAIShadowUsesParentCredentialsAndShadowModel(t *t
 		},
 	}
 	shadow := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:              200,
 		Platform:        PlatformOpenAI,
 		Type:            AccountTypeOAuth,
@@ -232,6 +228,7 @@ func TestAccountTestService_OpenAIShadowUsesParentCredentialsAndShadowModel(t *t
 }
 
 func TestAccountTestService_OpenAIStreamEOFBeforeCompletedFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -242,7 +239,6 @@ func TestAccountTestService_OpenAIStreamEOFBeforeCompletedFails(t *testing.T) {
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          90,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -257,6 +253,7 @@ func TestAccountTestService_OpenAIStreamEOFBeforeCompletedFails(t *testing.T) {
 }
 
 func TestAccountTestService_DeepSeekCustomBaseURLUsesV1ResponsesPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -290,6 +287,7 @@ func TestAccountTestService_DeepSeekCustomBaseURLUsesV1ResponsesPath(t *testing.
 }
 
 func TestAccountTestService_DeepSeekResponsesRoutesToOpenAIProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -329,6 +327,7 @@ func TestAccountTestService_DeepSeekResponsesRoutesToOpenAIProbe(t *testing.T) {
 }
 
 func TestAccountTestService_DeepSeekDefaultBaseURLUsesNativeResponsesPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -361,6 +360,7 @@ func TestAccountTestService_DeepSeekDefaultBaseURLUsesNativeResponsesPath(t *tes
 }
 
 func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusTooManyRequests, `{"error":{"type":"usage_limit_reached","message":"limit reached","resets_at":1777283883}}`)
@@ -375,7 +375,6 @@ func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testin
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          88,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -397,6 +396,7 @@ func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testin
 }
 
 func TestAccountTestService_OpenAI429BodyOnlyPersistsRateLimitAndClearsStaleError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusTooManyRequests, `{"error":{"type":"usage_limit_reached","message":"limit reached","resets_at":"1777283883"}}`)
@@ -405,7 +405,6 @@ func TestAccountTestService_OpenAI429BodyOnlyPersistsRateLimitAndClearsStaleErro
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:           77,
 		Platform:     PlatformOpenAI,
 		Type:         AccountTypeOAuth,
@@ -427,6 +426,7 @@ func TestAccountTestService_OpenAI429BodyOnlyPersistsRateLimitAndClearsStaleErro
 }
 
 func TestAccountTestService_OpenAI429SyncsObservedPlanType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusTooManyRequests, `{"error":{"type":"usage_limit_reached","message":"limit reached","plan_type":"free","resets_at":1777283883}}`)
@@ -435,7 +435,6 @@ func TestAccountTestService_OpenAI429SyncsObservedPlanType(t *testing.T) {
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          81,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -454,6 +453,7 @@ func TestAccountTestService_OpenAI429SyncsObservedPlanType(t *testing.T) {
 }
 
 func TestAccountTestService_OpenAI429ActiveAccountDoesNotClearError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusTooManyRequests, `{"error":{"type":"usage_limit_reached","message":"limit reached","resets_in_seconds":3600}}`)
@@ -462,7 +462,6 @@ func TestAccountTestService_OpenAI429ActiveAccountDoesNotClearError(t *testing.T
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          78,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -481,6 +480,7 @@ func TestAccountTestService_OpenAI429ActiveAccountDoesNotClearError(t *testing.T
 }
 
 func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusTooManyRequests, `{"error":{"type":"usage_limit_reached","message":"limit reached"}}`)
@@ -489,7 +489,6 @@ func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:           79,
 		Platform:     PlatformOpenAI,
 		Type:         AccountTypeOAuth,
@@ -510,6 +509,7 @@ func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState
 }
 
 func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusUnauthorized, `{"error":"bad token"}`)
@@ -518,7 +518,6 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          80,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -527,7 +526,6 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 		Credentials: map[string]any{"access_token": "test-token"},
 	}
 
-	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
 	require.Error(t, err)
 	require.Equal(t, account.ID, repo.setErrorID)
@@ -538,6 +536,7 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 }
 
 func TestAccountTestService_OpenAIAPIKeyResponsesUsesCodexProbeHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
 	resp := newJSONResponse(http.StatusOK, "")
@@ -568,6 +567,7 @@ func TestAccountTestService_OpenAIAPIKeyResponsesUsesCodexProbeHeaders(t *testin
 }
 
 func TestAccountTestService_OpenAIAPIKeyResponsesUnsupportedUsesChatCompletionsPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	upstreamBody := strings.Join([]string{
@@ -618,6 +618,7 @@ func TestAccountTestService_OpenAIAPIKeyResponsesUnsupportedUsesChatCompletionsP
 }
 
 func TestAccountTestService_OpenAIChatCompletionsPathReturns4xx(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	upstream := &httpUpstreamRecorder{resp: newJSONResponse(http.StatusBadRequest, `{"error":{"message":"bad request"}}`)}
@@ -646,6 +647,7 @@ func TestAccountTestService_OpenAIChatCompletionsPathReturns4xx(t *testing.T) {
 }
 
 func TestAccountTestService_OpenAIChatCompletionsPathTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	upstream := &httpUpstreamRecorder{err: context.DeadlineExceeded}
@@ -675,6 +677,7 @@ func TestAccountTestService_OpenAIChatCompletionsPathTimeout(t *testing.T) {
 }
 
 func TestAccountTestService_OpenAIChatCompletionsPathRejectsNonJSONStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
@@ -704,8 +707,4 @@ func TestAccountTestService_OpenAIChatCompletionsPathRejectsNonJSONStream(t *tes
 	require.Contains(t, err.Error(), "Invalid Chat Completions response from /v1/chat/completions")
 	require.Contains(t, recorder.Body.String(), "/v1/chat/completions")
 	require.NotContains(t, recorder.Body.String(), `"success":true`)
-}
-
-func (u *queuedHTTPUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

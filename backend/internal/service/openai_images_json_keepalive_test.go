@@ -17,6 +17,7 @@ import (
 )
 
 func TestOpenAIImagesJSONKeepalive_PreservesValidJSONResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -40,6 +41,7 @@ func TestOpenAIImagesJSONKeepalive_PreservesValidJSONResponse(t *testing.T) {
 }
 
 func TestOpenAIImagesJSONKeepalive_DisabledIsNoop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -55,6 +57,7 @@ func TestOpenAIImagesJSONKeepalive_DisabledIsNoop(t *testing.T) {
 }
 
 func TestOpenAIImagesJSONKeepalive_FastErrorPreservesStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -74,6 +77,7 @@ func TestOpenAIImagesJSONKeepalive_FastErrorPreservesStatus(t *testing.T) {
 }
 
 func TestOpenAIImagesJSONKeepalive_LateErrorRemainsJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -97,6 +101,7 @@ func TestOpenAIImagesJSONKeepalive_LateErrorRemainsJSON(t *testing.T) {
 }
 
 func TestOpenAIImagesJSONKeepalive_DoesNotBlockFailoverDetection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -113,6 +118,7 @@ func TestOpenAIImagesJSONKeepalive_DoesNotBlockFailoverDetection(t *testing.T) {
 }
 
 func TestOpenAIImagesJSONKeepalive_KeepsOAuthNonStreamResponseValid(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
@@ -128,6 +134,7 @@ func TestOpenAIImagesJSONKeepalive_KeepsOAuthNonStreamResponseValid(t *testing.T
 	}()
 
 	stop := StartOpenAIImagesJSONKeepalive(c, 5*time.Millisecond)
+	waitForOpenAIImagesJSONKeepalive(t, c)
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -173,6 +180,7 @@ func TestOpenAIImagesJSONKeepaliveWriter_NilGuards(t *testing.T) {
 // 回归：failover 第 2+ 轮时，上一轮心跳残留的空白字节不得被误判为"已写响应"，
 // 可重试上游错误必须仍转换为 UpstreamFailoverError（而非裸错误吞掉换号）。
 func TestOpenAIImagesJSONKeepalive_HeartbeatBeforeForwardStillFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat","response_format":"b64_json"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
@@ -205,7 +213,6 @@ func TestOpenAIImagesJSONKeepalive_HeartbeatBeforeForwardStillFailsOver(t *testi
 	waitForOpenAIImagesJSONKeepalive(t, c)
 
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       22,
 		Name:     "openai-oauth-heartbeat-failover",
 		Platform: PlatformOpenAI,

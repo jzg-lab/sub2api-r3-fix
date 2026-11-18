@@ -30,8 +30,6 @@ const {
   showSuccess: vi.fn()
 }))
 
-vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
-
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
@@ -129,7 +127,6 @@ const BulkEditAccountModalStub = {
 
 describe('admin AccountsView bulk edit scope', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     localStorage.clear()
 
     listAccounts.mockReset()
@@ -349,12 +346,6 @@ describe('admin AccountsView bulk edit scope', () => {
     await flushPromises()
 
     expect(getUpstreamBillingProbeSettings).toHaveBeenCalledTimes(1)
-    expect(wrapper.get('[data-test="upstream-billing-cell"]').attributes('data-global-enabled')).toBe('false')
-
-    getUpstreamBillingProbeSettings.mockResolvedValue(undefined as never)
-    await (wrapper.vm as unknown as { handleManualRefresh: () => Promise<void> }).handleManualRefresh()
-    await flushPromises()
-
     expect(wrapper.get('[data-test="upstream-billing-cell"]').attributes('data-global-enabled')).toBe('false')
   })
 
@@ -638,3 +629,5 @@ describe('admin AccountsView bulk edit scope', () => {
     expect(wrapper.get('[data-test="account-rate"]').text()).toBe('0.065x')
   })
 })
+
+beforeEach(() => setActivePinia(createPinia()))

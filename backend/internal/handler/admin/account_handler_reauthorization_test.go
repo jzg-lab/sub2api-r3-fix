@@ -16,8 +16,10 @@ import (
 
 type reauthorizationAdminService struct {
 	service.AdminService
-	account *service.Account
-	apply   func(context.Context) (*service.Account, error)
+	account   *service.Account
+	lastInput *service.ApplyOAuthCredentialsInput
+	expected  time.Time
+	apply     func(context.Context) (*service.Account, error)
 }
 
 func (s *reauthorizationAdminService) GetAccount(context.Context, int64) (*service.Account, error) {
@@ -25,8 +27,9 @@ func (s *reauthorizationAdminService) GetAccount(context.Context, int64) (*servi
 }
 
 func (s *reauthorizationAdminService) ApplyOAuthCredentials(
-	ctx context.Context, _ int64, _ time.Time, _ *service.ApplyOAuthCredentialsInput,
+	ctx context.Context, _ int64, expected time.Time, input *service.ApplyOAuthCredentialsInput,
 ) (*service.Account, error) {
+	s.lastInput, s.expected = input, expected
 	return s.apply(ctx)
 }
 

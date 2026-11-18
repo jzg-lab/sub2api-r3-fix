@@ -1,12 +1,17 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -14,15 +19,20 @@ import (
 
 func TestCodexClientEnvironmentAcrossAccountModes(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"timezone and hostname are business text"}],"tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}],"client_metadata":{"session_id":"client-session","timezone":"Asia/Shanghai","ip":"192.0.2.8","locale":"zh-CN","hostname":"customer-host","opaque_environment":{"other":"client"},"x-codex-turn-metadata":"{\"thread_id\":\"client-thread\",\"workspaces\":[\"/customer/private\"],\"timezone\":\"Asia/Shanghai\",\"os\":\"customer-os\",\"extra\":{\"ip\":\"192.0.2.8\"}}"}}`)
-	for _, mode := range []string{"off", "device", "session", "full", "machine"} {
+	for _, mode := range []string{"off", "device", "session", "full"} {
 		t.Run(mode, func(t *testing.T) {
-			account := newTestMachineAccount(t, 70, testCodexMachineSeedB)
-			account.Extra[codexFingerprintModeExtraKey] = mode
-			raw, changed, err := applyCodexAccountIdentityClientMetadataRaw(body, account, 101)
+			account := newTestOAuthAccount(70, map[string]any{
+				codexFingerprintModeExtraKey: mode,
+				codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
+			})
+			raw, cleaned, err := sanitizeCodexClientEnvironmentRaw(body, account)
 			require.NoError(t, err)
-			require.True(t, changed)
+			require.True(t, cleaned)
+			raw, _, err = applyCodexAccountIdentityClientMetadataRaw(raw, account, 101)
+			require.NoError(t, err)
 			var decoded map[string]any
 			require.NoError(t, json.Unmarshal(body, &decoded))
+			require.True(t, sanitizeCodexClientEnvironmentMap(decoded, account))
 			require.True(t, applyCodexAccountIdentityClientMetadataMap(decoded, account, 101))
 			expected, err := json.Marshal(decoded)
 			require.NoError(t, err)
@@ -50,7 +60,7 @@ func TestCodexEnvironmentBoundaryDoesNotDependOnIdentitySeed(t *testing.T) {
 		`{"client_metadata":{"session_id":{"ip":"192.0.2.8"}}}`,
 		`{"client_metadata":{"x-codex-turn-metadata":"malformed customer-host"}}`,
 	} {
-		clean, changed, err := applyCodexAccountIdentityClientMetadataRaw([]byte(body), account, 101)
+		clean, changed, err := sanitizeCodexClientEnvironmentRaw([]byte(body), account)
 		require.NoError(t, err)
 		require.True(t, changed)
 		require.JSONEq(t, `{}`, string(clean))
@@ -104,6 +114,7 @@ func TestCodexEnvironmentHeaderFinalizer(t *testing.T) {
 		headers := http.Header{}
 		headers.Set(openAIWSTurnMetadataHeader, `{"thread_id":"scoped","timezone":"private","workspaces":["private"]}`)
 		account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+		sanitizeCodexClientEnvironmentHeaders(headers)
 		applyCodexAccountIdentityHeaders(headers, account, 101)
 		enforceCodexIdentityHeadersWithUA(headers, "")
 		require.JSONEq(t, `{"thread_id":"scoped"}`, headers.Get(openAIWSTurnMetadataHeader))
@@ -112,6 +123,7 @@ func TestCodexEnvironmentHeaderFinalizer(t *testing.T) {
 		require.Equal(t, before, headers)
 		headers[openAIWSTurnMetadataHeader] = []string{`{"ip":"private"}`}
 		headers.Add(openAIWSTurnMetadataHeader, `{"hostname":"private"}`)
+		sanitizeCodexClientEnvironmentHeaders(headers)
 		applyCodexAccountIdentityHeaders(headers, account, 101)
 		enforceCodexIdentityHeadersWithUA(headers, "")
 		require.Empty(t, headers.Get(openAIWSTurnMetadataHeader))
@@ -131,9 +143,11 @@ func TestCodexEnvironmentVersionIsServerOwned(t *testing.T) {
 			}
 			headers.Set("version", version)
 			enforceCodexIdentityHeadersWithUA(headers, "")
-			require.Equal(t, CodexCanonicalClientVersion(), headers.Get("version"))
 			if originator == "" {
 				require.Empty(t, headers.Get("originator"))
+				require.Equal(t, CodexCanonicalClientVersion(), headers.Get("version"), "an existing version is server-owned even without an originator")
+			} else {
+				require.Equal(t, CodexCanonicalClientVersion(), headers.Get("version"))
 			}
 		}
 	}
@@ -154,50 +168,44 @@ func TestCodexEnvironmentUnrelatedPayloadAndAPIKeyRemainUnchanged(t *testing.T) 
 	require.Equal(t, body, clean)
 }
 
-func TestCodexEnvironmentWebSocketAndBridgeBoundaries(t *testing.T) {
-	body := []byte(`{"type":"response.create","input":"business","client_metadata":{"session_id":"same-client-session","timezone":"private","x-codex-turn-metadata":"{\"thread_id\":\"thread\",\"workspaces\":[\"private\"]}"}}`)
-	for _, mode := range []string{"off", "machine"} {
-		account := newTestMachineAccount(t, 70, testCodexMachineSeedB)
-		account.Extra[codexFingerprintModeExtraKey] = mode
-		for _, bridge := range []bool{false, true} {
-			c := tenantFingerprintContext(101)
-			service := &OpenAIGatewayService{}
-			var clean []byte
-			var err error
-			if bridge {
-				clean, err = service.stageCodexMachineFingerprintIDsForCompatBridge(c, account, body)
-			} else {
-				service.stageCodexMachineFingerprintIDsForWSIngress(c, account)
-				clean, _, err = applyStagedCodexFingerprintClientMetadataRaw(c, account, body)
-			}
-			require.NoError(t, err)
-			require.False(t, gjson.GetBytes(clean, "client_metadata.timezone").Exists())
-			require.NotContains(t, gjson.GetBytes(clean, "client_metadata.x-codex-turn-metadata").String(), "workspaces")
-			require.Equal(t, "business", gjson.GetBytes(clean, "input").String())
-		}
-	}
-}
-
-func TestCodexEnvironmentHTTPAndCompactBoundaries(t *testing.T) {
-	for _, endpoint := range []string{"/v1/responses", "/v1/responses/compact"} {
-		for _, passthrough := range []bool{false, true} {
-			c, _, body := machineChainRequest(t, endpoint, testMachineChainRoot, testMachineChainRoot, testMachineChainRoot+":0", "")
-			service, upstream := newMachineChainService()
-			account := newMachineChainAccount(t, 6001, testCodexMachineSeedB, passthrough, "")
-			c.Request.Header.Set("X-Forwarded-For", "192.0.2.8")
-			c.Request.Header.Set("X-Timezone", "Asia/Shanghai")
-			c.Request.Header.Set("Accept-Language", "zh-CN")
-			var err error
-			body, err = sjson.SetBytes(body, "client_metadata.customer_environment", map[string]string{"hostname": "customer-private"})
-			require.NoError(t, err)
-			_, _ = service.Forward(context.Background(), c, account, body)
-			require.NotNil(t, upstream.lastReq, "must exercise actual upstream builder")
-			require.Empty(t, upstream.lastReq.Header.Get("X-Forwarded-For"))
-			require.Empty(t, upstream.lastReq.Header.Get("X-Timezone"))
-			require.Empty(t, upstream.lastReq.Header.Get("Accept-Language"))
-			require.NotContains(t, string(upstream.lastBody), "customer-private")
-			require.NotContains(t, string(upstream.lastBody), "/customer/private")
-			require.Contains(t, string(upstream.lastBody), "hi")
-		}
+func TestCodexEnvironmentCompactBoundary(t *testing.T) {
+	{
+		endpoint := "/v1/responses/compact"
+		passthrough := false
+		body := []byte(`{"model":"gpt-5.2","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"client_metadata":{"session_id":"client-session","timezone":"Asia/Shanghai","hostname":"customer-private","x-codex-turn-metadata":"{\"thread_id\":\"client-thread\",\"timezone\":\"Asia/Shanghai\",\"workspaces\":[\"/customer/private\"]}"}}`)
+		upstream := &httpUpstreamRecorder{resp: &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"captured"}}`)),
+		}}
+		service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+		account := newTestOAuthAccount(6001, map[string]any{
+			codexFingerprintModeExtraKey: "session", codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
+			"openai_passthrough": passthrough,
+		})
+		account.Name = "oauth-test"
+		account.Status = StatusActive
+		account.Schedulable = true
+		account.Concurrency = 1
+		account.RateMultiplier = f64p(1)
+		account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Header.Set("session-id", "client-session")
+		c.Request.Header.Set("X-Forwarded-For", "192.0.2.8")
+		c.Request.Header.Set("X-Timezone", "Asia/Shanghai")
+		c.Request.Header.Set("Accept-Language", "zh-CN")
+		var err error
+		body, err = sjson.SetBytes(body, "client_metadata.customer_environment", map[string]string{"hostname": "customer-private"})
+		require.NoError(t, err)
+		_, _ = service.Forward(context.Background(), c, account, body)
+		require.NotNil(t, upstream.lastReq, "must exercise actual upstream builder")
+		require.Empty(t, upstream.lastReq.Header.Get("X-Forwarded-For"))
+		require.Empty(t, upstream.lastReq.Header.Get("X-Timezone"))
+		require.Empty(t, upstream.lastReq.Header.Get("Accept-Language"), "customer environment is outside the OAuth forwarding allowlist")
+		require.NotContains(t, string(upstream.lastBody), "customer-private")
+		require.NotContains(t, string(upstream.lastBody), "/customer/private")
+		require.Contains(t, string(upstream.lastBody), "hi")
 	}
 }

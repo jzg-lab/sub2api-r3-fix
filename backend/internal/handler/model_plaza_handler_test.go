@@ -3,11 +3,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -89,6 +92,7 @@ func TestToModelPlazaGroupDTO_UserRateAndFieldWhitelist(t *testing.T) {
 	g := service.PlazaGroup{
 		ID: 2, Name: "vip", Description: "d", Platform: "anthropic",
 		SubscriptionType: "standard", RateMultiplier: 1, IsExclusive: true,
+		VideoRateIndependent: true, VideoRateMultiplier: 0.7,
 		Models: []service.PlazaModel{{
 			Name:     "claude-sonnet",
 			Platform: "anthropic",
@@ -115,11 +119,14 @@ func TestToModelPlazaGroupDTO_UserRateAndFieldWhitelist(t *testing.T) {
 		"rate_multiplier", "user_rate_multiplier", "is_exclusive", "models",
 		"peak_rate_enabled", "peak_start", "peak_end", "peak_rate_multiplier",
 		"image_rate_independent", "image_rate_multiplier", "long_context_pricing_enabled",
+		"video_rate_independent", "video_rate_multiplier",
 	} {
 		_, exists := decoded[key]
 		require.Truef(t, exists, "plaza group DTO must expose %q", key)
 	}
 	require.InDelta(t, 0.5, decoded["user_rate_multiplier"].(float64), 1e-9)
+	require.Equal(t, true, decoded["video_rate_independent"])
+	require.Equal(t, 0.7, decoded["video_rate_multiplier"])
 
 	// 模型条目:pricing + official_pricing 并存;official 缺失字段输出 null 而非省略
 	models := decoded["models"].([]any)
@@ -245,28 +252,61 @@ func TestToModelPlazaGroupDTO_TimePricing(t *testing.T) {
 	require.Equal(t, true, weekdaysTP["weekdays_only"])
 }
 
-func TestModelPlazaConditionalResponseChangesWithPriceCurrencyAndViewer(t *testing.T) {
-	payload := modelPlazaResponse{Description: "price", BalanceRechargeMultiplier: 10,
-		Groups: toLocalizedModelPlazaGroups(plazaGroups(), nil, "zh-CN")}
-	request := func(etag string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/model-plaza", nil)
-		c.Request.Header.Set("If-None-Match", etag)
-		writeModelPlazaResponse(c, payload)
-		c.Writer.WriteHeaderNow()
-		return w
+func TestFilterPlazaVisibleGroups_SubscribedExclusiveGroup(t *testing.T) {
+	groups := []service.PlazaGroup{
+		{ID: 42, IsExclusive: true, SubscriptionType: "subscription"},
+		{ID: 43, IsExclusive: true, SubscriptionType: "subscription"},
+		{ID: 44, IsExclusive: true, SubscriptionType: "standard"},
 	}
-	first := request("")
-	require.Equal(t, http.StatusOK, first.Code)
-	etag := first.Header().Get("ETag")
-	require.NotEmpty(t, etag)
-	require.Equal(t, http.StatusNotModified, request(etag).Code)
-	payload.BalanceRechargeMultiplier = 20
-	require.Equal(t, http.StatusOK, request(etag).Code)
-	payload.BalanceRechargeMultiplier = 10
-	payload.Groups[0].RateMultiplier = 0.3
-	require.Equal(t, http.StatusOK, request(etag).Code)
-	payload.Groups = toLocalizedModelPlazaGroups(plazaGroups()[:1], map[int64]float64{1: 0.2}, "zh-CN")
-	require.Equal(t, http.StatusOK, request(etag).Code)
+	require.Empty(t, filterPlazaVisibleGroups(groups, nil, false))
+	for _, restricted := range []bool{false, true} {
+		visible := filterPlazaVisibleGroups(groups, map[int64]struct{}{42: {}}, restricted)
+		require.Len(t, visible, 1)
+		require.Equal(t, int64(42), visible[0].ID)
+	}
+}
+
+type plazaVarySettingRepo struct{ service.SettingRepository }
+
+func (plazaVarySettingRepo) GetMultiple(context.Context, []string) (map[string]string, error) {
+	return map[string]string{service.SettingKeyModelPlazaEnabled: "true"}, nil
+}
+
+type plazaVaryChannelRepo struct{ service.ChannelRepository }
+
+func (plazaVaryChannelRepo) ListAll(context.Context) ([]service.Channel, error) { return nil, nil }
+
+type plazaVaryAccountRepo struct{ service.AccountRepository }
+
+func (plazaVaryAccountRepo) ListActive(context.Context) ([]service.Account, error) { return nil, nil }
+
+type plazaVaryGroupRepo struct{ service.GroupRepository }
+
+func (plazaVaryGroupRepo) ListActive(context.Context) ([]service.Group, error) { return nil, nil }
+
+func TestModelPlazaHandler_VaryKeepsCORSOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewModelPlazaHandler(
+		service.NewModelPlazaService(plazaVaryChannelRepo{}, plazaVaryGroupRepo{}, plazaVaryAccountRepo{}, nil, nil, nil),
+		nil,
+		service.NewSettingService(plazaVarySettingRepo{}, &config.Config{}),
+		service.NewPaymentConfigService(nil, plazaVarySettingRepo{}, nil),
+	)
+	r := gin.New()
+	r.Use(middleware.CORS(config.CORSConfig{AllowedOrigins: []string{"https://a.example", "https://b.example"}}))
+	r.GET("/api/v1/model-plaza", h.Get)
+
+	for _, origin := range []string{"https://a.example", "https://b.example"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/model-plaza", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Accept-Language", "en")
+		w := httptest.NewRecorder()
+
+		r.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Equal(t, origin, w.Header().Get("Access-Control-Allow-Origin"))
+		// 共享缓存需同时按来源与语言区分，否则 A 来源的响应可能被复用给 B。
+		require.Equal(t, []string{"Origin", "Authorization", "Accept-Language"}, w.Header().Values("Vary"))
+	}
 }

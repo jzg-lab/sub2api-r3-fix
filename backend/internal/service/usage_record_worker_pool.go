@@ -207,7 +207,12 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 }
 
 // Pending includes queued, running and synchronous overflow tasks.
-func (p *UsageRecordWorkerPool) Pending() int64 { return p.pending.Load() }
+func (p *UsageRecordWorkerPool) Pending() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.pending.Load()
+}
 
 // Stats 返回当前池状态与计数器。
 func (p *UsageRecordWorkerPool) Stats() UsageRecordWorkerPoolStats {

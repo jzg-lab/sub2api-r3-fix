@@ -1,3 +1,4 @@
+import { openAIPlanTypeLabel } from '@/utils/planType'
 import { describe, it, expect } from 'vitest'
 import {
   ANTIGRAVITY_PROJECT_ID_CREDENTIAL_KEY,
@@ -563,5 +564,16 @@ describe('plan_type helpers', () => {
       expect(out).toEqual({ email: 'a@b.c' })
       expect('plan_type' in out).toBe(false)
     })
+  })
+})
+
+describe('Codex subscription analytics labels', () => {
+  it.each([
+    ['business', 'Business'], ['self_serve_business_prolite', 'Business'],
+    ['enterprise_cbp_automation', 'Enterprise'], ['ent26', 'Enterprise'],
+    ['edu', 'Education'], ['edu_plus', 'Education'], ['edu_pro', 'Education'],
+    ['unknown', 'Account'], ['promax', 'Pro 500']
+  ])('groups %s without changing its status label', (sku, label) => {
+    expect(openAIPlanTypeLabel(sku, 'analytics')).toBe(label)
   })
 })

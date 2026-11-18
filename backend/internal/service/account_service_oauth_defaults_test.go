@@ -59,6 +59,8 @@ func TestAccountServiceCreatePreservesAuthorizationRoute(t *testing.T) {
 					wantProxy := templateProxy
 					if mode == "browser" {
 						wantProxy = assigned
+					} else if assigned != 0 {
+						wantProxy = assigned
 					}
 					if wantProxy == 0 {
 						require.Nil(t, repo.account.ProxyID)

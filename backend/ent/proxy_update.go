@@ -262,24 +262,24 @@ func (_u *ProxyUpdate) AddAccounts(v ...*Account) *ProxyUpdate {
 	return _u.AddAccountIDs(ids...)
 }
 
-// SetBackupProxy sets the "backup_proxy" edge to the Proxy entity.
-func (_u *ProxyUpdate) SetBackupProxy(v *Proxy) *ProxyUpdate {
-	return _u.SetBackupProxyID(v.ID)
-}
-
-// AddBackupDependentIDs adds the "backup_dependents" edge to the Proxy entity by IDs.
-func (_u *ProxyUpdate) AddBackupDependentIDs(ids ...int64) *ProxyUpdate {
-	_u.mutation.AddBackupDependentIDs(ids...)
+// AddPrimaryProxyIDs adds the "primary_proxies" edge to the Proxy entity by IDs.
+func (_u *ProxyUpdate) AddPrimaryProxyIDs(ids ...int64) *ProxyUpdate {
+	_u.mutation.AddPrimaryProxyIDs(ids...)
 	return _u
 }
 
-// AddBackupDependents adds the "backup_dependents" edges to the Proxy entity.
-func (_u *ProxyUpdate) AddBackupDependents(v ...*Proxy) *ProxyUpdate {
+// AddPrimaryProxies adds the "primary_proxies" edges to the Proxy entity.
+func (_u *ProxyUpdate) AddPrimaryProxies(v ...*Proxy) *ProxyUpdate {
 	ids := make([]int64, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
 	}
-	return _u.AddBackupDependentIDs(ids...)
+	return _u.AddPrimaryProxyIDs(ids...)
+}
+
+// SetBackupProxy sets the "backup_proxy" edge to the Proxy entity.
+func (_u *ProxyUpdate) SetBackupProxy(v *Proxy) *ProxyUpdate {
+	return _u.SetBackupProxyID(v.ID)
 }
 
 // Mutation returns the ProxyMutation object of the builder.
@@ -308,31 +308,31 @@ func (_u *ProxyUpdate) RemoveAccounts(v ...*Account) *ProxyUpdate {
 	return _u.RemoveAccountIDs(ids...)
 }
 
-// ClearBackupProxy clears the "backup_proxy" edge to the Proxy entity.
-func (_u *ProxyUpdate) ClearBackupProxy() *ProxyUpdate {
-	_u.mutation.ClearBackupProxy()
+// ClearPrimaryProxies clears all "primary_proxies" edges to the Proxy entity.
+func (_u *ProxyUpdate) ClearPrimaryProxies() *ProxyUpdate {
+	_u.mutation.ClearPrimaryProxies()
 	return _u
 }
 
-// ClearBackupDependents clears all "backup_dependents" edges to the Proxy entity.
-func (_u *ProxyUpdate) ClearBackupDependents() *ProxyUpdate {
-	_u.mutation.ClearBackupDependents()
+// RemovePrimaryProxyIDs removes the "primary_proxies" edge to Proxy entities by IDs.
+func (_u *ProxyUpdate) RemovePrimaryProxyIDs(ids ...int64) *ProxyUpdate {
+	_u.mutation.RemovePrimaryProxyIDs(ids...)
 	return _u
 }
 
-// RemoveBackupDependentIDs removes the "backup_dependents" edge to Proxy entities by IDs.
-func (_u *ProxyUpdate) RemoveBackupDependentIDs(ids ...int64) *ProxyUpdate {
-	_u.mutation.RemoveBackupDependentIDs(ids...)
-	return _u
-}
-
-// RemoveBackupDependents removes "backup_dependents" edges to Proxy entities.
-func (_u *ProxyUpdate) RemoveBackupDependents(v ...*Proxy) *ProxyUpdate {
+// RemovePrimaryProxies removes "primary_proxies" edges to Proxy entities.
+func (_u *ProxyUpdate) RemovePrimaryProxies(v ...*Proxy) *ProxyUpdate {
 	ids := make([]int64, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
 	}
-	return _u.RemoveBackupDependentIDs(ids...)
+	return _u.RemovePrimaryProxyIDs(ids...)
+}
+
+// ClearBackupProxy clears the "backup_proxy" edge to the Proxy entity.
+func (_u *ProxyUpdate) ClearBackupProxy() *ProxyUpdate {
+	_u.mutation.ClearBackupProxy()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -528,10 +528,55 @@ func (_u *ProxyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.PrimaryProxiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPrimaryProxiesIDs(); len(nodes) > 0 && !_u.mutation.PrimaryProxiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PrimaryProxiesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _u.mutation.BackupProxyCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
-			Inverse: true,
+			Inverse: false,
 			Table:   proxy.BackupProxyTable,
 			Columns: []string{proxy.BackupProxyColumn},
 			Bidi:    false,
@@ -544,54 +589,9 @@ func (_u *ProxyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if nodes := _u.mutation.BackupProxyIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
-			Inverse: true,
+			Inverse: false,
 			Table:   proxy.BackupProxyTable,
 			Columns: []string{proxy.BackupProxyColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
-	if _u.mutation.BackupDependentsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.RemovedBackupDependentsIDs(); len(nodes) > 0 && !_u.mutation.BackupDependentsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.BackupDependentsIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
@@ -855,24 +855,24 @@ func (_u *ProxyUpdateOne) AddAccounts(v ...*Account) *ProxyUpdateOne {
 	return _u.AddAccountIDs(ids...)
 }
 
-// SetBackupProxy sets the "backup_proxy" edge to the Proxy entity.
-func (_u *ProxyUpdateOne) SetBackupProxy(v *Proxy) *ProxyUpdateOne {
-	return _u.SetBackupProxyID(v.ID)
-}
-
-// AddBackupDependentIDs adds the "backup_dependents" edge to the Proxy entity by IDs.
-func (_u *ProxyUpdateOne) AddBackupDependentIDs(ids ...int64) *ProxyUpdateOne {
-	_u.mutation.AddBackupDependentIDs(ids...)
+// AddPrimaryProxyIDs adds the "primary_proxies" edge to the Proxy entity by IDs.
+func (_u *ProxyUpdateOne) AddPrimaryProxyIDs(ids ...int64) *ProxyUpdateOne {
+	_u.mutation.AddPrimaryProxyIDs(ids...)
 	return _u
 }
 
-// AddBackupDependents adds the "backup_dependents" edges to the Proxy entity.
-func (_u *ProxyUpdateOne) AddBackupDependents(v ...*Proxy) *ProxyUpdateOne {
+// AddPrimaryProxies adds the "primary_proxies" edges to the Proxy entity.
+func (_u *ProxyUpdateOne) AddPrimaryProxies(v ...*Proxy) *ProxyUpdateOne {
 	ids := make([]int64, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
 	}
-	return _u.AddBackupDependentIDs(ids...)
+	return _u.AddPrimaryProxyIDs(ids...)
+}
+
+// SetBackupProxy sets the "backup_proxy" edge to the Proxy entity.
+func (_u *ProxyUpdateOne) SetBackupProxy(v *Proxy) *ProxyUpdateOne {
+	return _u.SetBackupProxyID(v.ID)
 }
 
 // Mutation returns the ProxyMutation object of the builder.
@@ -901,31 +901,31 @@ func (_u *ProxyUpdateOne) RemoveAccounts(v ...*Account) *ProxyUpdateOne {
 	return _u.RemoveAccountIDs(ids...)
 }
 
-// ClearBackupProxy clears the "backup_proxy" edge to the Proxy entity.
-func (_u *ProxyUpdateOne) ClearBackupProxy() *ProxyUpdateOne {
-	_u.mutation.ClearBackupProxy()
+// ClearPrimaryProxies clears all "primary_proxies" edges to the Proxy entity.
+func (_u *ProxyUpdateOne) ClearPrimaryProxies() *ProxyUpdateOne {
+	_u.mutation.ClearPrimaryProxies()
 	return _u
 }
 
-// ClearBackupDependents clears all "backup_dependents" edges to the Proxy entity.
-func (_u *ProxyUpdateOne) ClearBackupDependents() *ProxyUpdateOne {
-	_u.mutation.ClearBackupDependents()
+// RemovePrimaryProxyIDs removes the "primary_proxies" edge to Proxy entities by IDs.
+func (_u *ProxyUpdateOne) RemovePrimaryProxyIDs(ids ...int64) *ProxyUpdateOne {
+	_u.mutation.RemovePrimaryProxyIDs(ids...)
 	return _u
 }
 
-// RemoveBackupDependentIDs removes the "backup_dependents" edge to Proxy entities by IDs.
-func (_u *ProxyUpdateOne) RemoveBackupDependentIDs(ids ...int64) *ProxyUpdateOne {
-	_u.mutation.RemoveBackupDependentIDs(ids...)
-	return _u
-}
-
-// RemoveBackupDependents removes "backup_dependents" edges to Proxy entities.
-func (_u *ProxyUpdateOne) RemoveBackupDependents(v ...*Proxy) *ProxyUpdateOne {
+// RemovePrimaryProxies removes "primary_proxies" edges to Proxy entities.
+func (_u *ProxyUpdateOne) RemovePrimaryProxies(v ...*Proxy) *ProxyUpdateOne {
 	ids := make([]int64, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
 	}
-	return _u.RemoveBackupDependentIDs(ids...)
+	return _u.RemovePrimaryProxyIDs(ids...)
+}
+
+// ClearBackupProxy clears the "backup_proxy" edge to the Proxy entity.
+func (_u *ProxyUpdateOne) ClearBackupProxy() *ProxyUpdateOne {
+	_u.mutation.ClearBackupProxy()
+	return _u
 }
 
 // Where appends a list predicates to the ProxyUpdate builder.
@@ -1151,10 +1151,55 @@ func (_u *ProxyUpdateOne) sqlSave(ctx context.Context) (_node *Proxy, err error)
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.PrimaryProxiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPrimaryProxiesIDs(); len(nodes) > 0 && !_u.mutation.PrimaryProxiesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PrimaryProxiesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: true,
+			Table:   proxy.PrimaryProxiesTable,
+			Columns: []string{proxy.PrimaryProxiesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _u.mutation.BackupProxyCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
-			Inverse: true,
+			Inverse: false,
 			Table:   proxy.BackupProxyTable,
 			Columns: []string{proxy.BackupProxyColumn},
 			Bidi:    false,
@@ -1167,54 +1212,9 @@ func (_u *ProxyUpdateOne) sqlSave(ctx context.Context) (_node *Proxy, err error)
 	if nodes := _u.mutation.BackupProxyIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
-			Inverse: true,
+			Inverse: false,
 			Table:   proxy.BackupProxyTable,
 			Columns: []string{proxy.BackupProxyColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
-	if _u.mutation.BackupDependentsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.RemovedBackupDependentsIDs(); len(nodes) > 0 && !_u.mutation.BackupDependentsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.BackupDependentsIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   proxy.BackupDependentsTable,
-			Columns: []string{proxy.BackupDependentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(proxy.FieldID, field.TypeInt64),

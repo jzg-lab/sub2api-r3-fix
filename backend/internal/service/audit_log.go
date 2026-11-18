@@ -20,6 +20,8 @@ const (
 	AuditAuthMethodJWT         = "jwt"
 	AuditAuthMethodAdminAPIKey = "admin_api_key"
 	AuditAuthMethodPasskey     = "passkey"
+	// AuditAuthMethodMCPOAuth 标记管理 MCP 的 OAuth 访问令牌（机器凭证）。
+	AuditAuthMethodMCPOAuth = "mcp_oauth"
 
 	// auditRequestBodyMaxBytes 请求体脱敏后入库的最大长度（字节），超出截断。
 	auditRequestBodyMaxBytes = 16 * 1024
@@ -133,7 +135,6 @@ var auditBodySensitiveExactKeys = func() map[string]struct{} {
 		// custom_key 为用户自设的平台 API Key 明文，
 		// session 为 Ollama Cloud 用量的浏览器会话 Cookie 明文。
 		"proxy_key", "custom_key", "session",
-		// OAuth proof handles authorize a one-time credential replacement.
 		"authorization_session_id", "reauthorization_session_id", "code_verifier",
 	}
 	set := make(map[string]struct{}, len(builtin)+len(SensitiveCredentialKeys)+16)

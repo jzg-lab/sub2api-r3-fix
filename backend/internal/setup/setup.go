@@ -268,7 +268,6 @@ func testDatabaseConnection(cfg *DatabaseConfig, openDatabase postgresDatabaseOp
 	if err != nil {
 		return fmt.Errorf("failed to connect to database '%s': %w", cfg.DBName, err)
 	}
-
 	defer func() {
 		if err := targetDB.Close(); err != nil {
 			logger.LegacyPrintf("setup", "failed to close postgres connection: %v", err)
@@ -281,11 +280,10 @@ func testDatabaseConnection(cfg *DatabaseConfig, openDatabase postgresDatabaseOp
 // TestRedisConnection tests the Redis connection
 func TestRedisConnection(cfg *RedisConfig) error {
 	opts := &redis.Options{
-		ContextTimeoutEnabled: true,
-		Addr:                  fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Username:              cfg.Username,
-		Password:              cfg.Password,
-		DB:                    cfg.DB,
+		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Username: cfg.Username,
+		Password: cfg.Password,
+		DB:       cfg.DB,
 	}
 
 	if cfg.EnableTLS {

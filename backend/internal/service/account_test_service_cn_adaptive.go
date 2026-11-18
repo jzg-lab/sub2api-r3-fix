@@ -31,6 +31,9 @@ func (s *AccountTestService) testCNProviderAdaptiveConnection(c *gin.Context, ac
 		requestedModelID = openai.DefaultTestModel
 	}
 	testModelID := account.GetMappedModel(requestedModelID)
+	if manualQuality(c) != nil {
+		return s.testCNProviderChatCompletionsConnection(c, account, requestedModelID, prompt)
+	}
 
 	authToken := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
 	if authToken == "" {
@@ -74,6 +77,7 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create adaptive Anthropic test payload")
 	}
+	prepareManualQualityPayload(c, payload, "anthropic")
 	payloadBytes, _ := json.Marshal(payload)
 
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过原生 /v1/messages 测试自适应 Anthropic 端点"})
@@ -109,6 +113,9 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 		return s.sendErrorAndEnd(c, errMsg)
 	}
 
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, resp.Body, "anthropic")
+	}
 	if err := s.processCNProviderAdaptiveAnthropicStream(c, resp.Body); err != nil {
 		return err
 	}
@@ -173,7 +180,6 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	// DeepSeek / Kimi native Responses endpoints are stateless and do not need
 	// the OpenAI probe's synthetic instructions.
 	delete(payload, "instructions")
-	prepareManualQualityPayload(c, payload, "responses")
 	payloadBytes, _ := json.Marshal(payload)
 	payloadBytes = normalizeDeepSeekResponsesRequestBody(account, payloadBytes)
 
@@ -197,9 +203,9 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := readAccountTestResponse(c, resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("Adaptive Responses endpoint returned %d: %s", resp.StatusCode, string(body))
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil && manualQuality(c) == nil {
+		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
 		return s.sendErrorAndEnd(c, errMsg)
@@ -288,12 +294,15 @@ func (s *AccountTestService) testCNProviderAnthropicConnection(c *gin.Context, a
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := readAccountTestResponse(c, resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		errMsg := fmt.Sprintf("Anthropic endpoint returned %d: %s", resp.StatusCode, string(body))
-		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && s.accountRepo != nil && manualQuality(c) == nil {
+		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && s.accountRepo != nil {
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
 		return s.sendErrorAndEnd(c, errMsg)
+	}
+	if manualQuality(c) != nil {
+		return processManualQualityStream(c, resp.Body, "anthropic")
 	}
 
 	return s.processClaudeStream(c, resp.Body)

@@ -102,13 +102,12 @@ func ApplyLegacyRequestFields(requestType RequestType, fallbackStream bool, fall
 }
 
 type UsageLog struct {
-	ReasoningTokens int // Observed subset of output tokens; never billed separately.
-	ID              int64
-	UserID          int64
-	APIKeyID        int64
-	AccountID       int64
-	RequestID       string
-	Model           string
+	ID        int64
+	UserID    int64
+	APIKeyID  int64
+	AccountID int64
+	RequestID string
+	Model     string
 	// RequestedModel is the client-requested model name recorded for stable user/admin display.
 	// Empty should be treated as Model for backward compatibility with historical rows.
 	RequestedModel string
@@ -150,6 +149,7 @@ type UsageLog struct {
 
 	InputTokens         int
 	OutputTokens        int
+	ReasoningTokens     int // Observed subset of output tokens; never billed separately.
 	CacheCreationTokens int
 	CacheReadTokens     int
 

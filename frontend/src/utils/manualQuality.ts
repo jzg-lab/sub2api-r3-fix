@@ -21,7 +21,7 @@ export function qualityPreviewHTML(answer: string): string | null {
 // reasoning for a number ("21 is wrong, 22 is right" must not be called a match).
 export function qualityAnswerMatches(answer: string, reference: string): boolean | null {
   if (!reference.trim()) return null
-  const last = answer.trim().split('\n').filter(line => line.trim()).at(-1) || ''
+  const last = answer.trim().split('\n').filter(line => line.trim()).slice(-1)[0] || ''
   const normalize = (text: string) => text.trim().replace(/\*\*/g, '').replace(/[。.!！]$/, '').trim()
   const final = normalize(last).replace(/^(?:最终答案|答案|Answer|Final answer)\s*[:：]\s*/i, '')
   return normalize(reference) === final

@@ -288,11 +288,8 @@ func TestAccountRepository_ListOAuthRefreshCandidatePage_SQLFilter(t *testing.T)
 
 	normalized := normalizeSQLWhitespace(capturedSQL)
 	require.Contains(t, normalized, "deleted_at IS NULL")
-	// Deliberately NO schedulable filter: paused (schedulable=false, status=active)
-	// accounts must remain refresh candidates so their tokens do not silently
-	// expire while paused.（上游 v0.2.6：调度关注点与凭证健康关注点分离）
 	require.NotContains(t, normalized, "schedulable = TRUE",
-		"paused accounts must stay refresh candidates; permanent rejection is covered by status filter")
+		"paused (schedulable=false, status=active) accounts must remain OAuth refresh candidates: excluding them lets their stored access_token expire and the usage-window probe then reports a false 'needs re-auth'; permanent rejection is already covered by status = 'active' and refresh failures are bounded by the retry-cooldown exclusion")
 	require.Contains(t, normalized, "status = 'active'")
 	// setup-token 的 access_token 同为 8h 短期令牌，必须与 oauth 一起纳入后台刷新候选
 	require.Contains(t, normalized, "type IN ('oauth', 'setup-token')")

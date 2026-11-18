@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -155,10 +156,12 @@ func TestQueryUsageResetCreditCountPrecedence(t *testing.T) {
 				},
 			}
 			repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{100: account}}
+			account.Credentials["access_token"] = "fake-token"
+			account.Credentials["expires_at"] = time.Now().Add(time.Hour).Unix()
 			tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 				OpenAITokenCacheKey(account): "fake-token",
 			}}
-			tokenProvider := newQuotaTestTokenProvider(repo, tokenCache)
+			tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 			var detailCalls int
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +178,7 @@ func TestQueryUsageResetCreditCountPrecedence(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+			svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 			usage, err := svc.QueryUsage(context.Background(), 100)
 			require.NoError(t, err)
 			require.NotNil(t, usage)

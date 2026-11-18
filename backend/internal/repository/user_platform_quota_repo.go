@@ -427,18 +427,18 @@ func insertLimitsRow(ctx context.Context, client *dbent.Client, userID int64, re
 	return nil
 }
 
-// batchRows 是 BatchSnapshotUsage 每批最大行数（9 参/行 × 6000 + 1 ≈ 54001 参,低于 Postgres 65535 上限）。
+// batchRows 是 BatchSnapshotUsage 每批最大行数（8 参/行 × 6000 + 1 ≈ 48001 参,低于 Postgres 65535 上限）。
 const batchRows = 6000
 
 // BatchSnapshotUsage 用一条多行 UPDATE ... FROM (VALUES ...) 把整批 usage 以绝对值覆盖写入既有活跃行（非累加）。
-// 每批最多 batchRows 行；$1=now 共用；每行 9 个 per-row 参（quota_id, user_id, platform, 3×usage, 3×window_start）。
+// 每批最多 batchRows 行；$1=now 共用；每行 8 个 per-row 参（user_id, platform, 3×usage, 3×window_start）。
 // 只命中 deleted_at IS NULL 的既有行：行不存在或已软删的 (user, platform) 直接跳过，不建行。
 //
 // 注意:snapshots 超过 batchRows 会分多条 SQL 执行且【非单事务】——若某子批失败,
 // 先前子批已写入无法回滚。调用方(flusher)应保证单次 batchSize ≤ batchRows
 // (默认 flush_batch_size=1000 < 6000,安全)。
-// quota_id 阻止清空并重建额度后的旧快照回写；同一行的强制重置仍可能与 flusher 竞争，
-// 详见 service/user_platform_quota_flusher.go 的 shortcut 注释。
+// 另注:启用 flusher 后,本绝对值覆盖与 admin 直写 DB(ResetExpiredWindow/UpsertForUser)存在覆盖竞态,
+// 详见 service/user_platform_quota_flusher.go 中 flushOneBatch 的"已知竞态"注释。
 func (r *userPlatformQuotaRepository) BatchSnapshotUsage(ctx context.Context, snapshots []UserPlatformQuotaSnapshot, now time.Time) error {
 	if len(snapshots) == 0 {
 		return nil

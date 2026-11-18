@@ -7,6 +7,7 @@ import { refreshModelPlaza } from '@/api/modelPlaza'
 import { apiClient } from '@/api/client'
 import { plazaFixture } from '@/components/modelPlaza/__tests__/plazaFixture'
 const state = vi.hoisted(() => ({ auth: null as unknown, locale: null as unknown, monitorEnabled: false }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }) }))
 vi.mock('@/api/modelPlaza', () => ({ refreshModelPlaza: vi.fn() }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ fetchPublicSettings: vi.fn(), cachedPublicSettings: { channel_monitor_enabled: state.monitorEnabled } }) }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))

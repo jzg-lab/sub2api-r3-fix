@@ -10,7 +10,7 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     subscriptions: { list, bulkAction, bulkAssign },
     groups: { getAll: vi.fn().mockResolvedValue([]) },
-    usage: { searchUsers: listUsers }
+    users: { list: listUsers }
   }
 }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError, showSuccess: vi.fn() }) }))
@@ -114,7 +114,7 @@ describe('subscription bulk operations', () => {
     form.getComponent({ name: 'Select' }).vm.$emit('update:modelValue', 7)
     const search = form.get('[data-assign-user-search] input')
     for (const id of [11, 22]) {
-      listUsers.mockResolvedValue([{ id, email: `user${id}@example.com` }])
+      listUsers.mockResolvedValue({ items: [{ id, email: `user${id}@example.com` }] })
       await search.trigger('focus')
       await search.setValue(`user${id}`)
       await vi.advanceTimersByTimeAsync(300)

@@ -2,10 +2,12 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -140,6 +142,43 @@ func TestApplyOAuthCredentialsRejectsMalformedOpenAILongContextBillingBeforeMuta
 	require.Equal(t, "OPENAI_LONG_CONTEXT_BILLING_INVALID", responseBody.Reason)
 	require.Zero(t, stub.updateAccountCalls)
 	require.Zero(t, stub.updateAccountExtraCalls)
+}
+
+func TestApplyOAuthCredentialsUsesAtomicReauthorization(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stub := newStubAdminService()
+	stub.getAccountResult = &service.Account{
+		ID:       1,
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "old-refresh-token",
+			"model_mapping": map[string]any{"gpt-5": "gpt-5"},
+			"account_id":    "existing-account-id",
+			"password":      "must-not-survive",
+			"sso_token":     "must-not-survive",
+			"cookie":        "must-not-survive",
+		},
+	}
+	stub.getAccountResult.UpdatedAt = time.Now().UTC()
+	reauth := &reauthorizationAdminService{account: stub.getAccountResult, apply: func(context.Context) (*service.Account, error) { return stub.getAccountResult, nil }}
+	handler := NewAccountHandler(reauth, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := gin.New()
+	router.POST("/accounts/:id/apply-oauth-credentials", handler.ApplyOAuthCredentials)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/accounts/1/apply-oauth-credentials", bytes.NewBufferString(
+		`{"type":"oauth","expected_updated_at":"`+stub.getAccountResult.UpdatedAt.Format(time.RFC3339Nano)+`","credentials":{"access_token":"new-token","refresh_token":"new-refresh-token","password":"discard","cookie":"discard"}}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+
+	router.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Zero(t, stub.updateAccountCalls, "re-authorization must not use the non-atomic update path")
+	require.Equal(t, stub.getAccountResult.UpdatedAt, reauth.expected)
+	require.Equal(t, map[string]any{"access_token": "new-token", "refresh_token": "new-refresh-token"}, reauth.lastInput.Credentials)
+	require.Equal(t, map[string]any{"gpt-5": "gpt-5"}, stub.getAccountResult.Credentials["model_mapping"], "the handler must not mutate the old credential snapshot")
 }
 
 func TestOpenAIOAuthCodexPATBoundaryRejectsMalformedOpenAILongContextBillingValueBeforeTokenValidation(t *testing.T) {

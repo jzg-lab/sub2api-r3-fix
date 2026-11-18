@@ -19,6 +19,7 @@ import (
 // turned into a failover error instead of a successful empty reply (issue
 // #5009).
 func TestOpenAIResponsesEmptyCompletedFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
@@ -50,6 +51,7 @@ func TestOpenAIResponsesEmptyCompletedFailsOver(t *testing.T) {
 // TestOpenAIResponsesEmptyCompletedWithOutputSucceeds ensures streams with real
 // semantic output are untouched.
 func TestOpenAIResponsesEmptyCompletedWithOutputSucceeds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
@@ -83,6 +85,7 @@ func TestOpenAIResponsesEmptyCompletedWithOutputSucceeds(t *testing.T) {
 // TestOpenAIResponsesEmptyCompletedWithUsageSucceeds ensures a completed event
 // carrying usage is not mistaken for a silent refusal even without output.
 func TestOpenAIResponsesEmptyCompletedWithUsageSucceeds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,

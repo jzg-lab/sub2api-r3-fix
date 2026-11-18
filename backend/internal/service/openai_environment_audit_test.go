@@ -14,13 +14,13 @@ func TestOpenAIEnvironmentAudit_ReadOnlyEvidence(t *testing.T) {
 	shared := uuid.NewString()
 	accounts := []Account{
 		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, CreatedAt: now,
-			Extra: map[string]any{codexFingerprintModeExtraKey: "machine", codexFingerprintSeedExtraKey: shared}},
+			Extra: map[string]any{codexFingerprintModeExtraKey: "session", codexFingerprintSeedExtraKey: shared}},
 		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, CreatedAt: now.Add(2 * time.Second),
-			Extra: map[string]any{codexFingerprintModeExtraKey: "machine", codexFingerprintSeedExtraKey: shared}},
+			Extra: map[string]any{codexFingerprintModeExtraKey: "session", codexFingerprintSeedExtraKey: shared}},
 		{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth, CreatedAt: now.Add(3 * time.Second),
 			Extra: map[string]any{codexFingerprintModeExtraKey: "off", codexFingerprintSeedExtraKey: uuid.NewString()}},
 		{ID: 4, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-			Extra: map[string]any{codexFingerprintModeExtraKey: "machine"}},
+			Extra: map[string]any{codexFingerprintModeExtraKey: "session"}},
 		{ID: 5, Platform: PlatformAnthropic, Type: AccountTypeOAuth},
 		{ID: 6, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
 	}
@@ -29,7 +29,7 @@ func TestOpenAIEnvironmentAudit_ReadOnlyEvidence(t *testing.T) {
 	report := BuildOpenAIEnvironmentAudit(accounts, now)
 	require.Len(t, report.Accounts, 4)
 	require.Equal(t, int64(1), report.Accounts[0].AccountID)
-	require.Equal(t, "machine", report.Accounts[0].EffectiveMode)
+	require.Equal(t, "session", report.Accounts[0].EffectiveMode)
 	require.Equal(t, "seed_derived", report.Accounts[0].IdentitySource)
 	require.Nil(t, report.Accounts[0].IdentityGeneratedAt, "import time is not seed provenance")
 	require.Empty(t, report.Accounts[2].InstallationDigest, "off-mode outgoing identity is not known")
@@ -55,9 +55,9 @@ func TestOpenAIEnvironmentAudit_ConfiguredDeviceCollision(t *testing.T) {
 	device := uuid.NewString()
 	accounts := []Account{
 		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-			Extra: map[string]any{"openai_device_id": device, codexFingerprintSeedExtraKey: uuid.NewString()}},
+			Extra: map[string]any{codexFingerprintModeExtraKey: "session", "openai_device_id": device, codexFingerprintSeedExtraKey: uuid.NewString()}},
 		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-			Extra: map[string]any{"openai_device_id": device, codexFingerprintSeedExtraKey: uuid.NewString()}},
+			Extra: map[string]any{codexFingerprintModeExtraKey: "session", "openai_device_id": device, codexFingerprintSeedExtraKey: uuid.NewString()}},
 	}
 	report := BuildOpenAIEnvironmentAudit(accounts, time.Now())
 	require.Equal(t, "configured_device", report.Accounts[0].IdentitySource)

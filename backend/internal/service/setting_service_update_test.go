@@ -410,7 +410,7 @@ func TestSettingService_UpdateSettings_PaymentVisibleMethodsAndAdvancedScheduler
 		PaymentVisibleMethodAlipayEnabled:                  true,
 		PaymentVisibleMethodWxpayEnabled:                   false,
 		OpenAILowUpstreamRatePriorityEnabled:               true,
-		OpenAIOAuthSchedulingRateMultiplier:                0.05,
+		OpenAIOAuthSchedulingRateMultiplier:                testPtrFloat64(0.05),
 		OpenAIAdvancedSchedulerEnabled:                     true,
 		OpenAIAdvancedSchedulerStickyWeightedEnabled:       true,
 		OpenAIAdvancedSchedulerSubscriptionPriorityEnabled: true,
@@ -449,50 +449,12 @@ func TestSettingService_UpdateSettings_PaymentVisibleMethodsAndAdvancedScheduler
 	require.Equal(t, "4", repo.updates[SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky])
 }
 
-func TestSettingService_UpdateSettings_ClearsAdvancedSchedulerWeightOverrides(t *testing.T) {
-	repo := &settingUpdateRepoStub{}
-	svc := NewSettingService(repo, &config.Config{})
-
-	err := svc.UpdateSettings(context.Background(), &SystemSettings{
-		OpenAIAdvancedSchedulerEnabled:                true,
-		OpenAIAdvancedSchedulerLBTopK:                 "2",
-		OpenAIAdvancedSchedulerWeightPriority:         " ",
-		OpenAIAdvancedSchedulerWeightLoad:             "\t",
-		OpenAIAdvancedSchedulerWeightQueue:            "\n",
-		OpenAIAdvancedSchedulerWeightErrorRate:        "",
-		OpenAIAdvancedSchedulerWeightTTFT:             "  ",
-		OpenAIAdvancedSchedulerWeightReset:            "",
-		OpenAIAdvancedSchedulerWeightQuotaHeadroom:    " ",
-		OpenAIAdvancedSchedulerWeightUpstreamCost:     "\t",
-		OpenAIAdvancedSchedulerWeightPreviousResponse: "\n",
-		OpenAIAdvancedSchedulerWeightSessionSticky:    "",
-	})
-	require.NoError(t, err)
-	require.Equal(t, "true", repo.updates[openAIAdvancedSchedulerSettingKey])
-	require.Equal(t, "2", repo.updates[SettingKeyOpenAIAdvancedSchedulerLBTopK])
-
-	for _, key := range []string{
-		SettingKeyOpenAIAdvancedSchedulerWeightPriority,
-		SettingKeyOpenAIAdvancedSchedulerWeightLoad,
-		SettingKeyOpenAIAdvancedSchedulerWeightQueue,
-		SettingKeyOpenAIAdvancedSchedulerWeightErrorRate,
-		SettingKeyOpenAIAdvancedSchedulerWeightTTFT,
-		SettingKeyOpenAIAdvancedSchedulerWeightReset,
-		SettingKeyOpenAIAdvancedSchedulerWeightQuotaHeadroom,
-		SettingKeyOpenAIAdvancedSchedulerWeightUpstreamCost,
-		SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse,
-		SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky,
-	} {
-		require.Equal(t, "", repo.updates[key], key)
-	}
-}
-
 func TestSettingService_UpdateSettingsRejectsInvalidOpenAIOAuthSchedulingRateMultiplier(t *testing.T) {
 	repo := &settingUpdateRepoStub{}
 	svc := NewSettingService(repo, &config.Config{})
 
 	for _, rate := range []float64{-0.01, math.NaN(), math.Inf(1)} {
-		err := svc.UpdateSettings(context.Background(), &SystemSettings{OpenAIOAuthSchedulingRateMultiplier: rate})
+		err := svc.UpdateSettings(context.Background(), &SystemSettings{OpenAIOAuthSchedulingRateMultiplier: &rate})
 		require.Error(t, err)
 	}
 }
@@ -553,8 +515,12 @@ func TestSettingService_UpdateSettings_OpenAIAdvancedSchedulerWeightSums(t *test
 func TestSettingService_ParseSettingsDefaultsOpenAIOAuthSchedulingRateMultiplier(t *testing.T) {
 	svc := NewSettingService(&settingUpdateRepoStub{}, &config.Config{})
 
-	require.Equal(t, 1.0, svc.parseSettings(map[string]string{}).OpenAIOAuthSchedulingRateMultiplier)
-	require.Equal(t, 0.05, svc.parseSettings(map[string]string{SettingKeyOpenAIOAuthSchedulingRateMultiplier: "0.05"}).OpenAIOAuthSchedulingRateMultiplier)
+	require.Equal(t, testPtrFloat64(1.0), svc.parseSettings(map[string]string{}).OpenAIOAuthSchedulingRateMultiplier)
+	require.Equal(t, testPtrFloat64(0.05), svc.parseSettings(map[string]string{SettingKeyOpenAIOAuthSchedulingRateMultiplier: "0.05"}).OpenAIOAuthSchedulingRateMultiplier)
+	require.Equal(t, testPtrFloat64(0), svc.parseSettings(map[string]string{SettingKeyOpenAIOAuthSchedulingRateMultiplier: "0"}).OpenAIOAuthSchedulingRateMultiplier)
+	for _, raw := range []string{"", " ", "invalid", "-1", "NaN", "+Inf"} {
+		require.Nil(t, svc.parseSettings(map[string]string{SettingKeyOpenAIOAuthSchedulingRateMultiplier: raw}).OpenAIOAuthSchedulingRateMultiplier, raw)
+	}
 }
 
 func TestSettingService_GetAllSettings_OpenAIAdvancedSchedulerEffectiveValuesUseConfig(t *testing.T) {

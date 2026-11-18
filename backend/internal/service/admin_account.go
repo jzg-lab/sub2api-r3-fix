@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -21,6 +22,15 @@ import (
 
 // Account management implementations
 func (s *adminServiceImpl) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error) {
+	if groupID > 0 && s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		group, err := s.groupRepo.GetByID(ctx, groupID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := s.validateSimpleModeGroupAccess(group); err != nil {
+			return nil, 0, err
+		}
+	}
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	accounts, result, err := s.accountRepo.ListWithFilters(ctx, params, platform, accountType, status, search, groupID, privacyMode)
 	if err != nil {
@@ -284,6 +294,17 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	}
 	autoPauseOnExpired := source.AutoPauseOnExpired
 	groups, groupIDs := duplicateAccountGroups(source)
+	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		for _, groupID := range groupIDs {
+			group, groupErr := s.groupRepo.GetByID(ctx, groupID)
+			if groupErr != nil {
+				return nil, groupErr
+			}
+			if err := s.validateSimpleModeGroupAccess(group); err != nil {
+				return nil, err
+			}
+		}
+	}
 	proxyID := source.ProxyID
 	if source.ProxyFallbackOriginID != nil {
 		// Proxy fallback is transient runtime state; duplicate the configured origin.
@@ -307,7 +328,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		SkipDefaultGroupBind:  true,
 		SkipMixedChannelCheck: true,
 	}
-	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
+	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Type, input.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
@@ -337,7 +358,10 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	return duplicate, nil
 }
 
-func normalizeAccountConcurrency(_, _ string, concurrency int) int {
+func normalizeAccountConcurrency(platform, accountType string, concurrency int) int {
+	if platform == PlatformGrok && accountType == AccountTypeOAuth && concurrency <= 0 {
+		return 1
+	}
 	if concurrency == 0 {
 		return LocalAccountConcurrency
 	}
@@ -379,7 +403,7 @@ func ValidateOpenAILongContextBillingExtra(platform string, extra map[string]any
 	return nil
 }
 
-func normalizeOpenAILongContextBillingExtra(platform string, extra map[string]any) (map[string]any, error) {
+func normalizeOpenAILongContextBillingExtra(platform, accountType string, extra map[string]any) (map[string]any, error) {
 	if platform != PlatformOpenAI {
 		return extra, nil
 	}
@@ -393,13 +417,13 @@ func normalizeOpenAILongContextBillingExtra(platform string, extra map[string]an
 	}
 	_, exists := normalized[openAILongContextBillingEnabledKey]
 	if !exists {
-		normalized[openAILongContextBillingEnabledKey] = false
+		normalized[openAILongContextBillingEnabledKey] = accountType == AccountTypeAPIKey
 	}
 	return normalized, nil
 }
 
 func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *UpdateAccountInput) (map[string]any, error) {
-	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, input.Extra)
+	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, account.Type, input.Extra)
 	if err != nil || account.Platform != PlatformOpenAI {
 		return normalized, err
 	}
@@ -584,7 +608,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		!hasOpenAIOAuthCredentialMaterial(input.Credentials) {
 		return nil, ErrOpenAIOAuthProvenanceRequired
 	}
-	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
+	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Type, input.Extra)
 	if err != nil {
 		return nil, err
 	}
@@ -647,36 +671,35 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, account, groups); err != nil {
 		return nil, err
 	}
-	if IsOpenAIBrowserOAuthAccount(account) && s.openAIProbeWakeup != nil {
-		// Admin uploads and OAuth creation converge here. Wake only after the
-		// account and groups commit; retain eligibility and cooldown checks.
-		s.openAIProbeWakeup()
-	}
-
-	// OAuth 账号：创建后异步设置隐私。
-	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
-	if account.Type == AccountTypeOAuth {
-		switch account.Platform {
-		case PlatformOpenAI:
-			runDeploymentAsync(func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
-					}
-				}()
-				s.EnsureOpenAIPrivacy(context.Background(), account)
-			})
-		case PlatformAntigravity:
-			runDeploymentAsync(func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
-					}
-				}()
-				s.EnsureAntigravityPrivacy(context.Background(), account)
-			})
+	AfterAccountCommit(ctx, func(_ context.Context) {
+		if IsOpenAIBrowserOAuthAccount(account) && s.openAIProbeWakeup != nil {
+			s.openAIProbeWakeup()
 		}
-	}
+		// OAuth 账号：创建后异步设置隐私。
+		// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
+		if account.Type == AccountTypeOAuth {
+			switch account.Platform {
+			case PlatformOpenAI:
+				runDeploymentAsync(func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("create_account_openai_privacy_panic", "account_id", account.ID, "recover", r)
+						}
+					}()
+					s.EnsureOpenAIPrivacy(context.Background(), account)
+				})
+			case PlatformAntigravity:
+				runDeploymentAsync(func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("create_account_antigravity_privacy_panic", "account_id", account.ID, "recover", r)
+						}
+					}()
+					s.EnsureAntigravityPrivacy(context.Background(), account)
+				})
+			}
+		}
+	})
 
 	return account, nil
 }
@@ -694,8 +717,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 	}
-	previousWasOpenAIOAuth := account.IsOpenAIOAuth()
-	previousFingerprintMode := account.GetCodexFingerprintMode()
 	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
@@ -799,6 +820,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		// 目录观察和能力 metadata 只由同步写入。表单里的旧值或注入值不能进入本次更新。
+		delete(normalizedExtra, grokObservedModelsExtraKey)
+		delete(normalizedExtra, UpstreamModelMetadataExtraKey)
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
@@ -807,6 +831,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			"quota_weekly_used",
 			"quota_weekly_start",
 			grokBillingExtraKey,
+			grokObservedModelsExtraKey,
+			UpstreamModelMetadataExtraKey,
 			UpstreamBillingProbeEnabledExtraKey,
 			UpstreamBillingRateSyncEnabledExtraKey,
 			UpstreamBillingProbeExtraKey,
@@ -822,12 +848,21 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			}
 		}
 		normalizedExtra = PreserveModelRateLimitsForAccountEdit(account.Platform, account.Extra, normalizedExtra)
+		if account.Platform == PlatformAntigravity {
+			previousOverages := account.IsOveragesEnabled()
+			updatedOverages, _ := normalizedExtra["allow_overages"].(bool)
+			switch {
+			case updatedOverages:
+				delete(normalizedExtra, modelRateLimitsKey)
+			case previousOverages && !updatedOverages:
+				if limits, ok := normalizedExtra[modelRateLimitsKey].(map[string]any); ok {
+					delete(limits, creditsExhaustedKey)
+				}
+			}
+		}
 		normalizedExtra = PreserveOpenAIRescueManagedExtra(account.Extra, normalizedExtra)
 		normalizedExtra = normalizeOpenAICodexFingerprintExtraForUpdate(
-			account,
-			normalizedExtra,
-			previousWasOpenAIOAuth,
-			previousFingerprintMode,
+			account, normalizedExtra,
 		)
 		// Codex 指纹 seed 处理：剥掉用户带入值，已有合法 seed 保留，模式需要且缺失时铸造。
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
@@ -1506,10 +1541,16 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 	if err := s.accountRepo.ClearTempUnschedulable(ctx, id); err != nil {
 		return nil, err
 	}
-	if s.runtimeBlocker != nil {
-		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	return s.accountRepo.GetByID(ctx, id)
+	AfterAccountCommit(ctx, func(context.Context) {
+		if s.runtimeBlocker != nil {
+			s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+		}
+	})
+	return account, nil
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {

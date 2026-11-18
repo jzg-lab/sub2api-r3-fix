@@ -915,7 +915,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 				newCredentials["_token_version"] = time.Now().UnixMilli()
 				if saveErr := persistAccountCredentials(attemptCtx, s.accountRepo, attemptedAccount, newCredentials); saveErr != nil {
 					err = &providerCycleContainmentRefreshError{
-						err: fmt.Errorf("%w: %w", errOAuthRefreshCredentialPersist, saveErr),
+						err: errors.Join(errOAuthRefreshCredentialPersist, saveErr),
 					}
 				} else {
 					*account = *attemptedAccount

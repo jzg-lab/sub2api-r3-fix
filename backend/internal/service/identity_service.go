@@ -28,8 +28,9 @@ var (
 	// <product>/<major>.<minor>.<patch> 之后必须紧跟空白或字符串结束。
 	// 版本号带 -local / -dev / +build 等后缀的本地构建一律不接受。
 	fingerprintUserAgentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/\d+\.\d+\.\d+(\s|$)`)
+
 	// claudeCLIUAVersionPrefixRegex 匹配 claude-cli UA 开头的 "claude-cli/x.y.z" 版本号段，
-	// 用于版本下限抬升时只替换版本号、原样保留 UA 其余部分（上游 v0.2.6 同款）。
+	// 供版本下限抬升时就地替换版本号使用；UA 其余部分（括号内的真实客户端形态等）原样保留。
 	claudeCLIUAVersionPrefixRegex = regexp.MustCompile(`(?i)^(claude-cli)/\d+\.\d+\.\d+`)
 )
 
@@ -39,7 +40,7 @@ const (
 	// maxFingerprintUserAgentLength 限制写入缓存的 User-Agent 长度。
 	maxFingerprintUserAgentLength = 256
 	// maxClaudeCLIMajorVersionSkew 是 claude-cli 主版本号相对 sub2api 自身伪装
-	// 版本（claude.CLICurrentVersion）允许的最大超前量。给足两个大版本的升级
+	// 版本（claude.CLIVersion()）允许的最大超前量。给足两个大版本的升级
 	// 窗口，同时挡掉 999 这类哨兵版本号。
 	maxClaudeCLIMajorVersionSkew = 2
 )
@@ -71,6 +72,8 @@ func isAcceptableFingerprintUserAgent(ua string) bool {
 	if !ok {
 		return false
 	}
+	// 超前检查以运行期生效版本为基准（EffectiveCLIVersion）：同步跨大版本后，
+	// 若仍与静态基线比较会误拒客户端上报的新版本。
 	currentMajor, _, _, currentOK := parseUserAgentVersion(claudeCLIUserAgentProduct + "/" + claude.EffectiveCLIVersion())
 	if !currentOK {
 		return true
@@ -78,14 +81,14 @@ func isAcceptableFingerprintUserAgent(ua string) bool {
 	return major <= currentMajor+maxClaudeCLIMajorVersionSkew
 }
 
-// floorClaudeCLIUserAgentVersion 把 claude-cli UA 中的版本号抬升到 claude.CLICurrentVersion
-// 下限：低于下限时就地升到下限并返回 changed=true，否则原样返回。（上游 v0.2.6 移植）
+// floorClaudeCLIUserAgentVersion 把 claude-cli UA 中的版本号抬升到运行期生效版本
+// （claude.EffectiveCLIVersion()）下限：低于下限时就地升到下限并返回 changed=true，否则原样返回。
 //
 // 为什么需要这条：账号级指纹"只升不降"、活跃账号懒续期后近乎永不过期，且系统内没有重置
 // 入口，defaultFingerprint 只在首次创建指纹时使用。存量账号缓存里的 claude-cli 版本停留在
 // 历史值（如 claude-cli/2.1.220），客户端送来更旧的版本时 isNewerVersion 不会触发升级——
 // 仅升 CLICurrentVersion 常量对所有已有账号完全无效，上游按指纹 UA 做客户端版本闸门
-// （上游实测 Fable 5.1 要求 >= 2.1.251）时旧指纹永远过不去。
+// （如 Fable 5.1 要求 >= 2.1.251）时旧指纹永远过不去。
 //
 // 约束：
 //   - 只对 claude-cli 产品生效，其它产品一律不动，避免误伤别的合法客户端；
@@ -97,6 +100,9 @@ func floorClaudeCLIUserAgentVersion(ua string) (string, bool) {
 	if extractProduct(ua) != claudeCLIUserAgentProduct {
 		return ua, false
 	}
+	// 用 EffectiveCLIVersion()（面板/同步的运行期值，经 IsSupportedCLIVersion
+	// 校验、恒 >= 内置基线）而非静态基线 CLICurrentVersion：
+	// 运行期同步到更高版本后，存量低版本指纹才能被抬到新版本；"只升不降"语义不变。
 	floor := claude.EffectiveCLIVersion()
 	floorUA := claudeCLIUserAgentProduct + "/" + floor
 	// isNewerVersion(floor, ua) 为 true 当且仅当下限版本严格高于 ua：
@@ -111,7 +117,9 @@ func floorClaudeCLIUserAgentVersion(ua string) (string, bool) {
 	return floored, true
 }
 
-// defaultFingerprint 每次现取运行期版本，避免新账号固化过期身份。
+// defaultFingerprint 返回默认指纹值（当客户端未提供时使用）。
+// UserAgent 不能在包 init 时固化：必须在每次使用时经 EffectiveCLIVersion 现取，
+// 否则运行期同步到新版本后，新建账号会写入过期版本作为持久身份。
 func defaultFingerprint() Fingerprint {
 	return Fingerprint{
 		UserAgent:               claude.DefaultUserAgent(),
@@ -195,21 +203,24 @@ func (s *IdentityService) GetOrCreateFingerprint(ctx context.Context, accountID 
 			logger.LegacyPrintf("service.identity",
 				"Replaced malformed cached fingerprint for account %d: %q -> %q",
 				accountID, poisoned, cached.UserAgent)
-		} else if uaAcceptable && isNewerVersion(clientUA, cached.UserAgent) {
-			// 版本升级：merge 语义 — 仅更新请求中实际携带的字段，保留缓存值
-			// 避免缺失的头被硬编码默认值覆盖（如新 CLI 版本 + 旧 SDK 默认值的不一致）
-			mergeHeadersIntoFingerprint(cached, headers)
-			needWrite = true
-			logger.LegacyPrintf("service.identity", "Updated fingerprint for account %d: %s (merge update)", accountID, clientUA)
+		} else {
+			// 客户端送来更新版本时的常规升级：merge 语义 — 仅更新请求中实际携带的字段，
+			// 保留缓存值，避免缺失的头被硬编码默认值覆盖（如新 CLI 版本 + 旧 SDK 默认值的不一致）
+			if uaAcceptable && isNewerVersion(clientUA, cached.UserAgent) {
+				mergeHeadersIntoFingerprint(cached, headers)
+				needWrite = true
+				logger.LegacyPrintf("service.identity", "Updated fingerprint for account %d: %s (merge update)", accountID, clientUA)
+			}
+
 		}
 
 		// 版本下限抬升（floor）：heal 与 healthy 两条缓存命中路径共同的后置条件，与
 		// 上面的客户端常规升级相互独立、二者取更新者。客户端送来更旧版本时
 		// isNewerVersion 不触发，此处仍能把低于 CLICurrentVersion 的存量指纹就地抬到
 		// 下限并持久化，否则升 CLICurrentVersion 对所有已有账号无效，新模型的客户端
-		// 版本闸门（上游实测 Fable 5.1 要求 >= 2.1.251）永远过不去。自愈路径同样必须经过：
+		// 版本闸门（如 Fable 5.1 要求 >= 2.1.251）永远过不去。自愈路径同样必须经过：
 		// 畸形缓存 + 合法但过旧的客户端 UA 首次读取就要落到下限，不能先落库一个
-		// 过旧版本、等下一次读取才纠正。（上游 v0.2.6 移植）
+		// 过旧版本、等下一次读取才纠正。
 		if flooredUA, changed := floorClaudeCLIUserAgentVersion(cached.UserAgent); changed {
 			cached.UserAgent = flooredUA
 			needWrite = true
@@ -261,7 +272,7 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 	// 首次创建同样是持久化写入，必须与升级路径共用同一套校验。
 	if ua := strings.TrimSpace(headers.Get("User-Agent")); isAcceptableFingerprintUserAgent(ua) {
 		// 首次创建与缓存命中路径共用同一个版本下限：合法但过旧的 claude-cli UA
-		// 落库时同样不能低于 CLICurrentVersion，否则新账号一开始就带着过旧的持久身份。
+		// 落库时同样不能低于运行期生效版本（EffectiveCLIVersion），否则新账号一开始就带着过旧的持久身份。
 		fp.UserAgent, _ = floorClaudeCLIUserAgentVersion(ua)
 	} else {
 		fp.UserAgent = defaultFingerprint().UserAgent
@@ -324,7 +335,7 @@ func (s *IdentityService) ApplyFingerprint(req *http.Request, fp *Fingerprint) {
 		setHeaderRaw(req.Header, "User-Agent", fp.UserAgent)
 	}
 
-	// 设置x-stainless-*头（保持与 claude.DefaultHeaders 一致的大小写）
+	// 设置x-stainless-*头（保持与 claude.DefaultHeaders() 一致的大小写）
 	if fp.StainlessLang != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Lang", fp.StainlessLang)
 	}

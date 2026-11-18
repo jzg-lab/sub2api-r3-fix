@@ -26,21 +26,6 @@ type CRSSyncService struct {
 	openaiOAuthService *OpenAIOAuthService
 	geminiOAuthService *GeminiOAuthService
 	cfg                *config.Config
-	settings           *SettingService
-}
-
-func (s *CRSSyncService) createImportedAccount(ctx context.Context, account *Account) error {
-	if account.Platform == PlatformOpenAI {
-		settings, err := s.settings.GetOpenAIOperationsSettings(ctx)
-		if err != nil {
-			return err
-		}
-		defaulted := applyOpenAINewAccountDefaults(&CreateAccountInput{
-			Platform: account.Platform, ProxyID: account.ProxyID, Extra: account.Extra, Concurrency: account.Concurrency,
-		}, settings.NewAccountDefaults)
-		account.ProxyID, account.Extra, account.Concurrency = defaulted.ProxyID, defaulted.Extra, defaulted.Concurrency
-	}
-	return s.accountRepo.Create(ctx, account)
 }
 
 func NewCRSSyncService(
@@ -405,7 +390,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      status,
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -442,6 +427,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -540,7 +526,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      status,
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -570,6 +556,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -661,7 +648,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if existing != nil {
 			existingExtra = existing.Extra
 		}
-		extra, err = mergeCRSOpenAILongContextBillingExtra(existingExtra, extra)
+		extra, err = mergeCRSOpenAILongContextBillingExtra(AccountTypeOAuth, existingExtra, extra)
 		if err != nil {
 			item.Action = "failed"
 			item.Error = err.Error()
@@ -694,7 +681,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      status,
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -719,6 +706,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -811,7 +799,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if existing != nil {
 			existingExtra = existing.Extra
 		}
-		extra, err = mergeCRSOpenAILongContextBillingExtra(existingExtra, extra)
+		extra, err = mergeCRSOpenAILongContextBillingExtra(AccountTypeAPIKey, existingExtra, extra)
 		if err != nil {
 			item.Action = "failed"
 			item.Error = err.Error()
@@ -844,7 +832,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      status,
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -875,6 +863,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = concurrency
 		existing.Priority = priority
 		existing.Status = status
 		existing.Schedulable = src.Schedulable
@@ -973,7 +962,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      mapCRSStatus(src.IsActive, src.Status),
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -1006,6 +995,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = 3
 		existing.Priority = clampPriority(src.Priority)
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable
@@ -1102,7 +1092,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 				Status:      mapCRSStatus(src.IsActive, src.Status),
 				Schedulable: src.Schedulable,
 			}
-			if err := s.createImportedAccount(ctx, account); err != nil {
+			if err := s.accountRepo.Create(ctx, account); err != nil {
 				item.Action = "failed"
 				item.Error = "create failed: " + err.Error()
 				result.Failed++
@@ -1132,6 +1122,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if proxyID != nil {
 			existing.ProxyID = proxyID
 		}
+		existing.Concurrency = 3
 		existing.Priority = clampPriority(src.Priority)
 		existing.Status = mapCRSStatus(src.IsActive, src.Status)
 		existing.Schedulable = src.Schedulable
@@ -1212,8 +1203,8 @@ func reconcileCRSUpstreamBillingProbeExtra(
 	}
 }
 
-func mergeCRSOpenAILongContextBillingExtra(existing, updates map[string]any) (map[string]any, error) {
-	return normalizeOpenAILongContextBillingExtra(PlatformOpenAI, mergeMap(existing, updates))
+func mergeCRSOpenAILongContextBillingExtra(accountType string, existing, updates map[string]any) (map[string]any, error) {
+	return normalizeOpenAILongContextBillingExtra(PlatformOpenAI, accountType, mergeMap(existing, updates))
 }
 
 func (s *CRSSyncService) mapOrCreateProxy(ctx context.Context, enabled bool, cached *[]Proxy, src *crsProxy, defaultName string) (*int64, error) {
@@ -1464,8 +1455,7 @@ func (s *CRSSyncService) refreshOAuthToken(ctx context.Context, account *Account
 			} else {
 				*account = *updated
 			}
-			// The coordinator persisted under its lease. Rewriting these
-			// credentials here would reopen the race after lease release.
+			// The coordinator already persisted under its refresh lease.
 			return nil
 		}
 		tokenInfo, refreshErr := s.openaiOAuthService.RefreshAccountToken(ctx, account)

@@ -256,7 +256,7 @@ func (s *AccountTestService) testAntigravityManualQuality(c *gin.Context, accoun
 	if shouldUseAntigravityGeminiTestRequest(model, mapped) {
 		body, err = gateway.buildGeminiTestRequestWithPrompt(project, mapped, "")
 	} else {
-		body, err = gateway.buildClaudeTestRequest(project, mapped)
+		body, err = gateway.buildClaudeTestRequest(project, mapped, "")
 	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Unable to build Antigravity request")

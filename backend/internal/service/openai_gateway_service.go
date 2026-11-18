@@ -64,8 +64,8 @@ const (
 	openAICompactSessionSeedKey        = "openai_compact_session_seed"
 	openAIUpstreamEndpointContextKey   = "openai_actual_upstream_endpoint"
 	// codexCLIVersion 是网关对上游声明的 Codex 客户端版本，同时供 codexCLIUserAgent
-	// 与 version 头使用。上游 /backend-api/codex 在容量紧张时按客户端身份分优先级降载，
-	// 陈旧版本会被优先丢弃（HTTP 200 + 流内 server_is_overloaded）；非官方客户端配不出
+	// 与 version 头使用。上游 /backend-api/codex 会按客户端身份进行风控分层，
+	// 陈旧版本可能被优先丢弃（HTTP 200 + 流内 server_is_overloaded）；非官方客户端配不出
 	// 官方身份时整体回退到本常量，因此它必须跟随官方 CLI 的当前发布版本，
 	// 落后多个版本会让这些请求稳定落在被优先丢弃的一侧。
 	// Native macOS arm64 0.162.1 capture, 2026-10-15: TLS parameters match
@@ -96,24 +96,9 @@ var openaiAllowedHeaders = map[string]bool{
 	responsesLiteHeaderKey:    true,
 }
 
-// openaiCodexSessionIdentityHeaders 是 Codex 会话/子 Agent 身份头（codex-api/src/requests/headers.rs
-// build_session_headers、core/src/client.rs X_CODEX_* / X_OPENAI_SUBAGENT_HEADER），**仅 machine 模式**
-// 的 /responses 两条 HTTP 链路放行（isOpenAIResponsesClientHeaderAllowed / isOpenAIPassthroughAllowedRequestHeader），
-// machine 头 sink 会对其中身份值做假名化；off/device/session/full 维持原有行为（HTTP 丢弃），与 WS 握手
-// 拷贝列表（openai_ws_forwarder_payload.go）的 machine 分支逐键对齐。不并入 openaiPassthroughAllowedHeaders：
-// 该集合还被 /v1/images/* 复用（openai_images.go），图片链路没有指纹改写，不应放行会话身份头。
-var openaiCodexSessionIdentityHeaders = map[string]bool{
-	"session-id":               true,
-	"thread-id":                true,
-	"x-client-request-id":      true,
-	"x-openai-subagent":        true,
-	"x-codex-parent-thread-id": true,
-}
-
-// isOpenAIResponsesClientHeaderAllowed 非透传 /responses 链路的客户端头放行判定；
-// codexMachine 为账号有效指纹模式是否为 machine（activeCodexFingerprintMode）。
-func isOpenAIResponsesClientHeaderAllowed(lowerKey string, codexMachine bool) bool {
-	return openaiAllowedHeaders[lowerKey] || (codexMachine && openaiCodexSessionIdentityHeaders[lowerKey])
+// isOpenAIResponsesClientHeaderAllowed 非透传 /responses 链路的客户端头放行判定。
+func isOpenAIResponsesClientHeaderAllowed(lowerKey string) bool {
+	return openaiAllowedHeaders[lowerKey]
 }
 
 // OpenAI passthrough allowed headers whitelist.
@@ -327,14 +312,17 @@ type OpenAIForwardResult struct {
 	FirstTokenMs          *int
 	ClientDisconnect      bool
 	ImageCount            int
-	ImageSize             string
-	ImageInputSize        string
-	ImageOutputSize       string
-	ImageOutputSizes      []string
-	ImageSizeSource       string
-	ImageSizeBreakdown    map[string]int
-	VideoCount            int
-	VideoResolution       string
+	// ImageEndpoint 标记请求来自专用图片端点；分组 image_count_billing 开关
+	// 只对这类请求生效，混合 Responses/Chat/WS 请求仍按 token 计费。
+	ImageEndpoint      bool
+	ImageSize          string
+	ImageInputSize     string
+	ImageOutputSize    string
+	ImageOutputSizes   []string
+	ImageSizeSource    string
+	ImageSizeBreakdown map[string]int
+	VideoCount         int
+	VideoResolution    string
 	// VideoDurationSeconds 是提交时请求的生成时长（xAI 按输出秒数计费），已归一化到 1-15 秒。
 	VideoDurationSeconds int
 	// WebSearchCalls 是 Codex alpha/search 网页搜索调用次数（每次成功请求为 1）。
@@ -521,22 +509,21 @@ type OpenAIGatewayService struct {
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 
-	openaiWSPoolOnce               sync.Once
-	openaiWSStateStoreOnce         sync.Once
-	openaiSchedulerOnce            sync.Once
-	openaiProxyStreamCircuitOnce   sync.Once
-	openaiWSPassthroughDialerOnce  sync.Once
-	openaiModelTransientOnce       sync.Once
-	agentIdentityTaskMu            sync.Mutex
-	openaiWSPool                   *openAIWSConnPool
-	openaiWSStateStore             OpenAIWSStateStore
-	openaiScheduler                OpenAIAccountScheduler
-	openaiWSPassthroughDialer      openAIWSClientDialer
-	openaiWSSessionPreemptions     openAIWSSessionPreemptRegistry
-	openaiAccountStats             *openAIAccountRuntimeStats
-	openaiModelTransient           *openAIAccountModelTransientState
-	openaiProxyStreamCircuit       *openAIProxyStreamCircuit
-	openaiProxyStreamFailOpenLogAt atomic.Int64
+	openaiWSPoolOnce              sync.Once
+	openaiWSStateStoreOnce        sync.Once
+	openaiSchedulerOnce           sync.Once
+	openaiProxyStreamCircuitOnce  sync.Once
+	openaiWSPassthroughDialerOnce sync.Once
+	openaiModelTransientOnce      sync.Once
+	agentIdentityTaskMu           sync.Mutex
+	openaiWSPool                  *openAIWSConnPool
+	openaiWSStateStore            OpenAIWSStateStore
+	openaiScheduler               OpenAIAccountScheduler
+	openaiWSPassthroughDialer     openAIWSClientDialer
+	openaiWSSessionPreemptions    openAIWSSessionPreemptRegistry
+	openaiAccountStats            *openAIAccountRuntimeStats
+	openaiModelTransient          *openAIAccountModelTransientState
+	openaiProxyStreamCircuit      *openAIProxyStreamCircuit
 
 	openaiWSFallbackUntil               sync.Map // key: int64(accountID), value: time.Time
 	openaiAccountRuntimeBlockUntil      sync.Map // key: int64(accountID), value: time.Time
@@ -552,8 +539,8 @@ type OpenAIGatewayService struct {
 	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
 	codexSnapshotThrottle               *accountWriteThrottle
 	openAIModelsCache                   openAIModelsCache
-	openaiCompatSessionResponses        sync.Map
-	openaiCompatAnthropicDigestSessions sync.Map
+	openaiCompatSessionResponses        sessionMemoryCache
+	openaiCompatAnthropicDigestSessions sessionMemoryCache
 	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
 	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
 	// 剥离跨账号回带（openai_codex_turn_state.go）。
@@ -793,9 +780,14 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 	}
 }
 
-// CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
+// CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池、后台 worker 和会话缓存清理 timer。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
+	if s == nil {
+		return
+	}
+	s.openaiCompatSessionResponses.Close()
+	s.openaiCompatAnthropicDigestSessions.Close()
 	// Use the same initialization barrier so a concurrent first acquire cannot
 	// create a new pool after shutdown has already observed a nil pointer.
 	if pool := s.getOpenAIWSConnPool(); pool != nil {

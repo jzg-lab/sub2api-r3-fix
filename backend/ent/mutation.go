@@ -22200,6 +22200,7 @@ type GroupMutation struct {
 	adddefault_validity_days                *int
 	allow_image_generation                  *bool
 	allow_batch_image_generation            *bool
+	image_count_billing                     *bool
 	image_rate_independent                  *bool
 	image_rate_multiplier                   *float64
 	addimage_rate_multiplier                *float64
@@ -23383,6 +23384,42 @@ func (m *GroupMutation) OldAllowBatchImageGeneration(ctx context.Context) (v boo
 // ResetAllowBatchImageGeneration resets all changes to the "allow_batch_image_generation" field.
 func (m *GroupMutation) ResetAllowBatchImageGeneration() {
 	m.allow_batch_image_generation = nil
+}
+
+// SetImageCountBilling sets the "image_count_billing" field.
+func (m *GroupMutation) SetImageCountBilling(b bool) {
+	m.image_count_billing = &b
+}
+
+// ImageCountBilling returns the value of the "image_count_billing" field in the mutation.
+func (m *GroupMutation) ImageCountBilling() (r bool, exists bool) {
+	v := m.image_count_billing
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldImageCountBilling returns the old "image_count_billing" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldImageCountBilling(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldImageCountBilling is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldImageCountBilling requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldImageCountBilling: %w", err)
+	}
+	return oldValue.ImageCountBilling, nil
+}
+
+// ResetImageCountBilling resets all changes to the "image_count_billing" field.
+func (m *GroupMutation) ResetImageCountBilling() {
+	m.image_count_billing = nil
 }
 
 // SetImageRateIndependent sets the "image_rate_independent" field.
@@ -26086,7 +26123,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 68)
+	fields := make([]string, 0, 69)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26152,6 +26189,9 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.allow_batch_image_generation != nil {
 		fields = append(fields, group.FieldAllowBatchImageGeneration)
+	}
+	if m.image_count_billing != nil {
+		fields = append(fields, group.FieldImageCountBilling)
 	}
 	if m.image_rate_independent != nil {
 		fields = append(fields, group.FieldImageRateIndependent)
@@ -26343,6 +26383,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.AllowImageGeneration()
 	case group.FieldAllowBatchImageGeneration:
 		return m.AllowBatchImageGeneration()
+	case group.FieldImageCountBilling:
+		return m.ImageCountBilling()
 	case group.FieldImageRateIndependent:
 		return m.ImageRateIndependent()
 	case group.FieldImageRateMultiplier:
@@ -26488,6 +26530,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldAllowImageGeneration(ctx)
 	case group.FieldAllowBatchImageGeneration:
 		return m.OldAllowBatchImageGeneration(ctx)
+	case group.FieldImageCountBilling:
+		return m.OldImageCountBilling(ctx)
 	case group.FieldImageRateIndependent:
 		return m.OldImageRateIndependent(ctx)
 	case group.FieldImageRateMultiplier:
@@ -26742,6 +26786,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAllowBatchImageGeneration(v)
+		return nil
+	case group.FieldImageCountBilling:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetImageCountBilling(v)
 		return nil
 	case group.FieldImageRateIndependent:
 		v, ok := value.(bool)
@@ -27641,6 +27692,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldAllowBatchImageGeneration:
 		m.ResetAllowBatchImageGeneration()
+		return nil
+	case group.FieldImageCountBilling:
+		m.ResetImageCountBilling()
 		return nil
 	case group.FieldImageRateIndependent:
 		m.ResetImageRateIndependent()
@@ -37652,36 +37706,36 @@ func (m *PromoCodeUsageMutation) ResetEdge(name string) error {
 // ProxyMutation represents an operation that mutates the Proxy nodes in the graph.
 type ProxyMutation struct {
 	config
-	op                       Op
-	typ                      string
-	id                       *int64
-	created_at               *time.Time
-	updated_at               *time.Time
-	deleted_at               *time.Time
-	name                     *string
-	protocol                 *string
-	host                     *string
-	port                     *int
-	addport                  *int
-	username                 *string
-	password                 *string
-	status                   *string
-	expires_at               *time.Time
-	fallback_mode            *string
-	expiry_warn_days         *int
-	addexpiry_warn_days      *int
-	clearedFields            map[string]struct{}
-	accounts                 map[int64]struct{}
-	removedaccounts          map[int64]struct{}
-	clearedaccounts          bool
-	backup_proxy             *int64
-	clearedbackup_proxy      bool
-	backup_dependents        map[int64]struct{}
-	removedbackup_dependents map[int64]struct{}
-	clearedbackup_dependents bool
-	done                     bool
-	oldValue                 func(context.Context) (*Proxy, error)
-	predicates               []predicate.Proxy
+	op                     Op
+	typ                    string
+	id                     *int64
+	created_at             *time.Time
+	updated_at             *time.Time
+	deleted_at             *time.Time
+	name                   *string
+	protocol               *string
+	host                   *string
+	port                   *int
+	addport                *int
+	username               *string
+	password               *string
+	status                 *string
+	expires_at             *time.Time
+	fallback_mode          *string
+	expiry_warn_days       *int
+	addexpiry_warn_days    *int
+	clearedFields          map[string]struct{}
+	accounts               map[int64]struct{}
+	removedaccounts        map[int64]struct{}
+	clearedaccounts        bool
+	primary_proxies        map[int64]struct{}
+	removedprimary_proxies map[int64]struct{}
+	clearedprimary_proxies bool
+	backup_proxy           *int64
+	clearedbackup_proxy    bool
+	done                   bool
+	oldValue               func(context.Context) (*Proxy, error)
+	predicates             []predicate.Proxy
 }
 
 var _ ent.Mutation = (*ProxyMutation)(nil)
@@ -38445,6 +38499,60 @@ func (m *ProxyMutation) ResetAccounts() {
 	m.removedaccounts = nil
 }
 
+// AddPrimaryProxyIDs adds the "primary_proxies" edge to the Proxy entity by ids.
+func (m *ProxyMutation) AddPrimaryProxyIDs(ids ...int64) {
+	if m.primary_proxies == nil {
+		m.primary_proxies = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.primary_proxies[ids[i]] = struct{}{}
+	}
+}
+
+// ClearPrimaryProxies clears the "primary_proxies" edge to the Proxy entity.
+func (m *ProxyMutation) ClearPrimaryProxies() {
+	m.clearedprimary_proxies = true
+}
+
+// PrimaryProxiesCleared reports if the "primary_proxies" edge to the Proxy entity was cleared.
+func (m *ProxyMutation) PrimaryProxiesCleared() bool {
+	return m.clearedprimary_proxies
+}
+
+// RemovePrimaryProxyIDs removes the "primary_proxies" edge to the Proxy entity by IDs.
+func (m *ProxyMutation) RemovePrimaryProxyIDs(ids ...int64) {
+	if m.removedprimary_proxies == nil {
+		m.removedprimary_proxies = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.primary_proxies, ids[i])
+		m.removedprimary_proxies[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedPrimaryProxies returns the removed IDs of the "primary_proxies" edge to the Proxy entity.
+func (m *ProxyMutation) RemovedPrimaryProxiesIDs() (ids []int64) {
+	for id := range m.removedprimary_proxies {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// PrimaryProxiesIDs returns the "primary_proxies" edge IDs in the mutation.
+func (m *ProxyMutation) PrimaryProxiesIDs() (ids []int64) {
+	for id := range m.primary_proxies {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetPrimaryProxies resets all changes to the "primary_proxies" edge.
+func (m *ProxyMutation) ResetPrimaryProxies() {
+	m.primary_proxies = nil
+	m.clearedprimary_proxies = false
+	m.removedprimary_proxies = nil
+}
+
 // ClearBackupProxy clears the "backup_proxy" edge to the Proxy entity.
 func (m *ProxyMutation) ClearBackupProxy() {
 	m.clearedbackup_proxy = true
@@ -38470,60 +38578,6 @@ func (m *ProxyMutation) BackupProxyIDs() (ids []int64) {
 func (m *ProxyMutation) ResetBackupProxy() {
 	m.backup_proxy = nil
 	m.clearedbackup_proxy = false
-}
-
-// AddBackupDependentIDs adds the "backup_dependents" edge to the Proxy entity by ids.
-func (m *ProxyMutation) AddBackupDependentIDs(ids ...int64) {
-	if m.backup_dependents == nil {
-		m.backup_dependents = make(map[int64]struct{})
-	}
-	for i := range ids {
-		m.backup_dependents[ids[i]] = struct{}{}
-	}
-}
-
-// ClearBackupDependents clears the "backup_dependents" edge to the Proxy entity.
-func (m *ProxyMutation) ClearBackupDependents() {
-	m.clearedbackup_dependents = true
-}
-
-// BackupDependentsCleared reports if the "backup_dependents" edge to the Proxy entity was cleared.
-func (m *ProxyMutation) BackupDependentsCleared() bool {
-	return m.clearedbackup_dependents
-}
-
-// RemoveBackupDependentIDs removes the "backup_dependents" edge to the Proxy entity by IDs.
-func (m *ProxyMutation) RemoveBackupDependentIDs(ids ...int64) {
-	if m.removedbackup_dependents == nil {
-		m.removedbackup_dependents = make(map[int64]struct{})
-	}
-	for i := range ids {
-		delete(m.backup_dependents, ids[i])
-		m.removedbackup_dependents[ids[i]] = struct{}{}
-	}
-}
-
-// RemovedBackupDependents returns the removed IDs of the "backup_dependents" edge to the Proxy entity.
-func (m *ProxyMutation) RemovedBackupDependentsIDs() (ids []int64) {
-	for id := range m.removedbackup_dependents {
-		ids = append(ids, id)
-	}
-	return
-}
-
-// BackupDependentsIDs returns the "backup_dependents" edge IDs in the mutation.
-func (m *ProxyMutation) BackupDependentsIDs() (ids []int64) {
-	for id := range m.backup_dependents {
-		ids = append(ids, id)
-	}
-	return
-}
-
-// ResetBackupDependents resets all changes to the "backup_dependents" edge.
-func (m *ProxyMutation) ResetBackupDependents() {
-	m.backup_dependents = nil
-	m.clearedbackup_dependents = false
-	m.removedbackup_dependents = nil
 }
 
 // Where appends a list predicates to the ProxyMutation builder.
@@ -38944,11 +38998,11 @@ func (m *ProxyMutation) AddedEdges() []string {
 	if m.accounts != nil {
 		edges = append(edges, proxy.EdgeAccounts)
 	}
+	if m.primary_proxies != nil {
+		edges = append(edges, proxy.EdgePrimaryProxies)
+	}
 	if m.backup_proxy != nil {
 		edges = append(edges, proxy.EdgeBackupProxy)
-	}
-	if m.backup_dependents != nil {
-		edges = append(edges, proxy.EdgeBackupDependents)
 	}
 	return edges
 }
@@ -38963,16 +39017,16 @@ func (m *ProxyMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case proxy.EdgePrimaryProxies:
+		ids := make([]ent.Value, 0, len(m.primary_proxies))
+		for id := range m.primary_proxies {
+			ids = append(ids, id)
+		}
+		return ids
 	case proxy.EdgeBackupProxy:
 		if id := m.backup_proxy; id != nil {
 			return []ent.Value{*id}
 		}
-	case proxy.EdgeBackupDependents:
-		ids := make([]ent.Value, 0, len(m.backup_dependents))
-		for id := range m.backup_dependents {
-			ids = append(ids, id)
-		}
-		return ids
 	}
 	return nil
 }
@@ -38983,8 +39037,8 @@ func (m *ProxyMutation) RemovedEdges() []string {
 	if m.removedaccounts != nil {
 		edges = append(edges, proxy.EdgeAccounts)
 	}
-	if m.removedbackup_dependents != nil {
-		edges = append(edges, proxy.EdgeBackupDependents)
+	if m.removedprimary_proxies != nil {
+		edges = append(edges, proxy.EdgePrimaryProxies)
 	}
 	return edges
 }
@@ -38999,9 +39053,9 @@ func (m *ProxyMutation) RemovedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
-	case proxy.EdgeBackupDependents:
-		ids := make([]ent.Value, 0, len(m.removedbackup_dependents))
-		for id := range m.removedbackup_dependents {
+	case proxy.EdgePrimaryProxies:
+		ids := make([]ent.Value, 0, len(m.removedprimary_proxies))
+		for id := range m.removedprimary_proxies {
 			ids = append(ids, id)
 		}
 		return ids
@@ -39015,11 +39069,11 @@ func (m *ProxyMutation) ClearedEdges() []string {
 	if m.clearedaccounts {
 		edges = append(edges, proxy.EdgeAccounts)
 	}
+	if m.clearedprimary_proxies {
+		edges = append(edges, proxy.EdgePrimaryProxies)
+	}
 	if m.clearedbackup_proxy {
 		edges = append(edges, proxy.EdgeBackupProxy)
-	}
-	if m.clearedbackup_dependents {
-		edges = append(edges, proxy.EdgeBackupDependents)
 	}
 	return edges
 }
@@ -39030,10 +39084,10 @@ func (m *ProxyMutation) EdgeCleared(name string) bool {
 	switch name {
 	case proxy.EdgeAccounts:
 		return m.clearedaccounts
+	case proxy.EdgePrimaryProxies:
+		return m.clearedprimary_proxies
 	case proxy.EdgeBackupProxy:
 		return m.clearedbackup_proxy
-	case proxy.EdgeBackupDependents:
-		return m.clearedbackup_dependents
 	}
 	return false
 }
@@ -39056,11 +39110,11 @@ func (m *ProxyMutation) ResetEdge(name string) error {
 	case proxy.EdgeAccounts:
 		m.ResetAccounts()
 		return nil
+	case proxy.EdgePrimaryProxies:
+		m.ResetPrimaryProxies()
+		return nil
 	case proxy.EdgeBackupProxy:
 		m.ResetBackupProxy()
-		return nil
-	case proxy.EdgeBackupDependents:
-		m.ResetBackupDependents()
 		return nil
 	}
 	return fmt.Errorf("unknown Proxy edge %s", name)

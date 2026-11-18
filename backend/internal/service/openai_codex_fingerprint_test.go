@@ -29,8 +29,6 @@ func newTestOAuthAccount(id int64, extra map[string]any) *Account {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra:    extra,
-		ProxyID:  openAITransportTestProxyID(),
-		Proxy:    openAITransportTestProxy(),
 	}
 }
 
@@ -66,134 +64,24 @@ func TestGetCodexFingerprintMode(t *testing.T) {
 	}{
 		{"nil 账号", nil, codexFingerprintOff},
 		{"非 OAuth 账号", &Account{Platform: PlatformOpenAI, Type: "api_key"}, codexFingerprintOff},
-		// 本生产基线与上游 main 的差异：上游 #5610 改为缺省 off（显式 opt-in），
-		// 本基线一直以 session 为缺省并按此运行，保持现状（machine 移植只新增选项）。
-		{"OpenAI setup token 显式 session", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken, Extra: map[string]any{codexFingerprintModeExtraKey: "session"}}, codexFingerprintSession},
-		{"OpenAI setup token 缺省 off", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}, codexFingerprintOff},
+		{"OpenAI setup token", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken, Extra: map[string]any{codexFingerprintModeExtraKey: "session"}}, codexFingerprintSession},
 		{"Anthropic setup token", &Account{Platform: PlatformAnthropic, Type: AccountTypeSetupToken, Extra: map[string]any{codexFingerprintModeExtraKey: "session"}}, codexFingerprintOff},
-		{"无 extra 默认 machine", newTestOAuthAccount(1, nil), codexFingerprintMachine},
-		{"空值默认 machine", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: ""}), codexFingerprintMachine},
-		{"非法值默认 machine", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "invalid"}), codexFingerprintMachine},
+		// 收敛是显式 opt-in：缺省/空/非法一律 off（#5610）。存量账号普遍没有这个
+		// extra 键，升级不得把它们静默切进收敛。
+		{"无 extra 默认 off", newTestOAuthAccount(1, nil), codexFingerprintOff},
+		{"空值默认 off", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: ""}), codexFingerprintOff},
+		{"非法值默认 off", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "invalid"}), codexFingerprintOff},
 		{"显式 off", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "off"}), codexFingerprintOff},
 		{"device", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "device"}), codexFingerprintDevice},
 		{"session", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"}), codexFingerprintSession},
 		{"full", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "full"}), codexFingerprintFull},
-		{"machine", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "machine"}), codexFingerprintMachine},
+		{"removed machine mode", newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "machine"}), codexFingerprintOff},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.account.GetCodexFingerprintMode())
 		})
 	}
-}
-
-// --- Normalize（创建/更新边界的缺省显式化 + seed 铸造）---
-
-func TestNormalizeOpenAICodexFingerprintExtraForCreate(t *testing.T) {
-	tests := []struct {
-		name     string
-		account  *Account
-		expected codexFingerprintMode
-	}{
-		{
-			name:     "missing defaults to machine",
-			account:  newTestOAuthAccount(1, nil),
-			expected: codexFingerprintMachine,
-		},
-		{
-			name:     "explicit off is preserved",
-			account:  newTestOAuthAccount(2, map[string]any{codexFingerprintModeExtraKey: "off"}),
-			expected: codexFingerprintOff,
-		},
-		{
-			name:     "explicit device is preserved",
-			account:  newTestOAuthAccount(3, map[string]any{codexFingerprintModeExtraKey: "device"}),
-			expected: codexFingerprintDevice,
-		},
-		{
-			name:     "explicit full is preserved",
-			account:  newTestOAuthAccount(4, map[string]any{codexFingerprintModeExtraKey: "full"}),
-			expected: codexFingerprintFull,
-		},
-		{
-			name:     "explicit machine is preserved",
-			account:  newTestOAuthAccount(6, map[string]any{codexFingerprintModeExtraKey: "machine"}),
-			expected: codexFingerprintMachine,
-		},
-		{
-			name:     "invalid value normalizes to machine",
-			account:  newTestOAuthAccount(5, map[string]any{codexFingerprintModeExtraKey: "invalid"}),
-			expected: codexFingerprintMachine,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			NormalizeOpenAICodexFingerprintExtraForCreate(tt.account)
-			assert.Equal(t, tt.expected, tt.account.GetCodexFingerprintMode())
-			assert.NotNil(t, tt.account.Extra[codexFingerprintModeExtraKey])
-			// machine 移植扩展：需要 seed 的模式在创建边界同时铸造系统管理 seed。
-			if tt.expected == codexFingerprintOff {
-				assert.Empty(t, tt.account.Extra[codexFingerprintSeedExtraKey], "off 不需要 seed")
-			} else {
-				seed, ok := codexFingerprintSeed(tt.account.Extra)
-				assert.True(t, ok, "非 off 模式创建边界应铸造合法 seed")
-				assert.NotEqual(t, "00000000-0000-0000-0000-000000000000", seed)
-			}
-		})
-	}
-}
-
-func TestNormalizeOpenAICodexFingerprintExtraForUpdatePreservesExistingMode(t *testing.T) {
-	tests := []struct {
-		name     string
-		previous codexFingerprintMode
-		expected codexFingerprintMode
-	}{
-		{name: "off", previous: codexFingerprintOff, expected: codexFingerprintOff},
-		{name: "device", previous: codexFingerprintDevice, expected: codexFingerprintDevice},
-		{name: "session", previous: codexFingerprintSession, expected: codexFingerprintSession},
-		{name: "full", previous: codexFingerprintFull, expected: codexFingerprintFull},
-		{name: "machine", previous: codexFingerprintMachine, expected: codexFingerprintMachine},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			account := newTestOAuthAccount(10, map[string]any{
-				codexFingerprintModeExtraKey: string(tt.previous),
-			})
-			updated := normalizeOpenAICodexFingerprintExtraForUpdate(
-				account,
-				map[string]any{"unrelated": true},
-				true,
-				tt.previous,
-			)
-			assert.Equal(t, string(tt.expected), updated[codexFingerprintModeExtraKey])
-			assert.Equal(t, true, updated["unrelated"])
-		})
-	}
-}
-
-func TestNormalizeOpenAICodexFingerprintExtraForUpdateNewOAuthDefaultsToMachine(t *testing.T) {
-	account := newTestOAuthAccount(11, nil)
-	updated := normalizeOpenAICodexFingerprintExtraForUpdate(
-		account,
-		map[string]any{},
-		false,
-		codexFingerprintOff,
-	)
-	assert.Equal(t, string(codexFingerprintMachine), updated[codexFingerprintModeExtraKey])
-}
-
-func TestNormalizeOpenAICodexFingerprintExtraForUpdateInvalidValueDefaultsToMachine(t *testing.T) {
-	account := newTestOAuthAccount(12, nil)
-	updated := normalizeOpenAICodexFingerprintExtraForUpdate(
-		account,
-		map[string]any{codexFingerprintModeExtraKey: "invalid"},
-		false,
-		codexFingerprintOff,
-	)
-	assert.Equal(t, string(codexFingerprintMachine), updated[codexFingerprintModeExtraKey])
 }
 
 // --- resolveConvergedInstallationID ---
@@ -244,23 +132,11 @@ func TestResolveCodexFingerprintIDsFromRequest_ExplicitOff(t *testing.T) {
 	assert.Nil(t, ids, "显式 off 模式应返回 nil")
 }
 
-// 本基线缺省模式为 machine（与上游 #5610 的缺省 off 不同），但 seed 化收敛
-// 要求系统管理 seed 存在（需求 #5）：无 seed ⇒ 等价 off，宁可降级也不伪造身份根。
-func TestResolveCodexFingerprintIDsFromRequest_DefaultMachineRequiresSeed(t *testing.T) {
-	// 缺省 machine 且无 seed：resolve 返回 nil（等价 off）。
+// 未显式配置的存量账号不得被收敛（#5610）：默认返回 nil，出站身份保持
+// v0.1.175 之前的客户端原值。
+func TestResolveCodexFingerprintIDsFromRequest_DefaultIsOff(t *testing.T) {
 	account := newTestOAuthAccount(1, nil)
-	assert.Nil(t, resolveCodexFingerprintIDsFromRequest(account, nil), "无 seed 时缺省 machine 等价 off")
-
-	// 缺省 machine 且 seed 合法（迁移 222 回填后的存量形态）：resolve 生效。
-	backfilled := &Account{
-		ID:       2,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-		Extra:    map[string]any{codexFingerprintSeedExtraKey: testCodexFingerprintSeed},
-	}
-	ids := resolveCodexFingerprintIDsFromRequest(backfilled, nil)
-	require.NotNil(t, ids, "回填 seed 后缺省 machine 应生效")
-	assert.Equal(t, codexFingerprintMachine, ids.mode)
+	assert.Nil(t, resolveCodexFingerprintIDsFromRequest(account, nil), "无 extra 应视为 off")
 }
 
 // 管理员显式 opt-in 的账号行为不变。
@@ -927,6 +803,7 @@ func TestApplyCodexFingerprintClientMetadataRaw_Noop(t *testing.T) {
 
 func newFingerprintStageTestContext(t *testing.T) *gin.Context {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	return c
@@ -997,7 +874,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_AppliesStagedFingerprint(t *testi
 	c.Request.Header.Set("originator", "codex_cli_rs")
 	c.Request.Header.Set("x-codex-turn-metadata", `{"installation_id":"real-install","session_id":"real-session","sandbox":"seatbelt"}`)
 
-	// 复刻 forwardOpenAIPassthrough 的解析+暂存 seam（默认 machine 模式）
+	// 复刻 forwardOpenAIPassthrough 的解析+暂存 seam（默认 session 模式）
 	ids := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
 	require.NotNil(t, ids)
 	stageCodexFingerprintIDs(c, ids)
@@ -1013,7 +890,7 @@ func TestBuildUpstreamRequestOpenAIPassthrough_AppliesStagedFingerprint(t *testi
 	turnMetadata := req.Header.Get("x-codex-turn-metadata")
 	require.NotEmpty(t, turnMetadata)
 	assert.Contains(t, turnMetadata, ids.sessionID, "turn-metadata JSON 中的 session_id 应被收敛")
-	assert.NotContains(t, turnMetadata, `"sandbox"`, "downstream environment must not become the upstream account environment")
+	assert.Contains(t, turnMetadata, `"sandbox":"seatbelt"`, "turn-metadata 未指定字段应原样保留")
 }
 
 func TestBuildUpstreamRequestOpenAIPassthrough_OffModeKeepsIsolatedSession(t *testing.T) {

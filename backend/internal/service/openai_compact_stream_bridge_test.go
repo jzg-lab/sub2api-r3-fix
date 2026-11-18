@@ -16,6 +16,7 @@ import (
 
 func newCompactBridgeTestContext(t *testing.T, markClientStream bool) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
@@ -72,6 +73,8 @@ func TestBuildOpenAICompactSSEPayload_EmitsItemsAndCompleted(t *testing.T) {
 	require.Equal(t, "response.output_item.done", events[0][0])
 	first := events[0][1]
 	require.Equal(t, "response.output_item.done", gjson.Get(first, "type").String())
+	require.True(t, gjson.Get(first, "sequence_number").Exists(), "compact 合成帧必须带 sequence_number")
+	require.Equal(t, int64(0), gjson.Get(first, "sequence_number").Int())
 	require.Equal(t, int64(0), gjson.Get(first, "output_index").Int())
 	require.Equal(t, "compaction", gjson.Get(first, "item.type").String())
 	require.Equal(t, "cmp_1", gjson.Get(first, "item.id").String())
@@ -80,12 +83,14 @@ func TestBuildOpenAICompactSSEPayload_EmitsItemsAndCompleted(t *testing.T) {
 	require.True(t, gjson.Get(first, "item.opaque.kept").Bool(), "item 原始字段必须逐字节保留")
 
 	require.Equal(t, "response.output_item.done", events[1][0])
+	require.Equal(t, int64(1), gjson.Get(events[1][1], "sequence_number").Int())
 	require.Equal(t, int64(1), gjson.Get(events[1][1], "output_index").Int())
 	require.Equal(t, "message", gjson.Get(events[1][1], "item.type").String())
 
 	require.Equal(t, "response.completed", events[2][0])
 	completed := events[2][1]
 	require.Equal(t, "response.completed", gjson.Get(completed, "type").String())
+	require.Equal(t, int64(2), gjson.Get(completed, "sequence_number").Int())
 	require.Equal(t, "resp_compact_1", gjson.Get(completed, "response.id").String())
 	require.Equal(t, int64(13), gjson.Get(completed, "response.usage.total_tokens").Int())
 	require.Len(t, gjson.Get(completed, "response.output").Array(), 2)
@@ -460,6 +465,7 @@ func TestSupplementCompactionItemFromSSE_Gating(t *testing.T) {
 	bodyText := `data: {"type":"response.output_item.done","item":{"id":"cmp_g","type":"compaction","encrypted_content":"g"}}` + "\n"
 
 	// 非 compact 路径：不补入。
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)

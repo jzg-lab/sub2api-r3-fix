@@ -128,9 +128,9 @@ func TestGetCodexRestrictionPolicy_AllowAppServerClients(t *testing.T) {
 		}}, &config.Config{})
 		require.True(t, svc.GetCodexRestrictionPolicy(context.Background()).AllowAppServerClients)
 	})
-	t.Run("缺失默认 true", func(t *testing.T) {
+	t.Run("缺失默认 false", func(t *testing.T) {
 		svc := NewSettingService(&codexPolicyMigrationRepoStub{values: map[string]string{}}, &config.Config{})
-		require.True(t, svc.GetCodexRestrictionPolicy(context.Background()).AllowAppServerClients)
+		require.False(t, svc.GetCodexRestrictionPolicy(context.Background()).AllowAppServerClients)
 	})
 	t.Run("非 true 值视为 false", func(t *testing.T) {
 		svc := NewSettingService(&codexPolicyMigrationRepoStub{values: map[string]string{

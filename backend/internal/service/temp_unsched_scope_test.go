@@ -224,9 +224,7 @@ func TestOpenAIFailoverSideEffects_401FollowsTempUnschedScope(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &tempUnschedScopeRepoStub{}
-			rateLimitService := &RateLimitService{accountRepo: repo, cfg: &config.Config{}}
-			gateway := &OpenAIGatewayService{rateLimitService: rateLimitService}
-			rateLimitService.SetAccountRuntimeBlocker(gateway)
+			gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo, cfg: &config.Config{}}}
 			account := newTempUnschedScope401Account(PlatformOpenAI, tc.scopes...)
 			if tc.poolMode {
 				account.Credentials["pool_mode"] = true
@@ -240,7 +238,7 @@ func TestOpenAIFailoverSideEffects_401FollowsTempUnschedScope(t *testing.T) {
 				body = tempUnschedScope401Body
 			}
 
-			require.True(t, gateway.shouldFailoverOpenAIUpstreamResponse(http.StatusUnauthorized, "unauthorized", body))
+			require.True(t, gateway.shouldFailoverOpenAIUpstreamResponse(account, http.StatusUnauthorized, "unauthorized", body))
 			gateway.handleFailoverSideEffects(context.Background(), &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Header:     http.Header{},

@@ -965,28 +965,7 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_fingerprint_mode).toBe('off')
   })
 
-  it('persists single-machine multi-window Codex fingerprint convergence', async () => {
-    const account = buildAccount()
-    account.type = 'oauth'
-    account.extra = {
-      codex_fingerprint_mode: 'session'
-    }
-    updateAccountMock.mockReset()
-    checkMixedChannelRiskMock.mockReset()
-    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
-    updateAccountMock.mockResolvedValue(account)
-
-    const wrapper = mountModal(account)
-    const mode = wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]')
-
-    await mode.setValue('machine')
-    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
-
-    expect(updateAccountMock).toHaveBeenCalledTimes(1)
-    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_fingerprint_mode).toBe('machine')
-  })
-
-  it('defaults legacy OpenAI OAuth accounts to single-machine multi-window fingerprinting', async () => {
+  it('defaults legacy OpenAI OAuth accounts to passthrough fingerprinting', async () => {
     const account = buildAccount()
     account.type = 'oauth'
     account.extra = {}
@@ -996,7 +975,20 @@ describe('EditAccountModal', () => {
     expect(
       (wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').element as HTMLSelectElement)
         .value
-    ).toBe('machine')
+    ).toBe('off')
+  })
+
+  it('treats the removed machine fingerprint mode as passthrough', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { codex_fingerprint_mode: 'machine' }
+
+    const wrapper = mountModal(account)
+
+    expect(
+      (wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').element as HTMLSelectElement)
+        .value
+    ).toBe('off')
   })
 
   it('shows and persists TLS fingerprint controls for OpenAI OAuth accounts', async () => {
@@ -1057,9 +1049,9 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.tls_fingerprint_profile_id).toBe(12)
   })
 
-  it('shows and persists Codex long-context billing for OpenAI OAuth accounts', async () => {
+  it('shows and persists Codex long-context billing for OpenAI API key accounts', async () => {
     const account = buildAccount()
-    account.type = 'oauth'
+    account.type = 'apikey'
     account.extra = {
       openai_long_context_billing_enabled: true
     }
@@ -1095,6 +1087,41 @@ describe('EditAccountModal', () => {
     expect(wrapper.find('[data-testid="openai-long-context-billing-toggle"]').exists()).toBe(false)
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_long_context_billing_enabled).toBe(enabled)
+  })
+
+  it('writes restricted image size tiers into extra', async () => {
+    const account = buildAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="openai-image-size-tier-1K"]').setValue(false)
+    await wrapper.get('[data-testid="openai-image-size-tier-2K"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_image_size_tiers).toEqual(['4K'])
+  })
+
+  it('removes image size tiers from extra when every tier is selected again', async () => {
+    const account = buildAccount()
+    account.extra = { openai_image_size_tiers: ['1K', '2K'] }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const tier4K = wrapper.get('[data-testid="openai-image-size-tier-4K"]')
+    expect((tier4K.element as HTMLInputElement).checked).toBe(false)
+    await tier4K.setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toBeDefined()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('openai_image_size_tiers')
   })
 
   it('hides the Codex namespace flatten toggle for non-OAuth OpenAI accounts', async () => {
@@ -1780,6 +1807,26 @@ describe('EditAccountModal', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows quota limit card for Vertex SA account and keeps quota limits on save', async () => {
+    const account = buildVertexAccount()
+    account.extra = { quota_limit: 200, quota_daily_limit: 20, quota_used: 35.5 }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    expect(wrapper.findComponent({ name: 'QuotaLimitCard' }).exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.quota_limit).toBe(200)
+    expect(extra?.quota_daily_limit).toBe(20)
+    expect(extra?.quota_weekly_limit).toBeUndefined()
   })
 
   it('blocks Vertex SA save when neither credentials_status nor legacy json indicates existence', async () => {

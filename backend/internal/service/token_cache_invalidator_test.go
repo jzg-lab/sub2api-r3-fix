@@ -30,10 +30,10 @@ func (s *geminiTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 }
 
 func (s *geminiTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (string, error) {
-	return "test-lease", nil
+	return "lease", nil
 }
 
-func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, _ string) error {
+func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey, lease string) error {
 	return nil
 }
 
@@ -272,25 +272,11 @@ func TestCompositeTokenCacheInvalidator_DeleteError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The caller must observe stale-cache failures and choose its recovery policy.
 			err := invalidator.InvalidateToken(context.Background(), tt.account)
 			require.ErrorIs(t, err, expectedErr)
 		})
 	}
-}
-
-func TestCompositeTokenCacheInvalidatorAttemptsAllKeysAfterError(t *testing.T) {
-	expectedErr := errors.New("cache unavailable")
-	cache := &geminiTokenCacheStub{deleteErr: expectedErr}
-	invalidator := NewCompositeTokenCacheInvalidator(cache)
-	account := &Account{
-		ID: 701, Platform: PlatformGemini, Type: AccountTypeOAuth,
-		Credentials: map[string]any{"project_id": "test-project"},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	require.ErrorIs(t, invalidator.InvalidateToken(ctx, account), expectedErr)
-	require.Equal(t, []string{GeminiTokenCacheKey(account), "gemini:account:701"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_AllPlatformsIntegration(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -122,6 +123,19 @@ func TestAdminService_UpdateGroup_I18n(t *testing.T) {
 		require.Nil(t, repo.updated)
 	})
 
+	// 简易模式只放行名称与描述，译文属于同一类展示文案，同样放行。
+	t.Run("simple mode keeps i18n editable", func(t *testing.T) {
+		repo := &groupRepoStubForAdmin{getByID: newExisting()}
+		svc := &adminServiceImpl{cfg: &config.Config{RunMode: config.RunModeSimple}, groupRepo: repo}
+		next := GroupI18n{"en": {Name: "Standard v2"}}
+		rate := 9.0
+
+		_, err := svc.UpdateGroup(context.Background(), 1, &UpdateGroupInput{I18n: &next, RateMultiplier: &rate})
+
+		require.NoError(t, err)
+		require.Equal(t, GroupI18n{"en": {Name: "Standard v2"}}, repo.updated.I18n)
+		require.Equal(t, 1.0, repo.updated.RateMultiplier)
+	})
 }
 
 func TestCloneGroupForDuplicate_DropsNameTranslations(t *testing.T) {

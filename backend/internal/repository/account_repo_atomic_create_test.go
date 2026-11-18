@@ -32,7 +32,7 @@ func atomicCreateAccount() *service.Account {
 		Credentials: map[string]any{
 			"auth_mode": service.OpenAIAuthModePersonalAccessToken,
 		},
-		Concurrency: 1, Extra: map[string]any{"existing": true},
+		Concurrency: 1, Extra: map[string]any{"existing": true, "codex_fingerprint_mode": "device"},
 	}
 }
 

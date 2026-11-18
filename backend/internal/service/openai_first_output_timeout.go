@@ -243,30 +243,16 @@ func (s *OpenAIGatewayService) openAIFirstOutputTimeout(reasoningEffort string) 
 	return time.Duration(seconds) * time.Second
 }
 
-func (s *OpenAIGatewayService) openAIFirstOutputTimeoutForAccount(account *Account, reasoningEffort string) time.Duration {
-	if account == nil || account.Type == AccountTypeAPIKey {
-		return s.openAIFirstOutputTimeout(reasoningEffort)
-	}
-	if s == nil || s.cfg == nil {
-		return 0
-	}
-	seconds := s.cfg.Gateway.OpenAIOAuthFirstOutputTimeoutSeconds
-	if seconds <= 0 {
-		return 0
-	}
-	switch strings.ToLower(strings.TrimSpace(reasoningEffort)) {
-	case "high", "xhigh", "max":
-		if override := s.cfg.Gateway.OpenAIOAuthHighEffortFirstOutputTimeoutSeconds; override > 0 {
-			seconds = override
-		}
-	}
-	return time.Duration(seconds) * time.Second
-}
-
+// newOpenAIFirstOutputTimeoutError records the timeout as an upstream attempt
+// and returns the failover error. proxyID/proxyName are supplied by the caller
+// because the same deadline is enforced over HTTP and WebSocket transports,
+// whose direct-route semantics differ (see opsUpstreamWSProxyAttribution).
 func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,
+	proxyID *int64,
+	proxyName string,
 	startTime time.Time,
 	originalModel string,
 	reasoningEffort string,
@@ -282,8 +268,8 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	)
 	requestID := strings.TrimSpace(responseHeaders.Get("x-request-id"))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-		ProxyID:   opsUpstreamProxyID(account),
-		ProxyName: opsUpstreamProxyName(account),
+		ProxyID:   proxyID,
+		ProxyName: proxyName,
 		Platform:  account.Platform, AccountID: account.ID, AccountName: account.Name,
 		UpstreamStatusCode: http.StatusGatewayTimeout, UpstreamRequestID: requestID,
 		Kind: "first_output_timeout", Message: "OpenAI upstream produced no semantic output before the deadline",
@@ -348,14 +334,6 @@ type openAIRequestContextReadCloser struct {
 	err     error
 }
 
-func (r *openAIRequestContextReadCloser) Close() error {
-	r.once.Do(func() {
-		r.cleanup()
-		r.err = r.ReadCloser.Close()
-	})
-	return r.err
-}
-
 // Only disconnected clients start this grace period; live requests retain their normal limits.
 const openAIUsageDrainTimeout = 180 * time.Second
 
@@ -377,10 +355,9 @@ func withUpstreamDrain(ctx, base context.Context, timeout time.Duration) (contex
 	return upstream, func() { stop(); cancel(context.Canceled) }
 }
 
-// Closing the reader also interrupts a blocked synchronous scanner.
 type openAIReadDeadline struct {
 	timer *time.Timer
-	state atomic.Int32 // 0 waiting, 1 stopped, 2 expired
+	state atomic.Int32
 }
 
 func newOpenAIReadDeadline(body io.ReadCloser, deadline time.Time) *openAIReadDeadline {
@@ -400,4 +377,12 @@ func (g *openAIReadDeadline) stop() bool {
 	g.state.CompareAndSwap(0, 1)
 	g.timer.Stop()
 	return g.state.Load() != 2
+}
+
+func (r *openAIRequestContextReadCloser) Close() error {
+	r.once.Do(func() {
+		r.cleanup()
+		r.err = r.ReadCloser.Close()
+	})
+	return r.err
 }

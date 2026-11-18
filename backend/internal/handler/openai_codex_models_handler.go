@@ -39,21 +39,37 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 	// 全部不可用/全部失败时按 FallbackToScheduler 决定回退调度器或返回错误。
 	if apiKey.Group.Platform == service.PlatformOpenAI &&
 		apiKey.Group.CodexModelsManifestConfig.Enabled {
-		manifest, account, err := h.gatewayService.FetchGroupPinnedCodexModels(c.Request.Context(), apiKey.Group, c.Query("client_version"), h.maxAccountSwitches, ifNoneMatch)
-		if c.Request.Context().Err() != nil {
-			return
-		}
-		if err != nil {
-			if errors.Is(err, service.ErrNoPinnedCodexModelsAccounts) {
-				h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available pinned OpenAI accounts")
-			} else {
-				h.errorResponse(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
+		pinnedManifest, pinnedAccount, pinnedErr := h.gatewayService.FetchPinnedCodexModelsManifest(
+			c.Request.Context(),
+			apiKey.Group,
+			c.Query("client_version"),
+		)
+		if pinnedErr != nil {
+			if c.Request.Context().Err() != nil {
+				return
 			}
+			if !apiKey.Group.CodexModelsManifestConfig.FallbackToScheduler {
+				if errors.Is(pinnedErr, service.ErrNoPinnedCodexModelsAccounts) {
+					h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available pinned OpenAI accounts")
+					return
+				}
+				h.errorResponse(c, infraerrors.Code(pinnedErr), "upstream_error", infraerrors.Message(pinnedErr))
+				return
+			}
+			// 回退开启：跌入下方调度器循环。
+		} else {
+			// 让 ops 错误日志携带实际拉取成功的首个固定账号。
+			setOpsSelectedAccount(c, pinnedAccount.ID, pinnedAccount.Platform)
+			if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, pinnedManifest, ifNoneMatch); err != nil {
+				h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+				return
+			}
+			if c.Request.Context().Err() != nil {
+				return
+			}
+			writeOpenAIModelsResponse(c, pinnedManifest)
 			return
 		}
-		setOpsSelectedAccount(c, account.ID, account.Platform)
-		writeOpenAIModelsResponse(c, manifest)
-		return
 	}
 
 	if !apiKey.Group.CodexModelsManifestConfig.Enabled {

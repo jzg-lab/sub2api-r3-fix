@@ -27,9 +27,12 @@ func ResolveProxyFallbackTarget(start Proxy, byID map[int64]Proxy, now time.Time
 			if !ok {
 				return nil, false
 			}
-			if !(&p).IsExpired(now) && p.Status != StatusExpired {
+			if p.IsActive() && !p.IsExpired(now) {
 				id := p.ID
 				return &id, true
+			}
+			if p.Status != StatusExpired && (!p.IsActive() || !p.IsExpired(now)) {
+				return nil, false
 			}
 			visited[*curID] = struct{}{}
 			switch p.FallbackMode {

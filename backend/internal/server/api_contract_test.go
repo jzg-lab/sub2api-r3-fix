@@ -230,7 +230,7 @@ func TestAPIContracts(t *testing.T) {
 					"key": "sk_custom_1234567890",
 					"name": "Key One",
 					"group_id": null,
-					"group_ids": null,
+"group_ids": null,
 					"status": "active",
 					"ip_whitelist": null,
 					"ip_blacklist": null,
@@ -282,7 +282,7 @@ func TestAPIContracts(t *testing.T) {
 							"key": "sk_custom_1234567890",
 							"name": "Key One",
 							"group_id": null,
-							"group_ids": null,
+"group_ids": null,
 							"status": "active",
 							"ip_whitelist": null,
 							"ip_blacklist": null,
@@ -380,6 +380,7 @@ func TestAPIContracts(t *testing.T) {
 						"audio_realtime_price_per_min": null,
 						"allow_image_generation": false,
 						"allow_batch_image_generation": false,
+						"image_count_billing": false,
 						"batch_image_discount_multiplier": 0,
 						"batch_image_hold_multiplier": 0,
 						"image_rate_independent": false,
@@ -611,7 +612,7 @@ func TestAPIContracts(t *testing.T) {
 						"actual_cost": 0.5,
 						"rate_multiplier": 1,
 						"reasoning_tokens": 0,
-						"long_context_billing_applied": false,
+"long_context_billing_applied": false,
 						"billing_type": 0,
 							"stream": true,
 							"duration_ms": 100,
@@ -733,6 +734,17 @@ func TestAPIContracts(t *testing.T) {
 						"session_binding_enabled": false,
 						"step_up_enabled": false,
 						"audit_log_retention_days": 180,
+						"anti_bypass_enabled": false,
+						"anti_bypass_policy": {
+							"max_client_request_attempts": 3,
+							"max_concurrent": 32,
+							"max_distinct_fingerprints": 8,
+							"max_distinct_ips": 8,
+							"max_distinct_keys": 8,
+							"replay_window_seconds": 30,
+							"rpm_limit": 120,
+							"window_seconds": 300
+						},
 						"login_agreement_enabled": false,
 						"login_agreement_mode": "modal",
 						"login_agreement_updated_at": "2026-03-31",
@@ -900,9 +912,6 @@ func TestAPIContracts(t *testing.T) {
 						"table_page_size_options": [10, 20, 50, 100],
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
-					"claude_code_client_version": "",
-					"claude_code_client_version_synced": "",
-					"claude_code_version_auto_sync_enabled": true,
 					"min_codex_version": "",
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
@@ -959,6 +968,9 @@ func TestAPIContracts(t *testing.T) {
 					"openai_codex_client_version":       "",
 					"openai_codex_client_version_synced": "",
 					"openai_codex_version_auto_sync_enabled": true,
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"openai_fast_policy_settings": {
 						"rules": []
 					},
@@ -1001,8 +1013,10 @@ func TestAPIContracts(t *testing.T) {
 					"channel_monitor_mode": "v1",
 					"channel_monitor_hide_throughput": true,
 					"channel_monitor_show_quota": false,
+					"channel_monitor_hide_user_ranking": false,
 					"channel_monitor_default_interval_seconds": 60,
 					"available_channels_enabled": false,
+					"subscription_enabled": true,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
 					"model_plaza_description": "",
@@ -1028,13 +1042,7 @@ func TestAPIContracts(t *testing.T) {
 					"wechat_connect_redirect_url": "",
 					"wechat_connect_frontend_redirect_url": "/auth/wechat/callback",
 					"wechat_connect_scopes": "snsapi_login",
-					"allow_user_view_error_requests": false,
-					"anti_bypass_enabled": false,
-                    "anti_bypass_policy": {
-                        "window_seconds": 300, "replay_window_seconds": 30,
-                        "rpm_limit": 120, "max_concurrent": 32, "max_distinct_keys": 8,
-                        "max_distinct_ips": 8, "max_distinct_fingerprints": 8, "max_client_request_attempts": 3
-                    }
+					"allow_user_view_error_requests": false
 				}
 			}`,
 		},
@@ -1096,6 +1104,17 @@ func TestAPIContracts(t *testing.T) {
 						"session_binding_enabled": false,
 						"step_up_enabled": false,
 						"audit_log_retention_days": 180,
+						"anti_bypass_enabled": false,
+						"anti_bypass_policy": {
+							"max_client_request_attempts": 3,
+							"max_concurrent": 32,
+							"max_distinct_fingerprints": 8,
+							"max_distinct_ips": 8,
+							"max_distinct_keys": 8,
+							"replay_window_seconds": 30,
+							"rpm_limit": 120,
+							"window_seconds": 300
+						},
 						"login_agreement_enabled": false,
 						"login_agreement_mode": "modal",
 						"login_agreement_updated_at": "2026-03-31",
@@ -1228,9 +1247,6 @@ func TestAPIContracts(t *testing.T) {
 					"ops_metrics_interval_seconds": 60,
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
-					"claude_code_client_version": "",
-					"claude_code_client_version_synced": "",
-					"claude_code_version_auto_sync_enabled": true,
 					"allow_ungrouped_key_scheduling": false,
 					"backend_mode_enabled": false,
 					"enable_fingerprint_unification": true,
@@ -1287,6 +1303,9 @@ func TestAPIContracts(t *testing.T) {
 					"openai_codex_client_version":       "",
 					"openai_codex_client_version_synced": "",
 					"openai_codex_version_auto_sync_enabled": true,
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"openai_fast_policy_settings": {
 						"rules": []
 					},
@@ -1327,8 +1346,10 @@ func TestAPIContracts(t *testing.T) {
 					"channel_monitor_mode": "v1",
 					"channel_monitor_hide_throughput": true,
 					"channel_monitor_show_quota": false,
+					"channel_monitor_hide_user_ranking": false,
 					"channel_monitor_default_interval_seconds": 60,
 					"available_channels_enabled": false,
+					"subscription_enabled": true,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
 					"model_plaza_description": "",
@@ -1390,13 +1411,7 @@ func TestAPIContracts(t *testing.T) {
 					"auth_source_default_dingtalk_grant_on_signup": false,
 					"auth_source_default_dingtalk_grant_on_first_bind": false,
 					"force_email_on_third_party_signup": false,
-					"allow_user_view_error_requests": false,
-					"anti_bypass_enabled": false,
-                    "anti_bypass_policy": {
-                        "window_seconds": 300, "replay_window_seconds": 30,
-                        "rpm_limit": 120, "max_concurrent": 32, "max_distinct_keys": 8,
-                        "max_distinct_ips": 8, "max_distinct_fingerprints": 8, "max_client_request_attempts": 3
-                    }
+					"allow_user_view_error_requests": false
 				}
 			}`,
 		},
@@ -1505,7 +1520,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 	settingRepo := newStubSettingRepo()
 	settingService := service.NewSettingService(settingRepo, cfg)
 
-	adminService := service.NewAdminService(userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	adminService := service.NewAdminService(nil, userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	authHandler := handler.NewAuthHandler(cfg, nil, userService, settingService, nil, redeemService, nil, nil)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, nil, nil)
@@ -1818,6 +1833,10 @@ func (stubGroupRepo) DeleteCascade(ctx context.Context, id int64) ([]int64, erro
 	return nil, errors.New("not implemented")
 }
 
+func (stubGroupRepo) DeleteCascadeIfEmpty(ctx context.Context, id int64) ([]int64, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (stubGroupRepo) List(ctx context.Context, params pagination.PaginationParams) ([]service.Group, *pagination.PaginationResult, error) {
 	return nil, nil, errors.New("not implemented")
 }
@@ -1915,7 +1934,7 @@ func (s *stubAccountRepo) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
-	concurrency *int,
+	concurrency ...*int,
 ) error {
 	return errors.New("not implemented")
 }
@@ -2971,7 +2990,7 @@ var (
 	_ service.UserRepository             = (*stubUserRepo)(nil)
 	_ service.APIKeyRepository           = (*stubApiKeyRepo)(nil)
 	_ service.APIKeyCache                = (*stubApiKeyCache)(nil)
-	_ service.GroupRepository            = (*stubGroupRepo)(nil)
+	_ service.AdminGroupRepository       = (*stubGroupRepo)(nil)
 	_ service.UserSubscriptionRepository = (*stubUserSubscriptionRepo)(nil)
 	_ service.UsageLogRepository         = (*stubUsageLogRepo)(nil)
 	_ service.SettingRepository          = (*stubSettingRepo)(nil)

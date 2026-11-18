@@ -115,7 +115,10 @@ export default {
     notEnabledTitle: '该功能未开启',
     notEnabledDesc: '管理员暂未开启充值/订阅入口，请联系管理员。',
     notConfiguredTitle: '充值/订阅链接未配置',
-    notConfiguredDesc: '管理员已开启入口，但尚未配置充值/订阅链接，请联系管理员。'
+    notConfiguredDesc: '管理员已开启入口，但尚未配置充值/订阅链接，请联系管理员。',
+rechargeDescription: '通过内嵌页面完成充值',
+subscriptionDescription: '通过内嵌页面完成订阅',
+
   },
 
   // Custom Page (iframe embed)
@@ -701,6 +704,8 @@ export default {
         revoked: '已撤销',
       },
     },
+billingUnavailable: '充值与订阅均暂未开放，请联系管理员。',
+
   },
 
 }

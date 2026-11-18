@@ -41,11 +41,11 @@ func TestAstraAccountLongContextOptOutMatchesProductionBaseline(t *testing.T) {
 	}
 }
 
-func TestAstraOAuthMissingLongContextSettingDoesNotApplyPremium(t *testing.T) {
+func TestAstraOAuthExplicitLongContextOptOutDoesNotApplyPremium(t *testing.T) {
 	billing := NewBillingService(&config.Config{}, nil)
 	tokens := UsageTokens{InputTokens: 278598, CacheReadTokens: 3584, OutputTokens: 1273}
-	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	gate := openAILongContextBillingGate(account)
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{openAILongContextBillingEnabledKey: false}}
+	gate := openAILongContextBillingGate(account, account)
 	require.NotNil(t, gate)
 	require.False(t, *gate)
 	cost, err := billing.CalculateCostUnified(CostInput{

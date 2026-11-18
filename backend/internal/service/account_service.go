@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -11,13 +12,9 @@ import (
 )
 
 var (
-	ErrAccountNotFound           = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
-	ErrAccountNilInput           = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
-	ErrAccountNotInFallback      = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
-	ErrOAuthReauthorizationStale = infraerrors.Conflict(
-		"OAUTH_REAUTH_STALE_ACCOUNT",
-		"account changed while OAuth authorization was in progress; restart authorization",
-	)
+	ErrAccountNotFound      = infraerrors.NotFound("ACCOUNT_NOT_FOUND", "account not found")
+	ErrAccountNilInput      = infraerrors.BadRequest("ACCOUNT_NIL_INPUT", "account input cannot be nil")
+	ErrAccountNotInFallback = infraerrors.BadRequest("ACCOUNT_NOT_IN_FALLBACK", "account is not in proxy fallback state")
 )
 
 const AccountListGroupUngrouped int64 = -1
@@ -50,14 +47,6 @@ type OAuthRefreshCandidatePage struct {
 // this bounded contract instead of silently falling back to an unpaged scan.
 type OAuthRefreshCandidatePager interface {
 	ListOAuthRefreshCandidatePage(ctx context.Context, options OAuthRefreshPageOptions) (*OAuthRefreshCandidatePage, error)
-}
-
-// ModelAvailabilityCandidateRepository exposes the persistent account pool
-// used for model-support diagnosis and bounded transient-availability waits.
-// It is optional so narrow repositories and test doubles cannot accidentally
-// satisfy the contract through a nil embedded AccountRepository.
-type ModelAvailabilityCandidateRepository interface {
-	ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error)
 }
 
 type AccountRepository interface {
@@ -104,6 +93,13 @@ type AccountRepository interface {
 	ListSchedulableByGroupIDAndPlatforms(ctx context.Context, groupID int64, platforms []string) ([]Account, error)
 	ListSchedulableUngroupedByPlatform(ctx context.Context, platform string) ([]Account, error)
 	ListSchedulableUngroupedByPlatforms(ctx context.Context, platforms []string) ([]Account, error)
+	// ListModelAvailabilityCandidates returns accounts that are enabled by
+	// persistent configuration (active + schedulable) for model-support
+	// diagnosis. It deliberately does not filter transient runtime state such
+	// as rate-limit, overload, temporary-unschedulable, or expiry windows.
+	// When groupID is nil, includeGrouped controls whether the query scans all
+	// matching accounts or only accounts without a group binding.
+	ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error)
 
 	SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error
 	SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error
@@ -132,29 +128,8 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
-// OAuthReauthorizationRepository owns the single-transaction credential
-// replacement path used after an interactive OAuth flow.
-type OAuthReauthorizationRepository interface {
-	ApplyOAuthCredentials(
-		ctx context.Context,
-		id int64,
-		expectedUpdatedAt time.Time,
-		accountType string,
-		credentials map[string]any,
-		extra map[string]any,
-	) (*Account, error)
-}
-
-// OAuthReauthorizationService is intentionally narrower than AdminService.
-// Keeping this capability separate avoids forcing every lightweight admin
-// service test double to implement the interactive OAuth persistence path.
-type OAuthReauthorizationService interface {
-	ApplyOAuthCredentials(
-		ctx context.Context,
-		id int64,
-		expectedUpdatedAt time.Time,
-		input *ApplyOAuthCredentialsInput,
-	) (*Account, error)
+type ModelAvailabilityCandidateRepository interface {
+	ListModelAvailabilityCandidates(ctx context.Context, groupID *int64, platforms []string, includeGrouped bool) ([]Account, error)
 }
 
 type AccountDuplicateRepository interface {
@@ -163,10 +138,9 @@ type AccountDuplicateRepository interface {
 	CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error
 }
 
-// AccountBillingSettingsRepository preserves current scheduling during edits and
-// applies an admin edit without overwriting a
+// AccountBillingSettingsRepository applies an admin edit without overwriting a
 // rate_multiplier that a successful upstream probe synchronized after the edit
-// form was loaded. Nil rateMultiplier/concurrency preserve the persisted values.
+// form was loaded. A nil rateMultiplier means the request did not edit it.
 type AccountBillingSettingsRepository interface {
 	UpdateWithAccountBillingSettings(
 		ctx context.Context,
@@ -174,7 +148,7 @@ type AccountBillingSettingsRepository interface {
 		probeEnabled *bool,
 		rateSyncEnabled *bool,
 		rateMultiplier *float64,
-		concurrency *int,
+		concurrency ...*int,
 	) error
 }
 
@@ -261,19 +235,20 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := validateAccountConcurrency(req.Concurrency, true); err != nil {
 		return nil, err
 	}
-	if req.Platform == PlatformOpenAI {
-		settings, err := s.settings.GetOpenAIOperationsSettings(ctx)
-		if err != nil {
-			return nil, err
-		}
-		defaulted := applyOpenAINewAccountDefaults(&CreateAccountInput{
-			Platform: req.Platform, Type: req.Type, Credentials: req.Credentials,
-			ProxyID: req.ProxyID, Extra: req.Extra, Concurrency: req.Concurrency,
-		}, settings.NewAccountDefaults)
-		req.ProxyID, req.Extra, req.Concurrency = defaulted.ProxyID, defaulted.Extra, defaulted.Concurrency
-	}
 	if req.Platform == PlatformTypeSafe && req.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
+	}
+	authMode, _ := req.Credentials["auth_mode"].(string)
+	if req.Platform == PlatformOpenAI && s.settings != nil && req.ProxyID == nil &&
+		(req.Type != AccountTypeOAuth || strings.TrimSpace(authMode) != "") {
+		settings, err := s.settings.GetOpenAIOperationsSettings(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load OpenAI account defaults: %w", err)
+		}
+		if defaults := settings.NewAccountDefaults; defaults != nil && defaults.ProxyID != nil && *defaults.ProxyID > 0 {
+			proxyID := *defaults.ProxyID
+			req.ProxyID = &proxyID
+		}
 	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
@@ -294,12 +269,8 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Concurrency: NormalizeAccountConcurrency(req.Concurrency),
 		Priority:    req.Priority,
 		Status:      StatusActive,
+		Schedulable: true,
 		ExpiresAt:   req.ExpiresAt,
-	}
-	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
-		account.Schedulable = true
-		delete(account.Extra, openAIDowngradeQualificationExtraKey)
-		delete(account.Extra, OpenAIOAuthQualifiedProxyExtraKey)
 	}
 	if req.AutoPauseOnExpired != nil {
 		account.AutoPauseOnExpired = *req.AutoPauseOnExpired
@@ -612,4 +583,13 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		}
 		return fmt.Errorf("unsupported platform: %s", account.Platform)
 	}
+}
+
+type OAuthReauthorizationService interface {
+	ApplyOAuthCredentials(
+		ctx context.Context,
+		id int64,
+		expectedUpdatedAt time.Time,
+		input *ApplyOAuthCredentialsInput,
+	) (*Account, error)
 }

@@ -16,7 +16,7 @@ func TestAccountRepoSparkShadowRoundTrip(t *testing.T) {
 
 	parent := &service.Account{
 		Name:        "parent",
-		Credentials: map[string]any{"email": "parent@example.com"},
+		Credentials: map[string]any{"email": "parent@example.test"},
 		Platform:    service.PlatformOpenAI,
 		Type:        service.AccountTypeOAuth,
 		Status:      service.StatusActive,
@@ -27,6 +27,7 @@ func TestAccountRepoSparkShadowRoundTrip(t *testing.T) {
 	pid := parent.ID
 	shadow := &service.Account{
 		Name:            "shadow",
+		Credentials:     map[string]any{"email": "shadow@example.test"},
 		Platform:        service.PlatformOpenAI,
 		Type:            service.AccountTypeOAuth,
 		Status:          service.StatusActive,
@@ -60,7 +61,7 @@ func TestListShadowsByParent(t *testing.T) {
 	// Create parent1 and its spark shadow
 	parent1 := &service.Account{
 		Name:        "list-parent1",
-		Credentials: map[string]any{"email": "list-parent1@example.com"},
+		Credentials: map[string]any{"email": "list-parent1@example.test"},
 		Platform:    service.PlatformOpenAI,
 		Type:        service.AccountTypeOAuth,
 		Status:      service.StatusActive,
@@ -72,6 +73,7 @@ func TestListShadowsByParent(t *testing.T) {
 
 	shadow1 := &service.Account{
 		Name:            "shadow1",
+		Credentials:     map[string]any{"email": "shadow1@example.test"},
 		Platform:        service.PlatformOpenAI,
 		Type:            service.AccountTypeOAuth,
 		Status:          service.StatusActive,
@@ -85,7 +87,7 @@ func TestListShadowsByParent(t *testing.T) {
 	// Create parent2 and its spark shadow (must NOT appear in parent1's list)
 	parent2 := &service.Account{
 		Name:        "list-parent2",
-		Credentials: map[string]any{"email": "list-parent2@example.com"},
+		Credentials: map[string]any{"email": "list-parent2@example.test"},
 		Platform:    service.PlatformOpenAI,
 		Type:        service.AccountTypeOAuth,
 		Status:      service.StatusActive,
@@ -97,6 +99,7 @@ func TestListShadowsByParent(t *testing.T) {
 
 	shadow2 := &service.Account{
 		Name:            "shadow2",
+		Credentials:     map[string]any{"email": "shadow2@example.test"},
 		Platform:        service.PlatformOpenAI,
 		Type:            service.AccountTypeOAuth,
 		Status:          service.StatusActive,
@@ -110,7 +113,7 @@ func TestListShadowsByParent(t *testing.T) {
 	// Create 1 unrelated normal account (no parent, global dimension)
 	unrelated := &service.Account{
 		Name:        "unrelated",
-		Credentials: map[string]any{"email": "unrelated@example.com"},
+		Credentials: map[string]any{"email": "unrelated@example.test"},
 		Platform:    service.PlatformOpenAI,
 		Type:        service.AccountTypeOAuth,
 		Status:      service.StatusActive,

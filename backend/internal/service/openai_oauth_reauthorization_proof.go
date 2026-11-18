@@ -85,6 +85,9 @@ func (s *OpenAIOAuthService) issueReauthorizationProof(
 	proof.ReauthorizationBrowserSessionID = session.ID
 	proof.CreatedAt = time.Now().UTC()
 	proof.ReauthorizationCredentialsHash = hash
+	if s.sessionStore == nil {
+		return ErrOpenAIOAuthReauthorizationProofRequired
+	}
 	if err := s.sessionStore.Create(ctx, &proof); err != nil {
 		return err
 	}

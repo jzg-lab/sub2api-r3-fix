@@ -133,7 +133,7 @@ func TestValidatePlanPatch_NilOriginalPrice(t *testing.T) {
 
 func ptrStr(s string) *string            { return &s }
 func ptrInt(i int) *int                  { return &i }
-func paymentPlanPtrInt64(i int64) *int64 { return &i }
+func paymentPlanInt64Ptr(i int64) *int64 { return &i }
 func ptrFloat(f float64) *float64        { return &f }
 
 func TestValidatePlanPatch_EmptyName(t *testing.T) {
@@ -148,7 +148,7 @@ func TestValidatePlanPatch_ValidName(t *testing.T) {
 }
 
 func TestValidatePlanPatch_ZeroGroupID(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{GroupID: paymentPlanPtrInt64(0)})
+	err := validatePlanPatch(UpdatePlanRequest{GroupID: paymentPlanInt64Ptr(0)})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "group")
 }

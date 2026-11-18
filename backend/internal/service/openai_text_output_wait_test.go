@@ -331,11 +331,11 @@ func TestDeterministicUpstreamErrorsSkipSameAccountRetries(t *testing.T) {
 			err := svc.newOpenAIAccountFailoverError(account, tc.status, tc.headers, body, "", false, true)
 			require.Equal(t, !tc.want, err.RetryableOnSameAccount)
 			if tc.want {
-				require.True(t, shouldFailoverOpenAIPassthroughResponse(account, tc.status, body, tc.headers))
+				require.True(t, shouldFailoverOpenAIPassthroughResponse(account, tc.status, body))
 				require.Equal(t, NextAccountRetry, err.NextAccountAction)
 			}
 			if tc.status == 404 {
-				require.Equal(t, tc.want, svc.shouldFailoverOpenAIUpstreamResponse(tc.status, "", body))
+				require.Equal(t, tc.want, svc.shouldFailoverOpenAIUpstreamResponse(account, tc.status, "", body))
 			}
 		})
 	}

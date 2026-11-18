@@ -75,7 +75,7 @@ func (v OpenAIOperationsSettings) Validate() error {
 		}
 		if d.CodexFingerprintMode != nil {
 			switch *d.CodexFingerprintMode {
-			case "off", "device", "session", "full", "machine":
+			case "off", "device", "session", "full":
 			default:
 				return fmt.Errorf("invalid codex_fingerprint_mode")
 			}

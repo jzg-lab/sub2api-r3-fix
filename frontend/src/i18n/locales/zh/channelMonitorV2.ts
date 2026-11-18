@@ -1,18 +1,6 @@
 /** Channel Monitor V2 (user + admin passive monitor UI) */
 export default {
   channelMonitorV2: {
-    cards: {
-      historyCount: '近 {count} 次记录',
-      title: '渠道状态', overview: '渠道概览', details: '详细分析',
-      description: '查看各平台与分组的运行状态',
-      rangeSummary: '所选区间 {range} 汇总',
-      availability: '可用率', multiplier: '用户倍率 {value}x',
-      availabilityColorLegend: '颜色：可用率',
-      performanceHeightLegend: '高度：缓存 70% · 首 Token 延迟 30%（越高越好）',
-      history: '状态时间线', refreshIn: '{seconds}s 后刷新',
-      noDataAt: '{time} · 暂无数据', stale: '数据有延迟，请留意更新时间',
-      filtered: '已应用详细分析中的筛选条件',
-    },
     title: '渠道监控',
     updating: '正在更新数据',
     updatedTo: '更新至 {time}',
@@ -72,7 +60,7 @@ export default {
     empty: { title: '没有可展示的数据', description: '尝试调整时间范围或筛选条件' },
     bucket: { minutes: '{count} 分钟粒度', hours: '{count} 小时粒度', days: '{count} 天粒度' },
     matrix: {
-      title: '可用性趋势', description: '每行是一种渠道组合，每个色块代表一个统计区间；悬停查看明细', wheelZoom: '在色块上滚轮放大（区间变窄、色块变宽）', wheelZoomX: '在色块上滚轮放大（区间变窄、色块变宽）', dimension: '渠道维度', emptyTitle: '当前筛选窗口没有矩阵数据', legendAria: '健康分数图例', bad: '差', good: '好', healthyLegend: '健康 (≥80)', warningLegend: '需关注 (50–79)', criticalLegend: '异常 (<50)', unknownLegend: '无请求', noTraffic: '该区间无请求', noTrafficAt: '{time} · 无请求', scoreLine: '健康分 {score}', resetZoom: '重置缩放'
+      title: '可用性趋势', description: '每行是一种渠道组合，每个色块代表一个统计区间；悬停查看明细', wheelZoom: '在色块上滚轮放大（区间变窄、色块变宽）', wheelZoomX: '在色块上滚轮放大（区间变窄、色块变宽）', dimension: '渠道维度', emptyTitle: '当前筛选窗口没有矩阵数据', legendAria: '健康分数图例', bad: '差', good: '好', healthyLegend: '健康 (≥80)', warningLegend: '需关注 (50–79)', criticalLegend: '异常 (<50)', unknownLegend: '无流量 / 样本不足', noTraffic: '该区间无流量', noTrafficAt: '{time} · 无流量', scoreLine: '健康分 {score}', resetZoom: '重置缩放'
     },
     chart: {
       title: '可用性趋势', description: '平滑趋势：错误率 · 首 Token P50 · 缓存率', emptyTitle: '当前筛选窗口没有趋势数据', errorLegend: '错误率（左轴 %）', cacheLegend: '缓存率（左轴 %）', ttftLegend: '首 Token P50（右轴）', errorDataset: '错误率趋势 %', cacheDataset: '缓存率趋势 %', ttftDataset: '首 Token 趋势 P50 (ms)', percentAxis: '比率 %', resetZoom: '重置缩放'
@@ -120,11 +108,12 @@ export default {
       groupsEmpty: '没有可选择的分组',
       errorsTitle: '错误分类与忽略',
       errorsHint:
-        '勾选「忽略」的类别不计入错误率与健康分，也会从渠道状态错误列表隐藏；需排查时可取消忽略，或查看运维错误日志。未匹配的错误归入「其他」。',
+        '勾选「忽略」的类别不计入错误率与健康分，仍在错误原因列表中以灰色显示并标记忽略。未匹配的错误归入「其他」。',
       ignoredSummary: '已忽略 {ignored} 类 · 计入错误率 {counted} 类',
       healthTitle: '健康阈值',
-      healthHint: '控制用户端健康色和综合评分。',
+      healthHint: '控制用户端色块和整体评分。默认阈值较宽松，避免少量错误或低缓存率立即显示异常。',
       fields: {
+        minimumSample: '最小样本数',
         warningError: '错误率关注 %',
         criticalError: '错误率异常 %',
         targetTtft: 'TTFT 目标 ms',
@@ -151,5 +140,18 @@ export default {
       tabV1Active: 'V1 主动探测',
       tabV1History: 'V1 历史（当前模式未启用探测）',
     },
+cards: {
+      historyCount: '近 {count} 次记录',
+      title: '渠道状态', overview: '渠道概览', details: '详细分析',
+      description: '查看各平台与分组的运行状态',
+      rangeSummary: '所选区间 {range} 汇总',
+      availability: '可用率', multiplier: '用户倍率 {value}x',
+      availabilityColorLegend: '颜色：可用率',
+      performanceHeightLegend: '高度：缓存 70% · 首 Token 延迟 30%（越高越好）',
+      history: '状态时间线', refreshIn: '{seconds}s 后刷新',
+      noDataAt: '{time} · 暂无数据', stale: '数据有延迟，请留意更新时间',
+      filtered: '已应用详细分析中的筛选条件',
+    },
+
   },
 }

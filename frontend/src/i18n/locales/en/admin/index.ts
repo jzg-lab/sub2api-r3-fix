@@ -1,3 +1,4 @@
+import openaiOperations from './openaiOperations'
 import overview from './overview'
 import channels from './channels'
 import accounts from './accounts'
@@ -7,7 +8,6 @@ import settings from './settings'
 import audit from './audit'
 import promptAudit from './promptAudit'
 import plugins from './plugins'
-import openaiOperations from './openaiOperations'
 
 export default {
   ...overview,
@@ -19,5 +19,6 @@ export default {
   ...audit,
   ...promptAudit,
   ...plugins,
-  ...openaiOperations,
+...openaiOperations,
+
 }

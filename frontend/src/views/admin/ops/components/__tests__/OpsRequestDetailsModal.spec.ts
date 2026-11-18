@@ -1,113 +1,111 @@
-import { describe, expect, it, vi } from 'vitest'
-import { defineComponent, ref } from 'vue'
-import { flushPromises, mount } from '@vue/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
+import type { OpsDashboardOverview } from '@/api/admin/ops'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
+import OpsDashboardHeader from '../OpsDashboardHeader.vue'
 import OpsRequestDetailsModal from '../OpsRequestDetailsModal.vue'
+import { resetAccountNameCacheForTests } from '../../utils/accountNameMap'
 
-const mockListRequestDetails = vi.fn()
-
-vi.mock('@/api/admin/ops', () => ({
-  opsAPI: {
-    listRequestDetails: (...args: any[]) => mockListRequestDetails(...args),
-  },
+const { listRequestDetails, listAccounts, viewport } = vi.hoisted(() => ({
+  listRequestDetails: vi.fn(),
+  listAccounts: vi.fn(),
+  viewport: { desktop: true },
 }))
 
+vi.mock('@vueuse/core', () => ({ useMediaQuery: () => ref(viewport.desktop) }))
+vi.mock('@/api/admin/ops', () => ({ opsAPI: { listRequestDetails } }))
+vi.mock('@/api/admin/accounts', () => ({ accountsAPI: { list: listAccounts } }))
+vi.mock('@/api', () => ({ adminAPI: { groups: { getAll: vi.fn().mockResolvedValue([]) } } }))
 vi.mock('@/stores', () => ({
-  useAppStore: () => ({
-    showError: vi.fn(),
-    showWarning: vi.fn(),
-  }),
+  useAppStore: () => ({ showError: vi.fn() }),
+  useAdminSettingsStore: () => ({ opsRealtimeMonitoringEnabled: false }),
+}))
+vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: vi.fn() }) }))
+vi.mock('vue-i18n', async (importOriginal) => ({
+  ...await importOriginal<typeof import('vue-i18n')>(),
+  useI18n: () => ({ t: (key: string) => key }),
 }))
 
-vi.mock('@/composables/useClipboard', () => ({
-  useClipboard: () => ({
-    copyToClipboard: vi.fn().mockResolvedValue(true),
-  }),
-}))
+async function openDetails(sort: 'duration_desc' | 'ttft_desc') {
+  const wrapper = mount(OpsRequestDetailsModal, {
+    props: { modelValue: false, timeRange: '1h', preset: { title: 'Details', sort } },
+    global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Pagination: true } },
+  })
+  await wrapper.setProps({ modelValue: true })
+  await flushPromises()
+  return wrapper
+}
 
-vi.mock('@vueuse/core', () => ({
-  useMediaQuery: () => ref(true),
-}))
-
-vi.mock('vue-i18n', async () => {
-  const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
-  return {
-    ...actual,
-    useI18n: () => ({
-      t: (key: string) => key,
-    }),
-  }
-})
-
-const BaseDialogStub = defineComponent({
-  props: {
-    show: { type: Boolean, default: false },
-    title: { type: String, default: '' },
-  },
-  template: '<div v-if="show"><slot /></div>',
-})
-
-describe('OpsRequestDetailsModal TTFT drill-down', () => {
-  it('requests TTFT ordering and renders per-request TTFT', async () => {
-    mockListRequestDetails.mockResolvedValue({
+describe('Ops request latency details', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetAccountNameCacheForTests()
+    viewport.desktop = true
+    listRequestDetails.mockResolvedValue({
       items: [
-        {
-          kind: 'success',
-          created_at: '2026-09-02T09:00:00Z',
-          request_id: 'req-anonymous',
-          platform: 'openai',
-          model: 'gpt-test',
-          duration_ms: 1400,
-          first_token_ms: 320,
-          stream: true,
-        },
-        {
-          kind: 'error',
-          created_at: '2026-09-02T08:59:00Z',
-          request_id: 'req-error',
-          platform: 'openai',
-          model: 'gpt-test',
-          duration_ms: 500,
-          first_token_ms: null,
-          status_code: 502,
-          stream: true,
-        },
+        { kind: 'success', created_at: '2026-09-10T00:00:00Z', duration_ms: 12000, first_token_ms: 800, account_id: 101 },
+        { kind: 'success', created_at: '2026-09-10T00:00:01Z', duration_ms: 9000, first_token_ms: 0, account_id: 102 },
+        { kind: 'success', created_at: '2026-09-10T00:00:02Z', duration_ms: 5000, first_token_ms: null, account_id: 999 },
+      ],
+      total: 3,
+    })
+    listAccounts.mockResolvedValue({
+      items: [
+        { id: 101, name: 'acc-alpha' },
+        { id: 102, name: 'acc-beta' },
       ],
       total: 2,
-      page: 1,
-      page_size: 10,
     })
+  })
 
-    const wrapper = mount(OpsRequestDetailsModal, {
-      props: {
-        modelValue: false,
-        timeRange: '1h',
-        preset: {
-          title: 'TTFT',
-          sort: 'ttft_desc',
-        },
-      },
-      global: {
-        stubs: {
-          BaseDialog: BaseDialogStub,
-          Pagination: true,
-        },
-      },
+  it('opens the TTFT card with first-token sorting and successful requests', async () => {
+    const wrapper = shallowMount(OpsDashboardHeader, {
+      props: { overview: {} as OpsDashboardOverview, platform: '', groupId: null, timeRange: '1h', queryMode: 'auto', loading: false, lastUpdated: null },
     })
-    await wrapper.setProps({ modelValue: true })
     await flushPromises()
-
-    expect(mockListRequestDetails).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sort: 'ttft_desc',
-        kind: 'all',
-        page: 1,
-        page_size: 10,
-      })
+    const button = wrapper.findAll('button').find((item) =>
+      item.text() === 'admin.ops.requestDetails.details' &&
+      item.element.parentElement?.textContent?.includes('TTFT'),
     )
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    expect(wrapper.emitted('openRequestDetails')).toEqual([[
+      { title: 'admin.ops.ttftLabel', kind: 'success', sort: 'ttft_desc' },
+    ]])
+    wrapper.unmount()
+  })
 
-    const ttftCells = wrapper.findAll('[data-testid="request-detail-ttft"]')
-    expect(ttftCells).toHaveLength(2)
-    expect(ttftCells[0].text()).toBe('320 ms')
-    expect(ttftCells[1].text()).toBe('-')
+  it.each([true, false])('shows TTFT rather than total duration (desktop: %s)', async (desktop) => {
+    viewport.desktop = desktop
+    const wrapper = await openDetails('ttft_desc')
+    expect(listRequestDetails).toHaveBeenCalledWith(expect.objectContaining({ sort: 'ttft_desc' }))
+    expect(wrapper.text()).toContain('admin.ops.ttftLabel')
+    expect(wrapper.text()).toContain('800 ms')
+    expect(wrapper.text()).toContain('0 ms')
+    expect(wrapper.text()).not.toContain('12000 ms')
+    expect(wrapper.text()).not.toContain('9000 ms')
+    expect(wrapper.text()).not.toContain('5000 ms')
+    if (desktop) expect(wrapper.findAll('tbody tr')[2].findAll('td')[5].text()).toBe('-')
+    else expect(wrapper.text()).toContain('admin.ops.ttftLabel: -')
+    wrapper.unmount()
+  })
+
+  it('shows account names with id fallback in the account column', async () => {
+    const wrapper = await openDetails('ttft_desc')
+    expect(wrapper.text()).toContain('admin.ops.requestDetails.table.account')
+    const accountCells = wrapper.findAll('tbody tr').map(tr => tr.findAll('td')[4].text())
+    expect(accountCells).toEqual(['acc-alpha', 'acc-beta', '#999'])
+    // 999 不在账号映射里，应触发一次强制刷新重建缓存
+    expect(listAccounts).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('keeps total duration for duration details', async () => {
+    const wrapper = await openDetails('duration_desc')
+    expect(listRequestDetails).toHaveBeenCalledWith(expect.objectContaining({ sort: 'duration_desc' }))
+    expect(wrapper.text()).toContain('admin.ops.requestDetails.table.duration')
+    expect(wrapper.text()).toContain('12000 ms')
+    expect(wrapper.text()).not.toContain('800 ms')
+    wrapper.unmount()
   })
 })

@@ -4,7 +4,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"testing"
 
@@ -22,7 +21,9 @@ func TestAccountIsOpenAILongContextBillingEnabled(t *testing.T) {
 		{name: "non OpenAI account is disabled", account: &Account{Platform: PlatformGrok}, want: false},
 		{name: "missing extra defaults disabled", account: &Account{Platform: PlatformOpenAI}, want: false},
 		{name: "missing key defaults disabled", account: &Account{Platform: PlatformOpenAI, Extra: map[string]any{}}, want: false},
-		{name: "explicit true is enabled", account: &Account{Platform: PlatformOpenAI, Extra: map[string]any{"openai_long_context_billing_enabled": true}}, want: true},
+		{name: "API Key explicit true is enabled", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: map[string]any{"openai_long_context_billing_enabled": true}}, want: true},
+		{name: "OAuth is exempt", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{"openai_long_context_billing_enabled": true}}, want: false},
+		{name: "Spark shadow honors inherited value", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, QuotaDimension: QuotaDimensionSpark, Extra: map[string]any{"openai_long_context_billing_enabled": true}}, want: true},
 		{name: "explicit false is disabled", account: &Account{Platform: PlatformOpenAI, Extra: map[string]any{"openai_long_context_billing_enabled": false}}, want: false},
 		{name: "malformed value is disabled", account: &Account{Platform: PlatformOpenAI, Extra: map[string]any{"openai_long_context_billing_enabled": "false"}}, want: false},
 	}
@@ -35,29 +36,36 @@ func TestAccountIsOpenAILongContextBillingEnabled(t *testing.T) {
 }
 
 func TestNormalizeOpenAILongContextBillingExtra(t *testing.T) {
-	t.Run("OpenAI missing key persists disabled default", func(t *testing.T) {
-		extra, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, nil)
+	t.Run("OpenAI API Key missing key persists enabled default", func(t *testing.T) {
+		extra, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, AccountTypeAPIKey, nil)
+
+		require.NoError(t, err)
+		require.Equal(t, true, extra["openai_long_context_billing_enabled"])
+	})
+
+	t.Run("OAuth missing key remains exempt", func(t *testing.T) {
+		extra, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, AccountTypeOAuth, nil)
 
 		require.NoError(t, err)
 		require.Equal(t, false, extra["openai_long_context_billing_enabled"])
 	})
 
 	t.Run("OpenAI explicit false is preserved", func(t *testing.T) {
-		extra, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, map[string]any{"openai_long_context_billing_enabled": false})
+		extra, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, AccountTypeAPIKey, map[string]any{"openai_long_context_billing_enabled": false})
 
 		require.NoError(t, err)
 		require.Equal(t, false, extra["openai_long_context_billing_enabled"])
 	})
 
 	t.Run("OpenAI malformed value is rejected", func(t *testing.T) {
-		_, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, map[string]any{"openai_long_context_billing_enabled": "false"})
+		_, err := normalizeOpenAILongContextBillingExtra(PlatformOpenAI, AccountTypeAPIKey, map[string]any{"openai_long_context_billing_enabled": "false"})
 
 		require.Error(t, err)
 		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
 	})
 
 	t.Run("non OpenAI extra is unchanged", func(t *testing.T) {
-		extra, err := normalizeOpenAILongContextBillingExtra(PlatformGrok, nil)
+		extra, err := normalizeOpenAILongContextBillingExtra(PlatformGrok, AccountTypeAPIKey, nil)
 
 		require.NoError(t, err)
 		require.Nil(t, extra)
@@ -65,7 +73,7 @@ func TestNormalizeOpenAILongContextBillingExtra(t *testing.T) {
 
 	t.Run("non OpenAI malformed value is ignored", func(t *testing.T) {
 		extra := map[string]any{openAILongContextBillingEnabledKey: "provider-owned"}
-		normalized, err := normalizeOpenAILongContextBillingExtra(PlatformAnthropic, extra)
+		normalized, err := normalizeOpenAILongContextBillingExtra(PlatformAnthropic, AccountTypeAPIKey, extra)
 
 		require.NoError(t, err)
 		require.Equal(t, extra, normalized)
@@ -89,10 +97,11 @@ func (r *longContextBillingRepoStub) Create(_ context.Context, account *Account)
 }
 
 func (r *longContextBillingRepoStub) CreateWithAccountGroups(ctx context.Context, account *Account, groups []AccountGroup) error {
-	if len(groups) != 0 {
-		return errors.New("long context fixture expects an ungrouped account")
+	if err := r.Create(ctx, account); err != nil {
+		return err
 	}
-	return r.Create(ctx, account)
+	account.AccountGroups = append([]AccountGroup(nil), groups...)
+	return nil
 }
 
 func (r *longContextBillingRepoStub) GetByID(_ context.Context, _ int64) (*Account, error) {
@@ -124,7 +133,7 @@ func (r *longContextBillingRepoStub) BulkUpdate(_ context.Context, _ []int64, _ 
 	return 1, nil
 }
 
-func TestAdminServiceCreateAccountDefaultsOpenAILongContextBillingDisabled(t *testing.T) {
+func TestAdminServiceCreateAccountDefaultsOpenAILongContextBillingEnabled(t *testing.T) {
 	repo := &longContextBillingRepoStub{}
 	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 
@@ -138,12 +147,12 @@ func TestAdminServiceCreateAccountDefaultsOpenAILongContextBillingDisabled(t *te
 
 	require.NoError(t, err)
 	require.Same(t, account, repo.createdAccount)
-	require.Equal(t, false, account.Extra[openAILongContextBillingEnabledKey])
+	require.Equal(t, true, account.Extra[openAILongContextBillingEnabledKey])
 }
 
 func TestAdminServiceCreateAccountRejectsMalformedOpenAILongContextBillingValue(t *testing.T) {
 	repo := &longContextBillingRepoStub{}
-	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo}
 
 	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
 		Platform: PlatformOpenAI,
@@ -183,16 +192,13 @@ func TestAdminServiceUpdateAccountAllowsExplicitCodexImportOptIn(t *testing.T) {
 	}}
 	svc := &adminServiceImpl{accountRepo: repo}
 
-	input := &UpdateAccountInput{
+	account, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{
 		Credentials: map[string]any{"access_token": "new-token"},
 		Extra: map[string]any{
 			openAILongContextBillingEnabledKey: true,
 			"import_source":                    "codex_session",
 		},
-	}
-	// Billing opt-in is a metadata edit, not an unproved credential rotation.
-	repo.account.Credentials = input.Credentials
-	account, err := svc.UpdateAccount(context.Background(), 1, input)
+	})
 
 	require.NoError(t, err)
 	require.Equal(t, true, account.Extra[openAILongContextBillingEnabledKey])

@@ -31,6 +31,9 @@ const (
 	// 故障期间同一账号会被十几秒重查一次；用卡阶段的失败不受此限，超时后仍立即用
 	// 同一幂等键重试。
 	openAIAutoResetQueryFailureRetryAfter = time.Minute
+	// 调度热路径每次过滤候选都会评估暂停，对同一账号的通知按此冷却合并；
+	// 后台每分钟全量扫描兜底，冷却不会让账号漏检。
+	openAIAutoResetSchedulerNotifyCooldown = 30 * time.Second
 )
 
 const (
@@ -214,11 +217,11 @@ func (s *OpenAIQuotaAutoResetService) runScanner() {
 }
 
 func (s *OpenAIQuotaAutoResetService) scanEnabledAccounts(ctx context.Context) {
-	done, ok := beginDeploymentBackground()
-	if !ok {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
 		return
 	}
-	defer done()
+	defer deploymentDone()
 	release, scan := s.tryAcquireScanLock(ctx)
 	if !scan {
 		return
@@ -278,11 +281,11 @@ type openAIAutoResetAssessment struct {
 }
 
 func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accountID int64) error {
-	done, ok := beginDeploymentBackground()
-	if !ok {
+	deploymentDone, deploymentOK := beginDeploymentBackground()
+	if !deploymentOK {
 		return nil
 	}
-	defer done()
+	defer deploymentDone()
 	ctx = withOpenAIAutoResetContext(ctx)
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil || account == nil {
@@ -851,4 +854,30 @@ func notifyOpenAIAutoReset(accountID int64) {
 // NotifyOpenAIAutoResetCredit 供额度查询入口发送轻量信号；不执行同步上游请求。
 func NotifyOpenAIAutoResetCredit(accountID int64) {
 	notifyOpenAIAutoReset(accountID)
+}
+
+// openAIAutoResetSchedulerNotifiedAt 记录调度热路径最近一次为某账号发出通知的时间。
+var openAIAutoResetSchedulerNotifiedAt sync.Map // accountID(int64) -> time.Time
+
+// notifyOpenAIAutoResetFromScheduler 供调度候选过滤使用。候选过滤按请求逐账号执行，
+// 每条通知都会让后台读一次账号，不做冷却时无卡或待用卡的账号会持续占满后台协程。
+func notifyOpenAIAutoResetFromScheduler(accountID int64) {
+	notifyOpenAIAutoResetFromSchedulerAt(accountID, time.Now())
+}
+
+func notifyOpenAIAutoResetFromSchedulerAt(accountID int64, now time.Time) bool {
+	if accountID <= 0 {
+		return false
+	}
+	if last, ok := openAIAutoResetSchedulerNotifiedAt.Load(accountID); ok {
+		if lastAt, ok := last.(time.Time); ok {
+			elapsed := now.Sub(lastAt)
+			if elapsed >= 0 && elapsed < openAIAutoResetSchedulerNotifyCooldown {
+				return false
+			}
+		}
+	}
+	openAIAutoResetSchedulerNotifiedAt.Store(accountID, now)
+	notifyOpenAIAutoReset(accountID)
+	return true
 }

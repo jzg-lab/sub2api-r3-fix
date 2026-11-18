@@ -17,11 +17,11 @@ import (
 type OpenAIOAuthService struct {
 	reauthorizationAccountLookup func(context.Context, int64) (*Account, error)
 	sessionStore                 OpenAIOAuthSessionStore
+	tlsProfiles                  *TLSFingerprintProfileService
+	refreshAPI                   *OAuthRefreshAPI
 	proxyRepo                    ProxyRepository
 	oauthClient                  OpenAIOAuthClient
-	tlsProfiles                  *TLSFingerprintProfileService
 	privacyClientFactory         PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
-	refreshAPI                   *OAuthRefreshAPI
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
@@ -32,31 +32,18 @@ func NewOpenAIOAuthService(proxyRepo ProxyRepository, oauthClient OpenAIOAuthCli
 	}
 }
 
-// SetSessionStore injects the durable OAuth session store (P0-14). Sessions
-// persist in pending_auth_sessions with a 2h TTL so slow 接码 flows and
-// process restarts no longer lose in-flight authorizations.
 func (s *OpenAIOAuthService) SetSessionStore(store OpenAIOAuthSessionStore) {
 	s.sessionStore = store
+}
+
+func (s *OpenAIOAuthService) SetRefreshAPI(api *OAuthRefreshAPI) {
+	s.refreshAPI = api
 }
 
 // SetPrivacyClientFactory 注入 ImpersonateChrome 客户端工厂，
 // 用于调用 chatgpt.com/backend-api 获取账号信息（plan_type 等）。
 func (s *OpenAIOAuthService) SetPrivacyClientFactory(factory PrivacyClientFactory) {
 	s.privacyClientFactory = factory
-}
-
-func (s *OpenAIOAuthService) profileContext(ctx context.Context, account *Account) context.Context {
-	if account != nil {
-		var profile *tlsfingerprint.Profile
-		if s.tlsProfiles != nil {
-			profile = s.tlsProfiles.ResolveTLSProfile(account)
-		}
-		return tlsfingerprint.WithProfile(ctx, profile)
-	}
-	if _, present := tlsfingerprint.ProfileFromContext(ctx); present {
-		return ctx
-	}
-	return tlsfingerprint.WithProfile(ctx, s.tlsProfiles.OpenAIOAuthDefaultProfile())
 }
 
 // OpenAIAuthURLResult contains the authorization URL and session info
@@ -298,16 +285,6 @@ func (s *OpenAIOAuthService) RefreshToken(ctx context.Context, refreshToken stri
 	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, "")
 }
 
-// RefreshTokenWithProxyID keeps the admin refresh endpoint on the same
-// assignment validation path as authorization exchange and account refresh.
-func (s *OpenAIOAuthService) RefreshTokenWithProxyID(ctx context.Context, refreshToken string, proxyID *int64, clientID string) (*OpenAITokenInfo, error) {
-	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, proxyID)
-	if err != nil {
-		return nil, err
-	}
-	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
-}
-
 // RefreshTokenWithClientID refreshes an OpenAI OAuth token with optional client_id.
 func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken string, proxyURL string, clientID string) (*OpenAITokenInfo, error) {
 	if err := validateOpenAIOAuthProxyURL(proxyURL); err != nil {
@@ -542,11 +519,32 @@ func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo)
 	return NormalizeOpenAIPersonalAccessTokenCredentials(nil, tokenInfo, creds)
 }
 
-// Stop is retained for lifecycle compatibility. Durable pending auth sessions
-// have no goroutine of their own; they are cleaned up by the database cleanup path.
+// Stop stops the session store cleanup goroutine
 func (s *OpenAIOAuthService) Stop() {
 }
 
 func normalizeOpenAIOAuthPlatform(platform string) string {
 	return openai.OAuthPlatformOpenAI
+}
+
+func (s *OpenAIOAuthService) profileContext(ctx context.Context, account *Account) context.Context {
+	if account != nil {
+		var profile *tlsfingerprint.Profile
+		if s.tlsProfiles != nil {
+			profile = s.tlsProfiles.ResolveTLSProfile(account)
+		}
+		return tlsfingerprint.WithProfile(ctx, profile)
+	}
+	if _, present := tlsfingerprint.ProfileFromContext(ctx); present {
+		return ctx
+	}
+	return tlsfingerprint.WithProfile(ctx, s.tlsProfiles.OpenAIOAuthDefaultProfile())
+}
+
+func (s *OpenAIOAuthService) RefreshTokenWithProxyID(ctx context.Context, refreshToken string, proxyID *int64, clientID string) (*OpenAITokenInfo, error) {
+	proxyURL, err := resolveOpenAIOAuthProxyURL(ctx, s.proxyRepo, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 }

@@ -55,11 +55,8 @@ func (s *DeferredService) Pending() int {
 	return pending
 }
 
-func (s *DeferredService) flushLastUsed() {
-	_ = s.Flush(context.Background())
-}
+func (s *DeferredService) flushLastUsed() { _ = s.Flush(context.Background()) }
 
-// Flush persists accepted updates immediately without stopping the recurring job.
 func (s *DeferredService) Flush(ctx context.Context) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -74,8 +71,8 @@ func (s *DeferredService) Flush(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
 	updates := make(map[int64]time.Time)
+	s.mu.Lock()
 	s.lastUsedUpdates.Range(func(key, value any) bool {
 		id, ok := key.(int64)
 		if !ok {

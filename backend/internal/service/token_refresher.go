@@ -99,8 +99,7 @@ func (r *OpenAITokenRefresher) CanRefresh(account *Account) bool {
 }
 
 // NeedsRefresh 检查token是否需要刷新
-// Unknown expiry must agree with the request-path provider: an imported token
-// without expiry cannot be assumed fresh, even when the account is not limited.
+// expires_at 缺失且处于限流状态时需要刷新，防止限流期间 token 静默过期
 func (r *OpenAITokenRefresher) NeedsRefresh(account *Account, refreshWindow time.Duration) bool {
 	if account.IsOpenAIPersonalAccessToken() {
 		return false
@@ -113,7 +112,7 @@ func (r *OpenAITokenRefresher) NeedsRefresh(account *Account, refreshWindow time
 		return true
 	}
 
-	return time.Until(*expiresAt) <= refreshWindow
+	return time.Until(*expiresAt) < refreshWindow
 }
 
 // Refresh 执行token刷新

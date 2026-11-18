@@ -1,28 +1,6 @@
 export default {
-  qualityTest: {
-    "backToQuestion": "Back to prompt",
-    "svgSource": "View HTML / SVG source",
-    "resultHint": "Responses, SVG previews and request details will appear here for your review.",
-    "emptyResult": "Ready for your first test",
-    "localTemplateHint": "Saved only in this browser",
-    "billingHint": "Uses the selected key’s plan, with normal routing, quotas and usage charges.",
-    "pelicanDescription": "SVG drawing · Visual review",
-    "candyDescription": "Logical reasoning · Answer comparison",
-    "result": "Test result",
-    "question": "Test prompt",
-    "settings": "Test settings",
-    "moreKeys": "Load more keys",
-    "title": "Intelligence test",
-    "hint": "Explore model responses with candy reasoning or a pelican drawing. Choose your own API key and customize the prompt.",
-    "createKey": "Create an API key",
-    "save": "Save my templates",
-    "saved": "Saved in this browser for your user only.",
-    "background": "Continue in background and close",
-    "waitHint": "You can navigate within the site or background this tab. A notice will appear when finished. Keep this page open; closing or refreshing it interrupts waiting.",
-    "completed": "{name}: answer received. Reopen the test to review it.",
-    "failed": "{name}: test failed or the answer is incomplete. Reopen the test for details."
-  },
   common: {
+    details: 'Details',
     loading: 'Loading...',
     submitting: 'Submitting...',
     justNow: 'just now',
@@ -35,6 +13,12 @@ export default {
     delete: 'Delete',
     edit: 'Edit',
     create: 'Create',
+    apply: 'Apply',
+    clear: 'Clear',
+    creating: 'Creating...',
+    required: 'Required',
+    sending: 'Sending...',
+    tryAgain: 'Please try again',
     update: 'Update',
     confirm: 'Confirm',
     reset: 'Reset',
@@ -214,6 +198,8 @@ export default {
     github: 'GitHub',
     mySubscriptions: 'My Subscriptions',
     buySubscription: 'Recharge / Subscription',
+    recharge: 'Recharge',
+    subscribe: 'Subscription',
     docs: 'Docs',
     myOrders: 'My Orders',
     orderManagement: 'Orders',
@@ -263,6 +249,7 @@ export default {
     loginFailed: 'Login failed. Please check your credentials and try again.',
     errors: {
       USER_NOT_ACTIVE: 'Account has been disabled.',
+      EMAIL_BLOCKED: 'This email address is not allowed. Please use a different one.',
     },
     registrationFailed: 'Registration failed. Please try again.',
     emailDomainRegistrationLimit:
@@ -470,6 +457,30 @@ export default {
     notEnabled: 'This operation requires two-factor authentication. Please enable TOTP in your profile first.',
     adminApiKeyForbidden: 'Admin API keys cannot perform this operation. Use a two-factor verified admin session.'
   },
+qualityTest: {
+    "backToQuestion": "Back to prompt",
+    "svgSource": "View HTML / SVG source",
+    "resultHint": "Responses, SVG previews and request details will appear here for your review.",
+    "emptyResult": "Ready for your first test",
+    "localTemplateHint": "Saved only in this browser",
+    "billingHint": "Uses the selected key’s plan, with normal routing, quotas and usage charges.",
+    "pelicanDescription": "SVG drawing · Visual review",
+    "candyDescription": "Logical reasoning · Answer comparison",
+    "result": "Test result",
+    "question": "Test prompt",
+    "settings": "Test settings",
+    "moreKeys": "Load more keys",
+    "title": "Intelligence test",
+    "hint": "Explore model responses with candy reasoning or a pelican drawing. Choose your own API key and customize the prompt.",
+    "createKey": "Create an API key",
+    "save": "Save my templates",
+    "saved": "Saved in this browser for your user only.",
+    "background": "Continue in background and close",
+    "waitHint": "You can navigate within the site or background this tab. A notice will appear when finished. Keep this page open; closing or refreshing it interrupts waiting.",
+    "completed": "{name}: answer received. Reopen the test to review it.",
+    "failed": "{name}: test failed or the answer is incomplete. Reopen the test for details."
+  },
+
 
   // Dashboard
 }

@@ -51,7 +51,7 @@ type ConcurrencyCache interface {
 	CleanupExpiredAccountSlots(ctx context.Context, accountID int64) error
 	CleanupExpiredAccountSlotKeys(ctx context.Context) error
 
-	// Reconcile expired slots at startup while preserving other instances' waiters.
+	// 启动时清理旧进程遗留槽位与等待计数
 	CleanupStaleProcessSlots(ctx context.Context, activeRequestPrefix string) error
 }
 
@@ -236,8 +236,6 @@ type ConcurrencyService struct {
 	accountLoadCache    map[string]cachedAccountLoadBatch
 	accountLoadGroup    singleflight.Group
 
-	// slot cleanup worker 的停止通道（r17x I 项）：worker 原先
-	// for range ticker.C 永不退出，进程关闭时 goroutine 泄漏。
 	slotStopMu sync.Mutex
 	slotStopCh chan struct{}
 	slotDoneCh chan struct{}
@@ -751,7 +749,6 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 	slotDoneCh := make(chan struct{})
 	s.slotStopMu.Lock()
 	defer s.slotStopMu.Unlock()
-	// 重复启动时先停旧 worker,与 Stop 的语义保持一致(先关旧通道再换新)。
 	if s.slotStopCh != nil {
 		close(s.slotStopCh)
 		<-s.slotDoneCh
@@ -776,8 +773,6 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 	}()
 }
 
-// StopSlotCleanupWorker 停止后台 slot cleanup worker（r17x I 项）。
-// 幂等;未启动过时是 no-op。
 func (s *ConcurrencyService) StopSlotCleanupWorker() {
 	if s == nil {
 		return

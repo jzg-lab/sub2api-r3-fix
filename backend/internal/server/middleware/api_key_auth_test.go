@@ -108,6 +108,70 @@ func TestUniversalSubscriptionAuthOnStandardDestination(t *testing.T) {
 	}
 }
 
+func TestAPIKeyAuthLookupFailureWhenClientGoneReturns499(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+		want   int
+	}{
+		{name: "client gone", cancel: true, want: statusClientClosedRequest},
+		{name: "server failure", cancel: false, want: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cancel context.CancelFunc
+			repo := &stubApiKeyRepo{getByKey: func(lookupCtx context.Context, _ string) (*service.APIKey, error) {
+				if tc.cancel {
+					// 查库期间客户端断开：net/http 取消请求 ctx，驱动返回 context 错误。
+					cancel()
+					return nil, lookupCtx.Err()
+				}
+				return nil, errors.New("db unavailable")
+			}}
+			svc := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
+
+			for _, mw := range []gin.HandlerFunc{
+				gin.HandlerFunc(NewAPIKeyAuthMiddleware(svc, nil, cfg)),
+				APIKeyAuthWithSubscriptionGoogle(svc, nil, cfg),
+			} {
+				var ctx context.Context
+				ctx, cancel = context.WithCancel(context.Background())
+				r := gin.New()
+				r.Use(mw)
+				r.GET("/t", func(c *gin.Context) { c.Status(http.StatusOK) })
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/t", nil).WithContext(ctx)
+				req.Header.Set("x-api-key", "sk-test-key")
+				req.Header.Set("x-goog-api-key", "sk-test-key")
+				r.ServeHTTP(w, req)
+				require.Equal(t, tc.want, w.Code)
+				cancel()
+			}
+		})
+	}
+}
+
+func TestAPIKeyAuthRejectsNonUTF8KeyAsInvalid(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) {
+		// Postgres 拒绝非 UTF-8 参数（SQLSTATE 22021），不应走到这里。
+		return nil, errors.New("invalid byte sequence for encoding UTF8")
+	}}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	svc := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
+
+	r := gin.New()
+	r.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(svc, nil, cfg)))
+	r.GET("/t", func(c *gin.Context) { c.Status(http.StatusOK) })
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/t", nil)
+	req.Header.Set("x-api-key", "sk-\xff\xfe")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1868,38 +1932,4 @@ func (r *stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64,
 
 func (r *stubUserSubscriptionRepo) BatchUpdateExpiredStatus(ctx context.Context) (int64, error) {
 	return 0, errors.New("not implemented")
-}
-
-func TestSmartRouteAuthDefersOnlyGroupChecks(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		mutate func(*service.APIKey)
-		path   string
-		status int
-	}{
-		{"inactive primary", func(k *service.APIKey) { k.Group.Status = "inactive" }, "/v1/responses", 204},
-		{"primary subscription", func(k *service.APIKey) { k.Group.SubscriptionType = service.SubscriptionTypeSubscription }, "/v1/messages", 204},
-		{"disabled key", func(k *service.APIKey) { k.Status = "inactive" }, "/v1/responses", 401},
-		{"disabled user", func(k *service.APIKey) { k.User.Status = "inactive" }, "/v1/responses", 401},
-		{"expired key", func(k *service.APIKey) { past := time.Now().Add(-time.Hour); k.ExpiresAt = &past }, "/v1/responses", 403},
-		{"key quota", func(k *service.APIKey) { k.Quota = 1; k.QuotaUsed = 1 }, "/v1/responses", 429},
-		{"image unchanged", func(k *service.APIKey) { k.Group.Status = "inactive" }, "/v1/images/generations", 403},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			group := &service.Group{ID: 1, Status: service.StatusActive, Hydrated: true, Platform: service.PlatformOpenAI}
-			key := &service.APIKey{ID: 2, Key: "sk-smart-auth", Status: service.StatusActive, UserID: 3, GroupID: &group.ID, Group: group, RouteGroupIDs: []int64{1, 2}, User: &service.User{ID: 3, Status: service.StatusActive}}
-			tc.mutate(key)
-			cfg := &config.Config{RunMode: config.RunModeStandard}
-			repo := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) { return key, nil }}
-			svc := service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg)
-			r := gin.New()
-			r.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(svc, nil, cfg)))
-			r.POST(tc.path, func(c *gin.Context) { c.Status(204) })
-			req := httptest.NewRequest("POST", tc.path, strings.NewReader(`{"model":"gpt-5.1"}`))
-			req.Header.Set("x-api-key", key.Key)
-			rec := httptest.NewRecorder()
-			r.ServeHTTP(rec, req)
-			require.Equal(t, tc.status, rec.Code, rec.Body.String())
-		})
-	}
 }

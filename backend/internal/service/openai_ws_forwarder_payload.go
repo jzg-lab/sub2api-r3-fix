@@ -114,16 +114,6 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 				headers.Set(name, value)
 			}
 		}
-		// 子 Agent 身份头（core/src/client.rs X_OPENAI_SUBAGENT_HEADER / X_CODEX_PARENT_THREAD_ID_HEADER）
-		// 仅 machine 模式拷贝（machine 头 sink 会假名化 parent thread），与 HTTP 白名单
-		// openaiCodexSessionIdentityHeaders 的 machine 门控逐键对齐；其他模式维持原有行为。
-		if activeCodexFingerprintMode(account) == codexFingerprintMachine {
-			for _, name := range [...]string{"x-openai-subagent", "x-codex-parent-thread-id"} {
-				if value := c.Request.Header.Get(name); strings.TrimSpace(value) != "" {
-					headers.Set(name, value)
-				}
-			}
-		}
 	}
 	// 真实 Codex 的 WS 握手同样携带会话级 x-codex-beta-features
 	// （client.rs build_websocket_headers 复用 build_responses_headers），
@@ -154,9 +144,6 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	if metadata := strings.TrimSpace(turnMetadata); metadata != "" {
 		headers.Set(openAIWSTurnMetadataHeader, metadata)
 	}
-	// 指纹收敛：出站握手头改写（session-id/thread-id/x-client-request-id/子 Agent
-	// 头等）。staged IDs 由 ingress 的 stageCodexMachineFingerprintIDsForWSIngress
-	// 暂存；非 machine 模式读到 nil ⇒ 原样返回，不影响存量行为。
 	applyCodexAccountIdentityHeaders(headers, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	applyStagedCodexFingerprintHeaders(c, account, headers)
 

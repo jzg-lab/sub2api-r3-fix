@@ -17,6 +17,7 @@ import (
 // `missing field 'created_at'`。writeOpenAICompactSSEFailureMessage 存在的理由就是
 // 让 Codex 能把这帧识别成合法终止事件；解析不了就退化回它想避免的盲重连。
 func TestWriteOpenAICompactSSEFailureMessage_CarriesCreatedAt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -30,8 +31,9 @@ func TestWriteOpenAICompactSSEFailureMessage_CarriesCreatedAt(t *testing.T) {
 	require.True(t, found, "SSE 帧必须带 data 行: %q", body)
 
 	var event struct {
-		Type     string `json:"type"`
-		Response struct {
+		Type           string `json:"type"`
+		SequenceNumber *int   `json:"sequence_number"`
+		Response       struct {
 			ID        string `json:"id"`
 			Object    string `json:"object"`
 			CreatedAt int64  `json:"created_at"`
@@ -41,6 +43,8 @@ func TestWriteOpenAICompactSSEFailureMessage_CarriesCreatedAt(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(payload)), &event))
 
 	require.Equal(t, "response.failed", event.Type)
+	require.NotNil(t, event.SequenceNumber, "response.failed 必须带 sequence_number，否则 grok-build 读不出这帧")
+	require.GreaterOrEqual(t, *event.SequenceNumber, 0)
 	require.Equal(t, "response", event.Response.Object)
 	require.Equal(t, "failed", event.Response.Status)
 	require.Greater(t, event.Response.CreatedAt, int64(0),

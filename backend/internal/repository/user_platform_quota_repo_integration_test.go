@@ -131,9 +131,9 @@ func TestUserPlatformQuotaRepository_BulkInsertInitial_CNProvidersAllowed(t *tes
 		{UserID: userID, Platform: "minimax", DailyLimitUSD: &daily},
 	}
 	require.NoError(t, repo.BulkInsertInitial(txCtx, records),
-		"kimi/zhipu/deepseek 平台应可写入（迁移 224 后 CHECK 约束已含国产供应商）")
+		"kimi/zhipu/deepseek/minimax 平台应可写入（CHECK 约束已含国产供应商）")
 
-	for _, platform := range []string{"kimi", "zhipu", "deepseek"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
 		rec, err := repo.GetByUserPlatform(txCtx, userID, platform)
 		require.NoError(t, err)
 		require.NotNil(t, rec, "%s 配额行应已写入", platform)
@@ -373,11 +373,11 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 	repo := NewUserPlatformQuotaRepository(client)
 	mustSeedQuotaRow(t, ctx, repo, userID1, "anthropic")
 	mustSeedQuotaRow(t, ctx, repo, userID2, "openai")
+	row1, err := repo.GetByUserPlatform(ctx, userID1, "anthropic")
+	require.NoError(t, err)
+	row2, err := repo.GetByUserPlatform(ctx, userID2, "openai")
+	require.NoError(t, err)
 
-	record1, err := repo.GetByUserPlatform(ctx, userID1, "anthropic")
-	require.NoError(t, err)
-	record2, err := repo.GetByUserPlatform(ctx, userID2, "openai")
-	require.NoError(t, err)
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
 	dailyStart := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
 	weeklyStart := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) // 当周一
@@ -386,8 +386,8 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 	// ── 第一批：覆盖 2 行 ──────────────────────────────────────────────────────
 	firstBatch := []UserPlatformQuotaSnapshot{
 		{
-			QuotaID:            record1.QuotaID,
 			UserID:             userID1,
+			QuotaID:            row1.QuotaID,
 			Platform:           "anthropic",
 			DailyUsageUSD:      1.0,
 			WeeklyUsageUSD:     3.0,
@@ -397,8 +397,8 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 			MonthlyWindowStart: monthlyStart,
 		},
 		{
-			QuotaID:            record2.QuotaID,
 			UserID:             userID2,
+			QuotaID:            row2.QuotaID,
 			Platform:           "openai",
 			DailyUsageUSD:      2.0,
 			WeeklyUsageUSD:     4.0,
@@ -427,8 +427,8 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 	now2 := now.Add(5 * time.Minute)
 	secondBatch := []UserPlatformQuotaSnapshot{
 		{
-			QuotaID:            record1.QuotaID,
 			UserID:             userID1,
+			QuotaID:            row1.QuotaID,
 			Platform:           "anthropic",
 			DailyUsageUSD:      9.9,  // 新值，不是 1.0+9.9=10.9
 			WeeklyUsageUSD:     19.9, // 新值，不是 3.0+19.9=22.9
@@ -438,8 +438,8 @@ func TestBatchSnapshotUsage_OverwriteMultiKey(t *testing.T) {
 			MonthlyWindowStart: monthlyStart,
 		},
 		{
-			QuotaID:            record2.QuotaID,
 			UserID:             userID2,
+			QuotaID:            row2.QuotaID,
 			Platform:           "openai",
 			DailyUsageUSD:      8.8,
 			WeeklyUsageUSD:     18.8,

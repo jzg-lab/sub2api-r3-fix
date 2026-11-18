@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
 	coderws "github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -46,6 +45,22 @@ type openAIWSClientConn interface {
 // is not safe for every WebSocket implementation.
 type openAIWSIdlePingCapable interface {
 	SupportsIdlePingWithoutReader() bool
+}
+
+// openAIWSReaderLoopCapable 声明该实现的控制帧只在阻塞读期间被消费，
+// 连接池需为其常驻一个读循环，否则空闲连接无法应答上游 ping。
+type openAIWSReaderLoopCapable interface {
+	RequiresReaderLoop() bool
+}
+
+// openAIWSUpstreamPingCounter 报告连接收到过多少个上游 ping 帧，用于核对读循环是否在应答保活。
+type openAIWSUpstreamPingCounter interface {
+	UpstreamPingCount() int64
+}
+
+// openAIWSForceCloser 不做关闭握手直接切断连接，用于对端已不响应的场景。
+type openAIWSForceCloser interface {
+	CloseNow() error
 }
 
 // openAIWSClientDialer 抽象 WS 建连器。
@@ -108,13 +123,17 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		return nil, 0, nil, errors.New("ws url is empty")
 	}
 
+	wrapped := &coderOpenAIWSClientConn{}
 	opts := &coderws.DialOptions{
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
+		OnPingReceived: func(context.Context, []byte) bool {
+			wrapped.upstreamPings.Add(1)
+			return true
+		},
 	}
-	profile, _ := tlsfingerprint.ProfileFromContext(ctx)
-	if proxy := strings.TrimSpace(proxyURL); proxy != "" || profile != nil {
-		proxyClient, err := d.proxyHTTPClient(proxy, profile)
+	if proxy := strings.TrimSpace(proxyURL); proxy != "" {
+		proxyClient, err := d.proxyHTTPClient(proxy)
 		if err != nil {
 			return nil, 0, nil, err
 		}
@@ -143,59 +162,42 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	if resp != nil {
 		respHeaders = cloneHeader(resp.Header)
 	}
-	return &coderOpenAIWSClientConn{conn: conn}, 0, respHeaders, nil
+	wrapped.conn = conn
+	return wrapped, 0, respHeaders, nil
 }
 
-func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string, profiles ...*tlsfingerprint.Profile) (*http.Client, error) {
+func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string) (*http.Client, error) {
 	if d == nil {
 		return nil, errors.New("openai ws dialer is nil")
 	}
 	normalizedProxy := strings.TrimSpace(proxy)
-	var profile *tlsfingerprint.Profile
-	if len(profiles) > 0 {
-		profile = profiles[0].ForWebSocket()
-	}
-	if normalizedProxy == "" && profile == nil {
+	if normalizedProxy == "" {
 		return nil, errors.New("proxy url is empty")
 	}
-	var parsedProxyURL *url.URL
-	if normalizedProxy != "" {
-		var err error
-		parsedProxyURL, err = url.Parse(normalizedProxy)
-		if err != nil || parsedProxyURL.Host == "" {
-			return nil, fmt.Errorf("invalid proxy url")
-		}
-	}
-	key := normalizedProxy
-	if profile != nil {
-		key += "|" + profile.TransportKey()
+	parsedProxyURL, err := url.Parse(normalizedProxy)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy url: %w", err)
 	}
 	now := time.Now().UnixNano()
 
 	d.proxyMu.Lock()
 	defer d.proxyMu.Unlock()
-	if entry, ok := d.proxyClients[key]; ok && entry != nil && entry.client != nil {
+	if entry, ok := d.proxyClients[normalizedProxy]; ok && entry != nil && entry.client != nil {
 		entry.lastUsedUnixNano = now
 		d.proxyHits.Add(1)
 		return entry.client, nil
 	}
 	d.cleanupProxyClientsLocked(now)
 	transport := &http.Transport{
+		Proxy:               http.ProxyURL(parsedProxyURL),
 		MaxIdleConns:        openAIWSProxyTransportMaxIdleConns,
 		MaxIdleConnsPerHost: openAIWSProxyTransportMaxIdleConnsPerHost,
 		IdleConnTimeout:     openAIWSProxyTransportIdleConnTimeout,
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	rt, err := tlsfingerprint.ConfigureTransport(transport, profile, parsedProxyURL)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Transport: rt}
-	if d.proxyClients == nil {
-		d.proxyClients = make(map[string]*openAIWSProxyClientEntry)
-	}
-	d.proxyClients[key] = &openAIWSProxyClientEntry{
+	client := &http.Client{Transport: transport}
+	d.proxyClients[normalizedProxy] = &openAIWSProxyClientEntry{
 		client:           client,
 		lastUsedUnixNano: now,
 	}
@@ -287,7 +289,15 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 }
 
 type coderOpenAIWSClientConn struct {
-	conn *coderws.Conn
+	conn          *coderws.Conn
+	upstreamPings atomic.Int64
+}
+
+func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.upstreamPings.Load()
 }
 
 var _ openaiwsv2.FrameConn = (*coderOpenAIWSClientConn)(nil)
@@ -358,10 +368,15 @@ func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {
 
 // SupportsIdlePingWithoutReader reports the actual coder/websocket contract.
 // Conn.Ping waits for a pong, while control frames are only consumed by Read.
-// The pool deliberately has no reader on an idle connection, so using Ping as
-// a health probe would deterministically time out a healthy socket.
+// Without a reader, using Ping as a health probe would deterministically time
+// out a healthy socket; the pool compensates with a resident reader loop.
 func (*coderOpenAIWSClientConn) SupportsIdlePingWithoutReader() bool {
 	return false
+}
+
+// RequiresReaderLoop 让池为 coder/websocket 连接常驻读循环，空闲期也能应答 ping。
+func (*coderOpenAIWSClientConn) RequiresReaderLoop() bool {
+	return true
 }
 
 func (c *coderOpenAIWSClientConn) Close() error {
@@ -370,6 +385,14 @@ func (c *coderOpenAIWSClientConn) Close() error {
 	}
 	// Close 为幂等，忽略重复关闭错误。
 	_ = c.conn.Close(coderws.StatusNormalClosure, "")
+	_ = c.conn.CloseNow()
+	return nil
+}
+
+func (c *coderOpenAIWSClientConn) CloseNow() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
 	_ = c.conn.CloseNow()
 	return nil
 }

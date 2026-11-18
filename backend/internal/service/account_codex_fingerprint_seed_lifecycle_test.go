@@ -21,11 +21,10 @@ func TestAdminCreateAccountStripsUserSeedAndCreatesFreshSeedWhenEnabled(t *testi
 	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 
 	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
-		Name:     "codex-oauth",
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-		// 来源闸要求真实凭据物料：codex 导入形态的 refresh_token。
-		Credentials:          map[string]any{"refresh_token": "rt-seed-test"},
+		Name:                 "codex-oauth",
+		Platform:             PlatformOpenAI,
+		Type:                 AccountTypeOAuth,
+		Credentials:          map[string]any{"access_token": "test-oauth-access-token"},
 		SkipDefaultGroupBind: true,
 		Extra: map[string]any{
 			codexFingerprintModeExtraKey: "session",

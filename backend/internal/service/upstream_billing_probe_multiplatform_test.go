@@ -175,7 +175,6 @@ func TestUpstreamBillingProbeOfficialAPIBaseURLIsUnsupportedWithoutRequest(t *te
 		{PlatformDeepseek, "https://api.deepseek.com/anthropic"},
 		{PlatformOpenCodeGo, "https://opencode.ai/zen/go/v1"},
 		{PlatformOpenCodeGo, "https://opencode.ai/zen/go"},
-		// TypeSafe 官方 System One API 同样不提供 /v1/sub2api/billing。
 		{PlatformTypeSafe, "https://api.typesafe.ai"},
 		{PlatformTypeSafe, "https://api.typesafe.ai/v1"},
 	}
@@ -283,8 +282,6 @@ func TestUpstreamBillingProbeSetAccountEnabledAcceptsGrokAPIKey(t *testing.T) {
 	require.ErrorIs(t, err, ErrUpstreamBillingProbeAccountInvalid)
 }
 
-// 回归：创建表单对全部 API-key 平台默认开启自动探测；TypeSafe 账号带默认开关创建
-// 不能被 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID 拒绝。
 func TestBuildAccountForCreateAcceptsTypeSafeAPIKeyWithProbeEnabled(t *testing.T) {
 	enabled := true
 	account, err := buildAccountForCreate(&CreateAccountInput{

@@ -50,6 +50,10 @@ func (u *commandCodeAlphaUpstream) DoWithTLS(req *http.Request, proxyURL string,
 	return u.Do(req, proxyURL, accountID, concurrency)
 }
 
+func (u *commandCodeAlphaUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, 0, concurrency)
+}
+
 func (u *commandCodeAlphaUpstream) request(path string) *http.Request {
 	for _, req := range u.requests {
 		if req.URL.Path == path {
@@ -255,6 +259,10 @@ func (failingCommandCodeUpstream) Do(*http.Request, string, int64, int) (*http.R
 
 func (u failingCommandCodeUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.Do(req, proxyURL, accountID, concurrency)
+}
+
+func (u failingCommandCodeUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, 0, concurrency)
 }
 
 func TestCommandCodeQuotaProbeKeepsWindowsWhenPeriodEndpointsFail(t *testing.T) {
@@ -691,12 +699,4 @@ func TestClassifyCommandCodeUsageError(t *testing.T) {
 	for body, want := range cases {
 		require.Equal(t, want, classifyCommandCodeUsageError([]byte(body)), body)
 	}
-}
-
-func (u *commandCodeAlphaUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.Do(req, proxyURL, 0, concurrency)
-}
-
-func (u failingCommandCodeUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.Do(req, proxyURL, 0, concurrency)
 }

@@ -273,7 +273,6 @@ func (h *GrokOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 		Priority    int     `json:"priority"`
 		GroupIDs    []int64 `json:"group_ids"`
 	}
-	req.Priority = service.LocalAccountPriority
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
@@ -358,7 +357,7 @@ type grokSSOImportWorkerResult struct {
 }
 
 func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
-	req := GrokSSOToOAuthRequest{Priority: service.LocalAccountPriority}
+	var req GrokSSOToOAuthRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return

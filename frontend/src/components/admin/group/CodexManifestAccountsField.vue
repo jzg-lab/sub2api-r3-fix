@@ -12,6 +12,8 @@
       <button
         type="button"
         data-testid="codex-manifest-toggle"
+        role="switch"
+        :aria-checked="config.enabled"
         :class="[
           'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
           config.enabled
@@ -118,6 +120,8 @@
         <button
           type="button"
           data-testid="codex-manifest-fallback-toggle"
+          role="switch"
+          :aria-checked="config.fallback_to_scheduler"
           :class="[
             'relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors',
             config.fallback_to_scheduler

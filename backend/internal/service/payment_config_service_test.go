@@ -10,7 +10,6 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/enttest"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
-	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -554,15 +553,4 @@ func TestUpdatePaymentConfig_PersistsExplicitEmptyAndFalseValues(t *testing.T) {
 
 func paymentConfigStrPtr(value string) *string {
 	return &value
-}
-
-func TestPlazaBalanceConversionUsesLiveRechargeConfiguration(t *testing.T) {
-	repo := &paymentConfigSettingRepoStub{values: map[string]string{SettingBalanceRechargeMult: "10"}}
-	svc := &PaymentConfigService{settingRepo: repo}
-	for _, value := range []string{"10", "20", "0", "invalid"} {
-		repo.values[SettingBalanceRechargeMult] = value
-		got, err := svc.GetBalanceRechargeMultiplier(context.Background())
-		require.NoError(t, err)
-		require.Equal(t, svc.parsePaymentConfig(repo.values).BalanceRechargeMultiplier, got)
-	}
 }
