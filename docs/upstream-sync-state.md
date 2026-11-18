@@ -233,10 +233,25 @@ embed/Linux 编译、Go lint、双端安全和部署/候选工具均通过；本
 
 ### 2026-11-18 新基线验收与依赖修复
 
+本轮结果提交：`ad5cc1912449950cd55d0b60fb8514ca9b687e89`，已推送
+`origin/codex/official-v020-release` 并核对远端完整 SHA。尚未合入 main、登记候选或部署。
+固定源码 [CI 44278975985](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44278975985)
+已完成，整体 failure：freeze、前端完整检查与构建、部署工具、后端 unit/integration、真实 Nginx
+SSE/WebSocket 切换 race、Go lint、后端安全扫描均 success。唯一失败任务为
+`security / frontend-security`，失败步骤为 `Check audit exceptions`；候选登记 skipped。
+公开 API 已核对固定源码和各任务最终结果；远端详细日志需要登录，未取得，本地同源码审计与审核脚本
+复现唯一剩余的 picomatch high 阻断（见下文），不将本地日志冒充远端日志。
+没有修改既有部署审核、候选清单、生产数据库或插件。北京时间约 17:58 只读核验蓝槽 r17.11
+仍接流量且 ready，具体身份见[部署记录](deployment-state.md#官方-v020-发布阻断与只读核验2026-11-18)。
+本轮最终记录提交仅改文档；代码验收身份仍为上述 SHA，未重跑或掩盖该失败 CI。
+
 最终本地验收：Go unit 64 个测试包通过（14000 顶层通过、109 跳过）；integration 60 个测试包通过（8563 顶层通过、86 跳过）；真实 Nginx SSE/WebSocket 切换/回切 race
 通过（包含旧连接维持 31 秒），Go 同版固定历史基线 lint 为 0 新问题。未将缺 Nginx 或 Docker 的跳过计作通过。
 全部已执行历史 SQL 与主线原始字节比较一致，Ent/Wire 依据合并后 schema/provider 重新生成。
 提交前还恢复本地 `.gitignore` 的嵌入资源、构建源码、测试及维护文档规则，避免丢掉新哈希资源。
+本机原始验收日志及 manifest 已归档至独立工作树的
+`.codex-validation/official-v020-release/local-evidence.tar.gz`（忽略文件，未上传 Git），SHA-256
+`7acb5476380ffc34ad834a3ce276e3113aa2e1c1827d9054bbcb77b919b2cb8c`。
 
 工作分支 `codex/official-v020-release` 基于 main `02f7aeb85a83f012288d2980a31f26718ffd46f7`，
 官方来源仍固定 `dab829a4e9b7d1cc307189aea8b0319eb29e29d0`，没有追随官方最新 main。
