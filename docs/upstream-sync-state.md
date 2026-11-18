@@ -233,8 +233,15 @@ embed/Linux 编译、Go lint、双端安全和部署/候选工具均通过；本
 
 ### 2026-11-18 新基线验收与依赖修复
 
+2026-11-18 用户明确要求先合并主分支，保留安全发布阻断。合并前远端 main 为
+`02f7aeb85a83f012288d2980a31f26718ffd46f7`，整合分支为
+`e7e9bde2a37488e6e1220e210949f7ebd4c84c31`。使用保留历史的 merge，结果为
+`0d3585cc50e0dcd1240dabcd80762e5110ba8b4b`；两者 Git tree 均为
+`541ba665f4c45213e00e838de5fc5bb653aa85a0`，没有新增代码冲突或行为改动。
+本次追加提交只更新记录；不沿用旧审核批准新候选，不豁免 picomatch，不执行生产部署。
+
 本轮结果提交：`ad5cc1912449950cd55d0b60fb8514ca9b687e89`，已推送
-`origin/codex/official-v020-release` 并核对远端完整 SHA。尚未合入 main、登记候选或部署。
+`origin/codex/official-v020-release` 并核对远端完整 SHA。随后按用户明确要求合入 main，见下方记录；未登记候选或部署。
 固定源码 [CI 44278975985](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44278975985)
 已完成，整体 failure：freeze、前端完整检查与构建、部署工具、后端 unit/integration、真实 Nginx
 SSE/WebSocket 切换 race、Go lint、后端安全扫描均 success。唯一失败任务为
