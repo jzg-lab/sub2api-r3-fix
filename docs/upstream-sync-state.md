@@ -81,6 +81,37 @@ golangci-lint v2.14.0 使用 CI 相同的固定基线检查为 0 issues；差异
 `codex/capture-host-support-merge` 快进合入本地 `main`。合入后主线仍未部署，
 远端仍是 `b8a859e8d2364cf97512d5e3956567bc5180ebb1`；全量验收限制如上。
 
+### 主分支追加推送与 CI 核验（2026-11-19）
+
+用户随后要求将本地新提交推送远端，运行测试和 CI/CD 并判断上线条件。本次将上述宿主提交及
+合并记录推送到 `origin/main`，远端完整 SHA 已核对为
+`e75501e2e01997460735e5ad44df3f824eddf9c1`；包含此前已推送的分组长上下文计费修复。
+[本次 CI 44349772807](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44349772807)
+固定测试该 SHA，现已结束。前端完整检查/构建/内嵌资源/Linux 构建、Go lint、后端安全扫描、
+后端单元、真实 Nginx SSE/WebSocket 交接和集成测试全部通过。
+远端 `shell` 在排队 15 分钟后取消，未执行任何步骤；GitHub check annotations 明确报告
+`The job was not acquired by Runner of type hosted even after multiple attempts`，并提示 macOS
+arm64 容量限制。本地 macOS 使用 Python 3.12.14 按相同工作流补跑：Apple 容器脚本语法和
+生命周期 fixture、Compose 安全/Gateway 环境/运行资源、Caddy 策略、173 项部署控制器测试和
+21 项候选工具测试全部通过。此结果不冒充远端 job 成功，也不执行真实生产部署。
+
+前端安全任务在 `Check audit exceptions` 失败。本地同一锁文件、Node 24 / pnpm 11.21.0
+复现完整审计 1 high / 0 critical，仅为 `picomatch` 的 `GHSA-fc5q-39xc-vjpf`；
+生产前端依赖审计为零。npm 仍提示修复版本 `>=4.0.8`，registry 最新仍为 4.0.7，4.0.8 未发布。
+本轮追加核对发现 GitHub 已于 `2026-11-18T15:38:56Z` 撤回该公告；上游维护者认为允许不可信
+输入提供此类 glob 并非库漏洞。GitHub 撤回状态和 npm 审计结果目前不一致，不能继续将其表述为
+已确认仍有效的高危公告，也不能把现有失败门槛记成通过。公告见
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)。
+未新增豁免、修改审计逻辑或伪造修复版本。扫描原始回执在本机
+`/tmp/sub2api-current-audit.json`、`/tmp/sub2api-current-audit-prod.json`、
+`/tmp/sub2api-new-advisory.json`；远端任务状态保存在 `/tmp/sub2api-current-ci-jobs.json`。
+
+本次流水线未全绿：前端安全失败、远端部署工具 job 取消、候选登记 skipped。
+当前不能上线：安全任务失败，且 `.github/deployment-review.json` 仍为旧版 r17.11 的专项审核，
+不能批准本次源码；未登记本次候选，也未执行最终镜像、迁移、插件与回退专项验收或新生产备份。
+真实签名采集插件用例需要 `SUB2API_TEST_CAPTURE_PACKAGE`，当前 CI 未提供该变量，会跳过该项；
+上节的本地签名进程证据不冒充本次 CI 或生产目标镜像验证。未更改生产或执行迁移。
+
 ## 采集插件接入（2026-11-11）
 
 用户确认最小的“上传签名包、启用即可使用”流程，随后授权验证通过后合并主分支并推送宿主和插件仓库。
