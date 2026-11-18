@@ -119,6 +119,7 @@ type pluginConfigRepository struct {
 	PluginRepository
 	installation *PluginInstallation
 	encrypted    string
+	updateErr    error
 }
 
 func (r *pluginConfigRepository) GetByID(context.Context, int64) (*PluginInstallation, error) {
@@ -127,6 +128,9 @@ func (r *pluginConfigRepository) GetByID(context.Context, int64) (*PluginInstall
 }
 
 func (r *pluginConfigRepository) UpdateConfig(_ context.Context, _ int64, encrypted, expectedBinarySHA256 string) error {
+	if r.updateErr != nil {
+		return r.updateErr
+	}
 	if expectedBinarySHA256 != r.installation.BinarySHA256 {
 		return ErrPluginStateChanged
 	}

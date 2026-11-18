@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 	"github.com/stretchr/testify/require"
@@ -86,6 +87,44 @@ func TestCaptureRequiresSuccessfulCompleteResponse(t *testing.T) {
 				require.Equal(t, tc.body, record["response"])
 				require.Equal(t, `{ "model":"upstream-model" }`, record["request"])
 				require.NotContains(t, string(item.request.RecordJson), "must-not-save")
+			}
+		})
+	}
+}
+
+func TestCaptureSnapshotsSelectionMetadataBeforeContextChanges(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "snapshot", true: "missing-not-inferred"}[missing], func(t *testing.T) {
+			m := NewPluginManager(nil, nil, nil, PluginHostInfo{})
+			m.captureRuntime.Store(&pluginRuntime{})
+			c := captureForwardContext("/v1/responses", nil)
+			if missing {
+				c.Set("api_key", (*APIKey)(nil))
+				c.Request = c.Request.WithContext(context.Background())
+			}
+			ctx, finish := m.beginCapture(context.Background(), c, &Account{ID: 7, Platform: PlatformOpenAI, GroupIDs: []int64{99}})
+			groupID := int64(88)
+			c.Set("api_key", &APIKey{GroupID: &groupID})
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.Model, "later-model"))
+			req, err := http.NewRequestWithContext(ctx, "POST", "http://example.test/v1/responses", strings.NewReader(`{"model":"mapped-model"}`))
+			require.NoError(t, err)
+			resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"status":"completed"}`))}
+			captureHTTPResponse(req, resp, nil)
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			finish(true)
+			require.Len(t, m.captureQueue, 1)
+			item := <-m.captureQueue
+			defer item.release()
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
+			require.Equal(t, "mapped-model", record["model"])
+			if missing {
+				require.EqualValues(t, 0, record["group_id"])
+				require.Empty(t, record["requested_model"])
+			} else {
+				require.EqualValues(t, 42, record["group_id"])
+				require.Equal(t, "client-model", record["requested_model"])
 			}
 		})
 	}

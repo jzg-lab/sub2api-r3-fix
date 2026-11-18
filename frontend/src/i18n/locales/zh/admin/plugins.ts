@@ -4,7 +4,7 @@ export default {
     qualityScope: '质量调度限制',
     qualityScopeAll: '全部分组（原有规则）',
     qualityScopeSelected: '仅选中分组',
-    description: '安装和管理独立运行的 OAuth 出站传输插件。API Key 流程不受影响。',
+    description: '安装和管理独立运行的出站传输与数据留存插件。',
     upload: '安装插件',
     uploadHint: '仅接受 .s2plugin 包；默认要求可信发布者签名。',
     runtimeNotice: '插件安装、启用、停用和配置由 Sub2API 宿主动态处理，通常不需要重启宿主实例。只有宿主版本或宿主配置本身变化时，才按部署方式执行重启。',
@@ -42,12 +42,12 @@ export default {
     disableSuccess: '插件已停用',
     uninstallSuccess: '插件已卸载',
     testSuccess: '插件测试通过',
-    confirmDisable: '确定停用此插件吗？新的 OAuth 请求会立即恢复 Sub2API 原有路径。',
+    confirmDisable: '确定停用此插件吗？宿主将停止向此插件分发新请求，已有留存档案仍可查看和下载。',
     confirmUninstall: '确定卸载此插件吗？插件必须先停用。此操作会移除安装文件和配置。',
     confirmUntested: '该插件兼容当前版本范围，但未声明已测试当前 Sub2API 版本。确定承担风险并启用吗？',
     fileRequired: '请选择 .s2plugin 文件',
     bridgeRejected: '插件 UI 消息校验失败',
-    onlyOpenAI: '初期能力：仅 OpenAI OAuth 出站传输',
-    noAccountCoupling: '作用域为平台与账号类型，不修改账号数据，也不需要在账号页逐个开启。'
+    onlyOpenAI: '支持 OpenAI OAuth 出站传输与 Claude/OpenAI HTTP 数据留存',
+    noAccountCoupling: '两类插件独立启停；留存范围在插件配置中按分组和客户请求模型选择，不修改账号数据。'
   }
 }

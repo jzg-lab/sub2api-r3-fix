@@ -44,6 +44,8 @@ UI 到宿主：
 | `config.load` | 无 | `config` |
 | `config.save` | `config` 对象 | 规范化后的 `config` |
 | `config.test` | 无 | `result` |
+| `archive.groups` | 无 | `groups`：`{id, name}` 数组，仅 Claude/OpenAI 分组 |
+| `archive.models` | `group_id`：正的 JavaScript 安全整数 | `models`：该分组的模型候选字符串数组 |
 | `archive.list` | `date`：UTC `YYYY-MM-DD` | `records` 数组 |
 | `archive.download` | `record`：含 `date`、`instance_id`、`record_id` 的对象 | 宿主触发 JSON 下载，返回 `ok: true` |
 | `ui.resize` | `height` | 无响应 |
@@ -52,7 +54,11 @@ UI 到宿主：
 `config.test` 在 v1 中测试已保存配置。UI 若要测试当前表单，应先调用 `config.save`。
 
 `archive.*` 仅对声明 `data.capture.v1` 的当前插件开放。列表元素包含 `date`、`instance_id`、
-`record_id`、`size`；文件只能经管理员 API 从当前启用的采集插件读取，不接受服务器路径。
+`record_id`、`size`；文件只能经当前管理员 API 从指定的已安装采集插件读取，不接受服务器路径。
+停用后仍可列出、下载历史档案；宿主加载已保存配置启动独立的档案读取进程，不更改启用状态、
+绑定或采集槽位。`plugin.status` 不把该进程报告为采集已启用。
+分组与模型候选复用现有管理员接口；`archive.models` 会核对分组存在且平台为 `openai` 或
+`anthropic`。候选不自动勾选，不代表上游可用性承诺；接口失败以 `ok: false` 返回。
 下载内容由父页面获取为 Blob 并下载，不向 iframe 返回管理员凭据或档案正文。
 这些是 v1 的可选扩展，旧宿主不会因版本号相同而自动支持。
 

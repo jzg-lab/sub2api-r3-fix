@@ -15,6 +15,10 @@ const {
   cancelStepUp,
   listCaptureRecords,
   downloadCaptureRecord,
+  getAllGroups,
+  getGroupById,
+  getModelAllowlistCandidates,
+  saveAs,
 } = vi.hoisted(() => ({
   listPlugins: vi.fn(),
   uploadPlugin: vi.fn(),
@@ -26,7 +30,13 @@ const {
   cancelStepUp: vi.fn(),
   listCaptureRecords: vi.fn(),
   downloadCaptureRecord: vi.fn(),
+  getAllGroups: vi.fn(),
+  getGroupById: vi.fn(),
+  getModelAllowlistCandidates: vi.fn(),
+  saveAs: vi.fn(),
 }))
+
+vi.mock('file-saver', () => ({ saveAs }))
 
 vi.mock('@/api/admin', () => ({
   adminAPI: {
@@ -43,6 +53,11 @@ vi.mock('@/api/admin', () => ({
       createUISession,
       listCaptureRecords,
       downloadCaptureRecord,
+    },
+    groups: {
+      getAll: getAllGroups,
+      getById: getGroupById,
+      getModelAllowlistCandidates,
     },
   },
 }))
@@ -143,6 +158,7 @@ afterEach(() => {
   wrappers.splice(0).forEach(wrapper => wrapper.unmount())
   document.body.innerHTML = ''
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 async function openUI(wrapper: ReturnType<typeof mountView>) {
@@ -172,6 +188,13 @@ describe('管理员插件页二次验证', () => {
     enablePlugin.mockResolvedValue(plugin)
     savePluginConfig.mockResolvedValue({ enabled: true })
     getPluginConfig.mockResolvedValue({})
+    getAllGroups.mockResolvedValue([
+      { id: 7, name: 'OpenAI 分组', platform: 'openai' },
+      { id: 9, name: 'Claude 分组', platform: 'anthropic' },
+      { id: 11, name: '其他分组', platform: 'gemini' },
+    ])
+    getGroupById.mockImplementation(async id => ({ id, name: id === 9 ? 'Claude 分组' : 'OpenAI 分组', platform: id === 9 ? 'anthropic' : 'openai' }))
+    getModelAllowlistCandidates.mockResolvedValue(['gpt-6-astra', 'gpt-6-sol'])
     createUISession.mockResolvedValue({
       url: '/api/v1/plugin-ui/token/index.html#bridge_token=bridge',
       bridge_token: 'bridge',
@@ -193,6 +216,27 @@ describe('管理员插件页二次验证', () => {
     expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'archive.list.result', ok: true, records: expect.any(Array) }), '*')
   })
 
+  it('采集插件桥接返回可选分组及对应模型候选', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    const wrapper = mountView()
+    await flushPromises()
+    const { send, post } = await openUI(wrapper)
+    send({ type: 'archive.groups' })
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'archive.groups.result',
+      ok: true,
+      groups: [{ id: 7, name: 'OpenAI 分组' }, { id: 9, name: 'Claude 分组' }],
+    }), '*')
+    send({ type: 'archive.models', group_id: 9 })
+    await flushPromises()
+    expect(getGroupById).toHaveBeenCalledWith(9)
+    expect(getModelAllowlistCandidates).toHaveBeenCalledWith(9, 'anthropic')
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'archive.models.result', ok: true, models: ['gpt-6-astra', 'gpt-6-sol'],
+    }), '*')
+  })
+
   it('非采集插件和非当前窗口不能读取档案', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -202,6 +246,76 @@ describe('管理员插件页二次验证', () => {
     send({ type: 'archive.list', date: '2026-11-11', request_id: 'other-frame' }, window)
     await flushPromises()
     expect(listCaptureRecords).not.toHaveBeenCalled()
+  })
+
+  it('拒绝非采集插件查询分组和模型', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const { send, post } = await openUI(wrapper)
+    send({ type: 'archive.groups' })
+    await flushPromises()
+    send({ type: 'archive.models', group_id: 7 })
+    await flushPromises()
+    expect(getAllGroups).not.toHaveBeenCalled()
+    expect(getGroupById).not.toHaveBeenCalled()
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'archive.models.result', ok: false }), '*')
+  })
+
+  it('校验模型查询的分组 ID 和平台并回传接口错误', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    const wrapper = mountView()
+    await flushPromises()
+    const { send, post } = await openUI(wrapper)
+    for (const group_id of [0, -1, 1.5, '7', Number.MAX_SAFE_INTEGER + 1]) {
+      send({ type: 'archive.models', group_id })
+      await flushPromises()
+      expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ ok: false }), '*')
+    }
+    expect(getGroupById).not.toHaveBeenCalled()
+    getGroupById.mockResolvedValueOnce({ id: 11, platform: 'gemini' })
+    send({ type: 'archive.models', group_id: 11 })
+    await flushPromises()
+    expect(getModelAllowlistCandidates).not.toHaveBeenCalled()
+    getModelAllowlistCandidates.mockRejectedValueOnce(new Error('model lookup failed'))
+    send({ type: 'archive.models', group_id: 7 })
+    await flushPromises()
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ ok: false, error: 'model lookup failed' }), '*')
+    getAllGroups.mockRejectedValueOnce(new Error('group lookup failed'))
+    send({ type: 'archive.groups' })
+    await flushPromises()
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ ok: false, error: 'group lookup failed' }), '*')
+  })
+
+  it('关闭配置后不投递迟到的分组响应', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    let resolveGroups!: (groups: unknown[]) => void
+    getAllGroups.mockReturnValueOnce(new Promise(resolve => { resolveGroups = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    const { send, post } = await openUI(wrapper)
+    send({ type: 'archive.groups' })
+    await flushPromises()
+    post.mockClear()
+    wrapper.unmount()
+    resolveGroups([{ id: 7, name: 'group', platform: 'openai' }])
+    await flushPromises()
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('停用插件可下载旧档案且不启用插件或要求配置写入验证', async () => {
+    listPlugins.mockResolvedValue([{ ...plugin, manifest: { ...plugin.manifest, capabilities: [{ id: 'data.capture.v1', platform: '*', account_type: '*' }] } }])
+    const blob = new Blob(['{"request":"original"}'], { type: 'application/json' })
+    downloadCaptureRecord.mockResolvedValueOnce(blob)
+    const wrapper = mountView()
+    await flushPromises()
+    const { send, post } = await openUI(wrapper)
+    send({ type: 'archive.download', record: { date: '2026-11-18', instance_id: 'gateway', record_id: 'old-record' } })
+    await flushPromises()
+    expect(saveAs).toHaveBeenCalledOnce()
+    expect(saveAs).toHaveBeenCalledWith(blob, 'old-record.json')
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'archive.download.result', ok: true }), '*')
+    expect(enablePlugin).not.toHaveBeenCalled()
+    expect(stepUpRun).not.toHaveBeenCalled()
   })
 
   it('下载档案使用当前插件的管理员 API，关闭窗口后不下载迟到结果', async () => {
@@ -216,11 +330,9 @@ describe('管理员插件页二次验证', () => {
     await flushPromises()
     expect(downloadCaptureRecord).toHaveBeenCalledWith(7, { ...record, size: 0 })
     wrapper.unmount()
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     resolveDownload(new Blob(['{}']))
     await flushPromises()
-    expect(click).not.toHaveBeenCalled()
-    click.mockRestore()
+    expect(saveAs).not.toHaveBeenCalled()
   })
 
   it('启用插件通过 step-up 控制器执行', async () => {

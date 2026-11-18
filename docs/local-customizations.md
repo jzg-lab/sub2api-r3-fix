@@ -21,6 +21,15 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 回归入口：`plugin_capture*_test.go`、`plugin_package_test.go`、`PluginsView.spec.ts`；真实进程测试需要
 `SUB2API_TEST_CAPTURE_PACKAGE` 指向当前操作系统的签名包。插件自身测试在 `sub-data-save` 仓库。
 
+2026-11-19 补齐的筛选与历史档案能力尚未部署：UI Bridge 复用管理员分组和模型候选接口，
+只提供 Claude/OpenAI 分组；采集开始时冻结实际路由的 `group_id` 与客户原始 `requested_model`，
+与上游 `model` 分开保存。停用后通过独立只读运行时查看和下载旧档案，不占采集槽位、不启用采集，
+状态查询不再沿用停用前的运行缓存。启用采集时，旧档案进程在管理锁外等待已有下载结束，
+等待上限沿用下载的 30 秒超时。配置持久化失败且运行时回滚也失败时停止该采集进程，
+后续协调从已保存配置恢复；独立出站插件不受影响。浏览器下载复用现有 `file-saver`。
+新增配置失败与进程切换回归见 `plugin_capture_lifecycle_test.go`、`plugin_capture_integration_test.go`；
+本轮主线验收及既有浏览器联调的范围分别记录在版本记录中。
+
 ## 通用订阅与批量图片预占
 
 订阅可用于用户有权限的所有分组。实际目标组决定价格与倍率，原订阅分组继续提供日／周／月

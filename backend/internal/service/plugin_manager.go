@@ -63,6 +63,7 @@ type PluginManager struct {
 	mu                 sync.Mutex
 	runtimes           map[int64]*pluginRuntime
 	captureRuntime     atomic.Pointer[pluginRuntime]
+	archiveReadRuntime *pluginRuntime
 	captureQueue       chan queuedCapture
 	captureSlots       chan struct{}
 	captureQueuedBytes atomic.Int64
@@ -169,6 +170,10 @@ func (m *PluginManager) Stop() {
 	runtimes := make([]*pluginRuntime, 0, len(m.runtimes))
 	for _, runtime := range m.runtimes {
 		runtimes = append(runtimes, runtime)
+	}
+	if m.archiveReadRuntime != nil {
+		runtimes = append(runtimes, m.archiveReadRuntime)
+		m.archiveReadRuntime = nil
 	}
 	m.runtimes = make(map[int64]*pluginRuntime)
 	m.route.Store(nil)
@@ -482,6 +487,11 @@ func (m *PluginManager) detachAllRuntimes() []*pluginRuntime {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	runtimes := make([]*pluginRuntime, 0, len(m.runtimes))
+	if m.archiveReadRuntime != nil {
+		m.archiveReadRuntime.draining.Store(true)
+		runtimes = append(runtimes, m.archiveReadRuntime)
+		m.archiveReadRuntime = nil
+	}
 	for id, runtime := range m.runtimes {
 		runtime.draining.Store(true)
 		runtimes = append(runtimes, runtime)
@@ -706,8 +716,11 @@ func (m *PluginManager) Enable(ctx context.Context, id int64, acceptUntested boo
 		return nil, errors.Join(err, stateErr)
 	}
 	m.mu.Lock()
-	m.publishRuntimeLocked(installation, runtime)
+	archiveRuntime := m.publishRuntimeLocked(installation, runtime)
 	m.mu.Unlock()
+	if archiveRuntime != nil {
+		archiveRuntime.drain(captureDownloadTimeout)
+	}
 	result, err := m.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -734,9 +747,9 @@ func (m *PluginManager) Disable(ctx context.Context, id int64) (*PluginInstallat
 		m.mu.Unlock()
 		return nil, err
 	}
-	runtime := m.removeRuntimeLocked(id)
+	runtimes := m.removeRuntimeLocked(id)
 	m.mu.Unlock()
-	if runtime != nil {
+	for _, runtime := range runtimes {
 		runtime.drain(10 * time.Second)
 	}
 	return m.Get(ctx, id)
@@ -759,11 +772,11 @@ func (m *PluginManager) Delete(ctx context.Context, id int64) error {
 		m.mu.Unlock()
 		return err
 	}
-	runtime := m.removeRuntimeLocked(id)
+	runtimes := m.removeRuntimeLocked(id)
 	local := m.localInstallations[id]
 	delete(m.localInstallations, id)
 	m.mu.Unlock()
-	if runtime != nil {
+	for _, runtime := range runtimes {
 		runtime.drain(10 * time.Second)
 	}
 	cleanupErr := m.cleanupInstallationFiles(installation)
@@ -859,6 +872,18 @@ func (m *PluginManager) restoreRuntimeConfig(id int64, runtime *pluginRuntime, p
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := runtime.validateAndApplyConfig(rollbackCtx, previous); err != nil {
+		// A failed rollback must not leave the collector using unsaved filters.
+		m.mu.Lock()
+		failedCapture := m.captureRuntime.Load() == runtime
+		if failedCapture {
+			runtime.draining.Store(true)
+			m.captureRuntime.Store(nil)
+			delete(m.runtimes, id)
+		}
+		m.mu.Unlock()
+		if failedCapture {
+			runtime.kill()
+		}
 		route := m.route.Load()
 		if route != nil && route.pluginID == id && route.runtime == runtime {
 			stateErr := m.markRuntimeUnavailable(route, "插件配置回滚失败: "+err.Error())
@@ -942,8 +967,13 @@ type PluginStatus struct {
 // Status 返回插件状态：优先读轮询缓存，未命中（刚启动/未到首拍）现查一次
 // 并回填。插件未运行不是错误——disabled 插件天然无运行时。
 func (m *PluginManager) Status(ctx context.Context, id int64) (*PluginStatus, error) {
-	if _, err := m.repo.GetByID(ctx, id); err != nil {
+	installation, err := m.repo.GetByID(ctx, id)
+	if err != nil {
 		return nil, err
+	}
+	// Disabled plugins are no longer polled, so their old running snapshot never refreshes.
+	if installation.State == PluginStateDisabled {
+		return &PluginStatus{PluginID: id, CheckedAt: time.Now().UTC(), Message: "插件未运行"}, nil
 	}
 	return m.statusSnapshot(ctx, id), nil
 }
@@ -1316,7 +1346,12 @@ func (m *PluginManager) prepareRuntime(ctx context.Context, installation *Plugin
 	return runtime, nil
 }
 
-func (m *PluginManager) publishRuntimeLocked(installation *PluginInstallation, runtime *pluginRuntime) {
+func (m *PluginManager) publishRuntimeLocked(installation *PluginInstallation, runtime *pluginRuntime) *pluginRuntime {
+	var archiveRuntime *pluginRuntime
+	if m.archiveReadRuntime != nil && m.archiveReadRuntime.installation.ID == installation.ID {
+		archiveRuntime = m.archiveReadRuntime
+		m.archiveReadRuntime = nil
+	}
 	if old := m.runtimes[installation.ID]; old != nil {
 		old.kill()
 	}
@@ -1331,6 +1366,7 @@ func (m *PluginManager) publishRuntimeLocked(installation *PluginInstallation, r
 			rolloutPercent: bindingRollout(installation.Bindings),
 		})
 	}
+	return archiveRuntime
 }
 
 func (m *PluginManager) newRuntime(ctx context.Context, installation *PluginInstallation) (*pluginRuntime, error) {
@@ -1416,16 +1452,26 @@ func pluginAccountScopeFromManifest(manifest PluginManifest) PluginAccountScope 
 	return newPluginAccountScope(entries...)
 }
 
-func (m *PluginManager) removeRuntimeLocked(id int64) *pluginRuntime {
+func (m *PluginManager) removeRuntimeLocked(id int64) []*pluginRuntime {
+	var removed []*pluginRuntime
 	runtime := m.runtimes[id]
 	delete(m.runtimes, id)
+	if runtime != nil {
+		removed = append(removed, runtime)
+	}
+	if runtime := m.archiveReadRuntime; runtime != nil && runtime.installation.ID == id {
+		m.archiveReadRuntime = nil
+		if len(removed) == 0 || removed[0] != runtime {
+			removed = append(removed, runtime)
+		}
+	}
 	if capture := m.captureRuntime.Load(); capture != nil && capture.installation.ID == id {
 		m.captureRuntime.Store(nil)
 	}
 	if route := m.route.Load(); route != nil && route.pluginID == id {
 		m.route.Store(nil)
 	}
-	return runtime
+	return removed
 }
 
 func (m *PluginManager) decryptConfig(installation *PluginInstallation) (json.RawMessage, error) {

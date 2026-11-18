@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -61,6 +62,8 @@ func TestCaptureClaudeHTTPEntryPoints(t *testing.T) {
 				var record map[string]any
 				require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
 				require.Equal(t, string(raw), record["response"])
+				require.EqualValues(t, 42, record["group_id"])
+				require.Equal(t, "client-model", record["requested_model"])
 				require.NotContains(t, record["request"], "test-secret")
 			})
 		}
@@ -105,6 +108,8 @@ func TestCaptureOpenAIChatHTTPEntryPoint(t *testing.T) {
 				var record map[string]any
 				require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
 				require.Equal(t, raw, record["response"])
+				require.EqualValues(t, 42, record["group_id"])
+				require.Equal(t, "client-model", record["requested_model"])
 			})
 		}
 	}
@@ -128,6 +133,9 @@ func captureForwardContext(path string, body []byte) *gin.Context {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", path, strings.NewReader(string(body)))
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.Model, "client-model"))
+	groupID := int64(42)
+	c.Set("api_key", &APIKey{GroupID: &groupID})
 	return c
 }
 func captureAnthropicResponse(stream bool) *http.Response {
@@ -185,6 +193,8 @@ func TestCaptureOpenAIResponsesAndPassthrough(t *testing.T) {
 				var record map[string]any
 				require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
 				require.Equal(t, raw, record["response"])
+				require.EqualValues(t, 42, record["group_id"])
+				require.Equal(t, "client-model", record["requested_model"])
 			})
 		}
 	}

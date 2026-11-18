@@ -89,6 +89,27 @@ func TestPluginStatusRunningPluginNoStatusField(t *testing.T) {
 	}
 }
 
+func TestPluginStatusDisabledDoesNotReuseEnabledCache(t *testing.T) {
+	manager, fake := newBridgeTestManager(t)
+	repo, ok := manager.repo.(*bridgeStatusRepo)
+	if !ok {
+		t.Fatal("unexpected repository type")
+	}
+	fake.health = &pluginv1.HealthResponse{Healthy: true, Message: "archive ready"}
+	if _, err := manager.Status(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	repo.installations[0].State = PluginStateDisabled
+	delete(manager.runtimes, 7)
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Running || status.Healthy || fake.calls != 1 {
+		t.Fatalf("disabled status = %+v, health calls = %d", status, fake.calls)
+	}
+}
+
 func TestPluginStatusDropsInvalidStatusJSON(t *testing.T) {
 	manager, fake := newBridgeTestManager(t)
 	fake.health = &pluginv1.HealthResponse{Healthy: true, StatusJson: "{not-json"}

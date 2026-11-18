@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
@@ -24,20 +25,23 @@ import (
 
 const captureRecordMaxBytes = 60 << 20
 const captureQueueMaxBytes = 128 << 20
+const captureDownloadTimeout = 30 * time.Second
 
 // captureSession lives only for one forwarding attempt; queued records own their bytes.
 type captureSession struct {
-	ctx           context.Context
-	budgetCtx     context.Context
-	releaseBudget func()
-	mu            sync.Mutex
-	manager       *PluginManager
-	runtime       *pluginRuntime
-	accountID     int64
-	provider      string
-	request       []byte
-	response      *captureReadCloser
-	finished      bool
+	ctx            context.Context
+	budgetCtx      context.Context
+	releaseBudget  func()
+	mu             sync.Mutex
+	manager        *PluginManager
+	runtime        *pluginRuntime
+	accountID      int64
+	groupID        int64
+	requestedModel string
+	provider       string
+	request        []byte
+	response       *captureReadCloser
+	finished       bool
 }
 type captureContextKey struct{}
 
@@ -117,6 +121,11 @@ func (m *PluginManager) beginCapture(ctx context.Context, c *gin.Context, accoun
 		c.Writer = writer
 	}
 	session := &captureSession{ctx: budgetCtx, manager: m, runtime: runtime, accountID: account.ID, provider: account.Platform}
+	// Snapshot routing and the client model before mappings or later forwarding attempts mutate them.
+	session.groupID = getOpenAIGroupIDFromContext(c)
+	if c != nil && c.Request != nil {
+		session.requestedModel, _ = c.Request.Context().Value(ctxkey.Model).(string)
+	}
 	return context.WithValue(ctx, captureContextKey{}, session), func(success bool) {
 		defer func() {
 			<-m.captureSlots
@@ -226,14 +235,16 @@ func (s *captureSession) finish(success bool) {
 	}
 	completedAt := time.Now().UTC()
 	record, err := json.Marshal(struct {
-		SchemaVersion int       `json:"schema_version"`
-		CompletedAt   time.Time `json:"completed_at"`
-		Provider      string    `json:"provider"`
-		AccountID     int64     `json:"account_id"`
-		Model         string    `json:"model"`
-		Request       string    `json:"request"`
-		Response      string    `json:"response"`
-	}{1, completedAt, s.provider, s.accountID, gjson.GetBytes(s.request, "model").String(), string(s.request), r.buffer.String()})
+		SchemaVersion  int       `json:"schema_version"`
+		CompletedAt    time.Time `json:"completed_at"`
+		Provider       string    `json:"provider"`
+		AccountID      int64     `json:"account_id"`
+		GroupID        int64     `json:"group_id"`
+		RequestedModel string    `json:"requested_model"`
+		Model          string    `json:"model"`
+		Request        string    `json:"request"`
+		Response       string    `json:"response"`
+	}{1, completedAt, s.provider, s.accountID, s.groupID, s.requestedModel, gjson.GetBytes(s.request, "model").String(), string(s.request), r.buffer.String()})
 	if err != nil || len(record) > captureRecordMaxBytes {
 		return
 	}
@@ -424,9 +435,17 @@ func (m *PluginManager) reconcileCaptureRuntime(ctx context.Context, installatio
 		return err
 	}
 	m.mu.Lock()
+	var archiveRuntime *pluginRuntime
+	if current := m.archiveReadRuntime; current != nil && current.installation.ID == installation.ID {
+		archiveRuntime = current
+		m.archiveReadRuntime = nil
+	}
 	m.captureRuntime.Store(runtime)
 	m.runtimes[installation.ID] = runtime
 	m.mu.Unlock()
+	if archiveRuntime != nil {
+		archiveRuntime.drain(captureDownloadTimeout)
+	}
 	return nil
 }
 
@@ -468,10 +487,67 @@ func (m *PluginManager) captureLoop(ctx context.Context, done chan struct{}) {
 	}
 }
 
+func (m *PluginManager) captureReadRuntime(ctx context.Context, pluginID int64) (*pluginRuntime, error) {
+	if runtime := m.captureRuntime.Load(); runtime != nil && runtime.installation.ID == pluginID && !runtime.client.Exited() {
+		return runtime, nil
+	}
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	if runtime := m.captureRuntime.Load(); runtime != nil && runtime.installation.ID == pluginID && !runtime.client.Exited() {
+		return runtime, nil
+	}
+	installation, err := m.repo.GetByID(ctx, pluginID)
+	if err != nil {
+		return nil, err
+	}
+	if !installation.Manifest.HasCapability(PluginCapabilityCaptureRecords) {
+		return nil, errors.New("插件没有档案读取能力")
+	}
+	m.mu.Lock()
+	runtime := m.archiveReadRuntime
+	m.mu.Unlock()
+	if runtime != nil && runtime.installation.ID == pluginID &&
+		runtime.installation.BinarySHA256 == installation.BinarySHA256 &&
+		runtime.installation.ConfigEncrypted == installation.ConfigEncrypted && !runtime.client.Exited() {
+		return runtime, nil
+	}
+	if runtime != nil {
+		m.mu.Lock()
+		if m.archiveReadRuntime == runtime {
+			m.archiveReadRuntime = nil
+		}
+		m.mu.Unlock()
+		runtime.drain(captureDownloadTimeout)
+	}
+	local, err := m.ensureLocalInstallation(ctx, installation)
+	if err != nil {
+		return nil, err
+	}
+	runtime, err = m.prepareRuntime(ctx, local, true)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := m.repo.GetByID(ctx, pluginID)
+	if err != nil || latest.BinarySHA256 != installation.BinarySHA256 || latest.ConfigEncrypted != installation.ConfigEncrypted {
+		runtime.kill()
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrPluginStateChanged
+	}
+	m.mu.Lock()
+	m.archiveReadRuntime = runtime
+	m.mu.Unlock()
+	return runtime, nil
+}
+
 func (m *PluginManager) ListCaptureRecords(ctx context.Context, pluginID int64, date string) ([]*pluginv1.CaptureRecordInfo, error) {
-	runtime := m.captureRuntime.Load()
-	if runtime == nil || runtime.installation.ID != pluginID || runtime.client.Exited() || !runtime.beginRequest() {
-		return nil, errors.New("采集插件未启用")
+	runtime, err := m.captureReadRuntime(ctx, pluginID)
+	if err != nil {
+		return nil, err
+	}
+	if !runtime.beginRequest() {
+		return nil, errors.New("档案读取进程正在停止")
 	}
 	defer runtime.finishRequest()
 	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -484,12 +560,15 @@ func (m *PluginManager) ListCaptureRecords(ctx context.Context, pluginID int64, 
 }
 
 func (m *PluginManager) DownloadCaptureRecord(ctx context.Context, pluginID int64, date, instanceID, recordID string) ([]byte, error) {
-	runtime := m.captureRuntime.Load()
-	if runtime == nil || runtime.installation.ID != pluginID || runtime.client.Exited() || !runtime.beginRequest() {
-		return nil, errors.New("采集插件未启用")
+	runtime, err := m.captureReadRuntime(ctx, pluginID)
+	if err != nil {
+		return nil, err
+	}
+	if !runtime.beginRequest() {
+		return nil, errors.New("档案读取进程正在停止")
 	}
 	defer runtime.finishRequest()
-	rpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	rpcCtx, cancel := context.WithTimeout(ctx, captureDownloadTimeout)
 	defer cancel()
 	response, err := runtime.api.DownloadCaptureRecord(rpcCtx, &pluginv1.DownloadCaptureRecordRequest{
 		Date: date, InstanceId: instanceID, RecordId: recordID,

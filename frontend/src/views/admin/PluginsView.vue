@@ -340,6 +340,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { saveAs } from "file-saver";
 import {
   adminAPI,
   type PluginInstallation,
@@ -368,6 +369,7 @@ interface PluginBridgeMessage {
   level?: unknown;
   message?: unknown;
   date?: unknown;
+  group_id?: unknown;
   record?: unknown;
 }
 
@@ -664,6 +666,8 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
     message.type === "config.save" ||
     message.type === "config.test" ||
     message.type === "plugin.status" ||
+    message.type === "archive.groups" ||
+    message.type === "archive.models" ||
     message.type === "archive.list" ||
     message.type === "archive.download";
   const sensitive = message.type === "config.save" || message.type === "config.test";
@@ -723,6 +727,26 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
         postBridgeResult(message, binding, { ok: true, result: status });
         break;
       }
+      case "archive.groups": {
+        if (!configPlugin.value.manifest.capabilities.some(capability => capability.id === "data.capture.v1")) throw new Error(t("admin.plugins.bridgeRejected"));
+        const groups = await adminAPI.groups.getAll();
+        postBridgeResult(message, binding, {
+          ok: true,
+          groups: groups
+            .filter(group => group.platform === "openai" || group.platform === "anthropic")
+            .map(group => ({ id: group.id, name: group.name })),
+        });
+        break;
+      }
+      case "archive.models": {
+        if (!configPlugin.value.manifest.capabilities.some(capability => capability.id === "data.capture.v1")) throw new Error(t("admin.plugins.bridgeRejected"));
+        if (!Number.isSafeInteger(message.group_id) || Number(message.group_id) <= 0) throw new Error(t("admin.plugins.bridgeRejected"));
+        const group = await adminAPI.groups.getById(Number(message.group_id));
+        if (group.platform !== "openai" && group.platform !== "anthropic") throw new Error(t("admin.plugins.bridgeRejected"));
+        const models = await adminAPI.groups.getModelAllowlistCandidates(group.id, group.platform);
+        postBridgeResult(message, binding, { ok: true, models });
+        break;
+      }
       case "archive.list": {
         if (!configPlugin.value.manifest.capabilities.some(capability => capability.id === "data.capture.v1")) throw new Error(t("admin.plugins.bridgeRejected"));
         if (typeof message.date !== "string") throw new Error(t("admin.plugins.bridgeRejected"));
@@ -741,12 +765,7 @@ async function handleBridgeMessage(event: MessageEvent): Promise<void> {
           date: record.date, instance_id: record.instance_id, record_id: record.record_id, size: 0,
         });
         if (!isCurrentBridgeRequest(requestID, binding!)) break;
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${record.record_id}.json`;
-        link.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        saveAs(blob, `${record.record_id}.json`);
         postBridgeResult(message, binding, { ok: true });
         break;
       }

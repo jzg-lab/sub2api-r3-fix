@@ -234,7 +234,8 @@ Sub2API 后续会持续补充更多 Provider 的插件适配说明，包括能�
 
 ## 12. 数据采集插件
 
-宿主支持已随 r17.11 上线；生产尚未安装或启用采集插件包，实际部署证据见[部署状态](deployment-state.md)。
+宿主基础支持已随 r17.11 上线；本次新增筛选元信息、分组/模型 Bridge、停用历史读取及生命周期修复尚未部署。
+生产尚未安装或启用采集插件包，实际部署证据见[部署状态](deployment-state.md)。
 
 `data.capture.v1` 复用现有插件安装、加密配置与 UI Bridge，独立于 Cookie Pin 出站槽位。
 插件实现新增可选 RPC `CaptureRecord`、`ListCaptureRecords`、`DownloadCaptureRecord`；旧出站插件
@@ -244,6 +245,11 @@ Sub2API 后续会持续补充更多 Provider 的插件适配说明，包括能�
 覆盖透传与协议转换。JSON 须读完且有效；SSE 须有成功终态、无错误帧/读错误；业务处理成功且
 客户端未取消、写出未失败后，才入有界队列。探针、账号测试、WebSocket 和专用媒体/异步任务不采集。
 不保存 HTTP 头部、Cookie、令牌或代理凭据；正文仍可能包含敏感对话。
+
+每次转发尝试开始时，从当前路由 API Key 快照固定 `group_id`，从入口请求上下文固定客户原始
+`requested_model`；上游实际模型保留在 `model`，不拿映射后的名称代替客户模型，也不根据账号
+所属分组猜测缺失值。异步队列只持有这些值和独立正文，不持有 Gin Context 或可变账号对象。
+`sub-data-save` 0.1.2+ 的 `group_ids` 与 `models` 必须同时匹配；任一名单为空或元信息缺失时不保存。
 
 并发采集最多 128 条，排队最多 128 条/128 MiB；请求及响应各最多 60 MiB，最终 JSON 最多 60 MiB。
 缓冲与编码先申请现有请求内存预算；无入口预算时使用 128 MiB 共享预算。编码、JSON 转义也占预算，
@@ -257,6 +263,10 @@ Sub2API 后续会持续补充更多 Provider 的插件适配说明，包括能�
 UI 使用 `archive.list`（`date=YYYY-MM-DD`，UTC）及 `archive.download`（`record` 对象含
 `date/instance_id/record_id`）。宿主核对当前 iframe、令牌、采集能力和插件 ID，经现有管理员 API
 访问；iframe 不获得管理员凭据或文件系统入口。下载标记 `private, no-store`。
+`archive.groups` 返回 Claude/OpenAI 分组的 `{id, name}`；`archive.models` 接收正安全整数
+`group_id`，核对分组平台后复用管理员模型候选接口。候选不代表上游可用性保证，也不自动加入筛选。
+停用时列表与下载使用独立档案读取运行时，加载已保存配置但不发布至采集槽位、不修改启用绑定；
+保存配置也不启用采集。重启宿主后仍可读取，重新启用、卸载或宿主停止时清理对应读取进程。
 
 本项目采集包使用专用发布者 `jzg-lab-sub-data-save-v1`，宿主内置公钥只授权 `jzg-lab.sub-data-save`。
 保留原有未签名包拒绝规则与 Cookie Pin 信任配置。宿主升级一次后，兼容的签名采集包可在插件页

@@ -35,10 +35,11 @@
 - 清单为 `platform=*`、`account_type=*`；仅采集 Claude/OpenAI HTTP，包含完整成功的 SSE。
 - `CaptureRecord` 接收完整 JSON；`ListCaptureRecords` 按 UTC 日期列出记录，`DownloadCaptureRecord` 返回 JSON。
 - 宿主提供稳定的 `SUB2API_PLUGIN_STATE_DIR`，插件可使用空配置和默认目录；不向插件 UI 提供文件系统入口。
-- UI Bridge 新增 `archive.list`、`archive.download`，通过当前管理员权限代理；采集与出站各有独立槽位。
+- UI Bridge 提供 `archive.groups`、`archive.models`、`archive.list`、`archive.download`，通过当前管理员权限代理；采集与出站各有独立槽位。
+- 记录包含实际路由 `group_id`、客户原始 `requested_model` 和上游实际 `model`；停用仍可读取旧档案，读取不启用采集。
 - 这是可选的新增协议，旧插件不收到采集 RPC；不支持一个包同时占用采集和出站槽位。
 - 保存为尽力而为，队满/超限/停用/退出可漏存。具体限制、生命周期与安装说明见
-  [插件开发教程](../../../docs/PLUGIN_DEVELOPMENT.md#12-数据采集插件本地实现未部署)。
+  [插件开发教程](../../../docs/PLUGIN_DEVELOPMENT.md#12-数据采集插件)。
 
 ## 可选 HostService v2
 
@@ -100,6 +101,7 @@ UI 可以发送以下消息：
 - `ui.resize`
 - `ui.notify`
 - `archive.list`（仅采集插件）
+- `archive.groups`、`archive.models`（仅采集插件，管理员分组/模型候选）
 - `archive.download`（仅采集插件）
 
 每个请求消息带 `request_id`，宿主以 `<type>.result` 返回结果。配置整体使用 Sub2API 的密钥加密后存入数据库；运行中插件会先验证并应用新配置，数据库写入失败时恢复旧配置。
