@@ -1,9 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import PaymentProviderDialog from '@/components/payment/PaymentProviderDialog.vue'
 import { STRIPE_SDK_API_VERSION } from '@/components/payment/providerConfig'
 import type { ProviderInstance } from '@/types/payment'
+
+const { showError } = vi.hoisted(() => ({ showError: vi.fn() }))
+vi.mock('@/stores', () => ({ useAppStore: () => ({ showError }) }))
+beforeEach(() => showError.mockClear())
+// Validation loads the toast store asynchronously; settle it before teardown.
+afterEach(async () => { await vi.dynamicImportSettled() })
+enableAutoUnmount(afterEach)
 
 const messages: Record<string, string> = {
   'admin.settings.payment.providerConfig': 'Credentials',
@@ -274,6 +281,9 @@ describe('PaymentProviderDialog payment guide', () => {
     await displayNameInput.setValue('Custom payment')
     await wrapper.find('form').trigger('submit.prevent')
 
+    await vi.dynamicImportSettled()
+    expect(showError).toHaveBeenCalledOnce()
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('validationEasyPayCustomMethod'))
     expect(wrapper.emitted('save')).toBeUndefined()
   })
 })
