@@ -754,6 +754,30 @@ class FixtureIsolationTests(unittest.TestCase):
                 fixture.cleanup()
                 command.assert_not_called()
 
+    def test_disabled_installations_remain_in_approval_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "manifest.json"
+            enabled = {"state": "enabled", "id": 1, "artifact_sha256": "approved"}
+            disabled = {"state": "disabled", "id": 2, "artifact_sha256": "stored"}
+            plugins = [disabled, enabled]
+            inputs = {"production_plugins": plugins, "nginx_sha256": "nginx", "caller_inventory_sha256": "inventory", "inventory_files": {},
+                      **{key: {"path": root + "/" + key, "sha256": "approved"} for key in ("trust", "package", "plugin_config", "guard_evidence")}}
+            d.save(path, inputs)
+            host = Mock(c={"pause_services": [], "public_urls": [], "guard_checks": []})
+            host.plugins.return_value = plugins
+            host.nginx_hash.return_value = "nginx"
+            with patch.object(d, "plugin_contract", side_effect=lambda values: values), patch.object(d, "digest", return_value="approved"), patch.object(v, "caller_inventory", return_value="inventory"):
+                self.assertEqual(v.approved_inputs({"verification_manifest": str(path)}, host)[1], plugins)
+                disabled["artifact_sha256"] = "changed"
+                with self.assertRaisesRegex(RuntimeError, "drifted"):
+                    v.approved_inputs({"verification_manifest": str(path)}, host)
+                disabled["state"] = "starting"
+                with self.assertRaisesRegex(RuntimeError, "stable disabled"):
+                    v.approved_inputs({"verification_manifest": str(path)}, host)
+                disabled["state"] = "enabled"
+                with self.assertRaisesRegex(RuntimeError, "one enabled"):
+                    v.approved_inputs({"verification_manifest": str(path)}, host)
+
     def test_changed_plugin_fixture_rejected_before_creation(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "manifest.json"

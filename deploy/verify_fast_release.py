@@ -355,12 +355,14 @@ def approved_inputs(config, host):
     d.require(manifest.stat().st_uid == os.geteuid() and manifest.stat().st_mode & 0o077 == 0, "private verification manifest required")
     inputs = d.read(config["verification_manifest"])
     production_plugins = host.plugins()
-    d.require(len(production_plugins) == 1 and production_plugins[0]["state"] == "enabled", "fixture supports one enabled approved plugin")
+    enabled_plugins = [p for p in production_plugins if p["state"] == "enabled"]
+    d.require(len(enabled_plugins) == 1 and all(p["state"] in ("enabled", "disabled") for p in production_plugins),
+              "fixture requires one enabled plugin and only stable disabled installations")
     d.require(d.plugin_contract(production_plugins) == inputs["production_plugins"], "plugin fixture approval drifted")
     for name in ("trust", "package", "plugin_config", "guard_evidence"):
         item = inputs[name]
         d.require(d.digest(item["path"]) == item["sha256"], "verification input changed: " + name)
-    d.require(inputs["package"]["sha256"] == production_plugins[0]["artifact_sha256"], "fixture package differs from production")
+    d.require(inputs["package"]["sha256"] == enabled_plugins[0]["artifact_sha256"], "fixture package differs from production")
     d.require(host.nginx_hash() == inputs["nginx_sha256"], "maintenance rules changed; repeat isolated guard acceptance")
     d.require(caller_inventory(host) == inputs["caller_inventory_sha256"], "direct caller inventory changed")
     for path, checksum in inputs["inventory_files"].items():
