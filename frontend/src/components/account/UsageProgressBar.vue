@@ -22,6 +22,14 @@
         >
           U ${{ formatUserCost }}
         </span>
+        <span
+          v-if="estimatedTotalCost != null"
+          data-test="estimated-total-cost"
+          class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800"
+          :title="t('admin.accounts.usageWindow.estimatedTotalCostTooltip')"
+        >
+          {{ t('admin.accounts.usageWindow.estimatedTotalCost', { cost: estimatedTotalCost.toFixed(2) }) }}
+        </span>
       </div>
     </div>
 
@@ -41,7 +49,7 @@
       </div>
 
       <!-- Percentage -->
-      <span :class="['w-[36px] shrink-0 text-right text-[10px] font-medium', textClass]">
+      <span :class="['w-[32px] shrink-0 text-right text-[10px] font-medium', textClass]">
         {{ displayPercent }}
       </span>
 
@@ -67,6 +75,7 @@ const props = withDefaults(
     resetsAt?: string | null
     color: 'indigo' | 'emerald' | 'purple' | 'amber'
     windowStats?: WindowStats | null
+    estimatedTotalCost?: number | null
     showNowWhenIdle?: boolean
     remainingCapacity?: boolean
     /** fixed: 定宽居中徽章（账号页纵向对齐）；auto: 限宽截断左对齐（监控页组合标签） */
@@ -169,9 +178,6 @@ const barWidth = computed(() => {
 
 // Display percentage (cap at 999% for readability)
 const displayPercent = computed(() => {
-  if (!props.remainingCapacity && props.utilization < 100 && Math.round(props.utilization) === 100) {
-    return '<100%'
-  }
   const percent = Math.round(
     props.remainingCapacity
       ? Math.min(Math.max(props.utilization, 0), 100)
@@ -187,12 +193,10 @@ const shouldShowResetTime = computed(() => {
 
 // Format reset time
 const formatResetTime = computed(() => {
-  // For rolling windows, when utilization is 0%, treat as immediately available.
-  if (props.showNowWhenIdle && props.utilization <= 0) {
-    return t('usage.resetNow')
+  if (!props.resetsAt) {
+    // Idle rolling window without a known reset time: treat as immediately available.
+    return props.showNowWhenIdle && props.utilization <= 0 ? t('usage.resetNow') : '-'
   }
-
-  if (!props.resetsAt) return '-'
 
   const date = new Date(props.resetsAt)
   const diffMs = date.getTime() - now.value.getTime()

@@ -242,13 +242,18 @@ func TestOpenAIOperationsSettingsAndTemplate(t *testing.T) {
 	cfg.QualityProtectedGroupIDs = []int64{0}
 	require.Error(t, svc.SetOpenAIOperationsSettings(t.Context(), cfg))
 	cfg.QualityProtectedGroupIDs = nil
-	proxy, profile, concurrency, enabled, mode := int64(0), int64(-1), 8, false, "machine"
+	proxy, profile, concurrency, enabled, mode := int64(0), int64(-1), 8, false, "session"
 	cfg.NewAccountDefaults = &OpenAINewAccountDefaults{ProxyID: &proxy, TLSFingerprintProfileID: &profile,
 		Concurrency: &concurrency, EnableTLSFingerprint: &enabled, CodexFingerprintMode: &mode}
 	require.NoError(t, svc.SetOpenAIOperationsSettings(t.Context(), cfg))
 	loaded, err := svc.GetOpenAIOperationsSettings(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, cfg, loaded)
+	machineMode := "machine"
+	cfg.NewAccountDefaults.CodexFingerprintMode = &machineMode
+	require.Error(t, svc.SetOpenAIOperationsSettings(t.Context(), cfg), "removed mode must not be configured as a new-account default")
+	sessionMode := "session"
+	cfg.NewAccountDefaults.CodexFingerprintMode = &sessionMode
 	oldProxy := int64(9)
 	input := &CreateAccountInput{Platform: PlatformOpenAI, ProxyID: &oldProxy, Concurrency: 3,
 		Extra: map[string]any{"enable_tls_fingerprint": true, "unrelated": "kept"}}
@@ -310,7 +315,7 @@ func TestTLSProfileStableAccountSelectionAndWSCompatibility(t *testing.T) {
 		edited := profile.Clone()
 		edited.ShuffleExtensions = !edited.ShuffleExtensions
 		require.NotEqual(t, key, normalizeOpenAIWSHandshakeCompatibility(a, nil, edited))
-		require.NotEqual(t, key, normalizeOpenAIWSHandshakeCompatibility(a, nil, nil))
+		require.NotEqual(t, key, normalizeOpenAIWSHandshakeCompatibility(a, nil))
 	}
 	require.Len(t, seen, 3)
 }

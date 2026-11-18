@@ -70,6 +70,7 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		Credentials: map[string]any{
 			"chatgpt_account_id": "org-spark-parent",
 			"access_token":       "fake-access-token",
+			"expires_at":         time.Now().Add(time.Hour).Unix(),
 		},
 	}
 
@@ -85,7 +86,6 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{
 		OpenAITokenCacheKey(parent): "fake-access-token",
 	}}
-	parent.Credentials["access_token"] = tokenCache.tokens[OpenAITokenCacheKey(parent)]
 	tokenProvider := NewOpenAITokenProvider(repo, tokenCache, nil)
 
 	// httptest server: records the chatgpt-account-id header and returns a
@@ -119,7 +119,7 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	}))
 	defer srv.Close()
 
-	quotaService := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	quotaService := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv), nil)
 	svc := &AccountUsageService{
 		accountRepo:        repo,
 		openAIQuotaService: quotaService,

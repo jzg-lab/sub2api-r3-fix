@@ -185,26 +185,6 @@ func TestValidateFunctionCallOutputContextBytesMatchesMapValidation(t *testing.T
 	}
 }
 
-func TestValidateFunctionCallOutputContextScansOutputsAfterToolContext(t *testing.T) {
-	body := map[string]any{
-		"input": []any{
-			map[string]any{"type": "function_call", "call_id": "call_1"},
-			map[string]any{"type": "function_call_output", "call_id": "call_1"},
-			map[string]any{"type": "function_call_output", "output": "{}"},
-		},
-	}
-
-	bodyBytes, err := json.Marshal(body)
-	require.NoError(t, err)
-
-	mapResult := ValidateFunctionCallOutputContext(body)
-	rawResult := ValidateFunctionCallOutputContextBytes(bodyBytes)
-	require.Equal(t, mapResult, rawResult)
-	require.True(t, rawResult.HasFunctionCallOutput)
-	require.True(t, rawResult.HasToolCallContext)
-	require.True(t, rawResult.HasFunctionCallOutputMissingCallID)
-}
-
 func TestAnalyzeToolCallOutputContextCoverageBytes(t *testing.T) {
 	cases := []struct {
 		name         string

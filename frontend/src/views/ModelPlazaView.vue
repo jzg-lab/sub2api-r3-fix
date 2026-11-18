@@ -1,19 +1,21 @@
 <template>
-  <div class="plaza-page">
+  <component :is="isEmbedded ? AppLayout : 'div'" class="plaza-page">
     <div class="plaza-shell">
-      <PlazaNavBar />
+      <PlazaNavBar v-if="!isEmbedded" />
       <main>
         <ModelPlazaContent :response="data" :loading="loading" :error="loadFailed"
           :updated-at="updatedAt" :monitor="monitor" :monitor-unavailable="monitorUnavailable"
           @retry="refresh" />
       </main>
     </div>
-  </div>
+  </component>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
+import AppLayout from '@/components/layout/AppLayout.vue'
 import PlazaNavBar from '@/components/modelPlaza/PlazaNavBar.vue'
 import ModelPlazaContent from '@/components/modelPlaza/ModelPlazaContent.vue'
 import { refreshModelPlaza, type ModelPlazaResponse } from '@/api/modelPlaza'
@@ -24,6 +26,8 @@ import '@/components/modelPlaza/plaza.css'
 
 const appStore = useAppStore()
 const auth = useAuthStore()
+const route = useRoute()
+const isEmbedded = computed(() => route.query.embedded === '1' && auth.isAuthenticated)
 const { locale } = useI18n()
 const data = ref<ModelPlazaResponse | null>(null)
 const loading = ref(true)

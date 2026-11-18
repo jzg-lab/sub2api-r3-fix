@@ -578,10 +578,11 @@ type AccountWaitPlan struct {
 }
 
 type AccountSelectionResult struct {
-	Account     *Account
-	Acquired    bool
-	ReleaseFunc func()
-	WaitPlan    *AccountWaitPlan // nil means no wait allowed
+	Account          *Account
+	Acquired         bool
+	ReleaseFunc      func()
+	WaitPlan         *AccountWaitPlan // nil means no wait allowed
+	stickySessionHit bool
 	// profitGate 携带本次选号真实生效的利润门（无门为 nil）。门安装在调度栈的
 	// 局部 ctx 上，handler 必须经 ContextWithSelectionProfitGate 重放后才能在
 	// 调度栈之外做抢槽后终检与准入后粘性绑定。
@@ -640,7 +641,11 @@ type ForwardResult struct {
 	ServiceTier *string
 
 	// 图片生成计费字段（图片生成模型使用）
-	ImageCount         int    // 生成的图片数量
+	ImageCount int // 生成的图片数量
+	// ImageEndpoint 标记请求来自专用图片端点（/v1/images/*、图片模型端点）。
+	// 分组 image_count_billing 开关只对这类请求生效，混合的 Responses/Chat/WS
+	// 请求带图片工具时仍按 token 计费。
+	ImageEndpoint      bool
 	ImageSize          string // 最终计费尺寸 "1K", "2K", "4K"
 	ImageInputSize     string // 请求中的原始图片尺寸
 	ImageOutputSize    string // 上游响应中的图片尺寸
@@ -1468,7 +1473,7 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	if platform != "" {
 		filtered := make([]Account, 0)
 		for _, acc := range accounts {
-			if acc.Platform == platform {
+			if acc.Platform == platform || mixedListingAccountAllowed(platform, &acc) {
 				filtered = append(filtered, acc)
 			}
 		}
@@ -1478,7 +1483,6 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	// Collect unique models from all accounts
 	modelSet := make(map[string]struct{})
 	hasAnyMapping := false
-	hasPassthrough := false
 
 	for _, acc := range accounts {
 		// Passthrough routing accepts models independently of model_mapping, so a
@@ -1487,7 +1491,6 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		// supplementUnmappedOpenAIModels contribute the default set. Mappings on
 		// the ordinary accounts in the same group still count.
 		if platform == PlatformOpenAI && acc.IsOpenAIPassthroughEnabled() {
-			hasPassthrough = true
 			continue
 		}
 
@@ -1495,6 +1498,9 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		if len(mapping) > 0 {
 			hasAnyMapping = true
 			for model := range mapping {
+				if acc.Platform != platform && platform != "" && !mixedListingModelAllowed(platform, model) {
+					continue
+				}
 				modelSet[model] = struct{}{}
 			}
 		}
@@ -1520,7 +1526,7 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	for model := range modelSet {
 		models = append(models, model)
 	}
-	if hasPassthrough {
+	if platform == PlatformOpenAI {
 		models = supplementUnmappedOpenAIModels(accounts, models)
 	}
 	if platform == PlatformOpenAI {
@@ -1617,7 +1623,18 @@ func (s *GatewayService) GetCompositeRouteModels(ctx context.Context, groupID *i
 	if s == nil || s.compositeResolver == nil || groupID == nil {
 		return nil, nil
 	}
-	return s.compositeResolver.ListExactPublicModels(ctx, *groupID, endpoint)
+	return s.compositeResolver.ListExactPublicModels(ctx, *groupID, endpoint, endpoint == "")
+}
+
+func (s *GatewayService) ResolveFallbackGroupByID(ctx context.Context, groupID int64) (*Group, error) {
+	group, err := s.groupRepo.GetByID(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if !CanUseGatewayFallbackGroup(ctx, group) {
+		return nil, ErrGroupNotAllowed
+	}
+	return group, nil
 }
 
 // GetSchedulablePlatforms returns the concrete platforms that currently have

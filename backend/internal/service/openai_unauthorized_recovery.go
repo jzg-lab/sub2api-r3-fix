@@ -18,7 +18,7 @@ const (
 
 // The original caller context gates credential changes and replay. The outgoing
 // request may intentionally be detached for streaming/accounting.
-func (s *OpenAIGatewayService) doOpenAIUpstream(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+func (s *OpenAIGatewayService) doOpenAIUpstreamWithContext(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
 	return doOpenAIUpstreamWithRecovery(ctx, request, proxyURL, account, s.openAITokenProvider, false, s.roundTripOpenAIUpstream)
 }
 
@@ -42,6 +42,9 @@ func doOpenAIUpstreamWithRecovery(
 		}
 	}
 	account = snapshotOpenAIRequestAccount(request.Context(), account, request.Header.Get("Authorization"), repo)
+	if err := validateOpenAIAccountProxyRoute(account, proxyURL); err != nil {
+		return nil, err
+	}
 	authAccount := openAIAuthAttemptAccount(account)
 	response, err := roundTrip(request, proxyURL, account)
 	bindOpenAIResponseAccount(response, request, account)
@@ -159,6 +162,14 @@ func doOpenAIUpstreamWithRecovery(
 	if account.IsShadow() {
 		retryAccount = snapshotOAuthRefreshAccount(account)
 		retryAccount.openAIAuthAttempt = snapshotOAuthRefreshAccount(current)
+	}
+	if err := validateOpenAIAccountProxyRoute(retryAccount, proxyURL); err != nil {
+		stopCancel()
+		cancelRetry()
+		if retry.Body != nil {
+			_ = retry.Body.Close()
+		}
+		return nil, err
 	}
 	retryResponse, retryErr := roundTrip(retry, proxyURL, retryAccount)
 	bindOpenAIResponseAccount(retryResponse, retry, retryAccount)

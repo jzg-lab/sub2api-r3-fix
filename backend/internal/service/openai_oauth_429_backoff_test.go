@@ -47,11 +47,11 @@ func TestMarkOpenAIOAuth429RateLimitedUsesPerAccountNoResetBackoff(t *testing.T)
 	before := time.Now()
 	svc.markOpenAIOAuth429RateLimited(nil, account, nil, nil)
 	firstUntil := runtimeBlockUntilForTest(t, svc, account.ID)
-	require.GreaterOrEqual(t, firstUntil, before.Add(5*time.Minute))
+	require.GreaterOrEqual(t, firstUntil, before.Add(time.Duration(defaultRateLimit429CooldownSeconds)*time.Second))
 
 	svc.markOpenAIOAuth429RateLimited(nil, account, nil, nil)
 	secondUntil := runtimeBlockUntilForTest(t, svc, account.ID)
-	require.GreaterOrEqual(t, secondUntil, before.Add(10*time.Minute))
+	require.GreaterOrEqual(t, secondUntil, before.Add(2*time.Duration(defaultRateLimit429CooldownSeconds)*time.Second))
 	require.Greater(t, secondUntil, firstUntil)
 }
 

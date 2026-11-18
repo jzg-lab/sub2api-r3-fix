@@ -194,7 +194,7 @@ func (s *OpenAICodexVersionSyncService) fetchLatestStableVersion(ctx context.Con
 }
 
 // autoSyncEnabled 读取面板开关。缺失或空值视为开启，与设置默认值一致；
-// Failed reads suspend this cycle; an unavailable setting is not permission.
+// 读取失败时保持开启，避免一次数据库抖动就静默停掉版本跟随。
 func (s *OpenAICodexVersionSyncService) autoSyncEnabled(ctx context.Context) bool {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyOpenAICodexVersionAutoSyncEnabled)
 	if errors.Is(err, ErrSettingNotFound) {

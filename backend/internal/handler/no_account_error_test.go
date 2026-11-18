@@ -197,7 +197,6 @@ func TestClassifyNoAccountError_ModelSupportedOnlyByRateLimitedAccount_Returns50
 	require.Equal(t, http.StatusServiceUnavailable, cls.Status)
 	require.Equal(t, "api_error", cls.ErrType)
 	require.False(t, cls.ModelNotFound, "temporary account cooldown must remain retryable")
-	require.Equal(t, "No available accounts in this pool. Check account status and usage limits.", cls.Message)
 }
 
 func TestClassifyNoAccountError_NoAccountsInPool_Stays503(t *testing.T) {
@@ -209,7 +208,6 @@ func TestClassifyNoAccountError_NoAccountsInPool_Stays503(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, cls.Status, "empty pool is a service-availability issue, not a model issue")
 	require.False(t, cls.ModelNotFound)
-	require.Equal(t, "No available accounts in this pool. Check account status and usage limits.", cls.Message)
 }
 
 func TestClassifyNoAccountError_DisplayModelOverridesRoutingForMessage(t *testing.T) {
@@ -306,19 +304,21 @@ func TestClassifySelectionFailureError_StillUpgradesNonModelNotFoundFallback(t *
 	require.False(t, got.ModelNotFound)
 }
 
-func TestMarkSub2APINoAvailableAccounts_OnlyMarksConfirmed503(t *testing.T) {
-	c := newTestGinContextWithRequest()
-	markSub2APINoAvailableAccounts(c, noAccountErrorClassification{
-		Status:  http.StatusServiceUnavailable,
-		ErrType: "api_error",
-	})
-	require.Equal(t, "1", c.Writer.Header().Get(sub2APINoAvailableAccountsHeader))
+func TestClassifyNoAccountError_GPT55Retirement(t *testing.T) {
+	groupID := int64(1)
+	apiKey := &service.APIKey{GroupID: &groupID}
+	fd := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasRetiredSubscriptionModel: true}}
+	cls := classifyNoAccountError(context.Background(), fd, apiKey, "gpt-5.5", "legacy", service.PlatformOpenAI)
+	require.Equal(t, http.StatusNotFound, cls.Status)
+	require.Equal(t, "model_not_found", cls.ErrType)
+	require.Contains(t, cls.Message, "retired")
+	require.Contains(t, cls.Message, "API-key")
+	fd.resp.HasModelSupport = true
+	cls = classifyNoAccountError(context.Background(), fd, apiKey, "gpt-5.5", "legacy", service.PlatformOpenAI)
+	require.Equal(t, http.StatusServiceUnavailable, cls.Status, "a temporarily unavailable API pool is not a retirement error")
+}
 
-	modelNotFound := newTestGinContextWithRequest()
-	markSub2APINoAvailableAccounts(modelNotFound, noAccountErrorClassification{
-		Status:        http.StatusNotFound,
-		ErrType:       "model_not_found",
-		ModelNotFound: true,
-	})
-	require.Empty(t, modelNotFound.Writer.Header().Get(sub2APINoAvailableAccountsHeader))
+func TestGPT55RetirementEmptyListingDoesNotUseDefaults(t *testing.T) {
+	require.Empty(t, modelListingSource(service.PlatformOpenAI, []string{}, []string{"gpt-5.5"}))
+	require.Equal(t, []string{"gpt-5.5"}, modelListingSource(service.PlatformOpenAI, nil, []string{"gpt-5.5"}))
 }

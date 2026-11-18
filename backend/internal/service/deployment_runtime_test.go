@@ -30,6 +30,17 @@ func TestDeploymentStandbySkipsAutonomousWorkBeforeDependencies(t *testing.T) {
 	_, err = (&BatchImageWorker{}).RecoverStaleActiveOnce(ctx)
 	require.NoError(t, err)
 	(&ContentModerationService{}).runCleanupOnce()
+	(&BackupService{}).recoverStaleRecords()
+	(&BackupService{}).runScheduledBackup()
+	(&DashboardAggregationService{}).runScheduledAggregation()
+	(&DashboardAggregationService{}).runScheduledGroupUsageSync()
+	(&DashboardAggregationService{}).runStartupGroupUsageSync()
+	(&DashboardAggregationService{}).runScheduledRetention()
+	(&OpsCleanupService{}).runScheduled()
+	(&UsageCleanupService{}).runOnce()
+	(&SchedulerSnapshotService{}).runInitialRebuild()
+	(&SchedulerSnapshotService{}).pollOutbox()
+
 	require.Zero(t, deployment.Background.Pending())
 }
 

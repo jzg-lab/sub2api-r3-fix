@@ -26,25 +26,24 @@ const (
 // geminiCacheStorageModelPrices 是已发布型号的存储单价。模型名等于前缀，或以「前缀-」开头
 // （-preview、-customtools、-001 等变体）即命中；更具体的前缀排在前面。
 var geminiCacheStorageModelPrices = []struct {
-	prefix   string
-	price    float64
-	promoEnd string
+	prefix string
+	price  float64
 }{
-	{"gemini-3.8-flash-cyber", geminiFlashCacheStoragePrice, ""},
-	{"gemini-3.8-flash", geminiFlashPromoCacheStoragePrice, gemini36FlashPromoEnd},
-	{"gemini-3.7-flash", geminiFlashPromoCacheStoragePrice, gemini36FlashPromoEnd},
-	{"gemini-3.6-flash", geminiFlashPromoCacheStoragePrice, gemini36FlashPromoEnd},
-	{"gemini-3.5-flash-lite", geminiFlashCacheStoragePrice, ""},
-	{"gemini-3.5-flash", geminiFlashCacheStoragePrice, ""},
-	{"gemini-3.1-flash-lite", geminiFlashCacheStoragePrice, ""},
-	{"gemini-3.1-pro", geminiProCacheStoragePrice, ""},
-	{"gemini-3-flash", geminiFlashCacheStoragePrice, ""},
-	{"gemini-3-pro", geminiProCacheStoragePrice, ""},
-	{"gemini-2.5-flash-lite", geminiFlashCacheStoragePrice, ""},
-	{"gemini-2.5-flash", geminiFlashCacheStoragePrice, ""},
-	{"gemini-2.5-pro", geminiProCacheStoragePrice, ""},
-	{"gemini-2.0-flash-lite", geminiFlashCacheStoragePrice, ""},
-	{"gemini-2.0-flash", geminiFlashCacheStoragePrice, ""},
+	{"gemini-3.8-flash-cyber", geminiFlashCacheStoragePrice},
+	{"gemini-3.8-flash", geminiFlashPromoCacheStoragePrice},
+	{"gemini-3.7-flash", geminiFlashPromoCacheStoragePrice},
+	{"gemini-3.6-flash", geminiFlashPromoCacheStoragePrice},
+	{"gemini-3.5-flash-lite", geminiFlashCacheStoragePrice},
+	{"gemini-3.5-flash", geminiFlashCacheStoragePrice},
+	{"gemini-3.1-flash-lite", geminiFlashCacheStoragePrice},
+	{"gemini-3.1-pro", geminiProCacheStoragePrice},
+	{"gemini-3-flash", geminiFlashCacheStoragePrice},
+	{"gemini-3-pro", geminiProCacheStoragePrice},
+	{"gemini-2.5-flash-lite", geminiFlashCacheStoragePrice},
+	{"gemini-2.5-flash", geminiFlashCacheStoragePrice},
+	{"gemini-2.5-pro", geminiProCacheStoragePrice},
+	{"gemini-2.0-flash-lite", geminiFlashCacheStoragePrice},
+	{"gemini-2.0-flash", geminiFlashCacheStoragePrice},
 }
 
 // builtinGeminiCacheStoragePrice 返回内置的显式缓存存储单价：先按已发布型号匹配，未命中时按系列兜底，
@@ -61,21 +60,17 @@ func builtinGeminiCacheStoragePriceAt(model string, at time.Time) float64 {
 	}
 	parts := strings.Split(name, "-")
 	lite := slices.Contains(parts, "lite")
-	if at.IsZero() {
-		at = timezone.Now()
-	}
 	for _, entry := range geminiCacheStorageModelPrices {
+		price := entry.price
+		if strings.Contains(entry.prefix, "-3.8-flash") && at.UTC().Year() >= 2027 {
+			price = geminiFlashCacheStoragePrice
+		}
 		// Flash-Lite 变体只匹配 Flash-Lite 条目：gemini-3.8-flash-lite 不能落到 3.8 Flash 的优惠价。
 		if lite != strings.HasSuffix(entry.prefix, "-lite") {
 			continue
 		}
 		if name == entry.prefix || strings.HasPrefix(name, entry.prefix+"-") {
-			if entry.promoEnd != "" {
-				if end, err := time.ParseInLocation("2006-01-02", entry.promoEnd, timezone.Location()); err == nil && !at.Before(end) {
-					return geminiFlashCacheStoragePrice
-				}
-			}
-			return entry.price
+			return price
 		}
 	}
 	switch {

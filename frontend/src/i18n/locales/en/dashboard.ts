@@ -1,10 +1,5 @@
 export default {
   dashboard: {
-    overview: 'Usage overview',
-    totalUsage: 'Total usage',
-    tokenDetails: 'Token details',
-    details: 'Details',
-
     title: 'Dashboard',
     welcomeMessage: "Welcome back! Here's an overview of your account.",
     balance: 'Balance',
@@ -61,7 +56,12 @@ export default {
     viewUsage: 'View Usage',
     checkDetailedLogs: 'Check detailed usage logs',
     redeemCode: 'Redeem Code',
-    addBalanceWithCode: 'Add balance with a code'
+    addBalanceWithCode: 'Add balance with a code',
+overview: 'Usage overview',
+totalUsage: 'Total usage',
+tokenDetails: 'Token details',
+details: 'Details',
+
   },
 
   // Groups (shared)
@@ -71,14 +71,6 @@ export default {
 
   // API Keys
   keys: {
-    smartRouting: 'Smart routing',
-    smartRoutingHint: 'Try compatible groups in order and switch on retryable failures. Billing follows the selected group; backup rates may differ.',
-    routeAdd: 'Add a backup group',
-    routeMoveUp: 'Move group up',
-    routeMoveDown: 'Move group down',
-    routeRemove: 'Remove group',
-    routeLimit: 'Up to 10 groups; first group has priority',
-
     title: 'API Keys',
     description: 'Manage your API keys and access tokens',
     searchPlaceholder: 'Search name or key...',
@@ -96,6 +88,21 @@ export default {
     columnAlwaysVisible: 'This column is always visible',
     createKey: 'Create API Key',
     editKey: 'Edit API Key',
+    bulkEdit: {
+      title: 'Bulk Edit',
+      selectedCount: '{count} keys selected',
+      selectKey: 'Select key {name}',
+      clearSelection: 'Clear selection',
+      hint: 'Check the fields to update. Unchecked fields keep their current values.',
+      limitHint: 'Enter 0 for no limit. Existing usage is preserved.',
+      ipHint: 'One IP or CIDR per line. Leave empty to clear this list on the selected keys.',
+      invalidLimit: 'Enter a valid amount greater than or equal to 0.',
+      invalidExpiration: 'Choose a valid expiration date or select Never expires.',
+      apply: 'Apply to {count} keys',
+      success: 'Updated {count} keys',
+      partialFailure: 'Updated {success} keys; {failed} failed',
+      failureHint: 'These keys could not be updated. Adjust the settings and retry. Only failed keys will be retried.'
+    },
     deleteKey: 'Delete API Key',
     deleteConfirmMessage: "Are you sure you want to delete '{name}'? This action cannot be undone.",
     id: 'ID',
@@ -115,8 +122,18 @@ export default {
     namePlaceholder: 'My API Key',
     groupLabel: 'Group',
     providerLabel: 'Provider',
-    providerCN: 'Chinese models',
-    providerOther: 'Other',
+    providers: {
+      anthropic: 'Anthropic',
+      openai: 'OpenAI',
+      domestic: 'Chinese AI',
+      other: 'Other'
+    },
+    providerHints: {
+      anthropic: 'Choose an available Anthropic / Claude group',
+      openai: 'Choose an available OpenAI / GPT group',
+      domestic: 'Includes DeepSeek, Kimi, Zhipu GLM and MiniMax',
+      other: 'Includes Gemini, Grok, Antigravity, OpenCode and mixed groups'
+    },
     selectGroup: 'Select a group',
     statusLabel: 'Status',
     selectStatus: 'Select status',
@@ -156,10 +173,10 @@ export default {
       openai: {
         description: 'Add the following configuration files to your Codex CLI config directory.',
         authModeTitle: 'Codex authentication mode',
-        authModeDescription: 'Compatibility mode keeps the existing setup for older Codex clients. API Key Mode authorizes the client-side image executor.',
+        authModeDescription: 'The configuration enables live web search. API Key mode supports native Codex image generation by default. Choose compatibility mode for older clients.',
         authModeLegacy: 'Compatibility mode',
-        authModeApiKey: 'API Key Mode',
-        authModeApiKeyRestartNotice: 'After saving this configuration, completely quit and restart Codex Desktop or CLI, then create a new task so the client can rebuild its tool registry.',
+        authModeApiKey: 'API Key Mode (recommended)',
+        authModeApiKeyRestartNotice: 'This configuration contains your API key; do not share it or commit it. Save it and test in a new conversation; restart Codex if it has not loaded. Image generation still requires group permission, available balance, and upstream support.',
         configTomlHint: 'Make sure the following content is at the beginning of the config.toml file',
         note: 'Make sure the config directory exists. macOS/Linux users can run mkdir -p ~/.codex to create it.',
         noteWindows: 'Press Win+R and enter %userprofile%\\.codex to open the config directory. Create it manually if it does not exist.',
@@ -315,6 +332,16 @@ export default {
       quota_exhausted: 'Quota Exhausted',
       expired: 'Expired',
     },
+smartRouting: 'Smart routing',
+smartRoutingHint: 'Try compatible groups in order and switch on retryable failures. Billing follows the selected group; backup rates may differ.',
+routeAdd: 'Add a backup group',
+routeMoveUp: 'Move group up',
+routeMoveDown: 'Move group down',
+routeRemove: 'Remove group',
+routeLimit: 'Up to 10 groups; first group has priority',
+providerCN: 'Chinese models',
+providerOther: 'Other',
+
   },
 
   // Usage
@@ -383,6 +410,8 @@ export default {
     latency: 'Latency',
     latencyFirstToken: 'First',
     latencyDuration: 'Total',
+    outputTps: 'Output TPS',
+    outputTpsHint: 'Output tokens divided by total duration, including first-token wait, in tok/s. Output tokens may include reasoning tokens.',
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',
@@ -399,7 +428,6 @@ export default {
     cacheHit: 'Cache hit',
     cacheCreate: 'Cache create',
     cacheHitRate: 'Cache hit rate',
-    cacheMetricLabel: 'Cache',
     inputTokenPrice: 'Input price',
     outputTokenPrice: 'Output price',
     perMillionTokens: '/ 1M tokens',
@@ -441,6 +469,7 @@ export default {
     noDataToExport: 'No data to export',
     exportSuccess: 'Usage data exported successfully',
     exportFailed: 'Failed to export usage data',
+    exportRateLimited: 'Too many requests, export will resume in {seconds} seconds',
     exportExcelSuccess: 'Usage data exported successfully (Excel format)',
     exportExcelFailed: 'Failed to export usage data',
     imageUnit: ' images',
@@ -479,6 +508,8 @@ export default {
         loadFailed: 'Failed to load detail, please try again',
       },
     },
+    cacheMetricLabel: 'Cache',
+
   },
 
   // Shared keys for channel monitor (admin + user views)
@@ -618,6 +649,8 @@ export default {
       billingModePerRequest: 'Per Request',
       billingModeImage: 'Per Image',
       billingModeVideo: 'Per Video',
+      videoPrice: 'Video Price',
+      unitPerSecond: '/ second',
       inputPrice: 'Input',
       outputPrice: 'Output',
       cacheWritePrice: 'Cache Write',
@@ -635,7 +668,66 @@ export default {
 
   // Model Plaza (public group/model pricing showcase)
   modelPlaza: {
-    catalog: {
+    title: 'Model Plaza',
+    description: 'Browse available models and pricing by group',
+    loading: 'Loading...',
+    empty: 'No groups to display',
+    loadFailed: 'Failed to load model plaza',
+    noSearchResult: 'No matching models',
+    anonymousHint: 'Sign in to see your exclusive groups and personal rates',
+    filters: {
+      platformLabel: 'Platform',
+      groupLabel: 'Group',
+      rateLabel: 'Rate',
+      modelLabel: 'Model',
+      searchPlaceholder: 'Search models',
+      all: 'All'
+    },
+    badges: {
+      exclusive: 'Exclusive',
+      subscription: 'Subscription'
+    },
+    detail: {
+      noModels: 'No models configured for this group',
+      noPricing: 'Pricing not configured',
+      peakNote: 'Peak hours {window}: billing rate ×{multiplier}',
+      longContextDisabledNote: 'Long-context tier pricing is disabled for this group: requests above the threshold are billed at the base tier; official tiers are for reference only'
+    },
+    table: {
+      model: 'Model',
+      input: 'Input',
+      output: 'Output',
+      cache: 'Cache',
+      cacheWrite: 'Write',
+      cacheRead: 'Read',
+      cacheWriteShort: 'W',
+      cacheReadShort: 'R',
+      tierHint: 'The whole request is billed at the tier matching its total context (input + cache write + cache read)',
+      tierHintMarginal: 'Only the portion above the threshold is billed at this tier; output is unaffected',
+      reasoningMultiplierBadge: '{effort} ×{multiplier}',
+      reasoningMultiplierHint: 'When the forwarded reasoning effort is {effort}, billing and quota usage for the request are multiplied by {multiplier}. Unconfigured levels use 1×',
+      marginalBadge: 'excess-only tiers',
+      timePricingRowHint: 'Requests made within this period ({timezone} time) are billed at the prices in this row',
+      timePricingRowHintWeekdays:
+        'On weekdays (Mon–Fri) only, requests made within this period ({timezone} time) are billed at the prices in this row; weekends use the standard prices',
+      timePricingRowHintPeak:
+        '; prices in this row exclude the peak-hour rate — where this period overlaps the peak hours {window}, the overlapping portion is additionally multiplied by ×{multiplier}',
+      timePricingWeekdays: 'Weekdays',
+      timePricingRateHint: 'Effective rate {rate} × period multiplier {multiplier}',
+      paidPrice: 'Your Price (Discounted)',
+      officialPrice: 'Official Price',
+      rate: 'Rate',
+      unitPerMillion: '$ / 1M tokens',
+      perUnitRequest: '/ request',
+      perUnitImage: '/ image',
+      perRequest: 'Per request',
+      perImage: 'Per image'
+    },
+    nav: {
+      login: 'Sign In',
+      backToDashboard: 'Back to Console'
+    },
+catalog: {
       imageInput: 'Image input tokens',
       imageOutput: 'Image output tokens',
       filters: 'Filters',
@@ -714,65 +806,7 @@ export default {
       unit_per_request: '/ request',
       unit_video: '/ second',
     },
-    title: 'Model Plaza',
-    description: 'Browse available models and pricing by group',
-    loading: 'Loading...',
-    empty: 'No groups to display',
-    loadFailed: 'Failed to load model plaza',
-    noSearchResult: 'No matching models',
-    anonymousHint: 'Sign in to see your exclusive groups and personal rates',
-    filters: {
-      platformLabel: 'Platform',
-      groupLabel: 'Group',
-      rateLabel: 'Rate',
-      modelLabel: 'Model',
-      searchPlaceholder: 'Search models',
-      all: 'All'
-    },
-    badges: {
-      exclusive: 'Exclusive',
-      subscription: 'Subscription'
-    },
-    detail: {
-      noModels: 'No models configured for this group',
-      noPricing: 'Pricing not configured',
-      peakNote: 'Peak hours {window}: billing rate ×{multiplier}',
-      longContextDisabledNote: 'Long-context tier pricing is disabled for this group: requests above the threshold are billed at the base tier; official tiers are for reference only'
-    },
-    table: {
-      model: 'Model',
-      input: 'Input',
-      output: 'Output',
-      cache: 'Cache',
-      cacheWrite: 'Write',
-      cacheRead: 'Read',
-      cacheWriteShort: 'W',
-      cacheReadShort: 'R',
-      tierHint: 'The whole request is billed at the tier matching its total context (input + cache write + cache read)',
-      tierHintMarginal: 'Only the portion above the threshold is billed at this tier; output is unaffected',
-      reasoningMultiplierBadge: '{effort} ×{multiplier}',
-      reasoningMultiplierHint: 'When the forwarded reasoning effort is {effort}, billing and quota usage for the request are multiplied by {multiplier}. Unconfigured levels use 1×',
-      marginalBadge: 'excess-only tiers',
-      timePricingRowHint: 'Requests made within this period ({timezone} time) are billed at the prices in this row',
-      timePricingRowHintWeekdays:
-        'On weekdays (Mon–Fri) only, requests made within this period ({timezone} time) are billed at the prices in this row; weekends use the standard prices',
-      timePricingRowHintPeak:
-        '; prices in this row exclude the peak-hour rate — where this period overlaps the peak hours {window}, the overlapping portion is additionally multiplied by ×{multiplier}',
-      timePricingWeekdays: 'Weekdays',
-      timePricingRateHint: 'Effective rate {rate} × period multiplier {multiplier}',
-      paidPrice: 'Your Price (Discounted)',
-      officialPrice: 'Official Price',
-      rate: 'Rate',
-      unitPerMillion: '$ / 1M tokens',
-      perUnitRequest: '/ request',
-      perUnitImage: '/ image',
-      perRequest: 'Per request',
-      perImage: 'Per image'
-    },
-    nav: {
-      login: 'Sign In',
-      backToDashboard: 'Back to Console'
-    }
+
   },
 
   affiliate: {
@@ -861,6 +895,8 @@ export default {
     days: ' days',
     codeRedeemSuccess: 'Code redeemed successfully!',
     failedToRedeem: 'Failed to redeem code. Please check the code and try again.',
+    historyLoadFailed: 'Failed to load activity. Please try again.',
+    userRefreshFailed: 'Redeemed successfully, but failed to refresh account information.',
     subscriptionRefreshFailed: 'Redeemed successfully, but failed to refresh subscription status.',
     pleaseEnterCode: 'Please enter a redeem code'
   },

@@ -11,7 +11,7 @@ import (
 
 const (
 	ChannelMonitorV2OtherModel      = "__other__"
-	ChannelMonitorV2TaxonomyVersion = 2
+	ChannelMonitorV2TaxonomyVersion = 1
 )
 
 var (
@@ -44,7 +44,7 @@ type ChannelMonitorV2Config struct {
 	GroupIDs               []int64                          `json:"group_ids"`
 	HealthThresholds       ChannelMonitorV2HealthThresholds `json:"health_thresholds"`
 	// IgnoredErrorCategories are excluded from error_rate / health scoring.
-	// They are hidden from the channel status error breakdown.
+	// They still appear in the error breakdown with ignored=true (greyed in UI).
 	// Unknown categories always roll into "other" via the taxonomy classifier.
 	IgnoredErrorCategories []string  `json:"ignored_error_categories"`
 	UpdatedAt              time.Time `json:"updated_at"`
@@ -125,18 +125,19 @@ type ChannelMonitorV2Health struct {
 	ErrorRate string `json:"error_rate"`
 	TTFT      string `json:"ttft"`
 	Cache     string `json:"cache"`
-	// Score is 0–100 when requests exist; omitted/null when there are no requests.
+	// Score is 0–100 when samples are sufficient; omitted/null when unknown.
 	// Overall blends error-rate, TTFT p50, and cache rate (weights in Thresholds).
 	Score          *float64                         `json:"score,omitempty"`
 	ErrorRateScore *float64                         `json:"error_rate_score,omitempty"`
 	TTFTScore      *float64                         `json:"ttft_score,omitempty"`
 	CacheScore     *float64                         `json:"cache_score,omitempty"`
-	MinimumSample  int64                            `json:"minimum_sample"` // Retained for API compatibility; it no longer gates scoring.
+	MinimumSample  int64                            `json:"minimum_sample"`
 	Thresholds     ChannelMonitorV2HealthThresholds `json:"thresholds"`
 }
 
 type ChannelMonitorV2HealthThresholds struct {
-	MinimumSample int64 `json:"minimum_sample"` // Retained for config compatibility; it no longer gates scoring.
+	// MinimumSample is required before scoring request/latency/cache signals.
+	MinimumSample int64 `json:"minimum_sample"`
 	// WarningErrorRate / CriticalErrorRate map to discrete bands for legacy UI.
 	WarningErrorRate  float64 `json:"warning_error_rate"`
 	CriticalErrorRate float64 `json:"critical_error_rate"`
@@ -267,8 +268,7 @@ type ChannelMonitorV2ErrorRow struct {
 	Rate     float64                       `json:"rate"`
 	Details  []ChannelMonitorV2ErrorDetail `json:"details,omitempty"`
 	// Ignored is true when this category is excluded from error_rate scoring
-	// via config.ignored_error_categories. Ignored rows are removed from the
-	// channel-status breakdown before it is returned to viewers.
+	// via config.ignored_error_categories. Still shown in breakdown (UI greys it).
 	Ignored bool `json:"ignored"`
 }
 
@@ -408,6 +408,18 @@ func (s *ChannelMonitorV2Service) hideThroughputForViewer(ctx context.Context, a
 	return s.settings.GetChannelMonitorRuntime(ctx).HideThroughput
 }
 
+func (s *ChannelMonitorV2Service) hideUserRankingForViewer(ctx context.Context, admin bool) bool {
+	if admin {
+		return false
+	}
+	// Missing reader keeps the current ranking tab visible. Unlike throughput,
+	// ranking is already public and must stay on until an operator turns it off.
+	if s == nil || s.settings == nil {
+		return false
+	}
+	return s.settings.GetChannelMonitorRuntime(ctx).HideUserRanking
+}
+
 func (s *ChannelMonitorV2Service) GetConfig(ctx context.Context) (*ChannelMonitorV2Config, error) {
 	return s.repo.GetConfig(ctx)
 }
@@ -520,7 +532,6 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	filter.IncludeOutputTPS = filter.IncludeOutputTPS && !hideTP && groupBy == ChannelMonitorV2GroupByPlatformGroupModel && filter.End.Sub(filter.Start) <= 24*time.Hour
 	matrixConfig := *cfg
 	if filter.PreserveModelNames && groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
-		// Plaza cards need exact model keys, not the monitor's named + other split.
 		matrixConfig.Platforms = append([]ChannelMonitorV2PlatformConfig(nil), cfg.Platforms...)
 		for i := range matrixConfig.Platforms {
 			matrixConfig.Platforms[i].Models = nil
@@ -569,8 +580,9 @@ func (s *ChannelMonitorV2Service) Errors(ctx context.Context, filter ChannelMoni
 	return s.ErrorsForViewer(ctx, filter, false)
 }
 
-// ErrorsForViewer returns the error breakdown. Non-admin callers do not see
-// configured ignored categories, absolute counts, or upstream error details.
+// ErrorsForViewer returns the error breakdown.
+// Non-admin callers receive category rates + ignored flags only: absolute Count
+// is zeroed and Details (upstream messages / status codes / volume) are omitted.
 func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
@@ -580,20 +592,11 @@ func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter Ch
 	if err != nil {
 		return nil, err
 	}
-	if list != nil {
-		ignored := ChannelMonitorV2IgnoredCategorySet(*cfg)
-		visible := list.Items[:0]
-		for _, row := range list.Items {
-			if _, ok := ignored[row.Category]; ok {
-				continue
-			}
-			if !admin {
-				row.Count = 0
-				row.Details = nil
-			}
-			visible = append(visible, row)
+	if !admin && list != nil {
+		for i := range list.Items {
+			list.Items[i].Count = 0
+			list.Items[i].Details = nil
 		}
-		list.Items = visible
 	}
 	return list, nil
 }
@@ -674,6 +677,9 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.hideUserRankingForViewer(ctx, admin) {
+		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
 	}
 	result, err := s.repo.GetUsers(ctx, filter, *cfg, admin)
 	if err != nil {
@@ -787,8 +793,7 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 }
 
 // DefaultChannelMonitorV2IgnoredErrorCategories are factory defaults for
-// ignored_error_categories: excluded from health scoring and hidden from the
-// channel-status error breakdown.
+// ignored_error_categories: excluded from error_rate / health scoring only.
 // Operators can clear or extend via admin config.
 var DefaultChannelMonitorV2IgnoredErrorCategories = []string{
 	"authentication",
@@ -823,6 +828,9 @@ func NormalizeChannelMonitorV2HealthThresholds(in ChannelMonitorV2HealthThreshol
 	def := DefaultChannelMonitorV2HealthThresholds()
 	if in.MinimumSample <= 0 {
 		in.MinimumSample = def.MinimumSample
+	}
+	if in.MinimumSample < 1 {
+		in.MinimumSample = 1
 	}
 	if in.MinimumSample > 10000 {
 		in.MinimumSample = 10000
@@ -969,22 +977,25 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
 		MinimumSample: thresholds.MinimumSample, Thresholds: thresholds,
 	}
-	if metrics.RequestCount <= 0 {
+	if metrics.RequestCount < result.MinimumSample {
 		return result
 	}
 
 	type scored struct {
 		score  float64
 		weight float64
+		band   string
 	}
 	parts := make([]scored, 0, 3)
 
-	s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
-	result.ErrorRateScore = &s
-	result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
-	parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight})
+	if metrics.RequestCount >= result.MinimumSample {
+		s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
+		result.ErrorRateScore = &s
+		result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
+		parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight, band: result.ErrorRate})
+	}
 	// Prefer p50 for TTFT scoring; fall back to p95 only if p50 is missing.
-	if metrics.TTFT.SampleCount > 0 {
+	if metrics.TTFT.SampleCount >= result.MinimumSample {
 		var ttftMs *int64
 		if metrics.TTFT.P50Ms != nil {
 			ttftMs = metrics.TTFT.P50Ms
@@ -995,11 +1006,11 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 			s := ttftP50Score(float64(*ttftMs), float64(thresholds.TargetTTFTMs), float64(thresholds.CriticalTTFTMs))
 			result.TTFTScore = &s
 			result.TTFT = healthBand(float64(*ttftMs), float64(thresholds.WarningTTFTMs), float64(thresholds.CriticalTTFTMs))
-			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight})
+			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight, band: result.TTFT})
 		}
 	}
 	// Cache: need a meaningful denominator; higher rate is better.
-	if metrics.CacheRateDenominator > 0 {
+	if metrics.CacheRateDenominator >= result.MinimumSample {
 		s := cacheRateScore(metrics.CacheRate)
 		if thresholds.WarningCacheRate <= 0 && thresholds.CriticalCacheRate <= 0 {
 			// A zero/zero cache threshold means "do not penalize cache misses".
@@ -1008,26 +1019,23 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		result.CacheScore = &s
 		// Invert for healthBand (lower is worse): use (1 - rate) against warning/critical floors.
 		result.Cache = cacheRateBand(metrics.CacheRate, thresholds.WarningCacheRate, thresholds.CriticalCacheRate)
-		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight})
+		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight, band: result.Cache})
 	}
 
+	if len(parts) == 0 {
+		return result
+	}
 	var weightSum, scoreSum float64
 	for _, p := range parts {
 		weightSum += p.weight
 		scoreSum += p.weight * p.score
 	}
-	if weightSum > 0 {
-		scoreSum /= weightSum
-	} else {
-		// A request still needs a health state when configured weights exclude its available signals.
-		scoreSum = 0
-		for _, p := range parts {
-			scoreSum += p.score
-		}
-		scoreSum /= float64(len(parts))
+	if weightSum <= 0 {
+		return result
 	}
-	result.Score = &scoreSum
-	result.Overall = scoreBand(scoreSum)
+	overall := scoreSum / weightSum
+	result.Score = &overall
+	result.Overall = scoreBand(overall)
 	return result
 }
 

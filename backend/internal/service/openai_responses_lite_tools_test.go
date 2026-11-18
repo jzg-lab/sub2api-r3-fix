@@ -399,6 +399,7 @@ func TestApplyCodexOAuthTransform_PreservesLiteNamespaceToolChoice(t *testing.T)
 }
 
 func TestOpenAIGatewayServiceForward_NormalizesResponsesLiteToolsForOAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	for _, passthrough := range []bool{false, true} {
 		name := "managed"
@@ -421,7 +422,6 @@ func TestOpenAIGatewayServiceForward_NormalizesResponsesLiteToolsForOAuth(t *tes
 			}}
 			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 			account := &Account{
-				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 				ID: 501, Name: "responses-lite", Platform: PlatformOpenAI, Type: AccountTypeOAuth,
 				Concurrency: 1, Status: StatusActive, Schedulable: true, RateMultiplier: f64p(1),
 				Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account"},
@@ -499,6 +499,7 @@ func TestOpenAIGatewayServiceForward_NormalizesResponsesLiteToolsForOAuth(t *tes
 }
 
 func TestOpenAIGatewayServiceForward_PinsParallelToolCallsForToollessResponsesLite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	accountCases := []struct {
 		name        string
@@ -546,7 +547,6 @@ func TestOpenAIGatewayServiceForward_PinsParallelToolCallsForToollessResponsesLi
 						Credentials: accountCase.credentials,
 						Extra:       map[string]any{"openai_passthrough": passthrough},
 					}
-					assignOpenAITransportTestProxy(account)
 					body := []byte(`{
 						"model":"gpt-5.6-terra","stream":true,"instructions":"test",
 						"reasoning":{"effort":"high","context":"current_turn"},
@@ -566,6 +566,7 @@ func TestOpenAIGatewayServiceForward_PinsParallelToolCallsForToollessResponsesLi
 }
 
 func TestOpenAIGatewayServiceForward_DisablesParallelToolCallsForResponsesLiteAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	for _, passthrough := range []bool{false, true} {
 		name := "managed"

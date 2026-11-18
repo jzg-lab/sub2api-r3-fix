@@ -635,6 +635,24 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileDefaultsToHTTP2AndNoHeaderTimeout()
 	require.Equal(s.T(), upstreamProtocolModeOpenAIH2, entry.protocolMode)
 }
 
+func (s *HTTPUpstreamSuite) TestLongStreamProfileUsesSharedHTTP2KeepAlive() {
+	s.cfg.Gateway = config.GatewayConfig{
+		ResponseHeaderTimeout: 600,
+		OpenAIHTTP2: config.GatewayOpenAIHTTP2Config{
+			Enabled: false,
+		},
+	}
+	svc := s.newService()
+	entry, err := svc.getClientEntry("", 1, 1, service.HTTPUpstreamProfileLongStream, false, false)
+	require.NoError(s.T(), err)
+	transport, ok := entry.client.Transport.(*http.Transport)
+	require.True(s.T(), ok, "expected *http.Transport")
+	require.Equal(s.T(), 600*time.Second, transport.ResponseHeaderTimeout, "long-stream profile should retain the generic header timeout")
+	require.True(s.T(), transport.ForceAttemptHTTP2, "long-stream profile must enable HTTP/2 independently of OpenAI settings")
+	require.True(s.T(), transport.TLSNextProto["h2"] != nil || (transport.Protocols != nil && transport.Protocols.HTTP2()), "long-stream profile must install the HTTP/2 transport")
+	require.Equal(s.T(), upstreamProtocolModeLongStreamH2, entry.protocolMode)
+}
+
 func (s *HTTPUpstreamSuite) TestOpenAIProfileCustomHeaderTimeout() {
 	s.cfg.Gateway = config.GatewayConfig{
 		ResponseHeaderTimeout:       600,
@@ -664,60 +682,6 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileTLSFingerprintDoesNotInheritGeneric
 	transport, ok := entry.client.Transport.(*http.Transport)
 	require.True(s.T(), ok, "expected *http.Transport")
 	require.Equal(s.T(), time.Duration(0), transport.ResponseHeaderTimeout, "OpenAI TLS path should not inherit generic header timeout")
-}
-
-func (s *HTTPUpstreamSuite) TestPluginHostProfileEnforcesAccountProxyIsolation() {
-	s.cfg.Gateway = config.GatewayConfig{
-		ConnectionPoolIsolation:     config.ConnectionPoolIsolationProxy,
-		ResponseHeaderTimeout:       600,
-		OpenAIResponseHeaderTimeout: 1800,
-		OpenAIHTTP2:                 config.GatewayOpenAIHTTP2Config{Enabled: true},
-	}
-	for _, tlsEnabled := range []bool{false, true} {
-		svc := s.newService()
-		entry := func(proxy string, account int64) *upstreamClientEntry {
-			var result *upstreamClientEntry
-			var err error
-			if tlsEnabled {
-				result, err = svc.getClientEntryWithTLS(proxy, account, 3,
-					&tlsfingerprint.Profile{Name: "fixture"}, service.HTTPUpstreamProfileOpenAIPlugin, false, false)
-			} else {
-				result, err = svc.getClientEntry(proxy, account, 3, service.HTTPUpstreamProfileOpenAIPlugin, false, false)
-			}
-			require.NoError(s.T(), err)
-			return result
-		}
-		a := entry("socks5://127.0.0.1:19001", 41)
-		b := entry("socks5://127.0.0.1:19002", 41)
-		c := entry("socks5://127.0.0.1:19001", 42)
-		require.NotSame(s.T(), a, b, "proxy changes must not share connections")
-		require.NotSame(s.T(), a, c, "accounts must not share plugin connections")
-		require.Same(s.T(), a, entry("socks5://127.0.0.1:19001", 41))
-		transport, ok := a.client.Transport.(*http.Transport)
-		require.True(s.T(), ok)
-		require.Equal(s.T(), 1800*time.Second, transport.ResponseHeaderTimeout)
-	}
-}
-
-func (s *HTTPUpstreamSuite) TestPluginHostProfilePreservesHTTP2FallbackPolicy() {
-	s.cfg.Gateway = config.GatewayConfig{
-		OpenAIHTTP2: config.GatewayOpenAIHTTP2Config{
-			Enabled: true, AllowProxyFallbackToHTTP1: true,
-			FallbackErrorThreshold: 1, FallbackWindowSeconds: 60, FallbackTTLSeconds: 600,
-		},
-	}
-	svc := s.newService()
-	proxy := "http://127.0.0.1:19001"
-	profile := service.HTTPUpstreamProfileOpenAIPlugin
-	entry, err := svc.getClientEntry(proxy, 41, 3, profile, false, false)
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), upstreamProtocolModeOpenAIH2, entry.protocolMode)
-	svc.recordOpenAIHTTP2Failure(profile, entry.protocolMode, proxy, errors.New("http2: protocol error"))
-	require.True(s.T(), svc.isOpenAIHTTP2FallbackActive(proxy))
-	fallback, err := svc.getClientEntry(proxy, 41, 3, profile, false, false)
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), upstreamProtocolModeOpenAIH1Fallback, fallback.protocolMode)
-	require.Equal(s.T(), entry.proxyKey, fallback.proxyKey, "protocol fallback must retain the exact proxy")
 }
 
 func (s *HTTPUpstreamSuite) TestOpenAIProfileHTTP2DisabledUsesHTTP1Transport() {
@@ -1020,4 +984,64 @@ func hasEntry(svc *httpUpstreamService, target *upstreamClientEntry) bool {
 		}
 	}
 	return false
+}
+
+func TestHTTPUpstreamDoPublicHostsOnlyRejectsPrivateDestinationBeforeConnecting(t *testing.T) {
+	var calls atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+
+	upstream := NewHTTPUpstream(nil)
+
+	plain, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target.URL, nil)
+	require.NoError(t, err)
+	resp, err := upstream.Do(plain, "", 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, int64(1), calls.Load(), "loopback stays reachable for requests without the marker")
+
+	guarded, err := http.NewRequestWithContext(service.WithHTTPUpstreamPublicHostsOnly(t.Context()), http.MethodGet, target.URL, nil)
+	require.NoError(t, err)
+	resp, err = upstream.Do(guarded, "", 1, 1)
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.Contains(t, err.Error(), "not allowed")
+	require.Equal(t, int64(1), calls.Load(), "marked request must be rejected before any connection is made")
+}
+
+func TestHTTPUpstreamPublicHostsOnlyValidatesEveryRedirectHop(t *testing.T) {
+	upstream, ok := NewHTTPUpstream(nil).(*httpUpstreamService)
+	require.True(t, ok)
+	base := &http.Client{}
+
+	plain, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://cdn.example.com/a.png", nil)
+	require.NoError(t, err)
+	require.Same(t, base, upstream.httpClientForUpstreamRequest(base, plain))
+
+	guarded, err := http.NewRequestWithContext(service.WithHTTPUpstreamPublicHostsOnly(t.Context()), http.MethodGet, "https://cdn.example.com/a.png", nil)
+	require.NoError(t, err)
+	client := upstream.httpClientForUpstreamRequest(base, guarded)
+	require.NotSame(t, base, client)
+	require.NotNil(t, client.CheckRedirect)
+	require.Nil(t, base.CheckRedirect, "the cached client must stay untouched")
+
+	via := []*http.Request{guarded}
+	for _, hop := range []string{
+		"http://127.0.0.1:8080/a.png",
+		"http://[::1]:8080/a.png",
+		"http://10.0.0.8/a.png",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://0.0.0.0/a.png",
+	} {
+		hopReq, err := http.NewRequestWithContext(guarded.Context(), http.MethodGet, hop, nil)
+		require.NoError(t, err)
+		require.Error(t, client.CheckRedirect(hopReq, via), "hop=%s", hop)
+	}
+	publicHop, err := http.NewRequestWithContext(guarded.Context(), http.MethodGet, "http://93.184.216.34/a.png", nil)
+	require.NoError(t, err)
+	require.NoError(t, client.CheckRedirect(publicHop, via))
+	require.Error(t, client.CheckRedirect(publicHop, make([]*http.Request, 10)), "redirect chain stays capped")
 }

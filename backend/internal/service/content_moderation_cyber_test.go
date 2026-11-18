@@ -260,11 +260,8 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 		SettingKeyRiskControlEnabled:      "true",
 		SettingKeyContentModerationConfig: `{"all_groups":true,"model_filter":{"type":"include","models":["gpt-5"]}}`,
 	}}
-	svc := &ContentModerationService{
-		settingRepo:     settingRepo,
-		repo:            repo,
-		runtimeCacheTTL: time.Minute,
-	}
+	svc := NewContentModerationService(settingRepo, repo, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(svc.Stop)
 
 	_, err := svc.loadRuntimeSnapshot(context.Background())
 	require.NoError(t, err)

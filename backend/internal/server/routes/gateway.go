@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 
@@ -39,8 +38,9 @@ func RegisterGatewayRoutes(
 		}
 	}
 
-	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
-	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
+	bodyMemoryBudget := pkghttputil.NewBodyMemoryBudget(cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize, bodyMemoryBudget)
+	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize, bodyMemoryBudget)
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
 	endpointNorm := handler.InboundEndpointMiddleware()
@@ -89,10 +89,10 @@ func RegisterGatewayRoutes(
 	}
 	modelsHandler := func(c *gin.Context) {
 		if key, _ := middleware.GetAPIKeyFromContext(c); key.HasSmartRoutes() {
-			h.Gateway.SmartRouteModels(c, subscriptionService, c.Query("client_version") != "")
+			h.Gateway.SmartRouteModels(c, subscriptionService, c.Param("model") == "" && c.Query("client_version") != "")
 			return
 		}
-		if c.Query("client_version") != "" {
+		if c.Param("model") == "" && c.Query("client_version") != "" {
 			codexModelsHandler(c)
 			return
 		}
@@ -233,6 +233,10 @@ func RegisterGatewayRoutes(
 		// /models endpoint with a client_version query and expect the ChatGPT
 		// Codex manifest format; other clients keep the OpenAI-style list.
 		gateway.GET("/models", modelsHandler)
+		gateway.GET("/models/:model", modelsHandler)
+		gateway.POST("/contents/generations/tasks", h.OpenAIGateway.SeedanceTasks)
+		gateway.GET("/contents/generations/tasks/:task_id", h.OpenAIGateway.SeedanceTasks)
+		gateway.DELETE("/contents/generations/tasks/:task_id", h.OpenAIGateway.SeedanceTasks)
 		gateway.GET("/usage", h.Gateway.Usage)
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
@@ -417,6 +421,7 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.ResponsesWebSocketWithSubscriptions(c, subscriptionService)
 	})
 	rootGateway.GET("/models", requireGroupAnthropic, modelsHandler)
+	rootGateway.GET("/models/:model", requireGroupAnthropic, modelsHandler)
 	rootGateway.POST("/messages/count_tokens", compositeTarget, requireGroupAnthropic, countTokensHandler)
 	codexDirect := r.Group("/backend-api/codex")
 	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth))
@@ -433,6 +438,7 @@ func RegisterGatewayRoutes(
 			h.OpenAIGateway.ResponsesWebSocketWithSubscriptions(c, subscriptionService)
 		})
 		codexDirect.GET("/models", codexModelsHandler)
+		codexDirect.GET("/models/:model", codexModelsHandler)
 	}
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
 	rootGateway.POST("/chat/completions", compositeTarget, requireGroupAnthropic, smart(func(c *gin.Context) {
@@ -455,6 +461,15 @@ func RegisterGatewayRoutes(
 		}
 		h.OpenAIGateway.Embeddings(c)
 	})
+	rootGateway.POST("/contents/generations/tasks", compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.GET("/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.DELETE("/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.POST("/api/v3/contents/generations/tasks", compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.GET("/api/v3/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.DELETE("/api/v3/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.POST("/v3/contents/generations/tasks", compositeTarget, requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.GET("/v3/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
+	rootGateway.DELETE("/v3/contents/generations/tasks/:task_id", requireGroupAnthropic, h.OpenAIGateway.SeedanceTasks)
 	rootGateway.POST("/images/generations", compositeTarget, requireGroupAnthropic, imagesHandler)
 	rootGateway.POST("/images/edits", compositeTarget, requireGroupAnthropic, imagesHandler)
 	rootGateway.POST("/images/generations/async", compositeTarget, requireGroupAnthropic, h.AsyncImage.Submit)
@@ -610,15 +625,10 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 
 		body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
-			status := http.StatusBadRequest
-			message := "Failed to read request body"
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				status = http.StatusRequestEntityTooLarge
-				message = "Request body is too large"
+			if middleware.RejectRequestBodyReadError(c, "middleware.composite_route", err) {
+				return
 			}
-			c.JSON(status, gin.H{"error": gin.H{"type": "invalid_request_error", "message": message}})
-			c.Abort()
+			middleware.AbortWithRequestBodyReadFailure(c, "middleware.composite_route", err)
 			return
 		}
 

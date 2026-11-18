@@ -16,18 +16,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func geminiSignalTestAccount() *Account {
-	return &Account{
-		ID:       811,
-		Platform: PlatformGemini,
-		Type:     AccountTypeAPIKey,
-		Credentials: map[string]any{
-			"api_key": "gemini-test-key",
-		},
-		Concurrency: 1,
-	}
-}
-
 func TestGeminiNativeReasoningPricingUsesExplicitForwardedLevel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, provider := range []string{"api_key", "oauth_ai_studio", "oauth_code_assist", "antigravity"} {

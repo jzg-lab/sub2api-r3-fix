@@ -125,9 +125,9 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 		}
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
-		lease, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
-		if err == nil && lease != "" {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease) }()
+		lease, acquired, err := acquireGeminiRefreshLock(ctx, p.tokenCache, cacheKey, 30*time.Second)
+		if err == nil && acquired {
+			defer func() { _ = releaseGeminiRefreshLock(ctx, p.tokenCache, cacheKey, lease) }()
 		}
 	}
 
@@ -238,9 +238,5 @@ func (p *AntigravityTokenProvider) markBackfillAttempted(accountID int64) {
 }
 
 func AntigravityTokenCacheKey(account *Account) string {
-	projectID := strings.TrimSpace(account.GetCredential("project_id"))
-	if projectID != "" {
-		return "ag:" + projectID
-	}
 	return "ag:account:" + strconv.FormatInt(account.ID, 10)
 }

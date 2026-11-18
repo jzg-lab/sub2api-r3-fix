@@ -41,6 +41,7 @@ func alphaSearchResponsesSSE(output string) string {
 }
 
 func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{
 		"id":"search-session",
 		"model":"gpt-5.6-sol",
@@ -67,7 +68,6 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          42,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -91,8 +91,7 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 	require.Equal(t, "Bearer oauth-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "chatgpt-account", upstream.lastReq.Header.Get("chatgpt-account-id"))
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"))
-	require.Equal(t, CodexCanonicalClientVersion(), upstream.lastReq.Header.Get("Version"),
-		"optional version must describe the same server-owned client as User-Agent")
+	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("Version"))
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "session", "search-session"),
@@ -106,6 +105,7 @@ func TestForwardAlphaSearchOAuthPreservesWire(t *testing.T) {
 }
 
 func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{
 		"id":"search-session",
 		"model":"gpt-5.6-sol",
@@ -137,7 +137,6 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-
 		ID:          43,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -165,8 +164,7 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Content-Type"))
 	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"))
 	require.Equal(t, "responses=experimental", upstream.lastReq.Header.Get("OpenAI-Beta"))
-	require.Equal(t, CodexCanonicalClientVersion(), upstream.lastReq.Header.Get("Version"),
-		"optional version must describe the same server-owned client as User-Agent")
+	require.Equal(t, codexCLIVersion, upstream.lastReq.Header.Get("Version"))
 	require.Equal(t,
 		scopeCodexAccountIdentityValue(account, 0, "turn", "turn-1"),
 		gjson.Get(upstream.lastReq.Header.Get("X-Codex-Turn-Metadata"), "turn_id").String(),
@@ -186,6 +184,7 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 }
 
 func TestForwardAlphaSearchPATBackfillsMissingChatGPTAccountMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"OpenAI news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -223,7 +222,6 @@ func TestForwardAlphaSearchPATBackfillsMissingChatGPTAccountMetadata(t *testing.
 		openAITokenProvider: NewOpenAITokenProvider(nil, nil, oauthService),
 	}
 	account := &Account{
-
 		ID:          45,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -247,6 +245,7 @@ func TestForwardAlphaSearchPATBackfillsMissingChatGPTAccountMetadata(t *testing.
 }
 
 func TestForwardAlphaSearchAPIKeyMapsModelAndPassesThroughError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -287,6 +286,7 @@ func TestForwardAlphaSearchAPIKeyMapsModelAndPassesThroughError(t *testing.T) {
 }
 
 func TestForwardAlphaSearchReturnsFailoverBeforeWriting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -325,6 +325,7 @@ func TestForwardAlphaSearchReturnsFailoverBeforeWriting(t *testing.T) {
 }
 
 func TestForwardAlphaSearchSetupToken429CarriesSameAccountRetryWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -365,6 +366,7 @@ func TestForwardAlphaSearchSetupToken429CarriesSameAccountRetryWindow(t *testing
 }
 
 func TestForwardAlphaSearchAccessStateUsesTypedFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -380,7 +382,6 @@ func TestForwardAlphaSearchAccessStateUsesTypedFailover(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          11,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -400,6 +401,7 @@ func TestForwardAlphaSearchAccessStateUsesTypedFailover(t *testing.T) {
 }
 
 func TestForwardAlphaSearchPATFallbackAccessStateUsesTypedFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -415,7 +417,6 @@ func TestForwardAlphaSearchPATFallbackAccessStateUsesTypedFailover(t *testing.T)
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-
 		ID:          12,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -451,6 +452,7 @@ func assertOpenAIAlphaSearchAccessStateFailover(t *testing.T, err error, request
 }
 
 func TestForwardAlphaSearchUnauthorizedDoesNotMarkAccountError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -470,7 +472,6 @@ func TestForwardAlphaSearchUnauthorizedDoesNotMarkAccountError(t *testing.T) {
 		rateLimitService: NewRateLimitService(repo, nil, cfg, nil, nil),
 	}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          44,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -494,6 +495,7 @@ func TestForwardAlphaSearchUnauthorizedDoesNotMarkAccountError(t *testing.T) {
 }
 
 func TestForwardAlphaSearchPATResponsesFallbackUnauthorizedDoesNotMarkAccountError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -513,7 +515,6 @@ func TestForwardAlphaSearchPATResponsesFallbackUnauthorizedDoesNotMarkAccountErr
 		rateLimitService: NewRateLimitService(repo, nil, cfg, nil, nil),
 	}
 	account := &Account{
-
 		ID:          46,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -544,6 +545,7 @@ func TestForwardAlphaSearchPATResponsesFallbackUnauthorizedDoesNotMarkAccountErr
 // 承接搜索，请求不能死在先被选中的 API key 账号上。端点缺失也不能写账号
 // 错误状态——账号本身是健康的。
 func TestForwardAlphaSearchAPIKeyEndpointNotFoundFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -586,6 +588,7 @@ func TestForwardAlphaSearchAPIKeyEndpointNotFoundFailsOver(t *testing.T) {
 
 // OAuth 账号的 chatgpt.com 端点固定存在，404 保持原有透传行为不变。
 func TestForwardAlphaSearchOAuthNotFoundPassesThrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"id":"search-session","model":"gpt-5.6-sol","commands":{"search_query":[{"q":"news"}]}}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -599,7 +602,6 @@ func TestForwardAlphaSearchOAuthNotFoundPassesThrough(t *testing.T) {
 	}}
 	service := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          10,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
@@ -646,8 +648,7 @@ func TestSanitizeOpenAIAlphaSearchBody_RemovesResponsesOnlyFields(t *testing.T) 
 
 func TestIsOpenAIAlphaSearchEndpointUnsupported(t *testing.T) {
 	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
-	oauth := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	oauth := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	require.True(t, isOpenAIAlphaSearchEndpointUnsupported(apiKey, http.StatusNotFound))
 	require.True(t, isOpenAIAlphaSearchEndpointUnsupported(apiKey, http.StatusMethodNotAllowed))

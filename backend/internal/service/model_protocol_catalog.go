@@ -87,7 +87,7 @@ func (c *modelProtocolCatalog) lookup(ctx context.Context, key, model string, no
 		if entry.models == nil {
 			entry.firstLoadDeadline = now.Add(modelProtocolCatalogFirstLoadWait)
 		}
-		runDeploymentAsync(refresh)
+		runDeploymentAsync(func() { refresh() })
 	}
 	if entry.models == nil && entry.refreshing && now.Before(entry.firstLoadDeadline) {
 		done := entry.done

@@ -76,11 +76,3 @@ func TestValidateUpstreamRequestIDHeaderExtra(t *testing.T) {
 	require.Error(t, ValidateUpstreamRequestIDHeaderExtra(map[string]any{AccountExtraUpstreamRequestIDHeader: "X-Request-Id:"}))
 	require.Error(t, ValidateUpstreamRequestIDHeaderExtra(map[string]any{AccountExtraUpstreamRequestIDHeader: strings.Repeat("x", 65)}))
 }
-
-func TestUsageUpstreamRequestIDValidDatabaseText(t *testing.T) {
-	account := &Account{Extra: map[string]any{AccountExtraUpstreamRequestIDHeader: "x-id"}}
-	id := usageUpstreamRequestIDPtr(account, http.Header{"X-Id": []string{strings.Repeat("测", 129) + "\x00\xff"}}, false)
-	require.NotNil(t, id)
-	require.Equal(t, strings.Repeat("测", 128), *id)
-	require.Nil(t, usageUpstreamRequestIDPtr(account, http.Header{"X-Id": []string{"\x00\xff"}}, false))
-}

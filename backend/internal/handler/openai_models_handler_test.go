@@ -36,7 +36,7 @@ func ordinaryPinnedModelIDs(t *testing.T, recorder *httptest.ResponseRecorder) [
 func TestOrdinaryPinnedModelsUsesSelectedAccountsAndFinalETag(t *testing.T) {
 	accounts := []service.Account{
 		newPinnedCodexAccount(1, service.StatusActive, true, false),
-		newPinnedCodexAccount(2, service.StatusActive, true, false),
+		newPinnedCodexAccount(2, service.StatusActive, true, true),
 		newPinnedCodexAccount(3, service.StatusActive, true, false),
 	}
 	upstream := &codexModelsPinnedHTTPUpstream{bodies: map[int64]string{
@@ -142,8 +142,8 @@ func TestOrdinaryPinnedModelsSkipsPersistentlyUnavailableAccounts(t *testing.T) 
 	group := &service.Group{ID: 93, Platform: service.PlatformOpenAI,
 		CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{1, 2, 3, 4, 99}}}
 	recorder := performOrdinaryPinnedModelsRequest(t, h, group, "/v1/models", "")
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
-	require.Empty(t, upstream.accountIDs())
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Equal(t, []int64{1}, upstream.accountIDs())
 }
 
 func TestPinnedModelsAllowlistExpandsWildcardsForBothRepresentations(t *testing.T) {

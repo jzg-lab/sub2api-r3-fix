@@ -11,6 +11,6 @@ describe('OpsDashboardHeader TTFT drill-down', () => {
     const source = readFileSync(componentPath, 'utf8')
 
     expect(source).toContain("openDetails({ title: t('admin.ops.latencyDuration'), sort: 'duration_desc' })")
-    expect(source).toContain("openDetails({ title: t('admin.ops.ttftLabel'), sort: 'ttft_desc' })")
+    expect(source).toContain("openDetails({ title: t('admin.ops.ttftLabel'), kind: 'success', sort: 'ttft_desc' })")
   })
 })

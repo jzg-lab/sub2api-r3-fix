@@ -93,6 +93,7 @@ func TestNormalizeOpenAICodexCompactReasoningEffortDowngradesMax(t *testing.T) {
 }
 
 func TestNormalizeOpenAICodexCompactReasoningEffortForAccountScopesCompatibility(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-5.6-sol","input":"compact me","reasoning":{"effort":"max"}}`)
 
 	tests := []struct {
@@ -103,19 +104,17 @@ func TestNormalizeOpenAICodexCompactReasoningEffortForAccountScopesCompatibility
 		want    string
 	}{
 		{
-			name: "OpenAI OAuth compact 降级",
-			path: "/openai/v1/responses/compact",
-			account: &Account{
-				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+			name:    "OpenAI OAuth compact 降级",
+			path:    "/openai/v1/responses/compact",
+			account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth},
 			changed: true,
 			want:    "xhigh",
 		},
 		{
-			name: "OpenAI OAuth 普通请求保留",
-			path: "/openai/v1/responses",
-			account: &Account{
-				ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), Platform: PlatformOpenAI, Type: AccountTypeOAuth},
-			want: "max",
+			name:    "OpenAI OAuth 普通请求保留",
+			path:    "/openai/v1/responses",
+			account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+			want:    "max",
 		},
 		{
 			name:    "OpenAI API Key compact 保留",
@@ -147,6 +146,7 @@ func TestNormalizeOpenAICodexCompactReasoningEffortForAccountScopesCompatibility
 }
 
 func TestOpenAIGatewayServiceForwardPreservesGPT56MaxEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -185,6 +185,7 @@ func TestOpenAIGatewayServiceForwardPreservesGPT56MaxEffort(t *testing.T) {
 }
 
 func TestOpenAIGatewayServiceForwardPreservesMappedGPT56MaxEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -227,6 +228,7 @@ func TestOpenAIGatewayServiceForwardPreservesMappedGPT56MaxEffort(t *testing.T) 
 }
 
 func TestOpenAIGatewayServiceForwardOAuthCompactDowngradesMaxEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -238,7 +240,6 @@ func TestOpenAIGatewayServiceForwardOAuthCompactDowngradesMaxEffort(t *testing.T
 	cfg.Security.URLAllowlist.Enabled = false
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          8,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -269,6 +270,7 @@ func TestOpenAIGatewayServiceForwardOAuthCompactDowngradesMaxEffort(t *testing.T
 }
 
 func TestOpenAIGatewayServiceForwardOAuthRemoteCompactV2PreservesResponsesWire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -284,7 +286,6 @@ func TestOpenAIGatewayServiceForwardOAuthRemoteCompactV2PreservesResponsesWire(t
 	cfg.Security.URLAllowlist.Enabled = false
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          10,
 		Name:        "openai-oauth-responses",
 		Platform:    PlatformOpenAI,
@@ -326,6 +327,7 @@ func TestOpenAIGatewayServiceForwardOAuthRemoteCompactV2PreservesResponsesWire(t
 }
 
 func TestOpenAIGatewayServiceForwardAPIKeyRemoteCompactV2PreservesResponsesWire(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,

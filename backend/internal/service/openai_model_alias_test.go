@@ -12,40 +12,6 @@ func TestNormalizeKnownOpenAICodexModelGPT6Astra(t *testing.T) {
 	}
 }
 
-func TestNormalizeKnownOpenAICodexModelGPT6SolLuna(t *testing.T) {
-	tests := map[string]string{
-		"gpt-6-sol":                          "gpt-6-sol",
-		"openai/GPT_6_SOL":                   "gpt-6-sol",
-		"gpt-6-sol-max":                      "gpt-6-sol",
-		"gpt-6-luna":                         "gpt-6-luna",
-		"provider/gpt-6-luna-openai-compact": "gpt-6-luna",
-	}
-	for input, expected := range tests {
-		require.Equal(t, expected, normalizeKnownOpenAICodexModel(input), input)
-	}
-}
-
-func TestNormalizeKnownOpenAICodexModelGPT61SolPreservesIdentity(t *testing.T) {
-	for _, model := range []string{
-		"gpt-6.1-sol",
-		"openai/GPT_6.1_SOL",
-	} {
-		require.Equal(t, "gpt-6.1-sol", normalizeKnownOpenAICodexModel(model), model)
-	}
-
-	for _, model := range []string{
-		"gpt-6.1-sol-preview",
-	} {
-		require.Empty(t, normalizeKnownOpenAICodexModel(model), model)
-	}
-}
-
-func TestGPT61SolSupportsVerifiedGPT6Capabilities(t *testing.T) {
-	require.True(t, isOpenAIGPT6Model("gpt-6.1-sol"))
-	require.False(t, isOpenAIGPT6AstraModel("gpt-6.1-sol"))
-	require.True(t, openAIModelSupportsPromptCacheOptions("gpt-6.1-sol"))
-}
-
 func TestNormalizeKnownOpenAICodexModel_BareGPT56RoutesToSol(t *testing.T) {
 	tests := map[string]string{
 		"gpt-5.6":            "gpt-5.6-sol",

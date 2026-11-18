@@ -6,7 +6,7 @@
  * request/error/token counts in user-facing surfaces.
  */
 
-import type { HealthScoreBand, MonitorHealth, MonitorMetric } from '@/api/channelMonitorV2'
+import type { HealthScoreBand, HealthState, MonitorHealth, MonitorMetric } from '@/api/channelMonitorV2'
 import { formatCompactNumber } from '@/utils/format'
 
 export function monitorIntlLocale(): string {
@@ -114,24 +114,76 @@ export function healthScoreClass(
   requestCount: number,
 ): string {
   const score = healthModeScore(health, mode)
+  // Sync-only traffic has no first-token samples. Never paint TTFT as red/empty-fail.
+  if (mode === 'ttft' && score == null) return 'health-unknown'
   if (score == null) {
     if (requestCount <= 0) return 'health-unknown'
     // Fall back to coarse state when score is absent (older payloads).
     const coarse =
       mode === 'success'
         ? health.error_rate
-        : mode === 'ttft'
-          ? health.ttft
-          : mode === 'cache'
-            ? health.cache
-            : health.overall
+        : mode === 'cache'
+          ? health.cache
+          : health.overall
     return healthStateClass(coarse)
   }
   return `health-${scoreToBand(score)}`
 }
 
+/** Missing first-token samples are "not applicable", not a failed latency budget. */
+export function isTtftUnavailable(ttft?: { p50_ms?: number | null; sample_count?: number } | null): boolean {
+  if (ttft == null) return true
+  return ttft.p50_ms == null
+}
+
+export function ttftDisplayState(
+  state: HealthState | undefined,
+  ttft?: { p50_ms?: number | null; sample_count?: number } | null,
+): HealthState | undefined {
+  if (isTtftUnavailable(ttft)) return 'unknown'
+  return state
+}
+
 export function healthStateClass(state: string | undefined): string {
   return `health-${state || 'unknown'}`
+}
+
+/** Privacy-safe latency summary: avg + p50 + p90 (no absolute sample counts). */
+export function formatLatencyPrivacy(
+  p50: number | null | undefined,
+  p90: number | null | undefined,
+  avg?: number | null | undefined,
+  p95?: number | null | undefined,
+): string {
+  const parts: string[] = []
+  if (avg != null) parts.push(`AVG ${formatMonitorMs(avg)}`)
+  if (p50 != null) parts.push(`P50 ${formatMonitorMs(p50)}`)
+  if (p90 != null) parts.push(`P90 ${formatMonitorMs(p90)}`)
+  // p95 only as fallback when p90 missing (older payloads)
+  if (p90 == null && p95 != null) parts.push(`P95 ${formatMonitorMs(p95)}`)
+  return parts.length ? parts.join(' · ') : '-'
+}
+
+/**
+ * KPI secondary line for latency: AVG + P90 only (P50 is the primary value).
+ * Falls back to P95 when P90 is absent. Delimiter is " · " so MetricCell can
+ * split into non-truncated chips.
+ */
+export function formatLatencyKpiSecondary(
+  avg?: number | null | undefined,
+  p90?: number | null | undefined,
+  p95?: number | null | undefined,
+): string {
+  const parts: string[] = []
+  if (avg != null && Number.isFinite(avg)) parts.push(`AVG ${formatMonitorMs(avg)}`)
+  if (p90 != null && Number.isFinite(p90)) parts.push(`P90 ${formatMonitorMs(p90)}`)
+  else if (p95 != null && Number.isFinite(p95)) parts.push(`P95 ${formatMonitorMs(p95)}`)
+  return parts.length ? parts.join(' · ') : '-'
+}
+
+/** Fallback when i18n key is missing; prefer `channelMonitorV2.errorCategories.*`. */
+export function monitorErrorCategoryLabel(category: string): string {
+  return category
 }
 
 function monitorHasRequests(metrics: MonitorMetric, health: MonitorHealth): boolean {
@@ -186,44 +238,6 @@ export function monitorPerformanceScore(metrics: MonitorMetric, health: MonitorH
 
   const weight = scores.reduce((sum, [, value]) => sum + value, 0)
   return scores.reduce((sum, [score, value]) => sum + score * value, 0) / weight
-}
-
-/** Privacy-safe latency summary: avg + p50 + p90 (no absolute sample counts). */
-export function formatLatencyPrivacy(
-  p50: number | null | undefined,
-  p90: number | null | undefined,
-  avg?: number | null | undefined,
-  p95?: number | null | undefined,
-): string {
-  const parts: string[] = []
-  if (avg != null) parts.push(`AVG ${formatMonitorMs(avg)}`)
-  if (p50 != null) parts.push(`P50 ${formatMonitorMs(p50)}`)
-  if (p90 != null) parts.push(`P90 ${formatMonitorMs(p90)}`)
-  // p95 only as fallback when p90 missing (older payloads)
-  if (p90 == null && p95 != null) parts.push(`P95 ${formatMonitorMs(p95)}`)
-  return parts.length ? parts.join(' · ') : '-'
-}
-
-/**
- * KPI secondary line for latency: AVG + P90 only (P50 is the primary value).
- * Falls back to P95 when P90 is absent. Delimiter is " · " so MetricCell can
- * split into non-truncated chips.
- */
-export function formatLatencyKpiSecondary(
-  avg?: number | null | undefined,
-  p90?: number | null | undefined,
-  p95?: number | null | undefined,
-): string {
-  const parts: string[] = []
-  if (avg != null && Number.isFinite(avg)) parts.push(`AVG ${formatMonitorMs(avg)}`)
-  if (p90 != null && Number.isFinite(p90)) parts.push(`P90 ${formatMonitorMs(p90)}`)
-  else if (p95 != null && Number.isFinite(p95)) parts.push(`P95 ${formatMonitorMs(p95)}`)
-  return parts.length ? parts.join(' · ') : '-'
-}
-
-/** Fallback when i18n key is missing; prefer `channelMonitorV2.errorCategories.*`. */
-export function monitorErrorCategoryLabel(category: string): string {
-  return category
 }
 
 /** Public metrics redact counts. Health states retain whether samples are usable. */

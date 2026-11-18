@@ -8,7 +8,7 @@
     </button>
     <div class="plaza-metric"><span>{{ t('modelPlaza.catalog.ttft') }}</span><strong>{{ ttft }}</strong></div>
     <div class="plaza-metric" :title="t('modelPlaza.catalog.tpsHint')"><span>TPS</span><strong>{{ row?.output_tps != null ? row.output_tps.toFixed(1) : '—' }}</strong></div>
-    <button v-if="!expanded" class="plaza-detail-button" @click="$emit('details')">{{ t('modelPlaza.catalog.details') }} <Icon name="chevronRight" size="xs" /></button>
+    <button v-if="!expanded" class="plaza-detail-button" @click="$emit('details')">{{ t('common.details') }} <Icon name="chevronRight" size="xs" /></button>
   </div>
 </template>
 <script setup lang="ts">

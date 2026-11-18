@@ -43,8 +43,8 @@ type UserMessageQueueService struct {
 	cfg       *config.UserMessageQueueConfig
 	stopCh    chan struct{} // graceful shutdown
 	stopOnce  sync.Once     // 确保 Stop() 并发安全
+	stopDone  chan struct{}
 	startOnce sync.Once
-	workerWG  sync.WaitGroup
 }
 
 // NewUserMessageQueueService 创建用户消息串行队列服务
@@ -275,9 +275,9 @@ func (s *UserMessageQueueService) StartCleanupWorker(interval time.Duration) {
 	}
 
 	s.startOnce.Do(func() {
-		s.workerWG.Add(1)
+		s.stopDone = make(chan struct{})
 		go func() {
-			defer s.workerWG.Done()
+			defer close(s.stopDone)
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -298,8 +298,9 @@ func (s *UserMessageQueueService) Stop() {
 		s.stopOnce.Do(func() {
 			close(s.stopCh)
 		})
-		s.startOnce.Do(func() {})
-		s.workerWG.Wait()
+		if s.stopDone != nil {
+			<-s.stopDone
+		}
 	}
 }
 

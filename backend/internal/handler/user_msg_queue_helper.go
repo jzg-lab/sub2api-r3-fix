@@ -125,7 +125,7 @@ func (h *UserMsgQueueHelper) waitForLockWithPing(
 			if err != nil {
 				return nil, err
 			}
-			service.RecordOpenAIStreamKeepaliveBytes(c, written)
+			recordGatewayStreamHeartbeat(c, written)
 			flusher.Flush()
 
 		case <-timer.C:
@@ -232,7 +232,7 @@ func (h *UserMsgQueueHelper) ThrottleWithPing(
 			if err != nil {
 				return err
 			}
-			service.RecordOpenAIStreamKeepaliveBytes(c, written)
+			recordGatewayStreamHeartbeat(c, written)
 			flusher.Flush()
 		case <-timer.C:
 			return nil

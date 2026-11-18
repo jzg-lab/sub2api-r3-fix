@@ -199,10 +199,7 @@ func ValidateFunctionCallOutputContextBytes(body []byte) FunctionCallOutputValid
 			}
 			referenceIDs[idValue] = struct{}{}
 		}
-		// Scan the complete input. A valid tool context can appear before a
-		// later malformed output; stopping early would let that output bypass
-		// call_id validation.
-		return true
+		return !result.HasFunctionCallOutput || !result.HasToolCallContext
 	})
 	if !result.HasFunctionCallOutput || result.HasToolCallContext || len(callIDs) == 0 || len(referenceIDs) == 0 {
 		return result
@@ -327,15 +324,14 @@ func ValidateFunctionCallOutputContext(reqBody map[string]any) FunctionCallOutpu
 		switch {
 		case isCodexToolCallOutputItemType(itemType):
 			result.HasFunctionCallOutput = true
-			callID, _ := itemMap["call_id"].(string)
-			if strings.TrimSpace(callID) == "" {
-				result.HasFunctionCallOutputMissingCallID = true
-			}
 		case isCodexToolCallContextItemType(itemType):
 			callID, _ := itemMap["call_id"].(string)
 			if strings.TrimSpace(callID) != "" {
 				result.HasToolCallContext = true
 			}
+		}
+		if result.HasFunctionCallOutput && result.HasToolCallContext {
+			return result
 		}
 	}
 

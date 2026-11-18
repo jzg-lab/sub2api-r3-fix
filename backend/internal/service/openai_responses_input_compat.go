@@ -8,14 +8,6 @@ import (
 
 const openAIResponsesInputTextMaxChars = 10000000
 
-// openAIResponsesMayContainOrphanToolOutputs 是 sanitizeOpenAIResponsesOrphanToolOutputs
-// 的 gjson 预筛(r17x D 项):sanitize 只会删除 *_call_output/tool_search_output 类
-// item——input 里没有这类 item 时必然 noop,调用方无需 decode 全量 map。
-// 注意不能把 previous_response_id 在场当跳过条件:OAuth 路径的锚点删除是
-// patch,ensureReqBody 应用后 sanitize 看到的才是终态——锚点被删 + 孤儿
-// output 恰恰是必须清理的形态(回归测试
-// TestOpenAIGatewayService_OAuthDropsOrphanAfterDroppingPreviousResponse)。
-// hasPreviousResponseID 守卫留在 sanitize 内部,基于 decode 后的终态判断。
 func openAIResponsesMayContainOrphanToolOutputs(body []byte) bool {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
@@ -33,7 +25,8 @@ func openAIResponsesMayContainOrphanToolOutputs(body []byte) bool {
 }
 
 // sanitizeOpenAIResponsesOrphanToolOutputs removes tool-output items that have
-// no matching call or item reference anywhere in the current input.
+// no matching call or item reference anywhere in the current input. Named
+// function outputs without a call ID are standalone inputs, not orphan results.
 func sanitizeOpenAIResponsesOrphanToolOutputs(reqBody map[string]any, input []any, hasPreviousResponseID bool) bool {
 	if len(input) == 0 || hasPreviousResponseID {
 		return false
@@ -71,6 +64,15 @@ func sanitizeOpenAIResponsesOrphanToolOutputs(reqBody map[string]any, input []an
 		}
 
 		callID := strings.TrimSpace(firstNonEmptyString(item["call_id"]))
+		// Codex sends externally supplied inputs (such as task delegation) as
+		// named function outputs without a preceding function call. Preserve
+		// their native type, namespace and output instead of silently dropping
+		// the request that started the turn.
+		if callID == "" && strings.TrimSpace(firstNonEmptyString(item["type"])) == "function_call_output" &&
+			strings.TrimSpace(firstNonEmptyString(item["name"])) != "" {
+			normalized = append(normalized, rawItem)
+			continue
+		}
 		_, hasToolCall := toolCallIDs[callID]
 		_, hasReference := referenceIDs[callID]
 		if callID != "" && (hasToolCall || hasReference) {

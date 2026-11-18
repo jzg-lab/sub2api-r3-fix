@@ -1,11 +1,11 @@
 //go:build soak
 
-// soak_canary_test.go — machine 模式灰度观测负载（自包含，基线/候选两树同构可移植）。
+// soak_canary_test.go — Codex session 指纹收敛观测负载。
 //
 // 用法：
 //
-//	SOAK_MODE=machine|session SOAK_DURATION=10m SOAK_WINDOWS=6 SOAK_PACE_MS=150 \
-//	SOAK_OUT=/path/report.json go test -tags=soak ./internal/service/ -run TestSoakCanaryMachineWindow -timeout 30m -v
+//	SOAK_DURATION=10m SOAK_WINDOWS=6 SOAK_PACE_MS=150 \
+//	SOAK_OUT=/path/report.json go test -tags=soak ./internal/service/ -run TestSoakCanaryCodexSession -timeout 30m -v
 //
 // 观测维度（每 turn 对捕获的上游请求内联校验，只留计数不留样本）：
 //  1. rawLeaks       —— 任何窗口的原始 session/thread/installation 出现在出站头或 body
@@ -142,7 +142,7 @@ func soakEnvInt(key string, def int) int {
 }
 
 // soakBuildTurn 构造一次真实 Codex 窗口形态的下游请求（头/body 同源，与
-// openai_codex_machine_chain_test.go 的 machineChainRequest 同构，但自包含）。
+// 测试请求自包含，不依赖其他夹具）。
 // 返回 gin context 与 body 字节（Forward 需要显式接收 body）。
 func soakBuildTurn(w *soakWindow) (*gin.Context, []byte) {
 	tm := `{"installation_id":"real-install","session_id":"` + w.rawSession + `","thread_id":"` + w.rawThread + `","turn_id":"turn-soak-` + fmt.Sprint(w.turns+1) + `","window_id":"` + w.windowID + `","sandbox":"seccomp","sandbox_mode":"workspace-write","thread_source":"cli"`
@@ -257,10 +257,13 @@ func soakAnalyzeTurn(t *testing.T, svc *OpenAIGatewayService, account *Account, 
 	return latency, nil
 }
 
-func TestSoakCanaryMachineWindow(t *testing.T) {
+func TestSoakCanaryCodexSession(t *testing.T) {
 	mode := os.Getenv("SOAK_MODE")
 	if mode == "" {
-		mode = "machine"
+		mode = "session"
+	}
+	if mode != "session" {
+		t.Fatalf("unsupported SOAK_MODE %q; only session is available", mode)
 	}
 	duration := soakEnvDuration("SOAK_DURATION", 10*time.Minute)
 	windowsN := soakEnvInt("SOAK_WINDOWS", 6)
@@ -425,17 +428,6 @@ func TestSoakCanaryMachineWindow(t *testing.T) {
 	t.Logf("soak mode=%s turns=%d violations=%+v distinct_out_ids=%d/%d lat_p50=%.2fms p99=%.2fms heap=%.1fMB",
 		mode, totalTurns, report.Violations, len(distinct), windowsN, report.LatencyMS.P50, report.LatencyMS.P99, report.Mem.HeapAllocMB)
 
-	// 灰度组（machine）的硬性闸门：任何泄漏/漂移/形态违规都直接判失败；
-	// 对照组（session/基线）仅产出数据，不设闸门，便于量化差异。
-	if mode == "machine" {
-		if report.Violations.RawLeaks > 0 || report.Violations.UnstableID > 0 || report.Violations.PCKMismatch > 0 ||
-			report.Violations.V7Bad > 0 || report.Violations.Underscore > 0 || report.Violations.Errors > 0 {
-			t.Fatalf("machine 灰度不变量被打破: %+v", report.Violations)
-		}
-		if len(distinct) != windowsN {
-			t.Fatalf("窗口假名应 %d 个不同值, 实际 %d 个（跨窗口收敛/漂移）", windowsN, len(distinct))
-		}
-	}
 }
 
 func (u *soakUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {

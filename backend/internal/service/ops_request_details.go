@@ -62,7 +62,7 @@ type OpsRequestDetailFilter struct {
 	MinDurationMs *int
 	MaxDurationMs *int
 
-	// Sort: created_at_desc (default), duration_desc, or ttft_desc.
+	// Sort: created_at_desc (default), duration_desc or ttft_desc.
 	Sort string
 
 	Page     int

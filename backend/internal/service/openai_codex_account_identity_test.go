@@ -90,6 +90,7 @@ func TestCodexAccountIdentityNamespaceUsesStableCredentialSource(t *testing.T) {
 }
 
 func TestCodexAccountIdentitySourceResolvesShadowAndOverwritesFailoverContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -126,6 +127,7 @@ func TestCodexAccountIdentitySourceResolvesShadowAndOverwritesFailoverContext(t 
 }
 
 func TestBuildOpenAIWSHeadersNamespacesCodexIdentityByOAuthAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
@@ -167,6 +169,7 @@ func TestBuildOpenAIWSHeadersNamespacesCodexIdentityByOAuthAccount(t *testing.T)
 }
 
 func TestBuildUpstreamRequestNamespacesCodexIdentityByOAuthAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"model":"gpt-5.6-codex","stream":true,"prompt_cache_key":"client-session"}`)
 
@@ -224,34 +227,4 @@ func TestBuildUpstreamRequestNamespacesCodexIdentityByOAuthAccount(t *testing.T)
 		require.NotEqual(t, first.Get(header), second.Get(header), "account failover must rotate upstream identity: %s", header)
 	}
 	require.GreaterOrEqual(t, checked, 5, "test must exercise the real outbound identity surface")
-}
-
-func TestCodexAccountIdentityScopingSkipsMachineMode(t *testing.T) {
-	account := newTestOAuthAccount(7331, map[string]any{
-		codexFingerprintModeExtraKey: string(codexFingerprintMachine),
-		codexFingerprintSeedExtraKey: testCodexFingerprintSeed,
-	})
-	body := map[string]any{
-		"prompt_cache_key": testCodexMachineV7,
-		"client_metadata": map[string]any{
-			"session_id": testCodexMachineV7,
-		},
-	}
-	headers := make(http.Header)
-	headers.Set("session-id", testCodexMachineV7)
-	headers.Set("thread-id", testCodexMachineV7)
-
-	require.False(t, applyCodexAccountIdentityClientMetadataMap(body, account, 99))
-	require.Equal(t, testCodexMachineV7, body["prompt_cache_key"])
-	require.Equal(t, testCodexMachineV7, body["client_metadata"].(map[string]any)["session_id"])
-
-	applyCodexAccountIdentityHeaders(headers, account, 99)
-	require.Equal(t, testCodexMachineV7, headers.Get("session-id"))
-	require.Equal(t, testCodexMachineV7, headers.Get("thread-id"))
-
-	raw := []byte(`{"prompt_cache_key":"` + testCodexMachineV7 + `","client_metadata":{"session_id":"` + testCodexMachineV7 + `"}}`)
-	next, changed, err := applyCodexAccountIdentityClientMetadataRaw(raw, account, 99)
-	require.NoError(t, err)
-	require.False(t, changed)
-	require.Equal(t, raw, next)
 }

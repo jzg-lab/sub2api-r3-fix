@@ -4,10 +4,8 @@ package service
 
 import (
 	"context"
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -70,48 +68,4 @@ func TestForward_OAuthWebSearchHistoryDeclaresTool(t *testing.T) {
 			require.Equal(t, "web_search", additional.Get("tools.0.type").String())
 		})
 	}
-}
-
-const astraProCodexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
-
-type astraForwardSetup struct {
-	upstream *httpUpstreamRecorder
-	svc      *OpenAIGatewayService
-	c        *gin.Context
-	rec      *httptest.ResponseRecorder
-	account  *Account
-}
-
-// newAstraOAuthSetup builds an OpenAI OAuth account using the minimal
-// svc+account harness pattern (mirrors openai_oauth_passthrough_test.go). When
-// passthrough is true the account routes through forwardOpenAIPassthrough.
-func newAstraOAuthSetup(t *testing.T, passthrough bool) *astraForwardSetup {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
-	upstream := &httpUpstreamRecorder{}
-	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
-		httpUpstream: upstream,
-	}
-	account := &Account{
-		ID:             888,
-		Name:           "oauth-astra",
-		Platform:       PlatformOpenAI,
-		Type:           AccountTypeOAuth,
-		Concurrency:    1,
-		Credentials:    map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
-		Extra:          map[string]any{"openai_passthrough": passthrough},
-		Status:         StatusActive,
-		Schedulable:    true,
-		RateMultiplier: f64p(1),
-	}
-	return &astraForwardSetup{upstream: upstream, svc: svc, c: c, rec: rec, account: account}
-}
-
-func codexCompletedSSE(inner string) string {
-	return "data: {\"type\":\"response.completed\",\"response\":" + inner + "}\n\ndata: [DONE]\n\n"
 }

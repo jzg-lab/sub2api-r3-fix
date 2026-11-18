@@ -32,6 +32,7 @@ func (r *transportTempUnschedRepoStub) SetTempUnschedulable(_ context.Context, i
 
 func newTransportErrorTestGin(t *testing.T) *gin.Context {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	return c
@@ -68,6 +69,61 @@ func TestHandleUpstreamTransportError_TransientFailsOverWithoutEviction(t *testi
 	}
 	if c.Writer.Written() {
 		t.Fatal("handler owns the response; service must not write on transport failover")
+	}
+}
+
+// TestHandleUpstreamTransportError_AttributesEventTimeProxy pins that the
+// shared helper stamps proxy attribution from the same account snapshot the
+// transport used, so every Anthropic/Bedrock caller inherits it.
+func TestHandleUpstreamTransportError_AttributesEventTimeProxy(t *testing.T) {
+	proxyID := int64(10060)
+	tests := []struct {
+		name     string
+		account  *Account
+		wantID   *int64
+		wantName string
+	}{
+		{
+			name:     "managed proxy",
+			account:  &Account{ID: 149, Name: "acc", Platform: PlatformAnthropic, ProxyID: &proxyID, Proxy: &Proxy{ID: proxyID, Name: "wldsg82-ipv6-10060"}},
+			wantID:   &proxyID,
+			wantName: "wldsg82-ipv6-10060",
+		},
+		{
+			name:     "direct",
+			account:  &Account{ID: 149, Name: "acc", Platform: PlatformAnthropic},
+			wantName: opsProxyNameDirect,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &GatewayService{accountRepo: &transportTempUnschedRepoStub{}}
+			c := newTransportErrorTestGin(t)
+			_ = s.handleUpstreamTransportError(context.Background(), c, tt.account,
+				errors.New("EOF"), OpsUpstreamErrorEvent{UpstreamURL: "https://api.anthropic.com/v1/messages", Passthrough: true})
+			raw, ok := c.Get(OpsUpstreamErrorsKey)
+			if !ok {
+				t.Fatal("no upstream events recorded")
+			}
+			events := raw.([]*OpsUpstreamErrorEvent)
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			ev := events[0]
+			if tt.wantID == nil {
+				if ev.ProxyID != nil {
+					t.Fatalf("proxy_id = %d, want null", *ev.ProxyID)
+				}
+			} else if ev.ProxyID == nil || *ev.ProxyID != *tt.wantID {
+				t.Fatalf("proxy_id = %v, want %d", ev.ProxyID, *tt.wantID)
+			}
+			if ev.ProxyName != tt.wantName {
+				t.Fatalf("proxy_name = %q, want %q", ev.ProxyName, tt.wantName)
+			}
+			if !ev.Passthrough || ev.UpstreamURL == "" || ev.Kind != "request_error" {
+				t.Fatalf("caller-supplied fields lost: %+v", ev)
+			}
+		})
 	}
 }
 

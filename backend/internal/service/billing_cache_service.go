@@ -248,7 +248,12 @@ func (s *BillingCacheService) cacheWriteWorker(ch <-chan cacheWriteTask) {
 	}
 }
 
-func (s *BillingCacheService) PendingWrites() int64 { return s.cacheWritePending.Load() }
+func (s *BillingCacheService) PendingWrites() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.cacheWritePending.Load()
+}
 
 // cacheWriteKindName 用于日志中的任务类型标识，便于排查丢弃原因。
 func cacheWriteKindName(kind cacheWriteKind) string {
@@ -720,7 +725,7 @@ func (s *BillingCacheService) QueueUpdateAPIKeyRateLimitUsage(apiKeyID int64, co
 // 把 TOCTOU 超支窗口限制在并发 in-flight 请求数量内（而非随时间无限累积）。
 // 写延迟通常 < 1ms（本地 Redis），换取 quota 视图实时性的取舍合理。
 //
-// Redis 写失败用 ALERT 级 log；DB 持久化由 caller 单独 goroutine 兜底（gateway_service.go）。
+// Redis 写失败用 ALERT 级 log；DB 持久化由计费 worker 内同步执行或批量 flusher 处理。
 func (s *BillingCacheService) IncrementUserPlatformQuotaUsage(userID int64, platform string, cost float64) {
 	if s.cache == nil {
 		return
@@ -748,8 +753,13 @@ func (s *BillingCacheService) IncrementUserPlatformQuotaUsage(userID int64, plat
 // 订阅模式：检查缓存用量未超过限额（Group限额从参数传入）
 // platform 为请求的目标平台（如 "anthropic"），传空串 "" 时跳过 user × platform quota 检查。
 func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user *User, apiKey *APIKey, group *Group, subscription *UserSubscription, platform string) error {
-	// 简易模式：跳过所有计费检查
-	if s.cfg.RunMode == config.RunModeSimple {
+	// 简易模式默认跳过所有计费检查. An explicit key-window opt-in keeps
+	// balance/subscription/platform checks bypassed while enforcing the three
+	// API-key monetary windows from the database source of truth.
+	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+		if s.cfg.SimpleModeKeyRateLimitEnabled {
+			return s.checkSimpleModeAPIKeyRateLimits(ctx, apiKey)
+		}
 		return nil
 	}
 	if s.circuitBreaker != nil && !s.circuitBreaker.Allow() {
@@ -791,6 +801,34 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 	return nil
 }
 
+// checkSimpleModeAPIKeyRateLimits is deliberately DB-authoritative. Redis
+// updates are asynchronous and can be dropped or missed after a committed
+// transaction, so using the cache here could let a limited simple-mode key
+// continue past its configured window. A read failure fails closed because
+// the operator explicitly opted into enforcement.
+func (s *BillingCacheService) checkSimpleModeAPIKeyRateLimits(ctx context.Context, apiKey *APIKey) error {
+	if apiKey == nil || !apiKey.HasRateLimits() {
+		return nil
+	}
+	if s.apiKeyRateLimitLoader == nil {
+		return ErrBillingServiceUnavailable
+	}
+	data, err := s.apiKeyRateLimitLoader.GetRateLimitData(ctx, apiKey.ID)
+	if err != nil || data == nil {
+		return ErrBillingServiceUnavailable
+	}
+	if apiKey.RateLimit5h > 0 && data.EffectiveUsage5h() >= apiKey.RateLimit5h {
+		return ErrAPIKeyRateLimit5hExceeded
+	}
+	if apiKey.RateLimit1d > 0 && data.EffectiveUsage1d() >= apiKey.RateLimit1d {
+		return ErrAPIKeyRateLimit1dExceeded
+	}
+	if apiKey.RateLimit7d > 0 && data.EffectiveUsage7d() >= apiKey.RateLimit7d {
+		return ErrAPIKeyRateLimit7dExceeded
+	}
+	return nil
+}
+
 // checkRPM 执行并行 RPM 限流，所有适用的限制同时生效，任一超限即拒绝：
 //
 //  1. (用户, 分组) rpm_override       — 最细粒度：管理员为特定用户在特定分组设定的专属限额。
@@ -820,9 +858,9 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 		// snapshot 带 checked 标记（负缓存）时，nil 就是"已确认无 override"，
 		// 不再每请求回源；只有 unmarked 的 nil（snapshot 构建时查询失败/未查）才走 DB。
 		var override *int
-		if user.UserGroupRPMOverride != nil {
+		if user.UserGroupRPMOverride != nil && (user.UserGroupRPMOverrideGroupID == 0 || user.UserGroupRPMOverrideGroupID == group.ID) {
 			override = user.UserGroupRPMOverride
-		} else if user.UserGroupRPMOverrideChecked {
+		} else if user.UserGroupRPMOverrideChecked && (user.UserGroupRPMOverrideGroupID == 0 || user.UserGroupRPMOverrideGroupID == group.ID) {
 			// 负缓存命中：snapshot 构建时已确认无 override。
 		} else if s.userGroupRateRepo != nil {
 			dbOverride, err := s.userGroupRateRepo.GetRPMOverrideByUserAndGroup(ctx, user.ID, group.ID)
@@ -880,26 +918,6 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 		return admission.err
 	}
 	return s.checkRouteUserRPM(ctx, user)
-}
-
-func (s *BillingCacheService) checkRouteUserRPM(ctx context.Context, user *User) error {
-	// ── 第二层：用户级全局硬上限（始终生效） ──
-	if user.RPMLimit > 0 {
-		count, err := s.userRPMCache.IncrementUserRPM(ctx, user.ID)
-		if err != nil {
-			logger.LegacyPrintf(
-				"service.billing_cache",
-				"Warning: rpm increment (user) failed for user=%d: %v",
-				user.ID, err,
-			)
-			return nil // fail-open
-		}
-		if count > user.RPMLimit {
-			return ErrUserRPMExceeded
-		}
-	}
-
-	return nil
 }
 
 func (s *BillingCacheService) minimumBalanceReserve() float64 {
@@ -1144,7 +1162,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 	}
 
 	// --- cache HIT with current schema → 直接用 entry，不查 DB ---
-	if cacheErr == nil && ok && entry != nil && entry.SchemaVersion == UserPlatformQuotaCacheSchemaV2 {
+	if cacheErr == nil && ok && entry != nil && entry.SchemaVersion == UserPlatformQuotaCacheSchemaV1 {
 		now := time.Now()
 		dailyUsage := entry.DailyUsageUSD
 		weeklyUsage := entry.WeeklyUsageUSD
@@ -1192,7 +1210,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 				DailyUsageUSD:      dailyUsage,
 				WeeklyUsageUSD:     weeklyUsage,
 				MonthlyUsageUSD:    monthlyUsage,
-				SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
+				SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
 				DailyLimitUSD:      entry.DailyLimitUSD,
 				WeeklyLimitUSD:     entry.WeeklyLimitUSD,
 				MonthlyLimitUSD:    entry.MonthlyLimitUSD,
@@ -1258,7 +1276,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 			startOfDay := timezone.StartOfDay(now)
 			startOfWeek := timezone.StartOfWeek(now)
 			sentinel := &UserPlatformQuotaCacheEntry{
-				SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
+				SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
 				DailyWindowStart:   &startOfDay,
 				WeeklyWindowStart:  &startOfWeek,
 				MonthlyWindowStart: &now,
@@ -1314,7 +1332,7 @@ func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 		DailyUsageUSD:      dailyUsage,
 		WeeklyUsageUSD:     weeklyUsage,
 		MonthlyUsageUSD:    monthlyUsage,
-		SchemaVersion:      UserPlatformQuotaCacheSchemaV2,
+		SchemaVersion:      UserPlatformQuotaCacheSchemaV1,
 		DailyLimitUSD:      rec.DailyLimitUSD,
 		WeeklyLimitUSD:     rec.WeeklyLimitUSD,
 		MonthlyLimitUSD:    rec.MonthlyLimitUSD,
@@ -1413,4 +1431,24 @@ func (s *BillingCacheService) HasUserPlatformQuotaLimit(ctx context.Context, use
 		return true
 	}
 	return entry.DailyLimitUSD != nil || entry.WeeklyLimitUSD != nil || entry.MonthlyLimitUSD != nil
+}
+
+func (s *BillingCacheService) checkRouteUserRPM(ctx context.Context, user *User) error {
+	// ── 第二层：用户级全局硬上限（始终生效） ──
+	if user.RPMLimit > 0 {
+		count, err := s.userRPMCache.IncrementUserRPM(ctx, user.ID)
+		if err != nil {
+			logger.LegacyPrintf(
+				"service.billing_cache",
+				"Warning: rpm increment (user) failed for user=%d: %v",
+				user.ID, err,
+			)
+			return nil // fail-open
+		}
+		if count > user.RPMLimit {
+			return ErrUserRPMExceeded
+		}
+	}
+
+	return nil
 }

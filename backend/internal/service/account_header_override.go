@@ -1,6 +1,7 @@
 package service
 
 import (
+	"maps"
 	"net/http"
 	"strings"
 
@@ -99,12 +100,27 @@ func (a *Account) IsHeaderOverrideEnabled() bool {
 // GetHeaderOverrides 返回生效的请求头覆写表（key 统一小写）。
 // 未启用、不符合平台/类型条件或配置为空时返回 nil。
 // 空 value 的条目（模板占位）与非法/禁止的 header 名会被跳过。
-// 返回独立结果，不修改共享账号快照或将可变结果暴露给其他请求。
+// 共享快照在发布前缓存；普通账号读取不写入字段，允许并发读取及按值复制。
 func (a *Account) GetHeaderOverrides() map[string]string {
 	if !a.IsHeaderOverrideEnabled() {
 		return nil
 	}
-	return resolveHeaderOverrides(stringMappingFromRaw(a.Credentials[credKeyHeaderOverrides]))
+	rawMapping, rawIsAnyMap := a.Credentials[credKeyHeaderOverrides].(map[string]any)
+	if !rawIsAnyMap {
+		// 非 JSON 反序列化产物（如直接注入的 map[string]string）：直接解析，不缓存
+		return maps.Clone(resolveHeaderOverrides(stringMappingFromRaw(a.Credentials[credKeyHeaderOverrides])))
+	}
+
+	credentialsPtr := mapPtr(a.Credentials)
+	rawPtr := mapPtr(rawMapping)
+	rawLen := len(rawMapping)
+	if a.headerOverrideCacheReady &&
+		a.headerOverrideCacheCredentialsPtr == credentialsPtr &&
+		a.headerOverrideCacheRawPtr == rawPtr && a.headerOverrideCacheRawLen == rawLen &&
+		a.headerOverrideCacheRawSig == modelMappingSignature(rawMapping) {
+		return maps.Clone(a.headerOverrideCache)
+	}
+	return resolveHeaderOverrides(stringMappingFromRaw(rawMapping))
 }
 
 // resolveHeaderOverrides 解析并防御性过滤原始覆写表：保存路径已做校验，

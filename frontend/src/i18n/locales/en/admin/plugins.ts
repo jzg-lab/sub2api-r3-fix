@@ -1,9 +1,6 @@
 export default {
   plugins: {
     title: 'Plugin Management',
-    qualityScope: 'Quality scheduling restrictions',
-    qualityScopeAll: 'All groups (existing rules)',
-    qualityScopeSelected: 'Selected groups only',
     description: 'Install and manage isolated OAuth outbound transport plugins. API Key flows are unchanged.',
     upload: 'Install plugin',
     uploadHint: 'Only .s2plugin packages are accepted; trusted publisher signatures are required by default.',
@@ -48,6 +45,10 @@ export default {
     fileRequired: 'Select a .s2plugin file',
     bridgeRejected: 'Plugin UI message validation failed',
     onlyOpenAI: 'Initial capability: OpenAI OAuth outbound transport only',
-    noAccountCoupling: 'The scope is platform and account type. Account records are not changed and no per-account toggle is required.'
+    noAccountCoupling: 'The scope is platform and account type. Account records are not changed and no per-account toggle is required.',
+qualityScope: 'Quality scheduling restrictions',
+qualityScopeAll: 'All groups (existing rules)',
+qualityScopeSelected: 'Selected groups only',
+
   }
 }

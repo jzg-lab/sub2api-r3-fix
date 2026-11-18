@@ -229,6 +229,252 @@ embed/Linux 编译、Go lint、双端安全和部署/候选工具均通过；本
 生产工具当前仅支持迁移 265，
 266/267 的专项工具适配、最终镜像隔离验证、生产备份/迁移/准备及上线均未执行且不在此次授权内。
 
+## 官方 v0.2.20 整合（新主线适配完成，安全发布受阻）
+
+### 2026-11-18 新基线验收与依赖修复
+
+本轮结果提交：`ad5cc1912449950cd55d0b60fb8514ca9b687e89`，已推送
+`origin/codex/official-v020-release` 并核对远端完整 SHA。尚未合入 main、登记候选或部署。
+固定源码 [CI 44278975985](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44278975985)
+已完成，整体 failure：freeze、前端完整检查与构建、部署工具、后端 unit/integration、真实 Nginx
+SSE/WebSocket 切换 race、Go lint、后端安全扫描均 success。唯一失败任务为
+`security / frontend-security`，失败步骤为 `Check audit exceptions`；候选登记 skipped。
+公开 API 已核对固定源码和各任务最终结果；远端详细日志需要登录，未取得，本地同源码审计与审核脚本
+复现唯一剩余的 picomatch high 阻断（见下文），不将本地日志冒充远端日志。
+没有修改既有部署审核、候选清单、生产数据库或插件。北京时间约 17:58 只读核验蓝槽 r17.11
+仍接流量且 ready，具体身份见[部署记录](deployment-state.md#官方-v020-发布阻断与只读核验2026-11-18)。
+本轮最终记录提交仅改文档；代码验收身份仍为上述 SHA，未重跑或掩盖该失败 CI。
+
+最终本地验收：Go unit 64 个测试包通过（14000 顶层通过、109 跳过）；integration 60 个测试包通过（8563 顶层通过、86 跳过）；真实 Nginx SSE/WebSocket 切换/回切 race
+通过（包含旧连接维持 31 秒），Go 同版固定历史基线 lint 为 0 新问题。未将缺 Nginx 或 Docker 的跳过计作通过。
+全部已执行历史 SQL 与主线原始字节比较一致，Ent/Wire 依据合并后 schema/provider 重新生成。
+提交前还恢复本地 `.gitignore` 的嵌入资源、构建源码、测试及维护文档规则，避免丢掉新哈希资源。
+本机原始验收日志及 manifest 已归档至独立工作树的
+`.codex-validation/official-v020-release/local-evidence.tar.gz`（忽略文件，未上传 Git），SHA-256
+`7acb5476380ffc34ad834a3ce276e3113aa2e1c1827d9054bbcb77b919b2cb8c`。
+
+工作分支 `codex/official-v020-release` 基于 main `02f7aeb85a83f012288d2980a31f26718ffd46f7`，
+官方来源仍固定 `dab829a4e9b7d1cc307189aea8b0319eb29e29d0`，没有追随官方最新 main。
+原工作树保持原样；与主线的 18 处文本冲突已逐项适配，另外修复自动合并遗漏的重复方法和 TLS 测试夹具。
+共享订阅、分组长上下文阈值、已上线采集宿主及 266/267 的原始 SQL 均保留；六项未发布迁移改为 268–273。
+账号显式长上下文开关完全覆盖分组，缺省继承；WebSocket 每轮用固定的当轮订阅重新检查准入并结算。
+认证缓存版本 28 同时携带分组阈值及官方隐私限制；401 凭据重试经过原 TLS/插件/采集路径，
+新增成功重试只归档最终成功响应、不保存凭据的回归。独立采集筛选/停用读取任务未混入本轮。
+
+前端升级 Vite 7.3.8、Vitest/coverage 4.1.12、Vue 插件 6.0.11；保留 pnpm 11.21.0、SheetJS CDN 0.20.3。
+Vitest 覆盖率配置按新版迁移；Blob 测试模拟改为可构造函数；源码保持 ES2020 的数组索引兼容。
+已通过 Node 24 + pnpm 11.21.0 冻结安装、全量 431 文件/3520 测试、lint、类型及生产构建、内嵌资源测试，
+Go 1.27.4 的本机及 Linux amd64 embed 编译、重点 race 与受限管理员/代理真实 PostgreSQL 专项，
+Python 3.12 的部署工具 173 项、候选工具 21 项及发布矩阵 11 项、Compose/Caddy fixtures。
+数据库仓储全量实际执行于本机独立 PostgreSQL 17.11/Redis 7.4.7 Unix socket，并由 harness 创建/清理每次独立数据库，
+867 个顶层测试通过、60 个跳过；这不替代生产 PostgreSQL 18/Redis 8 与目标镜像验收。
+全量 integration、最终 unit 和真实 Nginx 均已通过，具体计数及提交/CI 证据见下方追加；不沿用旧基线的通过结论。
+
+安全：govulncheck 1.10.0 报告 0 可达漏洞，另有 6 项依赖模块通告无可达调用；生产前端依赖审计为 0 漏洞。
+全依赖审计由原 30 high/3 critical 降至仅 1 high：`picomatch` 的
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)。2026-11-18 同时核对 npm registry
+和 GitHub 公告：最新实际发布 4.0.7，受影响范围 `<=4.0.7`，公告 `first_patched_version=null`。
+审计响应提示 `>=4.0.8`，但实际无该发布，不能把不存在的版本写入锁文件。公告引用的 PR 194 仍 open，
+其作者也明确单分支 `+(*a)` 仍可指数回溯，不能当作修复补丁。
+CI 审计已扩展至全部开发依赖；原空豁免清单保持不变，本地同一审核脚本明确失败。发布继续阻断，
+不切生产、不登记候选、不改部署审核为 approved。最终目标镜像、生产备份/迁移/切流均未执行。
+
+
+2026-11-18 继续实施：用户授权修复前端依赖、回归通过后上线。基于最新 main
+`02f7aeb85a83f012288d2980a31f26718ffd46f7` 的独立工作树适配旧整合改动，保留已上线
+共享订阅、分组阈值及采集宿主。已执行迁移 266/267 原样保留；本轮未执行的六项迁移
+按原顺序顺延为 268–273（Gemini、受限管理员、多图计费、MCP、历史加价、提现幂等）。
+下文旧验证中的 266–271 是当时编号，不能替代新基线回归。独立任务的档案筛选及停用读取改动未纳入。
+本段是新基线适配开始时记录；当前结果以本节顶部验收及下方提交/CI 记录为准。
+
+
+2026-11-18 上线前复核更正：下文“源码完成”和 11 月 15 日测试结果仅针对旧基线
+`56dc80bd40322651706d491535fe397c258e7f93`，不能代表已经兼容当前主线或生产。
+远端 main 已为 `02f7aeb85a83f012288d2980a31f26718ffd46f7`；SSH 只读确认 Nginx 指向蓝槽
+8081，运行镜像 revision 为 `cc4c907e1c264403e870d52367316399788fe4e1`（r17.11），入口 ready。
+当前工作区缺少共享订阅额度、分组长上下文门槛等新增实现的 18 个路径，另有 37 个路径仍为旧基线；
+对两边同时修改的路径进行临时文件三方预检，18 个路径存在文本冲突，尚未写入源码或解决。
+线上 r17.11 记录已执行 `266_batch_image_subscription_billing.sql` 和
+`267_group_long_context_pricing.sql`，当前官方适配又占用 266/267；需保留已执行文件及 checksum，
+重新安排未发布新增迁移并验证升级/回退，不能直接覆盖上线。
+
+本次重新执行前端 audit（当前可用 pnpm 11.25.0，仅扫描，未安装或改锁文件）：全依赖 30 high、
+3 critical；生产依赖 high/critical 均 0，另有 1 moderate、1 low。当前 CI 安全工作流的前端步骤使用
+`--prod`，因此开发依赖阻断是本次已确认的发布要求，不能声称该步骤会因开发依赖自动失败。
+远端 [Security Scan 43850212636](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/43850212636)
+实际失败项为后端 govulncheck，前端步骤成功；这是远端 main 的结果，不是本工作区已运行 CI。
+本机 Docker daemon 未运行。用户本次授权“没问题就上线跑 CI/CD”；目前条件未满足，已询问是否
+将此前明确暂缓的前端依赖升级纳入本轮。未提交、未推送、未触发新 CI、未修改生产或迁移账本。
+
+来源固定为官方提交 `dab829a4e9b7d1cc307189aea8b0319eb29e29d0`，本项目合并前基线为
+`56dc80bd40322651706d491535fe397c258e7f93`。用户确认官方功能默认纳入，并已逐项裁决当前
+已发现的产品差异。Cyber 会话屏蔽采用官方行为：按 API Key 隔离，使用 transcript 历史长度
+匹配；屏蔽记录 Redis 读写失败时放行请求。因此不保留本地额外的跨 API Key 用户共享、故障时
+拒绝请求和 transcript 溢出时阻断。该屏蔽仅在命中时于账号选择前拒绝请求，不改变正常账号路由。
+
+本轮官方功能与逐项行为适配已完成工作区实现及全量 unit 验证；尚未提交、未推送、未部署，也未形成正式发布候选。
+Docker 全镜像构建受 Docker Hub token 请求超时阻断，前端开发/测试依赖漏洞按用户决定留待后续处理并保留发布阻断。
+用户另确认采用官方站点订阅开关及默认值、官方同步配额写库、
+官方账号映射缓存并补并发安全、官方 Cyber 屏蔽格式与 transcript 匹配。该开关只控制订阅界面，不改变既有 API
+订阅计费或正常路由。Cyber 官方策略按 API Key 隔离，屏蔽存储读取失败时放行请求；移除本地额外的用户级共享、
+故障拒绝和 transcript 溢出阻断。
+
+用户进一步确认 GPT-5.4 长上下文计费按官方默认；账号开关显式设为 true 或 false 时覆盖分组，未设置时跟随分组。
+OpenAI 上游账号成本统计独立于客户售价开关。用户确认按官方移除 Codex OAuth `machine` 指纹模式；此决定只针对
+本次 v0.2.20，不覆盖老板版 r27 的规则。模型广场保留本地按活跃且可调度账号实际供给过滤，不展示没有可用账号
+支持的模型。上述产品选择已确定，仍需代码与回归验收。
+
+当前工作树包含大量未提交移植；源码整合完成不代表存在结果提交或可发布版本。已修复一批明确的截断/重复代码，包括 Responses 非完成终止
+响应提取、DeepSeek 请求体归一化、Anthropic usage 同步、图像响应重复字段、仓储查询参数及 scheduler cache 计数，
+并补入配额缓存与 Anthropic Fable 专属限流片段。新增工具输出图片迁移逻辑复用既有图片提取器，但尚未通过其专项
+回归。按已确认本地要求，从本项目合并前基线恢复模型广场精确模型名与输出 TPS 汇总；恢复 OAuth refresh lock 的
+lease token 比对释放，避免锁过期后旧 owner 删除新 owner 的锁；补回用户质量测试模板 handler、HTTP upstream 请求
+helper 与 Gateway 流错误 code 入口。这些恢复项只完成了局部回归，尚未整体验收。
+
+此前前端类型检查及全量 Vitest 361 个文件、3010 项通过；GPT-5.4 账号/分组覆盖、上游账号成本统计、Grok 媒体资格、
+OpenAI OAuth 交换连续性、Cyber 流式策略与 HTTP 响应归属持久化等 service 定向 unit 通过。早先记录的
+`go build ./...`/Wire 与 repository 编译失败已在当前工作树验证为通过：`go build ./...`、Wire 检查及
+`go test -tags=unit ./internal/repository -run '^$'` 均通过；旧失败留作历史，不代表当前状态。
+2026-11-11 全量 service 套件失败是当时的阶段记录，不能代表当前状态。当前收尾结果见下方验证清单；
+由于未提交且发布门槛仍阻断，不登记正式 `v0.2.20` 发布或部署。
+
+2026-11-11 追加复核：修复了操作恢复路径退化为普通 OAuth 刷新、未保持原凭据代次校验的问题，恢复专用
+错误账号入口及条件恢复写库；恢复 worker 现在在锁内重读后仍要求 credentials 与扫描快照一致。
+同时移除 OpenAI 运维默认模板 UI 中残留的 `machine` 选项。修复简单模式账号列表组过滤缺少前置校验、
+OpenAI quota auto-reset 在部署 standby 时仍读取依赖，以及 OpenAI gateway URL 校验 nil config panic。
+容量退避回归发现容量错误缺少单账号重试上限、
+结构化错误码优先级不严及 Chat Completions 未接入每请求三次总预算；已补齐容量分类、状态边界与预算，
+避免认证/配额错误被通用消息误判。历史迁移 223 保留不改，历史 `machine` 值由运行时按无效模式回落 `off`；
+产品规则仍不涉及老板版 r27。
+
+追加验证通过：`go test -tags=unit ./internal/service -run 'TestCapacityBudget|TestSelectedModelCapacity|TestOpenAIOperationsRecovery|TestRefreshIfNeeded' -count=1`；
+`go test -tags=unit ./internal/handler -run 'TestCapacityRetryBudget|TestFailoverStateCapacityStopsAtThirdFailureWithoutAccountEviction|TestCapacityBudgetThroughRealHTTPHandlers' -count=1`；
+`go build ./...` 与 Wire 检查；repository 包编译；管理员 OpenAI 运维弹窗 4 项 Vitest 与单文件 ESLint；`git diff --check`。
+账户编辑弹窗 Vitest 仍被现有 mock 缺少 `resolveOpenAIWSModeConcurrencyHintKey` 导出阻断。
+三次 `go test -tags=unit ./internal/service` 全量运行均失败；已修复两项实际 panic/边界后，最新运行仍因调度质量/busy
+账号预期、OpenAI picker 重复发现、Codex 探针 UA 断言、Grok/DeepSeek 映射、Grok 默认并发、缺 atomic account repository 的
+旧创建 fixture、重复账号简单模式错误、overages 清理、长上下文缺省、部署 shutdown join、fallback 权限、Anthropic thinking
+block 清理、缓存 token usage 归一化等多组失败而退出；usage 测试随后 panic。账户列表 simple-mode nil fixture panic、
+CommandCode nil config panic、quota standby nil dependency panic 已分别修复并定向通过。不得以改断言掩盖真实行为，未完成各项根因分类。
+截至该次复核，尚未完成全量前端类型与测试、race、数据库集成、镜像构建、
+完整官方行为逐项验收；当前收尾结果以本节后面的清单为准。
+
+本轮追加修复 Anthropic 流式 Responses 转换保留 `message_start` 旧 input 用量的问题：当 `message_delta`
+携带 prompt/cache 总量字段及归一化后的 `input_tokens: 0` 时，显式用量现在可以覆盖旧值，避免 Kimi 全缓存
+输入被重复累加。`TestAnthropicChatStreamAuthoritativeUsage` 和
+`TestHandleResponsesStreamingResponse_NormalizesTerminalUsage` 定向通过。调度测试仍未通过：近期质量选择
+在真实选择入口只命中一个账号；忙碌 API Key 的粘性逃逸也仍返回原账号。全量 service unit 运行再次失败，
+除上述调度项外还包含 shadow account 测试夹具、Antigravity 工具混合断言、OAuth refresh 持久化错误链断言，
+并在 `TestOAuthRefreshPersistenceCompatibilityPreservesSnapshotOnFailure` 中 panic（nil `SetTempUnschedulable`
+fixture）。随后尝试将兼容 OAuth 写库失败包装为 provider-cycle 终止错误，但两项 persistence 回归仍失败：
+当前刷新重试路径收到的错误未带该终止类型，仍重试并触发不可调度写入；fixture 对应的 panic 也仍存在。
+不能记录为修复。上述失败尚未逐项定根因；不得把定向通过写成 service 套件通过。本轮仍未完成全量后端/前端、race、
+数据库集成、镜像构建或完整官方行为清单验收。
+
+### 当前收尾状态与可审查清单（2026-11-15）
+
+本段更新前面 11 月 11 日的阶段状态，历史失败记录保留。目标与合并前完整提交仍为本节开头的两个 SHA；
+当前分支 `codex/integrate-official-v0.2.20`，工作区尚未提交，**没有结果提交、推送或部署**。
+采用逐行为适配，不是整树替换或已经完成的 Git merge。官方相对上一官方固定 ref
+`upstream-official-v0.2.17` 的范围为 228 个提交（含 merge）、687 个变更路径；提交/文件数不是验收数量。
+工作区还含独立采集插件、提示词审计等任务，不能使用 `git add -A` 将混合改动作为本次结果提交。
+
+下表按产品行为归并官方更新与本地适配；“已接入”指工作区源码，不代表生产采用或真实供应商验收。
+全量提交与路径可按固定 ref 复核：
+`git log --oneline upstream-official-v0.2.17..dab829a4e9b7d1cc307189aea8b0319eb29e29d0`、
+`git diff --name-status upstream-official-v0.2.17 dab829a4e9b7d1cc307189aea8b0319eb29e29d0`。
+
+| 行为范围 | 本次采用/保留 | 当前验收或限制 |
+| --- | --- | --- |
+| 受限管理员密钥 | 接入官方按操作/资源授权与全权兼容确认；保留本地组权限、触发器与事务原子性 | 真实 PG 覆盖跨组拒绝、关联优先级保持、提交失败回滚；账号创建副作用延迟到外层事务提交后 |
+| 管理 MCP | 接入 OAuth 授权、同意页、连接管理、无状态客户端注册及 SDK 安全补丁 | 前后端套件覆盖；未执行外部 MCP 客户端实连 |
+| 注册与鉴权 | 精确邮箱黑名单及已注册用户批量禁用；管理员保护返回 400、坏密钥/客户端取消错误归类 | 后端 unit、前端套件覆盖；不批量操作现有用户 |
+| GPT-6.1 Terra / Codex 导出 | 采用模型描述、effort 校验、兼容缓存键、OAuth 长上下文豁免；导出保留图片和联网搜索配置 | 固定官方目标源码与测试；不跟随后续 main |
+| GPT-5.4 长上下文售价 | 账号显式 true/false 完全覆盖分组，缺省继承；历史 OpenAI API Key 的 false 按官方迁移改 true；上游账号成本独立 | 270 在隔离 PostgreSQL 验证改值及重复执行无副作用并回滚；之后可手动关闭 |
+| GPT Image 2.6 与图片路由 | 接入原生链路、账号测试参数、1K/2K/4K 尺寸分流与粘性归属 | 后端套件覆盖；真实生图未测 |
+| 多图计费 | 按上游实际返回图片数及端点/定价模式计费，渠道按次档保留 token 信息，Gemini fileData 图片计数 | 迁移 268；仅本地隔离库验证 |
+| Responses / HTTP / WebSocket | 非流式 incomplete/cancelled 返回 JSON，无 Content-Type SSE 识别、每轮首字、内容字段与 reasoning 保留、强制模式跳过探测 | 保留本地智能路由、首有效输出/断线结算和容量三次预算 |
+| 传输与资源限制 | 官方传输错误冷却开关、请求体读取超时、413 自定义透传优先、multipart 超限拒绝、SSE/EventStream 边界、异步图片内存预算；保留未到期的本机账号运行时冷却 | 本机冷却在数据库快照无冷却字段时仍有效至本机期限；定向回归通过 |
+| Cyber 屏蔽 | 用户选官方：按 API Key 隔离、记录格式与 transcript 前缀长度匹配；Redis 故障放行 | 不保留本地 fail-closed/用户共享/前缀溢出阻断；HTTP/WS/换账号路径及 race 已覆盖 |
+| 账号映射和调度快照缓存 | 官方签名/缓存方向，加并发安全、共享快照写时复制 | 定向 race；保留本地凭据代次/CAS、人工暂停、救治与质量范围 |
+| 平台配额结算 | 官方同步数据库写入；保留计数清零语义及失败可观测性 | 不再独立异步写库；通知使用有界 worker，退出单独等待 |
+| Gemini / Vertex | 同账号重试可配置、显式缓存绑定重试、模型声明列表、工具媒体保留、分组生图开关、Vertex 配额 | 266 为官方迁移 246 改号；保留本地额度、取消和计费保护 |
+| Antigravity / Claude | JSON schema、原生 Gemini 流、非法工具调用、系统身份文本、额度窗口/Argon 展示及图片 500 范围；SetupToken 周额度、Cloudflare beta 和 UTF-16 指纹修复 | 后端/前端套件覆盖；不恢复 machine 指纹 |
+| Grok | 模型目录诊断、CAS 保存、刷新隔离与响应模型审计、Voice 读错误、消息输入归一化、4.7 Fast 价卡 | 保留本地并发默认和账号权限/暂停保护 |
+| DeepSeek / Kimi / 国产平台 | developer 角色、缓存 token、去重图片、V4 Pro 价格及频率型短冷却 | 保留已选老板 OAuth 冷却规则；API Key 按本地质量路由 |
+| 站点订阅开关 | 用户选官方默认及可配置开关 | 控制界面展示，不停止现有订阅计费 |
+| 用户 API Key | 接入官方批量编辑、额度重置与导出；恢复本地智能路由组增删/排序、group_ids HTTP 入参 | 真实 handler→service 回归；页面批量选择与智能路由组合测试通过 |
+| 模型广场 | 保留本地实际可调度账号供给过滤、独立入口、币种/售价口径和精确模型监控；采用官方分组定价优先修复 | 不以价卡或通配符冒充供给；前后端回归通过 |
+| 用量与运维 TPS | 保留缓存率/TPS 徽标、首字后时间口径；采用官方 8 位金额精度和 CSV 导出限流重试 | 运维真实 PG 聚合回归；无 TTFT、媒体与 Cyber 记录排除 |
+| 界面与渠道状态 | 保留已选蓝灰视觉、首页/仪表板、cards 默认入口和历史 query；接入官方账户筛选记忆、渠道展示修复 | 430 文件/3509 项前端全量测试；未做完整浏览器视觉/交互验收 |
+| 代理回退 | 官方过期节点连续回退能力保留；人工停用备用节点时停止并保留原绑定；本地浏览器 OAuth 线路保护、revision/outbox 同事务、锁内重读恢复 | service 与锁内仓储都在人工停用节点停止；真实 PG 回归通过，维护变更须刷新所有关联消费者 |
+| 插件主动账号接口 | 恢复绑定/灰度范围、人工暂停、救治终止、冷却/代理与刷新后撤销检查；通用 metadata 去代理密码 | 插件与更新器专项 race；不改变原签名插件制品 |
+| 反绕过 | 保留本地检查，并补回 Wire 的生产 Guard→Middleware→Router 接线 | Wire 生成、middleware 回归及 race；仅有源文件存在不足以证明上线生效 |
+| 双实例部署 | 补回受管启动只验迁移、不自动 seed/改设置、价格本地只读加载、后台待机门禁和退出等待 | 新增待机空依赖回归；有限异步任务与 singleflight 尾部登记，新增日志保留任务也受门禁保护 |
+| 备份、日志与后台任务 | 采用月归档/清理、日志保留与有界工作更新；备份恢复先提交状态再删除对象并与其他实例隔离 | 保留本地后台所有权；未连接真实对象存储备份/恢复 |
+| 提现登记 | 新增 271 幂等 operation_id 唯一约束，同次重试返回首次结果，异用户/金额重用拒绝 | 仓储已有真实 PG 并发/重试回归；不改已执行的历史迁移 |
+| 更新源与正式发布 | 保留本项目源、r17 整数序号比较、源码构建拒绝原地替换；接入官方冻结 SHA 并行构建流程 | 恢复五平台包/校验和/草稿发布、禁止构建 tidy、保留插件随包；simple 只简化镜像；11 项工具测试通过，未触发发布 |
+| 安全依赖与 CI | 纳入 Go 1.27.4 修复；保留 I18n 11、pnpm 11.21.0、SheetJS 0.20.3 及 workspace 安全覆盖；恢复“扫描失败不能当作零漏洞”的门槛 | govulncheck 未发现可达漏洞；前端开发/测试依赖高危项仍阻断发布，镜像构建尚未通过，不能以旧报告替代 |
+
+#### 已裁决的行为冲突
+
+| 问题 | 当前工作区与选项 | 完成条件 |
+| --- | --- | --- |
+| 本机临时冷却与未更新 DB 快照 | 用户确认保留本地冷却；数据库快照无冷却字段不能提前解除未到期的本机运行时阻断 | 已恢复请求级检查并保留粘性响应路径回归；本机期限过后仍由正式账号状态判定 |
+| 历史加价 false | 用户确认按官方迁移将历史 OpenAI API Key 的 false 改 true，之后可手动关闭 | 迁移 270 在隔离 PostgreSQL 验证改值和重复执行无副作用，事务回滚；未运行生产迁移 |
+| 停用备用代理 | 用户确认停止回退并保留原绑定；不得穿过管理员手动停用节点 | service 解析与锁内仓储实现一致；更新真实 PG 回归覆盖有无下一跳 |
+
+#### 本轮验证与限制
+
+- 收尾在 Go 1.27.4 下运行 `go test -tags=unit ./... -count=1`：64 个包、13,972 个顶层测试通过、109 个 skip、0 失败；
+  包含本机临时冷却与数据库快照冲突回归。`go build ./...` 通过。
+- 本机账号冷却、previous_response_id 粘性路由和停用代理 service 行为的定向 race 通过；
+  隔离 PostgreSQL/Redis Unix socket 上完整 `ProxyExpirySuite` race 通过，包含人工停用备用节点的真实仓储用例。
+- 前端完整 Vitest 430 文件、3509 项通过；随后 lint、类型检查及生产构建通过。构建输出已写入内嵌目录。
+- 本轮专项：真实 PG 权限/代理/创建 race 44 项；插件/更新器 race 146 项通过、6 skip；
+  Cyber/路由/service-handler race 117 项；智能路由 HTTP 入口 28 项，相关前端 41 项。部署/反绕过追加 race 94 项通过；缓存并发/质量测试 race 37 项通过。
+- Python 工具 21 项、部署 Python 167 项、Apple/Compose 安全/网关环境/资源/Caddy shell 夹具通过。
+  首次 Python 3.9 导入失败已改用 bundled Python 3.12 重跑；发现真实 audit 门槛遗漏后修复并重新通过。
+- Wire、内嵌 web 测试与本机内嵌后端构建通过；最后一次前端重建后又完成 embed 测试及后端构建（日志 76）。源码 VERSION 保留基线 `0.2.17+r17.1`，
+  这是发布前占位，不能代表本次官方同步完成或当前生产版本；测试构建显式使用 `0.2.20-integration-check`。
+  不复用已分配 r17.6，也不在未冻结结果提交时预分配发布序号。
+- 历史迁移无修改；官方 246–249 改号 266–269，避免覆盖本地账本；270 按官方行为调整历史值，271 为本次提现幂等适配。
+  仅操作隔离本地/容器测试库，没有执行生产迁移或读取生产凭据。
+- 最新真实数据库权限/代理/提现/运维专项 50 个顶层用例通过；本次另在隔离 PostgreSQL/Redis 环境执行完整代理过期 suite race，确认人工停用备用代理时原绑定保留。两项旧 outbox 断言恢复为已确认本地规则：代理变更刷新全部消费者，即使没有探针快照。之前四包 Docker 集成通过不涵盖后来恢复的全部本地保护，不作为最终整版验收。
+  最终 Dockerfile 全镜像构建再次在 Docker Hub 匿名 token 获取阶段超时（日志 76），未进入编译；Go lint 已通过备用模块代理安装，按 CI 的 669ec02c 固定基线检查新增问题为 0；完整历史 lint 报告另存 `/tmp/sub2api-lint-full76.txt`，不能把新增门槛通过说成全仓零问题。
+  没有完成正式五平台制品、真实 OAuth/收费模型调用、压力/生产故障注入或生产部署。
+
+#### 追加发现并修复的合并遗漏与安全阻断
+
+- pnpm 11.21.0、workspace overrides、SheetJS 0.20.3 和 `dev:deployment` 曾被官方 manifest 覆盖。
+  已恢复这些明确保留项，CI 使用 packageManager，Dockerfile 重新复制 workspace 配置并保留可选 Linux OAuth runtime。
+  不是把本项目工具链降到 pnpm 9。首次临时目录 pnpm 9 冻结锁检查失败，不能计为通过；
+  恢复后用准确的 pnpm 11.21.0 重算必要锁条目并完成冻结安装，仅实际替换 xlsx 0.18.5→0.20.3。
+- Bedrock 手动质量测试曾退回普通连通性 `hi` 请求，并未采集质量结果。现恢复完整题目、独立结果、
+  完成标志检查及 2 MiB 响应上限，新增完整/截断/超限真实测试入口回归。
+- scheduler 元数据已改为带 revision 的原子 Lua 发布，删除无人调用的旧异步 revision 写入助手及其仅测助手的用例；
+  平台切换、部分失败与并发删除回归保留并通过。未使用的代理 fail-open 日志助手删除，不新增线路绕过。
+- 现行漏洞检查曾发现 Go 标准库 `GO-2026-6859`（HTTP/1 MaxBytesReader header race，可致崩溃），
+  用户确认一并升级 Go 1.27.4；当前 govulncheck 已无可达代码漏洞，但未部署生产工具链。
+- 前端完整依赖扫描在恢复 SheetJS 后仍报告 29 high、3 critical（另有 25 moderate、3 low；这是扫描器计数）。
+  涉及构建/测试依赖 Vite、Vitest、tinypool、rollup 等；用户确认本轮先完成官方功能合并，依赖修复另行处理。
+  保留本项目空漏洞豁免表，未沿用官方过期或未经当前审查的例外；扫描失败不伪装为通过。
+  生产依赖单独扫描结果为 high/critical 均 0、1 moderate、1 low；其退出码仍非零，不写成零漏洞。
+  使用 pnpm 11.21.0 冻结安装后，430 文件/3509 项全量前端、lint、类型检查和生产构建再次通过。
+- 用户确认前端依赖升级另行处理；当前扫描仍有开发/测试依赖高危项，保留发布阻断且未添加漏洞豁免。
+  产品源码合并、CI 全绿和可发布分别判断；当前不能宣称整版验收完成或解除发布阻断。
+
+本轮临时证据：`/tmp/sub2api-unit-all68.jsonl`、`/tmp/sub2api-unit-all72.jsonl`、
+`/tmp/sub2api-frontend-all68.log`、`/tmp/sub2api-frontend-lint69.log`、`/tmp/sub2api-frontend-build69.log`、
+`/tmp/sub2api-runtime-unit70.jsonl`、`/tmp/sub2api-runtime-race71.jsonl`、`/tmp/sub2api-integration72.jsonl`、
+`/tmp/sub2api-tools70.log`、`/tmp/sub2api-release-tests75.log`、`/tmp/sub2api-lint-new74.txt`、
+`/tmp/sub2api-vuln73.log`、`/tmp/sub2api-frontend-all75.log`、`/tmp/sub2api-pnpm-audit75.json`、
+`/tmp/sub2api-pnpm-prod-audit75.json`、`/tmp/sub2api-embed76.log`、`/tmp/sub2api-build76.log`、
+`/tmp/sub2api-docker-build76.log`、`/tmp/sub2api-wire71.log`、`/tmp/sub2api-embed71.log`、
+`/tmp/sub2api-v020-unit-final82.jsonl`、`/tmp/sub2api-v020-race-final82.jsonl`、
+`/tmp/sub2api-v020-proxy-pg-final82.jsonl`。
+临时日志不作为永久制品证据；最终提交/发布仍需固定结果 SHA 和保留验收材料。
+
 ## 智商检测固定画框与彩色密钥选择（2026-11-04）
 
 用户验收本地效果后授权提交推送；本次在现有 main 上直接提交，无新上游合并。

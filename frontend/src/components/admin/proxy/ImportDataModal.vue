@@ -27,20 +27,17 @@
             </div>
             <div class="text-xs text-gray-500 dark:text-dark-400">JSON (.json)</div>
           </div>
-          <label
-            class="btn btn-secondary relative shrink-0 cursor-pointer overflow-hidden focus-within:ring-2 focus-within:ring-primary-500 focus-within:ring-offset-2 dark:focus-within:ring-offset-dark-900"
-          >
-            <span>{{ t('common.chooseFile') }}</span>
-            <input
-              ref="fileInput"
-              type="file"
-              class="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-              accept="application/json,.json"
-              :aria-label="t('common.chooseFile')"
-              @change="handleFileChange"
-            />
-          </label>
+          <button type="button" class="btn btn-secondary shrink-0" @click="openFilePicker">
+            {{ t('common.chooseFile') }}
+          </button>
         </div>
+        <input
+          ref="fileInput"
+          type="file"
+          class="hidden"
+          accept="application/json,.json"
+          @change="handleFileChange"
+        />
       </div>
 
       <div
@@ -111,6 +108,7 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const importing = ref(false)
+const hasImportedData = ref(false)
 const file = ref<File | null>(null)
 const result = ref<AdminDataImportResult | null>(null)
 
@@ -124,6 +122,7 @@ watch(
   (open) => {
     if (open) {
       file.value = null
+      hasImportedData.value = false
       result.value = null
       if (fileInput.value) {
         fileInput.value.value = ''
@@ -132,6 +131,10 @@ watch(
   }
 )
 
+const openFilePicker = () => {
+  fileInput.value?.click()
+}
+
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement
   file.value = target.files?.[0] || null
@@ -139,6 +142,10 @@ const handleFileChange = (event: Event) => {
 
 const handleClose = () => {
   if (importing.value) return
+  if (hasImportedData.value) {
+    hasImportedData.value = false
+    emit('imported')
+  }
   emit('close')
 }
 
@@ -182,8 +189,10 @@ const handleImport = async () => {
     }
 
     if (res.proxy_failed > 0) {
+      hasImportedData.value ||= res.proxy_created > 0 || res.proxy_reused > 0
       appStore.showError(t('admin.proxies.dataImportCompletedWithErrors', msgParams))
     } else {
+      hasImportedData.value = false
       appStore.showSuccess(t('admin.proxies.dataImportSuccess', msgParams))
       emit('imported')
     }

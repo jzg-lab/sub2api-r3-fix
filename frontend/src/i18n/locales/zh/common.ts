@@ -1,28 +1,6 @@
 export default {
-  qualityTest: {
-    "backToQuestion": "返回测试题目",
-    "svgSource": "查看 HTML / SVG 源码",
-    "resultHint": "回答、SVG 预览与请求详情将在这里展示；结果供人工判断。",
-    "emptyResult": "准备好后，开始第一次检测",
-    "localTemplateHint": "仅保存在当前浏览器",
-    "billingHint": "使用所选 Key 的绑定套餐，沿用正常路由、额度与实际用量计费。",
-    "pelicanDescription": "SVG 绘图 · 视觉观察",
-    "candyDescription": "逻辑推理 · 答案对照",
-    "result": "检测结果",
-    "question": "测试题目",
-    "settings": "测试设置",
-    "moreKeys": "加载更多密钥",
-    "title": "智商检测",
-    "hint": "用糖果推理或鹈鹕绘图，观察模型的回答表现。选择自己的 API Key，也可以编辑题目。",
-    "createKey": "前往创建 API Key",
-    "save": "保存我的模板",
-    "saved": "已保存到当前浏览器，仅供当前用户使用。",
-    "background": "后台运行并关闭",
-    "waitHint": "可切换站内页面或将网页放到后台，完成后会提示。请保留网页打开；关闭或刷新网页会中断等待。",
-    "completed": "{name}：测试回答已返回，可重新打开测试查看结果。",
-    "failed": "{name}：测试失败或回答不完整，请重新打开测试查看详情。"
-  },
   common: {
+    details: '详情',
     loading: '加载中...',
     submitting: '提交中...',
     justNow: '刚刚',
@@ -35,6 +13,12 @@ export default {
     delete: '删除',
     edit: '编辑',
     create: '创建',
+    apply: '应用',
+    clear: '清除',
+    creating: '创建中...',
+    required: '必填',
+    sending: '发送中...',
+    tryAgain: '请重试',
     update: '更新',
     confirm: '确认',
     reset: '重置',
@@ -214,6 +198,8 @@ export default {
     github: 'GitHub',
     mySubscriptions: '我的订阅',
     buySubscription: '充值/订阅',
+    recharge: '充值',
+    subscribe: '订阅',
     docs: '文档',
     myOrders: '我的订单',
     orderManagement: '订单管理',
@@ -263,6 +249,7 @@ export default {
     loginFailed: '登录失败，请检查您的凭据后重试。',
     errors: {
       USER_NOT_ACTIVE: '账号已被禁用',
+      EMAIL_BLOCKED: '该邮箱不允许注册，请更换其他邮箱。',
     },
     registrationFailed: '注册失败，请重试。',
     emailDomainRegistrationLimit:
@@ -469,6 +456,30 @@ export default {
     notEnabled: '此操作需要开启二次验证，请先在个人资料中启用 TOTP。',
     adminApiKeyForbidden: '管理 API Key 无法执行此操作，请使用已通过二次验证的管理员会话。'
   },
+qualityTest: {
+    "backToQuestion": "返回测试题目",
+    "svgSource": "查看 HTML / SVG 源码",
+    "resultHint": "回答、SVG 预览与请求详情将在这里展示；结果供人工判断。",
+    "emptyResult": "准备好后，开始第一次检测",
+    "localTemplateHint": "仅保存在当前浏览器",
+    "billingHint": "使用所选 Key 的绑定套餐，沿用正常路由、额度与实际用量计费。",
+    "pelicanDescription": "SVG 绘图 · 视觉观察",
+    "candyDescription": "逻辑推理 · 答案对照",
+    "result": "检测结果",
+    "question": "测试题目",
+    "settings": "测试设置",
+    "moreKeys": "加载更多密钥",
+    "title": "智商检测",
+    "hint": "用糖果推理或鹈鹕绘图，观察模型的回答表现。选择自己的 API Key，也可以编辑题目。",
+    "createKey": "前往创建 API Key",
+    "save": "保存我的模板",
+    "saved": "已保存到当前浏览器，仅供当前用户使用。",
+    "background": "后台运行并关闭",
+    "waitHint": "可切换站内页面或将网页放到后台，完成后会提示。请保留网页打开；关闭或刷新网页会中断等待。",
+    "completed": "{name}：测试回答已返回，可重新打开测试查看结果。",
+    "failed": "{name}：测试失败或回答不完整，请重新打开测试查看详情。"
+  },
+
 
   // Dashboard
 }

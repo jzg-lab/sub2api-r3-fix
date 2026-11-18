@@ -10,15 +10,13 @@ import (
 )
 
 type channelMonitorV2RepoStub struct {
-	filter       ChannelMonitorV2Filter
-	config       serviceChannelMonitorV2ConfigAlias
-	users        *ChannelMonitorV2List[ChannelMonitorV2UserRow]
-	matrix       *ChannelMonitorV2Matrix
-	matrixConfig ChannelMonitorV2Config
-	errors       *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
-	snap         *ChannelMonitorV2Snapshot
-	group        ChannelMonitorV2GroupBy
-	admin        bool
+	config serviceChannelMonitorV2ConfigAlias
+	users  *ChannelMonitorV2List[ChannelMonitorV2UserRow]
+	matrix *ChannelMonitorV2Matrix
+	errors *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
+	snap   *ChannelMonitorV2Snapshot
+	group  ChannelMonitorV2GroupBy
+	admin  bool
 }
 
 // Alias keeps composite literals readable without introducing another package.
@@ -54,9 +52,8 @@ func (s *channelMonitorV2RepoStub) GetSnapshot(_ context.Context, _ ChannelMonit
 func (s *channelMonitorV2RepoStub) GetModels(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config, bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
 	return nil, nil
 }
-func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
-	s.group, s.admin, s.filter = groupBy, admin, filter
-	s.matrixConfig = cfg
+func (s *channelMonitorV2RepoStub) GetMatrix(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
+	s.group, s.admin = groupBy, admin
 	return s.matrix, nil
 }
 func (s *channelMonitorV2RepoStub) GetErrors(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
@@ -163,34 +160,6 @@ func TestChannelMonitorV2MatrixForwardsGroupingAndAdminScope(t *testing.T) {
 	require.ErrorIs(t, err, ErrChannelMonitorV2InvalidGroupBy)
 }
 
-func TestChannelMonitorV2PlazaModelNamesKeepScopeAndConfig(t *testing.T) {
-	cfg := ChannelMonitorV2Config{
-		Enabled:   true,
-		Platforms: []ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{"gpt-5.6-sol"}}},
-		GroupIDs:  []int64{37}, IgnoredErrorCategories: []string{"quota_or_balance"},
-		HealthThresholds: DefaultChannelMonitorV2HealthThresholds(),
-	}
-	repo := &channelMonitorV2RepoStub{config: cfg}
-	svc := NewChannelMonitorV2Service(repo)
-	filter := ChannelMonitorV2Filter{PreserveModelNames: true, RestrictGroups: true, AllowedGroupIDs: []int64{37}, Models: []string{"gpt-6.1-sol"}}
-	_, err := svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
-	require.NoError(t, err)
-	want := cfg
-	want.Platforms = []ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}
-	require.Equal(t, want, repo.matrixConfig)
-	require.Equal(t, filter, repo.filter)
-	require.Equal(t, []string{"gpt-5.6-sol"}, cfg.Platforms[0].Models, "request must not mutate the shared config")
-
-	filter.PreserveModelNames = false
-	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
-	require.NoError(t, err)
-	require.Equal(t, cfg, repo.matrixConfig, "channel monitor keeps its model presentation")
-	filter.PreserveModelNames = true
-	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformModel, false)
-	require.NoError(t, err)
-	require.Equal(t, cfg, repo.matrixConfig, "exact names only apply to the plaza grouping")
-}
-
 func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	cfg := ChannelMonitorV2Config{
 		Platforms: []ChannelMonitorV2PlatformConfig{
@@ -221,7 +190,6 @@ func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {
 		{"cyber", ChannelMonitorV2ErrorInput{ErrorType: "cyber_policy", StatusCode: 200}, "content_policy"},
 		{"auth before forbidden", ChannelMonitorV2ErrorInput{StatusCode: 403, Message: "invalid API key"}, "authentication"},
 		{"context", ChannelMonitorV2ErrorInput{Message: "maximum prompt length exceeded"}, "context_limit"},
-		{"customer balance", ChannelMonitorV2ErrorInput{StatusCode: 403, Message: "Insufficient account balance"}, "quota_or_balance"},
 		{"unsupported", ChannelMonitorV2ErrorInput{Message: "not supported by any configured account"}, "model_unsupported"},
 		{"pool", ChannelMonitorV2ErrorInput{Message: "No available accounts"}, "account_pool_unavailable"},
 		{"timeout", ChannelMonitorV2ErrorInput{Message: "error code: 524"}, "timeout"},
@@ -239,6 +207,7 @@ func TestChannelMonitorV2HealthBlendsErrorTTFTAndCache(t *testing.T) {
 	p50 := int64(2000)
 	p95 := int64(9000)
 	thresholds := ChannelMonitorV2HealthThresholds{
+		MinimumSample:     20,
 		WarningErrorRate:  0.02,
 		CriticalErrorRate: 0.05,
 		TargetTTFTMs:      2500,
@@ -276,6 +245,100 @@ func TestChannelMonitorV2HealthBlendsErrorTTFTAndCache(t *testing.T) {
 	require.Equal(t, "healthy", health.Overall)
 	require.NotNil(t, health.Score)
 	require.InDelta(t, 100.0, *health.Score, 0.01)
+
+	// Small samples stay unknown
+	health = ChannelMonitorV2HealthFor(ChannelMonitorV2Metric{RequestCount: 2})
+	require.Equal(t, "unknown", health.Overall)
+	require.Nil(t, health.Score)
+}
+
+func TestChannelMonitorV2HealthRequiresRequestSamples(t *testing.T) {
+	for _, requestCount := range []int64{0, 8, 9, 49} {
+		t.Run(fmt.Sprintf("requests_%d", requestCount), func(t *testing.T) {
+			thresholds := DefaultChannelMonitorV2HealthThresholds()
+			thresholds.WarningCacheRate = 0.85
+			thresholds.CriticalCacheRate = 0.60
+			metrics := ChannelMonitorV2Metric{SuccessRequests: requestCount, RequestCount: requestCount}
+			if requestCount > 0 {
+				metrics.CacheRateDenominator = 448
+			}
+			health := ChannelMonitorV2HealthForWithThresholds(metrics, thresholds)
+			require.Equal(t, ChannelMonitorV2Health{
+				Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
+				MinimumSample: 50, Thresholds: NormalizeChannelMonitorV2HealthThresholds(thresholds),
+			}, health)
+		})
+	}
+}
+
+func TestChannelMonitorV2HealthMinimumSampleBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		minimumSample int64
+		wantMinimum   int64
+	}{
+		{name: "configured", minimumSample: 20, wantMinimum: 20},
+		{name: "configured_one", minimumSample: 1, wantMinimum: 1},
+		{name: "normalized_zero", minimumSample: 0, wantMinimum: 50},
+		{name: "normalized_negative", minimumSample: -1, wantMinimum: 50},
+		{name: "normalized_maximum", minimumSample: 10001, wantMinimum: 10000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			thresholds := DefaultChannelMonitorV2HealthThresholds()
+			thresholds.MinimumSample = test.minimumSample
+			thresholds.WarningCacheRate = 0.85
+			thresholds.CriticalCacheRate = 0.60
+			p50 := int64(1000)
+			metrics := ChannelMonitorV2Metric{
+				SuccessRequests: test.wantMinimum - 1, RequestCount: test.wantMinimum - 1,
+				CacheRateDenominator: 20000,
+				TTFT:                 ChannelMonitorV2Latency{SampleCount: 20000, P50Ms: &p50},
+			}
+			health := ChannelMonitorV2HealthForWithThresholds(metrics, thresholds)
+			require.Equal(t, ChannelMonitorV2Health{
+				Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
+				MinimumSample: test.wantMinimum, Thresholds: NormalizeChannelMonitorV2HealthThresholds(thresholds),
+			}, health)
+
+			metrics.RequestCount = test.wantMinimum
+			metrics.SuccessRequests = test.wantMinimum
+			health = ChannelMonitorV2HealthForWithThresholds(metrics, thresholds)
+			require.Equal(t, test.wantMinimum, health.MinimumSample)
+			require.Equal(t, "healthy", health.ErrorRate)
+			require.Equal(t, "healthy", health.TTFT)
+			require.Equal(t, "critical", health.Cache)
+			require.NotNil(t, health.ErrorRateScore)
+			require.NotNil(t, health.TTFTScore)
+			require.NotNil(t, health.CacheScore)
+			require.NotNil(t, health.Score)
+			require.InDelta(t, 80.0, *health.Score, 0.01)
+			require.Equal(t, "healthy", health.Overall)
+		})
+	}
+}
+
+func TestChannelMonitorV2HealthSufficientHighErrorIsCritical(t *testing.T) {
+	health := ChannelMonitorV2HealthFor(ChannelMonitorV2Metric{
+		RequestCount: 50, ErrorRequests: 50, ErrorRate: 1,
+	})
+	require.Equal(t, "critical", health.ErrorRate)
+	require.Equal(t, "critical", health.Overall)
+	require.NotNil(t, health.Score)
+	require.Zero(t, *health.Score)
+}
+
+func TestChannelMonitorV2HealthLeavesMissingTTFTUnknown(t *testing.T) {
+	health := ChannelMonitorV2HealthFor(ChannelMonitorV2Metric{
+		RequestCount:         200,
+		ErrorRate:            0,
+		CacheRate:            0,
+		CacheRateDenominator: 200,
+		TTFT:                 ChannelMonitorV2Latency{SampleCount: 0},
+	})
+	require.Equal(t, "unknown", health.TTFT)
+	require.Nil(t, health.TTFTScore)
+	require.NotEqual(t, "critical", health.Overall)
+	require.Equal(t, "healthy", health.Overall)
 }
 
 func TestChannelMonitorV2DefaultHealthThresholdsAreTolerant(t *testing.T) {
@@ -311,6 +374,32 @@ func TestErrorRateTTFTAndCacheScoreHelpers(t *testing.T) {
 	require.Equal(t, "critical", cacheRateBand(0.02, 0.20, 0.05))
 	require.Equal(t, "warning", cacheRateBand(0.10, 0.20, 0.05))
 	require.Equal(t, "healthy", cacheRateBand(0.50, 0.20, 0.05))
+}
+
+type channelMonitorV2RuntimeStub struct {
+	rt ChannelMonitorRuntime
+}
+
+func (s channelMonitorV2RuntimeStub) GetChannelMonitorRuntime(context.Context) ChannelMonitorRuntime {
+	return s.rt
+}
+
+func TestChannelMonitorV2UsersHiddenWhenSettingEnabled(t *testing.T) {
+	selfID, otherID := int64(7), int64(9)
+	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: true}, users: &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{
+		{UserID: &otherID, Email: "other@example.com", Username: "other"},
+		{UserID: &selfID, Email: "self@example.com", Username: "self"},
+	}}}
+	svc := NewChannelMonitorV2Service(repo)
+	svc.SetRuntimeReader(channelMonitorV2RuntimeStub{rt: ChannelMonitorRuntime{HideUserRanking: true}})
+
+	hidden, err := svc.Users(context.Background(), ChannelMonitorV2Filter{}, selfID, false)
+	require.NoError(t, err)
+	require.Empty(t, hidden.Items)
+
+	admin, err := svc.Users(context.Background(), ChannelMonitorV2Filter{}, selfID, true)
+	require.NoError(t, err)
+	require.Len(t, admin.Items, 2)
 }
 
 func TestChannelMonitorV2UsersRemovesOtherUserIdentity(t *testing.T) {
@@ -383,12 +472,12 @@ func TestApplyIgnoredErrorsAdjustsRateOnly(t *testing.T) {
 	require.Equal(t, int64(100), m.RequestCount)
 }
 
-func TestErrorsForViewerHidesIgnoredCategoriesForAllAndStripsNonAdminDetails(t *testing.T) {
+func TestErrorsForViewerStripsDetailsAndCountsForNonAdmin(t *testing.T) {
 	fixture := &ChannelMonitorV2List[ChannelMonitorV2ErrorRow]{
 		Items: []ChannelMonitorV2ErrorRow{{
 			Category: "timeout",
 			Count:    42,
-			Rate:     0.42,
+			Rate:     0.4,
 			Details: []ChannelMonitorV2ErrorDetail{{
 				Platform:           "anthropic",
 				Model:              "claude",
@@ -398,42 +487,23 @@ func TestErrorsForViewerHidesIgnoredCategoriesForAllAndStripsNonAdminDetails(t *
 				Message:            "gateway timeout sk-secret",
 				Count:              12,
 			}},
-		}, {
-			Category: "internal",
-			Count:    18,
-			Rate:     0.18,
-		}, {
-			Category: "quota_or_balance",
-			Count:    40,
-			Rate:     0.4,
-			Ignored:  false,
 		}},
 	}
-	repo := &channelMonitorV2RepoStub{
-		config: ChannelMonitorV2Config{Enabled: true, IgnoredErrorCategories: []string{"quota_or_balance"}},
-		errors: fixture,
-	}
+	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: true}, errors: fixture}
 	svc := NewChannelMonitorV2Service(repo)
 
 	userList, err := svc.ErrorsForViewer(context.Background(), ChannelMonitorV2Filter{}, false)
 	require.NoError(t, err)
 	require.False(t, repo.admin)
-	require.Len(t, userList.Items, 2)
-	require.Equal(t, "timeout", userList.Items[0].Category)
+	require.Len(t, userList.Items, 1)
 	require.Zero(t, userList.Items[0].Count)
 	require.Empty(t, userList.Items[0].Details)
-	require.InDelta(t, 0.42, userList.Items[0].Rate, 0.0001)
-	require.Equal(t, "internal", userList.Items[1].Category)
-	require.InDelta(t, 0.18, userList.Items[1].Rate, 0.0001)
+	require.InDelta(t, 0.4, userList.Items[0].Rate, 0.0001)
 
 	adminList, err := svc.ErrorsForViewer(context.Background(), ChannelMonitorV2Filter{}, true)
 	require.NoError(t, err)
 	require.True(t, repo.admin)
-	require.Len(t, adminList.Items, 2)
-	require.Equal(t, "timeout", adminList.Items[0].Category)
 	require.Equal(t, int64(42), adminList.Items[0].Count)
-	require.InDelta(t, 0.42, adminList.Items[0].Rate, 0.0001)
-	require.InDelta(t, 0.18, adminList.Items[1].Rate, 0.0001)
 	require.Len(t, adminList.Items[0].Details, 1)
 	require.Contains(t, adminList.Items[0].Details[0].Message, "gateway timeout")
 }
@@ -457,6 +527,9 @@ func TestSnapshotRedactsPublicConfigPolicyFields(t *testing.T) {
 			Metrics: ChannelMonitorV2Metric{RequestCount: 100, ErrorRate: 0.1, SuccessRate: 0.9, RPM: 5},
 		},
 	}
+	repo.snap.Health = ChannelMonitorV2HealthFor(repo.snap.Metrics)
+	wantHealth := repo.snap.Health
+	require.NotNil(t, wantHealth.Score)
 	svc := NewChannelMonitorV2Service(repo)
 	snap, err := svc.Snapshot(context.Background(), ChannelMonitorV2Filter{}, false)
 	require.NoError(t, err)
@@ -466,6 +539,7 @@ func TestSnapshotRedactsPublicConfigPolicyFields(t *testing.T) {
 	require.Empty(t, snap.Config.Platforms[0].Models)
 	require.Equal(t, 300, snap.Config.RefreshIntervalSeconds)
 	require.Zero(t, snap.Metrics.RequestCount)
+	require.Equal(t, wantHealth, snap.Health)
 	require.InDelta(t, 0.1, snap.Metrics.ErrorRate, 0.0001)
 	require.Zero(t, snap.Metrics.RPM)
 }
@@ -511,47 +585,4 @@ func TestChannelMonitorV2HealthTTFTAtTargetIsHealthy(t *testing.T) {
 	require.Equal(t, "healthy", h.TTFT)
 	require.NotNil(t, h.TTFTScore)
 	require.InDelta(t, 100.0, *h.TTFTScore, 0.01)
-}
-
-func TestChannelMonitorV2HealthScoresAvailableMetricsOnFirstRequest(t *testing.T) {
-	thresholds := DefaultChannelMonitorV2HealthThresholds()
-	p50 := int64(1000)
-	health := ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{
-		RequestCount: 1, SuccessRequests: 1, CacheRate: 0.9, CacheRateDenominator: 1,
-		TTFT: ChannelMonitorV2Latency{SampleCount: 1, P50Ms: &p50},
-	}, thresholds)
-	require.Equal(t, "healthy", health.Overall)
-	require.Equal(t, "healthy", health.ErrorRate)
-	require.Equal(t, "healthy", health.TTFT)
-	require.Equal(t, "healthy", health.Cache)
-	require.NotNil(t, health.Score)
-	require.InDelta(t, 100.0, *health.Score, 0.01)
-
-	thresholds.ErrorWeight, thresholds.TTFTWeight, thresholds.CacheWeight = 0, 1, 0
-	failed := ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{RequestCount: 1, ErrorRate: 1}, thresholds)
-	require.Equal(t, "critical", failed.Overall)
-	require.Zero(t, *failed.Score)
-
-	noRequests := ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{}, thresholds)
-	require.Equal(t, "unknown", noRequests.Overall)
-	require.Nil(t, noRequests.Score)
-}
-
-func TestChannelMonitorV2OutputTPSRespectsPrivacyAndQueryWindow(t *testing.T) {
-	start := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
-	speed := 100.0
-	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: true}, matrix: &ChannelMonitorV2Matrix{Items: []ChannelMonitorV2MatrixRow{{OutputTPS: &speed}}}}
-	filter := ChannelMonitorV2Filter{IncludeOutputTPS: true, Start: start, End: start.Add(time.Hour)}
-	svc := NewChannelMonitorV2Service(repo)
-	result, err := svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, false)
-	require.NoError(t, err)
-	require.Nil(t, result.Items[0].OutputTPS, "missing privacy settings fail closed")
-	require.False(t, repo.filter.IncludeOutputTPS)
-	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, true)
-	require.NoError(t, err)
-	require.True(t, repo.filter.IncludeOutputTPS)
-	filter.End = start.Add(7 * 24 * time.Hour)
-	_, err = svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel, true)
-	require.NoError(t, err)
-	require.False(t, repo.filter.IncludeOutputTPS, "long windows must not scan raw usage logs")
 }

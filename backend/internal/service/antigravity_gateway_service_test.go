@@ -144,6 +144,10 @@ func (s *httpUpstreamStub) DoWithTLS(_ *http.Request, _ string, _ int64, _ int, 
 	return s.resp, s.err
 }
 
+func (s *httpUpstreamStub) DoProbeWithTLS(_ *http.Request, _ string, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.resp, s.err
+}
+
 type queuedHTTPUpstreamStub struct {
 	responses     []*http.Response
 	errors        []error
@@ -183,6 +187,10 @@ func (s *queuedHTTPUpstreamStub) Do(req *http.Request, _ string, _ int64, _ int)
 
 func (s *queuedHTTPUpstreamStub) DoWithTLS(req *http.Request, proxyURL string, accountID int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	return s.Do(req, proxyURL, accountID, concurrency)
+}
+
+func (s *queuedHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.Do(req, proxyURL, 0, concurrency)
 }
 
 type recordingInternal500CounterCache struct {
@@ -286,6 +294,7 @@ func TestResolveAntigravityProjectID(t *testing.T) {
 }
 
 func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -340,6 +349,7 @@ func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t
 }
 
 func TestAntigravityGatewayService_ForwardGemini_ImageUsesDefaultMappingAndOAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}],"generationConfig":{"responseModalities":["TEXT","IMAGE"],"imageConfig":{"aspectRatio":"1:1"}}}`)
@@ -397,7 +407,8 @@ func TestAntigravityGatewayService_ForwardGemini_ImageUsesDefaultMappingAndOAuth
 	require.Equal(t, []any{"TEXT", "IMAGE"}, generationConfig["responseModalities"])
 }
 
-func TestAntigravityGatewayService_ForwardGemini_PreservesServerSideToolInvocationConfig(t *testing.T) {
+func TestAntigravityGatewayService_ForwardGemini_StripsBuiltinsWhenClientFunctionsPresent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":[{"functionDeclarations":[{"name":"get_weather","parameters":{"type":"object","additionalProperties":false}}]},{"googleSearch":{}}],"toolConfig":{"includeServerSideToolInvocations":true}}`)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
@@ -428,13 +439,20 @@ func TestAntigravityGatewayService_ForwardGemini_PreservesServerSideToolInvocati
 	require.NoError(t, json.Unmarshal(upstream.requestBodies[0], &wrapped))
 	request, ok := wrapped["request"].(map[string]any)
 	require.True(t, ok)
-	toolConfig, ok := request["toolConfig"].(map[string]any)
+	tools, ok := request["tools"].([]any)
 	require.True(t, ok)
-	require.Equal(t, true, toolConfig["includeServerSideToolInvocations"])
-	require.NotContains(t, toolConfig, "include_server_side_tool_invocations")
+	require.Len(t, tools, 1)
+	tool, ok := tools[0].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, tool, "functionDeclarations")
+	require.NotContains(t, tool, "googleSearch")
+	if toolConfig, exists := request["toolConfig"].(map[string]any); exists {
+		require.NotContains(t, toolConfig, "includeServerSideToolInvocations")
+	}
 }
 
 func TestAntigravityGatewayService_ForwardGemini_MissingProjectReturnsLocalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -480,6 +498,7 @@ func TestAntigravityGatewayService_ForwardGemini_MissingProjectReturnsLocalError
 }
 
 func TestAntigravityGatewayService_Forward_PromptTooLong(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -543,6 +562,7 @@ func TestAntigravityGatewayService_Forward_PromptTooLong(t *testing.T) {
 // 验证：当账号存在模型限流且剩余时间 >= antigravityRateLimitThreshold 时，
 // Forward 方法应返回 UpstreamFailoverError，触发 Handler 切换账号
 func TestAntigravityGatewayService_Forward_ModelRateLimitTriggersFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -602,6 +622,7 @@ func TestAntigravityGatewayService_Forward_ModelRateLimitTriggersFailover(t *tes
 // TestAntigravityGatewayService_ForwardGemini_ModelRateLimitTriggersFailover
 // 验证：ForwardGemini 方法同样能正确将 AntigravityAccountSwitchError 转换为 UpstreamFailoverError
 func TestAntigravityGatewayService_ForwardGemini_ModelRateLimitTriggersFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -658,6 +679,7 @@ func TestAntigravityGatewayService_ForwardGemini_ModelRateLimitTriggersFailover(
 // TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling
 // 验证：粘性会话切换时，UpstreamFailoverError.ForceCacheBilling 应为 true
 func TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -712,6 +734,7 @@ func TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling(t *tes
 // TestAntigravityGatewayService_ForwardGemini_StickySessionForceCacheBilling verifies
 // that ForwardGemini sets ForceCacheBilling=true for sticky session switch.
 func TestAntigravityGatewayService_ForwardGemini_StickySessionForceCacheBilling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -765,6 +788,7 @@ func TestAntigravityGatewayService_ForwardGemini_StickySessionForceCacheBilling(
 }
 
 func TestAntigravityGatewayService_ForwardGemini_ClearsStickySessionOnGeminiRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -846,6 +870,7 @@ func TestAntigravityGatewayService_ForwardGemini_ClearsStickySessionOnGeminiRate
 // TestAntigravityGatewayService_Forward_BillsWithMappedModel
 // 验证：Antigravity Claude 转发返回的计费模型使用映射后的模型
 func TestAntigravityGatewayService_Forward_BillsWithMappedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -902,6 +927,7 @@ func TestAntigravityGatewayService_Forward_BillsWithMappedModel(t *testing.T) {
 // TestAntigravityGatewayService_ForwardGemini_BillsWithMappedModel
 // 验证：Antigravity Gemini 转发返回的计费模型使用映射后的模型
 func TestAntigravityGatewayService_ForwardGemini_BillsWithMappedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -953,6 +979,7 @@ func TestAntigravityGatewayService_ForwardGemini_BillsWithMappedModel(t *testing
 }
 
 func TestAntigravityGatewayService_ForwardGemini_FallbackReportsActualUpstreamModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -1019,6 +1046,7 @@ func TestAntigravityGatewayService_ForwardGemini_FallbackReportsActualUpstreamMo
 }
 
 func TestAntigravityGatewayService_ForwardGemini_RetriesCorruptedThoughtSignature(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -1106,6 +1134,7 @@ func TestAntigravityGatewayService_ForwardGemini_RetriesCorruptedThoughtSignatur
 }
 
 func TestAntigravityGatewayService_ForwardGemini_SignatureRetryPropagatesFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
@@ -1193,6 +1222,7 @@ func TestAntigravityGatewayService_ForwardGemini_SignatureRetryPropagatesFailove
 // TestStreamUpstreamResponse_UsageAndFirstToken
 // 验证：usage 字段可被累积/覆盖更新，并且能记录首 token 时间
 func TestStreamUpstreamResponse_UsageAndFirstToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1232,6 +1262,7 @@ func TestStreamUpstreamResponse_UsageAndFirstToken(t *testing.T) {
 // TestStreamUpstreamResponse_NormalComplete
 // 验证：正常流式转发完成时，数据正确透传、usage 正确收集、clientDisconnect=false
 func TestStreamUpstreamResponse_NormalComplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1275,6 +1306,7 @@ func TestStreamUpstreamResponse_NormalComplete(t *testing.T) {
 // TestHandleGeminiStreamingResponse_NormalComplete
 // 验证：正常 Gemini 流式转发，数据正确透传、usage 正确收集
 func TestHandleGeminiStreamingResponse_NormalComplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1321,6 +1353,7 @@ func TestHandleGeminiStreamingResponse_NormalComplete(t *testing.T) {
 // TestHandleClaudeStreamingResponse_NormalComplete
 // 验证：正常 Claude 流式转发（Gemini→Claude 转换），数据正确转换并输出
 func TestHandleClaudeStreamingResponse_NormalComplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1362,7 +1395,51 @@ func TestHandleClaudeStreamingResponse_NormalComplete(t *testing.T) {
 
 // TestHandleGeminiStreamingResponse_ThoughtsTokenCount
 // 验证：Gemini 流式转发时 thoughtsTokenCount 被计入 OutputTokens
+// 回归：上游事件之间的空分隔行不能再透传，否则下游看到的是 "data: ...\n\n\n"。
+// google-genai Go SDK 按 "\n\n" 切事件，多出的 "\n" 会让第二个事件的前缀变成
+// "\ndata" 而报 invalid stream chunk（Antigravity CLI 每条流都在第二个事件中断）。
+func TestHandleGeminiStreamingResponse_EventSeparatorIsExactlyOneBlankLine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := newAntigravityTestService(&config.Config{
+		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+
+	pr, pw := io.Pipe()
+	resp := &http.Response{StatusCode: http.StatusOK, Body: pr, Header: http.Header{}}
+
+	first := `{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}`
+	second := `{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig","text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"thoughtsTokenCount":5}}`
+
+	go func() {
+		defer func() { _ = pw.Close() }()
+		// 上游原样：每个 data 行后跟一个空分隔行（第二个事件用 CRLF，覆盖两种换行）
+		fmt.Fprintf(pw, "data: %s\n\n", first)
+		fmt.Fprintf(pw, "data: %s\r\n\r\n", second)
+	}()
+
+	result, err := svc.handleGeminiStreamingResponse(c, resp, time.Now())
+	_ = pr.Close()
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	body := rec.Body.String()
+	require.Equal(t, "data: "+first+"\n\ndata: "+second+"\n\n", body)
+	require.NotContains(t, body, "\n\n\n", "events must be separated by exactly one blank line")
+
+	// 模拟 google-genai 的切帧方式：按 "\n\n" 切，每个非空 token 都必须以 "data" 为前缀
+	for _, token := range strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n") {
+		prefix, _, _ := strings.Cut(token, ":")
+		require.Equal(t, "data", prefix, "token %q would be rejected by a \\n\\n-delimited SSE parser", token)
+	}
+}
+
 func TestHandleGeminiStreamingResponse_ThoughtsTokenCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1398,6 +1475,7 @@ func TestHandleGeminiStreamingResponse_ThoughtsTokenCount(t *testing.T) {
 // TestHandleClaudeStreamingResponse_ThoughtsTokenCount
 // 验证：Gemini→Claude 流式转换时 thoughtsTokenCount 被计入 OutputTokens
 func TestHandleClaudeStreamingResponse_ThoughtsTokenCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1432,6 +1510,7 @@ func TestHandleClaudeStreamingResponse_ThoughtsTokenCount(t *testing.T) {
 // TestStreamUpstreamResponse_ClientDisconnectDrainsUsage
 // 验证：客户端写入失败后，streamUpstreamResponse 继续读取上游以收集 usage
 func TestStreamUpstreamResponse_ClientDisconnectDrainsUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1466,6 +1545,7 @@ func TestStreamUpstreamResponse_ClientDisconnectDrainsUsage(t *testing.T) {
 // TestStreamUpstreamResponse_ContextCanceled
 // 验证：context 取消时返回 usage 且标记 clientDisconnect
 func TestStreamUpstreamResponse_ContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1488,6 +1568,7 @@ func TestStreamUpstreamResponse_ContextCanceled(t *testing.T) {
 // TestStreamUpstreamResponse_Timeout
 // 验证：上游超时时返回已收集的 usage
 func TestStreamUpstreamResponse_Timeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{StreamDataIntervalTimeout: 1, MaxLineSize: defaultMaxLineSize},
 	})
@@ -1510,6 +1591,7 @@ func TestStreamUpstreamResponse_Timeout(t *testing.T) {
 // TestStreamUpstreamResponse_TimeoutAfterClientDisconnect
 // 验证：客户端断开后上游超时，返回 usage 并标记 clientDisconnect
 func TestStreamUpstreamResponse_TimeoutAfterClientDisconnect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{StreamDataIntervalTimeout: 1, MaxLineSize: defaultMaxLineSize},
 	})
@@ -1539,6 +1621,7 @@ func TestStreamUpstreamResponse_TimeoutAfterClientDisconnect(t *testing.T) {
 // TestHandleGeminiStreamingResponse_ClientDisconnect
 // 验证：Gemini 流式转发中客户端断开后继续 drain 上游
 func TestHandleGeminiStreamingResponse_ClientDisconnect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1569,6 +1652,7 @@ func TestHandleGeminiStreamingResponse_ClientDisconnect(t *testing.T) {
 // TestHandleGeminiStreamingResponse_ContextCanceled
 // 验证：context 取消时不注入错误事件
 func TestHandleGeminiStreamingResponse_ContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1592,6 +1676,7 @@ func TestHandleGeminiStreamingResponse_ContextCanceled(t *testing.T) {
 // TestHandleClaudeStreamingResponse_ClientDisconnect
 // 验证：Claude 流式转发中客户端断开后继续 drain 上游
 func TestHandleClaudeStreamingResponse_ClientDisconnect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1622,6 +1707,7 @@ func TestHandleClaudeStreamingResponse_ClientDisconnect(t *testing.T) {
 // TestHandleClaudeStreamingResponse_EmptyStream
 // 验证：上游只返回无法解析的 SSE 行时，触发 UpstreamFailoverError 而不是向客户端发出残缺流
 func TestHandleClaudeStreamingResponse_EmptyStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1661,6 +1747,7 @@ func TestHandleClaudeStreamingResponse_EmptyStream(t *testing.T) {
 // TestHandleClaudeStreamingResponse_ContextCanceled
 // 验证：context 取消时不注入错误事件
 func TestHandleClaudeStreamingResponse_ContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := newAntigravityTestService(&config.Config{
 		Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize},
 	})
@@ -1753,6 +1840,7 @@ func TestExtractSSEUsage_StreamingSequence(t *testing.T) {
 // TestAntigravityClientWriter 验证 antigravityClientWriter 的断开检测
 func TestAntigravityClientWriter(t *testing.T) {
 	t.Run("normal write succeeds", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		flusher, _ := c.Writer.(http.Flusher)
@@ -1765,6 +1853,7 @@ func TestAntigravityClientWriter(t *testing.T) {
 	})
 
 	t.Run("write failure marks disconnected", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		fw := &antigravityFailingWriter{ResponseWriter: c.Writer, failAfter: 0}
@@ -1777,6 +1866,7 @@ func TestAntigravityClientWriter(t *testing.T) {
 	})
 
 	t.Run("subsequent writes are no-op", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		fw := &antigravityFailingWriter{ResponseWriter: c.Writer, failAfter: 0}
@@ -1931,10 +2021,174 @@ func generateLargeUnwrapJSON(minSize int) []byte {
 	return b
 }
 
-func (u *httpUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+func TestAntigravityGatewayService_ForwardGemini_NonStreamPreservesFunctionCallAndThoughtSignature(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Tokyo."}]}],"tools":[{"functionDeclarations":[{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}]}`)
+
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:generateContent", bytes.NewReader(body))
+
+	sseStream := strings.Join([]string{
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_fc_1","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_1"}}]}}],"usageMetadata":{"promptTokenCount":300,"candidatesTokenCount":16,"totalTokenCount":328,"thoughtsTokenCount":12},"modelVersion":"gemini-4-argon","responseId":"resp_1"}}`,
+		"",
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":300,"candidatesTokenCount":22,"totalTokenCount":334,"thoughtsTokenCount":12},"modelVersion":"gemini-4-argon","responseId":"resp_1"}}`,
+		"",
+	}, "\n")
+
+	upstream := &queuedHTTPUpstreamStub{
+		responses: []*http.Response{{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sseStream)),
+		}},
+	}
+	svc := &AntigravityGatewayService{
+		settingService: NewSettingService(&antigravitySettingRepoStub{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}),
+		tokenProvider:  &AntigravityTokenProvider{},
+		httpUpstream:   upstream,
+	}
+	account := &Account{
+		ID:          109,
+		Name:        "antigravity-fc-nonstream",
+		Platform:    PlatformAntigravity,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "test-access-token",
+			"project_id":   "test-project",
+			"model_mapping": map[string]any{
+				"gemini-4-argon": "gemini-4-argon",
+			},
+		},
+	}
+
+	result, err := svc.ForwardGemini(context.Background(), c, account, "gemini-4-argon", "generateContent", false, body, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, writer.Code)
+
+	var respPayload map[string]any
+	require.NoError(t, json.Unmarshal(writer.Body.Bytes(), &respPayload))
+	candidates, ok := respPayload["candidates"].([]any)
+	require.True(t, ok)
+	require.Len(t, candidates, 1)
+	candidate, ok := candidates[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "STOP", candidate["finishReason"])
+
+	content, ok := candidate["content"].(map[string]any)
+	require.True(t, ok)
+	parts, ok := content["parts"].([]any)
+	require.True(t, ok)
+	require.Len(t, parts, 1, "trailing empty text part should not overwrite or pollute functionCall part")
+
+	part0, ok := parts[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "sig_fc_1", part0["thoughtSignature"])
+	fc, ok := part0["functionCall"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "get_weather", fc["name"])
+	require.Equal(t, "call_1", fc["id"])
+	require.Equal(t, map[string]any{"city": "Tokyo"}, fc["args"])
 }
 
-func (u *queuedHTTPUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+func TestAntigravityGatewayService_ForwardGemini_StreamAndFunctionResponseFollowUp(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 1) Stream request with functionDeclarations returns unwrapped functionCall and thoughtSignature
+	streamReqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Tokyo."}]}],"tools":[{"functionDeclarations":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}]}`)
+	streamWriter := httptest.NewRecorder()
+	streamCtx, _ := gin.CreateTestContext(streamWriter)
+	streamCtx.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse", bytes.NewReader(streamReqBody))
+
+	streamSSE := strings.Join([]string{
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_stream_1","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_s1"}}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}}`,
+		"",
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":6}}}`,
+		"",
+	}, "\n")
+
+	// 2) Non-stream follow-up with functionCall (missing thoughtSignature) + functionResponse (with inlineData image)
+	followUpReqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Tokyo."}]},{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_s1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_s1","response":{"weather":"Sunny"},"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}]}}]}],"tools":[{"functionDeclarations":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}]}`)
+	followUpWriter := httptest.NewRecorder()
+	followUpCtx, _ := gin.CreateTestContext(followUpWriter)
+	followUpCtx.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon:generateContent", bytes.NewReader(followUpReqBody))
+
+	followUpSSE := strings.Join([]string{
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"It is sunny in "}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":4}}}`,
+		"",
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Tokyo."}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":6}}}`,
+		"",
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_final","text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":8}}}`,
+		"",
+	}, "\n")
+
+	upstream := &queuedHTTPUpstreamStub{
+		responses: []*http.Response{
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(streamSSE)),
+			},
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(followUpSSE)),
+			},
+		},
+	}
+
+	svc := &AntigravityGatewayService{
+		settingService: NewSettingService(&antigravitySettingRepoStub{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}),
+		tokenProvider:  &AntigravityTokenProvider{},
+		httpUpstream:   upstream,
+	}
+	account := &Account{
+		ID:          110,
+		Name:        "antigravity-fc-stream",
+		Platform:    PlatformAntigravity,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "test-access-token",
+			"project_id":   "test-project",
+			"model_mapping": map[string]any{
+				"gemini-4-argon": "gemini-4-argon",
+			},
+		},
+	}
+
+	res1, err := svc.ForwardGemini(context.Background(), streamCtx, account, "gemini-4-argon", "streamGenerateContent", true, streamReqBody, false)
+	require.NoError(t, err)
+	require.NotNil(t, res1)
+	require.Contains(t, streamWriter.Body.String(), `"functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_s1"}`)
+	require.Contains(t, streamWriter.Body.String(), `"thoughtSignature":"sig_stream_1"`)
+
+	res2, err := svc.ForwardGemini(context.Background(), followUpCtx, account, "gemini-4-argon", "generateContent", false, followUpReqBody, false)
+	require.NoError(t, err)
+	require.NotNil(t, res2)
+	require.Len(t, upstream.requestBodies, 2)
+
+	// Verify follow-up request had dummy thoughtSignature injected on functionCall and preserved functionResponse image part
+	secondSent := string(upstream.requestBodies[1])
+	require.Contains(t, secondSent, `"thoughtSignature":"skip_thought_signature_validator"`)
+	require.Contains(t, secondSent, `"mimeType":"image/png"`)
+
+	var followUpResp map[string]any
+	require.NoError(t, json.Unmarshal(followUpWriter.Body.Bytes(), &followUpResp))
+	cands, ok := followUpResp["candidates"].([]any)
+	require.True(t, ok)
+	cand0, ok := cands[0].(map[string]any)
+	require.True(t, ok)
+	content, ok := cand0["content"].(map[string]any)
+	require.True(t, ok)
+	parts, ok := content["parts"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, parts)
+	firstPart, ok := parts[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "It is sunny in Tokyo.", firstPart["text"])
 }

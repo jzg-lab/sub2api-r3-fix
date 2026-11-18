@@ -58,8 +58,6 @@ func applyStagedCodexFingerprintClientMetadata(c *gin.Context, account *Account,
 	return applyCodexFingerprintClientMetadata(reqBody, stagedCodexFingerprintIDs(c, account)) || cleaned
 }
 
-// applyStagedCodexFingerprintClientMetadataRaw 是 raw 字节版的 staged body sink，供客户端 WS
-// 入口的 response.create 帧使用（帧是原始 JSON 字节，与透传 HTTP 一样禁全量 Unmarshal）。
 func applyStagedCodexFingerprintClientMetadataRaw(c *gin.Context, account *Account, body []byte) ([]byte, bool, error) {
 	body, cleaned, err := sanitizeCodexClientEnvironmentRaw(body, account)
 	if err != nil {
@@ -67,66 +65,6 @@ func applyStagedCodexFingerprintClientMetadataRaw(c *gin.Context, account *Accou
 	}
 	next, changed, err := applyCodexFingerprintClientMetadataRaw(body, stagedCodexFingerprintIDs(c, account))
 	return next, cleaned || changed, err
-}
-
-// stageCodexMachineFingerprintIDsForWSIngress 在客户端 WS 入口（ProxyResponsesWebSocketFromClient）
-// 建连时 resolve/stage 指纹 IDs，仅 machine 模式。
-//   - 该入口不经过 Forward / forwardOpenAIPassthrough，baseline 对所有模式都不 stage：握手头 sink
-//     （openai_ws_forwarder_payload.go applyStagedCodexFingerprintHeaders）读到 nil ⇒ 不改写，
-//     response.create 帧的 client_metadata 也无人改写。
-//   - 只接 machine：machine 的 IDs 不含 turn 级随机字段（turnID / turnStartedAtUnixMs 零值，
-//     三个 sink 的 machine 分支不读），一份 snapshot 跨整条连接的多个 turn 复用，语义等价于
-//     每 turn 各 resolve 一次（假名是纯函数，pseudonymIssued 仅做幂等）。session / full 每次
-//     resolve 都生成新的 turn_id，按连接 stage 会让多 turn 共用同一 turn_id，与 HTTP 语义不一致；
-//     改动 session / full / device 在 WS 入口的行为超出本期范围，维持 baseline（见设计 §5）。
-//   - 无条件先清空：与 Forward 阶段一致，避免同一 gin context 上一次 attempt（其他账号）的残留。
-func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForWSIngress(c *gin.Context, account *Account) {
-	stageCodexFingerprintIDs(c, nil)
-	if c == nil || account == nil || account.GetCodexFingerprintMode() != codexFingerprintMachine {
-		return
-	}
-	var clientHeaders http.Header
-	if c.Request != nil {
-		clientHeaders = c.Request.Header
-	}
-	fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
-	// machine：按 WS 握手终态出站 UA（buildOpenAIWSHeaders 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
-	stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
-	stageCodexFingerprintIDs(c, fpIDs)
-}
-
-// stageCodexMachineFingerprintIDsForCompatBridge 在兼容桥（chat completions / messages）构造好
-// Responses body 之后 resolve/stage 指纹 IDs 并应用 raw body sink，仅 machine 模式。
-//   - 两座桥不经过 Forward，baseline 对所有模式都不 stage；machine 下桥的下游是非 Codex 客户端
-//     （无 session-id / thread-id 头），出站必须与 Forward 非 Codex 下游同形态：body sink 只改不增
-//     （桥自建 body 无 client_metadata ⇒ 只假名化 prompt_cache_key），头 sink 删除 conversation_id、
-//     保留桥 post-build 的下划线 session_id（见 applyCodexMachineHeaders）。
-//   - 无条件先清空：与 Forward 阶段一致，避免同一 gin context 上一次 attempt（其他账号）的残留。
-func (s *OpenAIGatewayService) stageCodexMachineFingerprintIDsForCompatBridge(c *gin.Context, account *Account, body []byte) ([]byte, error) {
-	stageCodexFingerprintIDs(c, nil)
-	body, _, err := sanitizeCodexClientEnvironmentRaw(body, account)
-	if err != nil {
-		return nil, err
-	}
-	if activeCodexFingerprintMode(account) != codexFingerprintMachine {
-		return body, nil
-	}
-	var clientHeaders http.Header
-	if c != nil && c.Request != nil {
-		clientHeaders = c.Request.Header
-	}
-	fpIDs := resolveCodexFingerprintIDsForClient(c, account, clientHeaders)
-	if fpIDs == nil {
-		return body, nil
-	}
-	// machine：按桥终态出站 UA（buildUpstreamRequest 的 enforceCodexIdentityHeadersWithUA 同源）补记 sandbox 标签。
-	stampCodexMachineSandboxTag(fpIDs, s.codexIdentityOverrideUA(account))
-	next, _, err := applyCodexFingerprintClientMetadataRaw(body, fpIDs)
-	if err != nil {
-		return body, err
-	}
-	stageCodexFingerprintIDs(c, fpIDs)
-	return next, nil
 }
 
 // codexFingerprintMode 控制 OAuth 账号出站请求的设备指纹收敛强度。
@@ -137,6 +75,7 @@ type codexFingerprintMode string
 
 const (
 	// codexFingerprintOff 不做任何收敛，原样透传客户端标识。
+	// 这是默认值：收敛是显式 opt-in 的（见 GetCodexFingerprintMode）。
 	codexFingerprintOff codexFingerprintMode = "off"
 	// codexFingerprintDevice 仅收敛 installation_id 为账号级恒定值。
 	// 上游看到 1 台设备 + 多会话（每用户各自的 session）。
@@ -148,12 +87,6 @@ const (
 	// codexFingerprintFull 收敛所有标识：installation_id + session_id + thread_id。
 	// 上游看到 1 台设备 + 1 会话 + 1 线程，最激进。
 	codexFingerprintFull codexFingerprintMode = "full"
-	// codexFingerprintMachine "单机多窗口"：installation_id 收敛为账号级恒定值，
-	// session/thread/window/prompt_cache_key 等会话标识按账号 seed 做 1:1 保版本假名化
-	// （每个下游窗口仍是一个独立会话，只是换了名字），sandbox 与账号 OS 对齐，
-	// 并删除真实 Codex 不再发送的 session_id / conversation_id 下划线头。
-	// 上游看到 1 台设备 + N 个彼此自洽的窗口，最接近"一台机器上开多个 Codex 窗口"。
-	codexFingerprintMachine codexFingerprintMode = "machine"
 )
 
 const (
@@ -187,16 +120,13 @@ func stripCodexFingerprintSeed(extra map[string]any) map[string]any {
 	return stripped
 }
 
-// codexFingerprintModeFromExtra 只认 extra 里显式写入的模式（未设置/非法 ⇒ off）。
-// 供 seed 管理辅助函数使用：是否铸造/保留 seed 以显式 opt-in 为准；
-// 运行时生效模式见 GetCodexFingerprintMode（本基线缺省 machine）。
 func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 	if extra == nil {
 		return codexFingerprintOff
 	}
 	raw, _ := extra[codexFingerprintModeExtraKey].(string)
 	switch codexFingerprintMode(strings.TrimSpace(raw)) {
-	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
+	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
 		return codexFingerprintMode(strings.TrimSpace(raw))
 	default:
 		return codexFingerprintOff
@@ -205,7 +135,7 @@ func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 
 func codexFingerprintModeRequiresSeed(mode codexFingerprintMode) bool {
 	switch mode {
-	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
+	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
 		return true
 	default:
 		return false
@@ -221,9 +151,7 @@ func codexFingerprintSeed(extra map[string]any) (string, bool) {
 
 func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra map[string]any) map[string]any {
 	prepared := stripCodexFingerprintSeed(extra)
-	if platform != PlatformOpenAI ||
-		(accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) ||
-		!codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
+	if platform != PlatformOpenAI || (accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) || !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
 		return prepared
 	}
 	if prepared == nil {
@@ -231,6 +159,13 @@ func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra m
 	}
 	prepared[codexFingerprintSeedExtraKey] = newCodexFingerprintSeed()
 	return prepared
+}
+
+func NormalizeOpenAICodexFingerprintExtraForCreate(account *Account) {
+	if account == nil {
+		return
+	}
+	account.Extra = prepareCodexFingerprintExtraForCreate(account.Platform, account.Type, account.Extra)
 }
 
 func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]any) map[string]any {
@@ -254,6 +189,10 @@ func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]an
 	return prepared
 }
 
+func normalizeOpenAICodexFingerprintExtraForUpdate(account *Account, extra map[string]any, _ ...any) map[string]any {
+	return prepareCodexFingerprintExtraForUpdate(account, extra)
+}
+
 func sanitizedCodexFingerprintExtraUpdates(updates map[string]any) map[string]any {
 	if updates == nil {
 		return nil
@@ -274,110 +213,21 @@ func ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates map[string]any) boo
 }
 
 // GetCodexFingerprintMode 从账号 extra JSON 读取指纹收敛模式。
-// 未设置或非法时默认 machine（单机多窗口）；显式 off/device/session/full 仍保留。
+//
+// **收敛是显式 opt-in**：未设置、空值或非法值一律按 off 处理，只有管理员
+// 明确配置 device / session / full 才收敛。
+//
+// 历史：v0.1.175（#5553）把缺省值当作 session，导致升级后存量 OAuth 账号
+// （普遍没有这个 extra 键）的每个非透传请求都被静默改写 installation /
+// session / thread / turn / window 五类标识；#5555、#5556、#5582 报告的额度
+// 缩水都卡在该版本边界，并有"回退 v0.1.173 即恢复"与"新账号开收敛后降额"
+// 的 A/B 实测。上游的配额判定策略不可观测，因此这里取兼容安全的一侧：
+// 不显式 opt-in 就保持 v0.1.175 之前的客户端身份（#5610）。
 func (a *Account) GetCodexFingerprintMode() codexFingerprintMode {
 	if a == nil || !a.IsOpenAIOAuthLike() {
 		return codexFingerprintOff
 	}
-	raw := strings.TrimSpace(a.GetExtraString(codexFingerprintModeExtraKey))
-	switch codexFingerprintMode(raw) {
-	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
-		return codexFingerprintMode(raw)
-	default:
-		if a.Type == AccountTypeSetupToken {
-			return codexFingerprintOff
-		}
-		return codexFingerprintMachine
-	}
-}
-
-// activeCodexFingerprintMode 返回账号“有效”指纹模式：显式 off 或缺少系统管理
-// seed 时等价 off（需求 #5：无 seed ⇒ 不改写，宁可指纹收敛降级也不伪造随机设备）。
-// seed 化收敛（v2 派生）与 machine 假名都以 seed 为根，seed 缺失即身份根缺失。
-func activeCodexFingerprintMode(account *Account) codexFingerprintMode {
-	if account == nil || account.GetCodexFingerprintMode() == codexFingerprintOff {
-		return codexFingerprintOff
-	}
-	if _, ok := codexFingerprintSeed(account.Extra); !ok {
-		return codexFingerprintOff
-	}
-	return account.GetCodexFingerprintMode()
-}
-
-// NormalizeOpenAICodexFingerprintExtraForCreate makes the default explicit at
-// every account persistence boundary. Persisting the default prevents alternate
-// import paths from requiring a manual update.
-// machine 移植扩展：模式需要 seed 时同时在创建边界铸造系统管理的账号级 seed
-// （上游等价物是 service 层 prepareCodexFingerprintExtraForCreate；本基线在 repo
-// 层兜底，覆盖 CRS 同步等绕过 service 层的创建路径）。
-func NormalizeOpenAICodexFingerprintExtraForCreate(account *Account) {
-	if account == nil || !account.IsOpenAIOAuth() {
-		return
-	}
-	if account.Extra == nil {
-		account.Extra = make(map[string]any, 1)
-	}
-	raw, ok := account.Extra[codexFingerprintModeExtraKey].(string)
-	switch codexFingerprintMode(strings.TrimSpace(raw)) {
-	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
-		if ok && strings.TrimSpace(raw) != "" {
-			// 显式模式已写入；seed 仍按需铸造（调用方可能绕过 service 层 prepare）。
-			ensureCodexFingerprintSeedForCreate(account)
-			return
-		}
-	}
-	account.Extra[codexFingerprintModeExtraKey] = string(codexFingerprintMachine)
-	ensureCodexFingerprintSeedForCreate(account)
-}
-
-// ensureCodexFingerprintSeedForCreate 在创建边界为需要 seed 的模式铸造系统 seed；
-// 已有合法 seed（service 层 prepare 已铸造）时保留，用户带入的非法值被覆盖。
-func ensureCodexFingerprintSeedForCreate(account *Account) {
-	if !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(account.Extra)) {
-		return
-	}
-	if _, ok := codexFingerprintSeed(account.Extra); ok {
-		return
-	}
-	account.Extra[codexFingerprintSeedExtraKey] = newCodexFingerprintSeed()
-}
-
-// normalizeOpenAICodexFingerprintExtraForUpdate keeps an existing explicit
-// mode when an edit payload omits the default field. This is important for
-// bulk/import callers that submit a partial extra object.
-func normalizeOpenAICodexFingerprintExtraForUpdate(
-	account *Account,
-	extra map[string]any,
-	previousWasOpenAIOAuth bool,
-	previousMode codexFingerprintMode,
-) map[string]any {
-	if account == nil || !account.IsOpenAIOAuth() {
-		return extra
-	}
-	if extra == nil {
-		extra = make(map[string]any, 1)
-	}
-	if _, ok := extra[codexFingerprintModeExtraKey]; ok {
-		raw, isString := extra[codexFingerprintModeExtraKey].(string)
-		switch codexFingerprintMode(strings.TrimSpace(raw)) {
-		case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
-			if isString && strings.TrimSpace(raw) != "" {
-				return extra
-			}
-		}
-		extra[codexFingerprintModeExtraKey] = string(codexFingerprintMachine)
-		return extra
-	}
-
-	mode := codexFingerprintMachine
-	if previousWasOpenAIOAuth {
-		switch previousMode {
-		case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintMachine:
-			mode = previousMode
-		}
-	}
-	extra[codexFingerprintModeExtraKey] = string(mode)
-	return extra
+	return codexFingerprintModeFromExtra(a.Extra)
 }
 
 // deriveStableUUIDv4 从种子确定性派生一个 UUIDv4 格式的字符串。
@@ -443,27 +293,14 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
-	// pseudonymKey scopes client sessions to the account and authenticated API key.
-	pseudonymKey []byte
-	// pseudonymIssued 仅 machine 模式使用：本请求内已签发的假名集合，使 sink 对同一
-	// ids 重复应用幂等（WS 链路对共享 body map 会应用两次：openai_gateway_forward.go
-	// 的 body sink 与 openai_ws_forwarder_v2.go 的 payload sink），见 machinePseudonym。
-	pseudonymIssued map[string]struct{}
-	// sandboxTag 仅 machine 模式使用：账号 OS 对应的平台沙箱标签（seatbelt /
-	// seccomp / windows_sandbox），空串表示不改写 turn metadata 的 sandbox 字段。
-	sandboxTag string
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
 // clientSessionID 是客户端原始的 session-id 头值（连字符形式），用于 session 模式下
 // 的 thread_id 派生——每个真实 Codex 会话得到一个独立线程。
-// 返回 nil 表示 off 模式或无合法 seed（等价 off，不需要改写）。
+// 返回 nil 表示 off 模式，不需要改写。
 // 注意：包含随机生成的 turn_id，调用方必须只调用一次并共享结果给头改写和体改写。
 func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode codexFingerprintMode) *codexFingerprintIDs {
-	return resolveCodexFingerprintIDsWithAPIKey(account, clientSessionID, mode, 0)
-}
-
-func resolveCodexFingerprintIDsWithAPIKey(account *Account, clientSessionID string, mode codexFingerprintMode, apiKeyID int64) *codexFingerprintIDs {
 	if account == nil || mode == codexFingerprintOff {
 		return nil
 	}
@@ -482,10 +319,6 @@ func resolveCodexFingerprintIDsWithAPIKey(account *Account, clientSessionID stri
 	if ids.installationID == "" {
 		return nil
 	}
-
-	// Keep the account's device identity stable while isolating all derived
-	// session/cache identities between authenticated gateway clients.
-	seed = codexClientSessionSeed(seed, apiKeyID)
 
 	switch mode {
 	case codexFingerprintDevice:
@@ -507,18 +340,6 @@ func resolveCodexFingerprintIDsWithAPIKey(account *Account, clientSessionID stri
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = ids.threadID + ":0"
 		return ids
-
-	case codexFingerprintMachine:
-		// machine 不生成 turn 级字段（sessionID / threadID / turnID / windowID /
-		// turnStartedAtUnixMs 保持零值，三个 sink 的 machine 分支也不读它们），
-		// 只携带假名密钥；sandboxTag 由各调用链在 resolve 后按出站 UA 补记
-		// （stampCodexMachineSandboxTag）。
-		return &codexFingerprintIDs{
-			accountID:      account.ID,
-			mode:           mode,
-			installationID: ids.installationID,
-			pseudonymKey:   []byte(seed),
-		}
 	}
 
 	return nil
@@ -538,7 +359,18 @@ func extractClientSessionID(h http.Header) string {
 // 结合账号配置一次性解析收敛 ID 集合。调用方应将返回的 ids 同时传给
 // applyCodexFingerprintHeaders 和 applyCodexFingerprintClientMetadata。
 func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.Header) *codexFingerprintIDs {
-	return resolveCodexFingerprintIDsForClient(nil, account, clientHeaders)
+	if account == nil {
+		return nil
+	}
+	mode := account.GetCodexFingerprintMode()
+	if mode == codexFingerprintOff {
+		return nil
+	}
+	clientSessionID := ""
+	if clientHeaders != nil {
+		clientSessionID = extractClientSessionID(clientHeaders)
+	}
+	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
 }
 
 func resolveCodexFingerprintIDsForClient(c *gin.Context, account *Account, clientHeaders http.Header) *codexFingerprintIDs {
@@ -553,19 +385,13 @@ func resolveCodexFingerprintIDsForClient(c *gin.Context, account *Account, clien
 	if clientHeaders != nil {
 		clientSessionID = extractClientSessionID(clientHeaders)
 	}
-	return resolveCodexFingerprintIDsWithAPIKey(account, clientSessionID, mode, getAPIKeyIDFromContext(c))
+	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
 }
 
 // applyCodexFingerprintHeaders 按预计算的收敛 ID 改写出站 HTTP 头中的设备指纹。
 // 在 buildUpstreamRequest 的白名单透传之后、enforceCodexIdentityHeaders 之前调用。
 func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 	if h == nil || ids == nil {
-		return
-	}
-
-	// machine 模式：只改不增的假名化 + 删除下划线会话头，独立实现（openai_codex_machine_identity.go）。
-	if ids.mode == codexFingerprintMachine {
-		applyCodexMachineHeaders(h, ids)
 		return
 	}
 
@@ -612,7 +438,7 @@ func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any) {
 	for k, v := range fields {
 		metadata[k] = v
 	}
-	rebuilt, err := json.Marshal(metadata)
+	rebuilt, err := marshalCodexTurnMetadata(metadata)
 	if err != nil {
 		return
 	}
@@ -628,16 +454,12 @@ func applyCodexFingerprintClientMetadata(reqBody map[string]any, ids *codexFinge
 
 	captureCodexFingerprintOriginalBodySessionID(ids, reqBody["client_metadata"])
 	existing, _ := reqBody["client_metadata"].(map[string]any)
-	// machine 只改不增：下游没有 client_metadata 对象时不创建（真实 Codex 没有
-	// client_metadata 的请求也没有该键；第三方 Agent 直连 Codex 后端也不带该键），
-	// 仅继续处理顶层 prompt_cache_key。
-	skipClientMetadata := ids.mode == codexFingerprintMachine && existing == nil
 	if existing == nil {
 		existing = make(map[string]any)
 	}
 
 	modified := false
-	if !skipClientMetadata && applyCodexFingerprintToClientMetadataMap(existing, ids) {
+	if applyCodexFingerprintToClientMetadataMap(existing, ids) {
 		reqBody["client_metadata"] = existing
 		modified = true
 	}
@@ -653,11 +475,6 @@ func applyCodexFingerprintClientMetadata(reqBody map[string]any, ids *codexFinge
 func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *codexFingerprintIDs) bool {
 	if existing == nil || ids == nil {
 		return false
-	}
-
-	// machine 模式：只改不增的假名化，独立实现（openai_codex_machine_identity.go）。
-	if ids.mode == codexFingerprintMachine {
-		return applyCodexMachineClientMetadata(existing, ids)
 	}
 
 	modified := false
@@ -734,21 +551,7 @@ func applyCodexFingerprintPromptCacheKey(reqBody map[string]any, ids *codexFinge
 		return false
 	}
 	promptCacheKey, ok := reqBody["prompt_cache_key"].(string)
-	if !ok || strings.TrimSpace(promptCacheKey) == "" {
-		return false
-	}
-	// machine：非空字符串一律 1:1 假名化（不要求等于 body session_id；根会话
-	// pck == session_id ⇒ pck' == session'，见设计 I1）。唯一调用方
-	// applyCodexFingerprintClientMetadata 已保证 ids 非 nil。
-	if ids.mode == codexFingerprintMachine {
-		rewritten := ids.machinePseudonym(promptCacheKey)
-		if rewritten == promptCacheKey {
-			return false
-		}
-		reqBody["prompt_cache_key"] = rewritten
-		return true
-	}
-	if !shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey) {
+	if !ok || strings.TrimSpace(promptCacheKey) == "" || !shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey) {
 		return false
 	}
 	if promptCacheKey == ids.sessionID {
@@ -763,8 +566,8 @@ func applyCodexFingerprintPromptCacheKey(reqBody map[string]any, ids *codexFinge
 // Unmarshal（见 forwardOpenAIPassthrough 的轻量提取注释）。实现为：gjson 提取
 // client_metadata 小对象单独解码，经共享核心改写后 sjson 一次性拼回，body
 // 其余字节原样保留；root prompt_cache_key 仅在可证明是 body session 默认值时
-// 做标量改写（machine：非空一律 1:1 假名化）。语义与
-// applyCodexFingerprintClientMetadata 逐点一致。
+// 做标量改写。语义与 applyCodexFingerprintClientMetadata 逐点一致（含
+// "非对象值整体替换为收敛集合"的行为）。
 func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintIDs) ([]byte, bool, error) {
 	if len(body) == 0 || ids == nil {
 		return body, false, nil
@@ -778,8 +581,6 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 	}
 
 	existing := map[string]any{}
-	// machine 只改不增：与 map 版一致，client_metadata 不是对象时不创建。
-	skipClientMetadata := false
 	if cm := gjson.GetBytes(body, "client_metadata"); cm.IsObject() {
 		captureCodexFingerprintOriginalBodySessionIDRaw(ids, gjson.GetBytes(body, "client_metadata.session_id"))
 		if err := json.Unmarshal([]byte(cm.Raw), &existing); err != nil {
@@ -787,12 +588,11 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 		}
 	} else {
 		captureCodexFingerprintOriginalBodySessionIDRaw(ids, gjson.Result{})
-		skipClientMetadata = ids.mode == codexFingerprintMachine
 	}
 
 	next := body
 	modified := false
-	if !skipClientMetadata && applyCodexFingerprintToClientMetadataMap(existing, ids) {
+	if applyCodexFingerprintToClientMetadataMap(existing, ids) {
 		raw, err := json.Marshal(existing)
 		if err != nil {
 			return body, false, fmt.Errorf("encode converged client_metadata: %w", err)
@@ -805,25 +605,13 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 		modified = true
 	}
 	promptCacheKey := gjson.GetBytes(body, "prompt_cache_key")
-	if promptCacheKey.Exists() && promptCacheKey.Type == gjson.String && strings.TrimSpace(promptCacheKey.String()) != "" {
-		// 与 applyCodexFingerprintPromptCacheKey 逐点一致：machine 非空即 1:1 假名化，
-		// session / full 仅在可证明是 body session 默认值时改写为收敛 session。
-		target := ""
-		if ids.mode == codexFingerprintMachine {
-			if rewritten := ids.machinePseudonym(promptCacheKey.String()); rewritten != promptCacheKey.String() {
-				target = rewritten
-			}
-		} else if shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey.String()) {
-			target = ids.sessionID
+	if promptCacheKey.Exists() && promptCacheKey.Type == gjson.String && strings.TrimSpace(promptCacheKey.String()) != "" && shouldRewriteCodexFingerprintPromptCacheKey(ids, promptCacheKey.String()) {
+		rewritten, err := sjson.SetBytes(next, "prompt_cache_key", ids.sessionID)
+		if err != nil {
+			return body, false, fmt.Errorf("splice converged prompt_cache_key: %w", err)
 		}
-		if target != "" {
-			rewritten, err := sjson.SetBytes(next, "prompt_cache_key", target)
-			if err != nil {
-				return body, false, fmt.Errorf("splice converged prompt_cache_key: %w", err)
-			}
-			next = rewritten
-			modified = true
-		}
+		next = rewritten
+		modified = true
 	}
 	return next, modified, nil
 }
@@ -843,7 +631,7 @@ func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fi
 	for k, v := range fields {
 		metadata[k] = v
 	}
-	if rebuilt, err := json.Marshal(metadata); err == nil {
+	if rebuilt, err := marshalCodexTurnMetadata(metadata); err == nil {
 		clientMetadata["x-codex-turn-metadata"] = string(rebuilt)
 	}
 }

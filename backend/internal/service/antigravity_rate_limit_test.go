@@ -45,6 +45,10 @@ func (r *recordingOKUpstream) DoWithTLS(req *http.Request, proxyURL string, acco
 	return r.Do(req, proxyURL, accountID, accountConcurrency)
 }
 
+func (r *recordingOKUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return r.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
+}
+
 func (s *stubAntigravityUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	url := req.URL.String()
 	s.calls = append(s.calls, url)
@@ -64,6 +68,10 @@ func (s *stubAntigravityUpstream) Do(req *http.Request, proxyURL string, account
 
 func (s *stubAntigravityUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	return s.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func (s *stubAntigravityUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }
 
 type rateLimitCall struct {
@@ -1166,14 +1174,8 @@ func TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache(t *testing
 	}
 	modelKey := "claude-sonnet-4-5"
 	resetAt := time.Now().Add(30 * time.Second)
-	committed := &Account{
-		ID: account.ID, UpdatedAt: time.Now(),
-		Extra: map[string]any{"model_rate_limits": map[string]any{
-			modelKey: map[string]any{"rate_limit_reset_at": resetAt.Format(time.RFC3339)},
-		}},
-	}
-	snapshotService.accountRepo = &schedulerPublicationRepo{current: committed}
 
+	snapshotService.accountRepo = &schedulerPublicationRepo{current: account}
 	svc.updateAccountModelRateLimitInCache(context.Background(), account, modelKey, resetAt)
 
 	// 验证 Extra 字段被正确更新
@@ -1187,7 +1189,7 @@ func TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache(t *testing
 
 	// 验证 cache.SetAccount 被调用
 	require.Len(t, cache.setAccountCalls, 1)
-	require.Same(t, committed, cache.setAccountCalls[0])
+	require.Equal(t, account.ID, cache.setAccountCalls[0].ID)
 }
 
 // TestUpdateAccountModelRateLimitInCache_NilSchedulerSnapshot 测试 schedulerSnapshot 为 nil 时不 panic
@@ -1227,8 +1229,8 @@ func TestUpdateAccountModelRateLimitInCache_PreservesExistingExtra(t *testing.T)
 			},
 		},
 	}
-	snapshotService.accountRepo = &schedulerPublicationRepo{current: account}
 
+	snapshotService.accountRepo = &schedulerPublicationRepo{current: account}
 	svc.updateAccountModelRateLimitInCache(context.Background(), account, "claude-sonnet-4-5", time.Now().Add(30*time.Second))
 
 	// 验证已有数据被保留
@@ -1242,8 +1244,10 @@ func TestUpdateAccountModelRateLimitInCache_PreservesExistingExtra(t *testing.T)
 func TestSchedulerSnapshotService_UpdateAccountInCache(t *testing.T) {
 	t.Run("calls cache.SetAccount", func(t *testing.T) {
 		cache := &stubSchedulerCache{}
+		svc := &SchedulerSnapshotService{cache: cache}
+
 		account := &Account{ID: 123, Name: "test"}
-		svc := &SchedulerSnapshotService{cache: cache, accountRepo: &schedulerPublicationRepo{current: account}}
+		svc.accountRepo = &schedulerPublicationRepo{current: account}
 		err := svc.UpdateAccountInCache(context.Background(), account)
 
 		require.NoError(t, err)
@@ -1272,10 +1276,9 @@ func TestSchedulerSnapshotService_UpdateAccountInCache(t *testing.T) {
 	t.Run("propagates cache error", func(t *testing.T) {
 		expectedErr := fmt.Errorf("cache error")
 		cache := &stubSchedulerCache{setAccountErr: expectedErr}
-		account := &Account{ID: 1}
-		svc := &SchedulerSnapshotService{cache: cache, accountRepo: &schedulerPublicationRepo{current: account}}
+		svc := &SchedulerSnapshotService{cache: cache, accountRepo: &schedulerPublicationRepo{current: &Account{ID: 1}}}
 
-		err := svc.UpdateAccountInCache(context.Background(), account)
+		err := svc.UpdateAccountInCache(context.Background(), &Account{ID: 1})
 
 		require.ErrorIs(t, err, expectedErr)
 	})
@@ -1329,12 +1332,4 @@ func TestNormalizeAntigravityModelName(t *testing.T) {
 			require.Equal(t, tt.expected, actual)
 		})
 	}
-}
-
-func (u *recordingOKUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
-}
-
-func (u *stubAntigravityUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.DoWithTLS(req, proxyURL, 0, accountConcurrency, profile)
 }

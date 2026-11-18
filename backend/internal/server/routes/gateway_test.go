@@ -25,14 +25,6 @@ func newGatewayRoutesTestRouter(platform ...string) *gin.Engine {
 }
 
 func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string) *gin.Engine {
-	return newGatewayRoutesTestRouterWithAntiBypass(cfg, nil, platform...)
-}
-
-func newGatewayRoutesTestRouterWithAntiBypass(
-	cfg *config.Config,
-	antiBypass []servermiddleware.AntiBypassMiddleware,
-	platform ...string,
-) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
@@ -61,44 +53,9 @@ func newGatewayRoutesTestRouterWithAntiBypass(
 		nil,
 		nil,
 		cfg,
-		antiBypass...,
 	)
 
 	return router
-}
-
-func TestGatewayRoutesMountAntiBypassAfterAPIKeyAuthentication(t *testing.T) {
-	for _, path := range []string{
-		"/v1/messages",
-		"/responses",
-		"/backend-api/codex/responses",
-		"/antigravity/v1/messages",
-	} {
-		t.Run(path, func(t *testing.T) {
-			authenticated := false
-			antiBypass := servermiddleware.AntiBypassMiddleware(func(c *gin.Context) {
-				_, authenticated = servermiddleware.GetAPIKeyFromContext(c)
-				c.AbortWithStatus(http.StatusTeapot)
-			})
-			router := newGatewayRoutesTestRouterWithAntiBypass(
-				&config.Config{
-					Gateway: config.GatewayConfig{
-						MaxBodySize:     1024 * 1024,
-						TextMaxBodySize: 1024 * 1024,
-					},
-				},
-				[]servermiddleware.AntiBypassMiddleware{antiBypass},
-			)
-
-			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-5"}`))
-			request.Header.Set("Content-Type", "application/json")
-			recorder := httptest.NewRecorder()
-			router.ServeHTTP(recorder, request)
-
-			require.Equal(t, http.StatusTeapot, recorder.Code)
-			require.True(t, authenticated, "anti-bypass must run after API key authentication")
-		})
-	}
 }
 
 func TestGatewayRoutesOpenAIResponsesCompactPathIsRegistered(t *testing.T) {

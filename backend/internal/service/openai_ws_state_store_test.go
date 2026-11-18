@@ -178,14 +178,12 @@ func TestEnsureBindingCapacity_DoesNotEvictWhenUpdatingExistingKey(t *testing.T)
 }
 
 type openAIWSStateStoreTimeoutProbeCache struct {
-	setHasDeadline      bool
-	getHasDeadline      bool
-	deleteHasDeadline   bool
-	setDeadlineDelta    time.Duration
-	getDeadlineDelta    time.Duration
-	delDeadlineDelta    time.Duration
-	failSetWhenCanceled bool
-	setErr              error
+	setHasDeadline    bool
+	getHasDeadline    bool
+	deleteHasDeadline bool
+	setDeadlineDelta  time.Duration
+	getDeadlineDelta  time.Duration
+	delDeadlineDelta  time.Duration
 }
 
 func (c *openAIWSStateStoreTimeoutProbeCache) GetSessionAccountID(ctx context.Context, _ int64, _ string) (int64, error) {
@@ -200,13 +198,6 @@ func (c *openAIWSStateStoreTimeoutProbeCache) SetSessionAccountID(ctx context.Co
 	if deadline, ok := ctx.Deadline(); ok {
 		c.setHasDeadline = true
 		c.setDeadlineDelta = time.Until(deadline)
-	}
-	if c.failSetWhenCanceled {
-		if ctx.Err() != nil {
-			c.setErr = ctx.Err()
-			return c.setErr
-		}
-		return nil
 	}
 	return errors.New("set failed")
 }
@@ -275,17 +266,6 @@ func TestOpenAIWSStateStore_RedisOpsUseShortTimeout(t *testing.T) {
 	require.True(t, probe2.getHasDeadline, "GetSessionAccountID 在缓存未命中时应携带独立超时上下文")
 	require.Greater(t, probe2.getDeadlineDelta, 2*time.Second)
 	require.LessOrEqual(t, probe2.getDeadlineDelta, 3*time.Second)
-}
-
-func TestOpenAIWSStateStore_BindResponseAccountSurvivesCanceledParent(t *testing.T) {
-	probe := &openAIWSStateStoreTimeoutProbeCache{failSetWhenCanceled: true}
-	store := NewOpenAIWSStateStore(probe)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	require.NoError(t, store.BindResponseAccount(ctx, 5, "resp_after_response", 11, time.Minute))
-	require.True(t, probe.setHasDeadline)
-	require.NoError(t, probe.setErr)
 }
 
 func TestWithOpenAIWSStateStoreRedisTimeout_WithParentContext(t *testing.T) {

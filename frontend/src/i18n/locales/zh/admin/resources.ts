@@ -81,7 +81,7 @@ export default {
         location: '地理位置',
         status: '状态',
         accounts: '账号数',
-        latency: '探测首包',
+        latency: '延迟',
         expiry: '有效期',
         createdAt: '创建时间',
         actions: '操作',
@@ -140,7 +140,6 @@ export default {
       batchTest: '批量测试',
       testFailed: '失败',
       latencyFailed: '链接失败',
-      latencyMeasurement: '代理请求至目标站响应头的耗时，包含建连；不是纯 IP 往返延迟。',
       batchTestEmpty: '暂无可测试的代理',
       batchTestDone: '批量测试完成，共测试 {count} 个代理',
       batchTestFailed: '批量测试失败',
@@ -151,7 +150,6 @@ export default {
       batchDeleteSkipped: '已跳过 {skipped} 个代理',
       batchDeleteFailed: '批量删除失败',
       deleteBlockedInUse: '该代理已有账号使用，无法删除',
-      historyBindingProtected: '此代理仍被当前或历史 OpenAI 授权记录引用，不能删除或直接修改连接参数。可在编辑中停用或续期；历史绑定和原登录 IP 将继续保留。',
       accountsTitle: '使用该IP的账号',
       accountsEmpty: '暂无账号使用此代理',
       accountsFailed: '获取账号列表失败',
@@ -184,7 +182,7 @@ export default {
       proxyUpdated: '代理更新成功',
       proxyDeleted: '代理删除成功',
       proxyWorking: '代理连接正常',
-      proxyWorkingWithLatency: '代理连接正常，探测首包 {latency}ms',
+      proxyWorkingWithLatency: '代理连接正常，延迟 {latency}ms',
       proxyTestFailed: '代理测试失败',
       qualityCheckDone: '质量检测完成：评分 {score}（{grade}）',
       qualityCheckFailed: '代理质量检测失败',
@@ -236,6 +234,9 @@ export default {
       fallbackProxy: '指定备用代理',
       fallbackDirect: '回退直连',
       backupProxy: '备用代理',
+latencyMeasurement: '代理请求至目标站响应头的耗时，包含建连；不是纯 IP 往返延迟。',
+historyBindingProtected: '此代理仍被当前或历史 OpenAI 授权记录引用，不能删除或直接修改连接参数。可在编辑中停用或续期；历史绑定和原登录 IP 将继续保留。',
+
     },
 
     // Redeem Codes Management

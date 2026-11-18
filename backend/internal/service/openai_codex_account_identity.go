@@ -154,7 +154,7 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 	if !applyCodexAccountIdentityFields(metadata, account, apiKeyID) {
 		return false
 	}
-	rebuilt, err := json.Marshal(metadata)
+	rebuilt, err := marshalCodexTurnMetadata(metadata)
 	if err != nil {
 		return false
 	}
@@ -163,10 +163,10 @@ func applyCodexAccountIdentityEmbeddedMetadata(values map[string]any, account *A
 }
 
 func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, account *Account, apiKeyID int64) bool {
-	changed := sanitizeCodexClientEnvironmentMap(requestBody, account)
-	if requestBody == nil || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
-		return changed
+	if requestBody == nil || codexAccountIdentityNamespace(account) == "" {
+		return false
 	}
+	changed := false
 	clientMetadata, _ := requestBody["client_metadata"].(map[string]any)
 	originalBodySessionID := ""
 	if clientMetadata != nil {
@@ -196,12 +196,8 @@ func applyCodexAccountIdentityClientMetadataMap(requestBody map[string]any, acco
 // subobjects with gjson/sjson. The passthrough hot path never unmarshals the
 // potentially multi-megabyte request body.
 func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, apiKeyID int64) ([]byte, bool, error) {
-	body, cleaned, err := sanitizeCodexClientEnvironmentRaw(body, account)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(body) == 0 || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
-		return body, cleaned, nil
+	if len(body) == 0 || codexAccountIdentityNamespace(account) == "" {
+		return body, false, nil
 	}
 	root := gjson.ParseBytes(body)
 	if !root.IsObject() {
@@ -209,7 +205,7 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 	}
 
 	next := body
-	changed := cleaned
+	changed := false
 	originalBodySessionID := ""
 	if cm := gjson.GetBytes(body, "client_metadata"); cm.IsObject() {
 		clientMetadata := map[string]any{}
@@ -254,12 +250,7 @@ func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, a
 }
 
 func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, apiKeyID int64) {
-	// Filter before fingerprinting so newly generated server timestamps/IDs are
-	// retained, while untrusted downstream environment metadata is discarded.
-	if account != nil && account.IsOpenAIOAuthLike() {
-		sanitizeCodexClientEnvironmentHeaders(headers)
-	}
-	if headers == nil || skipCodexAccountIdentityScoping(account) || codexAccountIdentityNamespace(account) == "" {
+	if headers == nil || codexAccountIdentityNamespace(account) == "" {
 		return
 	}
 	for _, field := range codexAccountIdentityFields {
@@ -276,17 +267,9 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 	if raw := strings.TrimSpace(headers.Get(openAIWSTurnMetadataHeader)); raw != "" {
 		metadata := map[string]any{}
 		if err := json.Unmarshal([]byte(raw), &metadata); err == nil && metadata != nil && applyCodexAccountIdentityFields(metadata, account, apiKeyID) {
-			if rebuilt, err := json.Marshal(metadata); err == nil {
+			if rebuilt, err := marshalCodexTurnMetadata(metadata); err == nil {
 				headers.Set(openAIWSTurnMetadataHeader, string(rebuilt))
 			}
 		}
 	}
-}
-
-func skipCodexAccountIdentityScoping(account *Account) bool {
-	// Machine mode already scopes every observed identity through an
-	// account-specific HMAC seed. Applying the generic account namespace first
-	// replaces client IDs with random UUIDs and destroys deterministic
-	// pseudonymization across HTTP, passthrough, bridge, and WebSocket paths.
-	return activeCodexFingerprintMode(account) == codexFingerprintMachine
 }

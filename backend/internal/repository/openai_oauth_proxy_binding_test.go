@@ -325,7 +325,7 @@ func TestRequiresOpenAIOAuthBulkValidation(t *testing.T) {
 		updates service.AccountBulkUpdate
 		want    bool
 	}{
-		{name: "unrelated fields", updates: service.AccountBulkUpdate{Name: stringPtr("renamed")}},
+		{name: "unrelated fields", updates: service.AccountBulkUpdate{Name: proxyBindingStringPtr("renamed")}},
 		{name: "ordinary credential refresh", updates: service.AccountBulkUpdate{
 			Credentials: map[string]any{"access_token": "replacement"},
 		}},
@@ -359,6 +359,6 @@ func requireProxyID(t *testing.T, proxyID *int64) int64 {
 	return *proxyID
 }
 
-func stringPtr(value string) *string {
+func proxyBindingStringPtr(value string) *string {
 	return &value
 }

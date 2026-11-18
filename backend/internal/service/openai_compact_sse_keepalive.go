@@ -14,15 +14,6 @@ import (
 // openAICompactSSEKeepaliveKey 存放 body-signal compact 请求的下游 SSE 心跳器。
 const openAICompactSSEKeepaliveKey = "openai_compact_sse_keepalive"
 
-// CopyOpenAIKeepaliveState keeps response-wide byte accounting across route contexts.
-func CopyOpenAIKeepaliveState(dst, src *gin.Context) {
-	for _, key := range []string{openAICompactSSEKeepaliveKey, openAIStreamKeepaliveBytesKey} {
-		if value, ok := src.Get(key); ok {
-			dst.Set(key, value)
-		}
-	}
-}
-
 // openAICompactSSEKeepalive 在 compact 上游 unary 等待期间向下游写 SSE 注释行
 // 心跳。上游 /responses/compact 在模型处理期间不发送任何字节（大上下文可长达
 // 数分钟），下游若经过反向代理（Nginx/Cloudflare Tunnel 等），零字节静默会触发
@@ -338,4 +329,12 @@ func (w *openAICompactKeepaliveWriter) Written() bool {
 	w.k.mu.Lock()
 	defer w.k.mu.Unlock()
 	return w.ResponseWriter.Written()
+}
+
+func CopyOpenAIKeepaliveState(dst, src *gin.Context) {
+	for _, key := range []string{openAICompactSSEKeepaliveKey, openAIStreamKeepaliveBytesKey} {
+		if value, ok := src.Get(key); ok {
+			dst.Set(key, value)
+		}
+	}
 }

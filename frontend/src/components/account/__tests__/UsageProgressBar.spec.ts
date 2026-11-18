@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import UsageProgressBar from '../UsageProgressBar.vue'
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -12,18 +13,6 @@ vi.mock('vue-i18n', async () => {
 })
 
 describe('UsageProgressBar', () => {
-  it('does not round an unexhausted usage window up to 100%', async () => {
-    const wrapper = mount(UsageProgressBar, {
-      props: { label: '7d', utilization: 99.6, color: 'emerald' }
-    })
-    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('<100%')
-    await wrapper.setProps({ utilization: 100 })
-    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('100%')
-    await wrapper.setProps({ utilization: 99.6, remainingCapacity: true })
-    expect(wrapper.get('.h-1\\.5 + span').text()).toBe('100%')
-    wrapper.unmount()
-  })
-
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-17T00:00:00Z'))
@@ -33,7 +22,7 @@ describe('UsageProgressBar', () => {
     vi.useRealTimers()
   })
 
-  it('showNowWhenIdle=true 且利用率为 0 时显示“现在”', () => {
+  it('showNowWhenIdle=true 且利用率为 0 但有未来 resetsAt 时显示倒计时', () => {
     const wrapper = mount(UsageProgressBar, {
       props: {
         label: '5h',
@@ -44,8 +33,8 @@ describe('UsageProgressBar', () => {
       }
     })
 
-    expect(wrapper.text()).toContain('usage.resetNow')
-    expect(wrapper.text()).not.toContain('2h 30m')
+    expect(wrapper.text()).toContain('2h 30m')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
   })
 
   it('showNowWhenIdle=true 但利用率大于 0 时显示倒计时', () => {
@@ -208,7 +197,7 @@ describe('UsageProgressBar', () => {
     expect(label.classes()).not.toContain('max-w-[72px]')
 
     const percent = wrapper.get('.h-1\\.5 + span')
-    expect(percent.classes()).toContain('w-[36px]')
+    expect(percent.classes()).toContain('w-[32px]')
     expect(percent.classes()).toContain('text-right')
   })
 
@@ -227,11 +216,11 @@ describe('UsageProgressBar', () => {
     expect(label.classes()).toContain('max-w-[72px]')
     expect(label.classes()).toContain('truncate')
     expect(label.classes()).toContain('text-left')
-    expect(label.classes()).not.toContain('w-[36px]')
+    expect(label.classes()).not.toContain('w-[32px]')
     expect(label.classes()).not.toContain('text-center')
 
     const percent = wrapper.get('.h-1\\.5 + span')
-    expect(percent.classes()).toContain('w-[36px]')
+    expect(percent.classes()).toContain('w-[32px]')
     expect(percent.classes()).toContain('text-right')
   })
 })

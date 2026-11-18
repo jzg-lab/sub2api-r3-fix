@@ -33,7 +33,7 @@ VALUES ($1, '["claude-fable-5-1"]') RETURNING id`, channelID).Scan(&unsetID))
 	require.NoError(t, err)
 	var configured, unset string
 	require.NoError(t, tx.QueryRowContext(ctx, `SELECT reasoning_effort_multipliers::text FROM channel_model_pricing WHERE id = $1`, configuredID).Scan(&configured))
-	require.JSONEq(t, `{}`, configured)
+	require.JSONEq(t, `{}`, configured, "local channel schema has no legacy max multiplier column")
 	require.NoError(t, tx.QueryRowContext(ctx, `SELECT reasoning_effort_multipliers::text FROM channel_model_pricing WHERE id = $1`, unsetID).Scan(&unset))
 	require.JSONEq(t, `{}`, unset)
 

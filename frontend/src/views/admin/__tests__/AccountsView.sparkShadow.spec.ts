@@ -18,7 +18,6 @@ const {
   getAllGroups,
   duplicateAccount,
   createSparkShadow,
-  terminateOpenAIRescue,
   showSuccess,
   showError
 } = vi.hoisted(() => ({
@@ -29,12 +28,9 @@ const {
   getAllGroups: vi.fn(),
   duplicateAccount: vi.fn(),
   createSparkShadow: vi.fn(),
-  terminateOpenAIRescue: vi.fn(),
   showSuccess: vi.fn(),
   showError: vi.fn()
 }))
-
-vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
 
 vi.mock('@/api/admin', () => ({
   adminAPI: {
@@ -45,8 +41,6 @@ vi.mock('@/api/admin', () => ({
       duplicate: duplicateAccount,
       getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({ enabled: true, interval_minutes: 30 }),
       createSparkShadow,
-      terminateOpenAIRescue,
-      listOpenAIAccountHealth: vi.fn().mockResolvedValue({ accounts: [] }),
       delete: vi.fn(),
       batchClearError: vi.fn(),
       batchRefresh: vi.fn(),
@@ -113,9 +107,8 @@ const mountView = () =>
 
 describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     localStorage.clear()
-    for (const fn of [listAccounts, listWithEtag, getBatchTodayStats, getAllProxies, getAllGroups, duplicateAccount, createSparkShadow, terminateOpenAIRescue, showSuccess, showError]) {
+    for (const fn of [listAccounts, listWithEtag, getBatchTodayStats, getAllProxies, getAllGroups, duplicateAccount, createSparkShadow, showSuccess, showError]) {
       fn.mockReset()
     }
     listAccounts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
@@ -125,52 +118,10 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     getAllGroups.mockResolvedValue([])
     duplicateAccount.mockResolvedValue({ id: 998, name: 'parent-acc (Copy)' })
     createSparkShadow.mockResolvedValue({ id: 999, name: 'parent-acc (Spark)' })
-    terminateOpenAIRescue.mockResolvedValue({ account_id: 42, terminated: true })
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
-  })
-
-  it('confirms termination, ignores duplicate clicks and refreshes accounts', async () => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
-    const wrapper = mountView()
-    await flushPromises()
-    const before = listWithEtag.mock.calls.length
-    const menu = wrapper.findComponent(AccountActionMenu)
-    menu.vm.$emit('terminate-rescue', { id: 42, name: 'rescue-account' })
-    menu.vm.$emit('terminate-rescue', { id: 42, name: 'rescue-account' })
-    await flushPromises()
-    expect(terminateOpenAIRescue).toHaveBeenCalledTimes(1)
-    expect(terminateOpenAIRescue).toHaveBeenCalledWith(42)
-    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.health.rescueTerminated')
-    expect(listWithEtag.mock.calls.length).toBeGreaterThan(before)
-    wrapper.unmount()
-  })
-
-  it('cancels termination without calling the API', async () => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(false))
-    const wrapper = mountView()
-    await flushPromises()
-    wrapper.findComponent(AccountActionMenu).vm.$emit('terminate-rescue', { id: 42, name: 'rescue-account' })
-    await flushPromises()
-    expect(terminateOpenAIRescue).not.toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
-  it('reports termination failures and permits retry', async () => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
-    terminateOpenAIRescue.mockRejectedValueOnce(new Error('restore failed'))
-    const wrapper = mountView()
-    await flushPromises()
-    const menu = wrapper.findComponent(AccountActionMenu)
-    menu.vm.$emit('terminate-rescue', { id: 42, name: 'rescue-account' })
-    await flushPromises()
-    expect(showError).toHaveBeenCalledWith('admin.accounts.health.terminateRescueFailed: restore failed')
-    menu.vm.$emit('terminate-rescue', { id: 42, name: 'rescue-account' })
-    await flushPromises()
-    expect(terminateOpenAIRescue).toHaveBeenCalledTimes(2)
-    wrapper.unmount()
   })
 
   it('AccountActionMenu 的 duplicate 事件一键复制账号并刷新列表', async () => {
@@ -308,7 +259,6 @@ const mountViewWithRow = () =>
 
 describe('admin AccountsView — 账号行展示', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     localStorage.clear()
     for (const fn of [listAccounts, listWithEtag, getBatchTodayStats, getAllProxies, getAllGroups, duplicateAccount, createSparkShadow, showSuccess, showError]) {
       fn.mockReset()
@@ -631,3 +581,5 @@ describe('admin AccountsView — 账号行展示', () => {
     wrapper.unmount()
   })
 })
+
+beforeEach(() => setActivePinia(createPinia()))

@@ -20,7 +20,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 	// OAuth adapters keep the reference transport/drain behavior; native Responses owns its configured first-output timer.
 	if account.Type != AccountTypeAPIKey {
 		upstreamStart := time.Now()
-		response, err := s.doOpenAIUpstream(ctx, req, proxy, account)
+		response, err := s.doOpenAIUpstreamWithContext(ctx, req, proxy, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		return response, err
 	}
@@ -32,7 +32,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 	}
 	timeout := time.Duration(0)
 	if account.Platform == PlatformOpenAI && !IsImageGenerationIntent(req.URL.Path, model, body) {
-		timeout = s.openAIFirstOutputTimeoutForAccount(account, effort)
+		timeout = s.openAIFirstOutputTimeout(effort)
 	}
 	var headerGuard *openAIFirstOutputHeaderGuard
 	if timeout > 0 {
@@ -43,7 +43,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 		cleanup = headerGuard.close
 	}
 	upstreamStart := time.Now()
-	resp, err := s.doOpenAIUpstream(ctx, req.WithContext(upstream), proxy, account)
+	resp, err := s.doOpenAIUpstreamWithContext(ctx, req.WithContext(upstream), proxy, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	account = openAIResponseAccount(resp, account)
 	if headerGuard != nil && headerGuard.stopHeaderWait() {
@@ -54,7 +54,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, s.newOpenAIFirstOutputTimeoutError(ctx, c, account, start, model, effort, timeout, "response_headers", nil)
+		return nil, s.newOpenAIFirstOutputTimeoutError(ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account), start, model, effort, timeout, "response_headers", nil)
 	}
 	if err != nil || resp == nil || resp.Body == nil {
 		cleanup()
@@ -96,7 +96,7 @@ func (s *OpenAIGatewayService) doOpenAITextUpstream(ctx context.Context, c *gin.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, s.newOpenAIFirstOutputTimeoutError(ctx, c, account, start, model, effort, timeout, "semantic_output", resp.Header)
+		return nil, s.newOpenAIFirstOutputTimeoutError(ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account), start, model, effort, timeout, "semantic_output", resp.Header)
 	}
 	if err != nil {
 		_ = resp.Body.Close()

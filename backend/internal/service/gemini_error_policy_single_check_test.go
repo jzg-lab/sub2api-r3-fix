@@ -65,10 +65,6 @@ func (s *geminiSequenceUpstreamStub) DoWithTLS(req *http.Request, proxyURL strin
 	return s.Do(req, proxyURL, accountID, concurrency)
 }
 
-func (s *geminiSequenceUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return s.Do(req, proxyURL, 0, concurrency)
-}
-
 func newGeminiSingleCheckService(responses ...geminiSequenceUpstreamResponse) (*GeminiMessagesCompatService, *geminiSequenceUpstreamStub, *geminiSingleCheckRepoStub) {
 	repo := &geminiSingleCheckRepoStub{}
 	rateLimit := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
@@ -186,6 +182,7 @@ func TestGeminiForward_UncheckedFinalResponseIsCheckedAfterLoop(t *testing.T) {
 		geminiSequenceUpstreamResponse{status: http.StatusServiceUnavailable, body: `{"error":{"code":503,"message":"backend busy","status":"UNAVAILABLE"}}`},
 		geminiSequenceUpstreamResponse{status: http.StatusBadRequest, body: `{"error":{"code":400,"message":"quota project misconfigured","status":"FAILED_PRECONDITION"}}`},
 	)
+	svc.cfg.Gateway.MaxSameAccountRetriesGemini = 1
 	account := geminiAPIKeyAccountWithTempRule(map[string]any{
 		"error_code":       float64(400),
 		"keywords":         []any{"misconfigured"},
@@ -202,4 +199,8 @@ func TestGeminiForward_UncheckedFinalResponseIsCheckedAfterLoop(t *testing.T) {
 	require.True(t, errors.As(err, &failoverErr), "400 规则命中应换号，got %T: %v", err, err)
 	require.Equal(t, 2, upstream.calls)
 	require.Equal(t, 1, repo.tempCalls, "循环内未检查的最终响应应在循环外检查")
+}
+
+func (s *geminiSequenceUpstreamStub) DoProbeWithTLS(req *http.Request, proxyURL string, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.Do(req, proxyURL, 0, concurrency)
 }

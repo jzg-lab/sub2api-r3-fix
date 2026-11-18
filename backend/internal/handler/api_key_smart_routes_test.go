@@ -615,7 +615,7 @@ func TestSmartRoutesWebSocketSwitchBeforeFirstTurn(t *testing.T) {
 	billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, h.cfg, nil)
 	t.Cleanup(billing.Stop)
 	gateway := service.NewOpenAIGatewayService(accounts, &openAIWSUsageHandlerUsageLogRepoStub{}, &smartRouteLedger{}, nil, nil, nil, nil, &cfg, nil, nil, service.NewBillingService(&cfg, nil), nil, billing, nil, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
-	openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing, h.apiKeyService, nil, nil, nil, nil, &cfg)
+	openAI := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(&concurrencyCacheMock{acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil }}), billing, h.apiKeyService, nil, nil, nil, nil, &cfg)
 	done := make(chan struct{})
 	r := gin.New()
 	r.GET("/v1/responses", func(c *gin.Context) {

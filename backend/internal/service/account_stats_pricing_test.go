@@ -1099,7 +1099,7 @@ func TestOpenAIGatewayServiceRecordUsage_AccountStatsLongContextFollowsAccountGa
 		wantTotalCost    float64
 		wantAccountCost  float64
 	}{
-		{name: "group_on_account_off", groupLongContext: true, wantTotalCost: baseCost, wantAccountCost: baseCost},
+		{name: "group_on_account_off", groupLongContext: true, wantTotalCost: longContextCost, wantAccountCost: baseCost},
 		{name: "group_off_account_off", wantTotalCost: baseCost, wantAccountCost: baseCost},
 		{
 			name:            "group_off_account_on",
@@ -1125,7 +1125,7 @@ func TestOpenAIGatewayServiceRecordUsage_AccountStatsLongContextFollowsAccountGa
 				},
 				APIKey:  apiKey,
 				User:    &User{ID: 2015},
-				Account: &Account{ID: 3015, Platform: PlatformOpenAI, Extra: tt.accountExtra},
+				Account: &Account{ID: 3015, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: tt.accountExtra},
 			})
 
 			require.NoError(t, err)

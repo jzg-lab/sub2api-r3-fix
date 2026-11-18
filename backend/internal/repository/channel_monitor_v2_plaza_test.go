@@ -30,7 +30,7 @@ func TestChannelMonitorV2PlazaKeepsUnlistedModelMetricsSeparate(t *testing.T) {
 			}
 			mock.ExpectQuery(`(?s)SELECT version, enabled.*FROM channel_monitor_v2_config`).WillReturnRows(
 				sqlmock.NewRows([]string{"version", "enabled", "refresh", "platforms", "groups", "ignored", "thresholds", "updated_at", "updated_by"}).
-					AddRow(1, true, 300, `[{"platform":"openai","enabled":true,"models":["gpt-5.6-sol"]}]`, "{37,45}", "{quota_or_balance}", "{}", start, nil))
+					AddRow(1, true, 300, `[{"platform":"openai","enabled":true,"models":["gpt-5.6-sol"]}]`, "{37,45}", "{quota_or_balance}", `{"minimum_sample":1}`, start, nil))
 			mock.ExpectQuery(`(?s)SELECT usage_coverage_start.*FROM channel_monitor_v2_watermarks`).WillReturnRows(
 				sqlmock.NewRows([]string{"usage", "errors", "through", "computed", "backfill"}).AddRow(start, start, end, end, start))
 			mock.ExpectQuery(`(?s)SELECT m.bucket_start.*FROM channel_monitor_v2_metrics_rollup`).

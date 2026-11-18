@@ -114,35 +114,6 @@ func TestEffectiveSameAccountRetryLimitHonorsErrorCapAndDisabledAccount(t *testi
 	require.Equal(t, 0, effectiveSameAccountRetryLimit(&service.UpstreamFailoverError{SameAccountRetryMax: 1}, account))
 }
 
-func TestRetrySameAccountAllowed(t *testing.T) {
-	require.False(t, retrySameAccountAllowed(service.PlatformOpenAI, &service.UpstreamFailoverError{
-		StatusCode:             http.StatusTooManyRequests,
-		RetryableOnSameAccount: true,
-	}))
-	require.True(t, retrySameAccountAllowed(service.PlatformOpenAI, &service.UpstreamFailoverError{
-		StatusCode:             http.StatusServiceUnavailable,
-		RetryableOnSameAccount: true,
-	}))
-	require.True(t, retrySameAccountAllowed(service.PlatformGemini, &service.UpstreamFailoverError{
-		StatusCode:             http.StatusTooManyRequests,
-		RetryableOnSameAccount: true,
-	}))
-}
-
-func TestApplyRetryExhaustedDisposition(t *testing.T) {
-	mock := &mockTempUnscheduler{}
-	err := &service.UpstreamFailoverError{
-		StatusCode:             http.StatusUnauthorized,
-		RetryableOnSameAccount: true,
-	}
-
-	applyRetryExhaustedDisposition(context.Background(), mock, 739, err)
-
-	require.Len(t, mock.calls, 1)
-	require.Equal(t, int64(739), mock.calls[0].accountID)
-	require.Same(t, err, mock.calls[0].failoverErr)
-}
-
 // ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------

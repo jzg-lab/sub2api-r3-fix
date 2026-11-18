@@ -11,6 +11,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type fakeSettingRepo struct{ vals map[string]string }
+
+func (r *fakeSettingRepo) Get(_ context.Context, key string) (*Setting, error) {
+	value, err := r.GetValue(context.Background(), key)
+	if err != nil {
+		return nil, err
+	}
+	return &Setting{Key: key, Value: value}, nil
+}
+func (r *fakeSettingRepo) GetValue(_ context.Context, key string) (string, error) {
+	value, ok := r.vals[key]
+	if !ok {
+		return "", ErrSettingNotFound
+	}
+	return value, nil
+}
+func (r *fakeSettingRepo) Set(_ context.Context, key, value string) error {
+	if r.vals == nil {
+		r.vals = map[string]string{}
+	}
+	r.vals[key] = value
+	return nil
+}
+func (r *fakeSettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, ok := r.vals[key]; ok {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+func (r *fakeSettingRepo) SetMultiple(_ context.Context, values map[string]string) error {
+	if r.vals == nil {
+		r.vals = map[string]string{}
+	}
+	for key, value := range values {
+		r.vals[key] = value
+	}
+	return nil
+}
+func (r *fakeSettingRepo) GetAll(context.Context) (map[string]string, error) { return r.vals, nil }
+func (r *fakeSettingRepo) Delete(_ context.Context, key string) error {
+	delete(r.vals, key)
+	return nil
+}
+
 type cyberRuntimeSettingRepo struct {
 	fakeSettingRepo
 	getValue    func(context.Context, string) (string, error)
@@ -308,10 +355,8 @@ func TestCyberSessionBlockRuntimeSettingsSaveRejectsTTLOverflow(t *testing.T) {
 	require.Contains(t, err.Error(), "TTL")
 }
 
-func TestFindCyberSessionBlockedForRequestSettingsFailureRejects(t *testing.T) {
-	combo := &comboCacheAndStore{}
+func TestFindCyberSessionBlockedForRequestSettingsFailureFailsOpen(t *testing.T) {
 	svc := &OpenAIGatewayService{
-		cache: combo,
 		settingService: &SettingService{settingRepo: &cyberRuntimeSettingRepo{
 			getValue: func(context.Context, string) (string, error) {
 				return "", errors.New("settings offline")
@@ -319,16 +364,12 @@ func TestFindCyberSessionBlockedForRequestSettingsFailureRejects(t *testing.T) {
 		}},
 	}
 	c, body := newCyberBlockTestCtx(map[string]string{"session_id": "session"}, `{}`)
-	key, err := svc.FindCyberSessionBlockedForRequest(context.Background(), 1, c, body, "", "")
+	key := svc.FindCyberSessionBlockedForRequest(context.Background(), 1, c, body, "", "")
 	require.Empty(t, key)
-	require.ErrorIs(t, err, ErrCyberSessionProtectionUnavailable)
-	require.Zero(t, combo.store.findCalls)
-	require.Zero(t, combo.store.scopeCalls)
-	require.ErrorIs(t, svc.MarkCyberSessionBlocked(context.Background(), "", []string{"key"}), ErrCyberSessionProtectionUnavailable)
-	require.Empty(t, combo.store.blocked)
+	svc.MarkCyberSessionBlocked(context.Background(), CyberSessionBlock{APIKeyID: 1, Keys: []string{"key"}})
 }
 
-func TestFindCyberSessionBlockedForRequestSettingsDeadline(t *testing.T) {
+func TestFindCyberSessionBlockedForRequestSettingsFailureDoesNotBlockRequest(t *testing.T) {
 	drained := make(chan struct{})
 	svc := &OpenAIGatewayService{settingService: &SettingService{settingRepo: &cyberRuntimeSettingRepo{
 		getValue: func(ctx context.Context, _ string) (string, error) {
@@ -340,8 +381,8 @@ func TestFindCyberSessionBlockedForRequestSettingsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := svc.FindCyberSessionBlockedForRequest(ctx, 1, nil, nil, "", "")
-	require.ErrorIs(t, err, ErrCyberSessionProtectionUnavailable)
+	key := svc.FindCyberSessionBlockedForRequest(ctx, 1, nil, nil, "", "")
+	require.Empty(t, key)
 	require.Less(t, time.Since(start), time.Second)
 	select {
 	case <-drained:

@@ -118,7 +118,7 @@ WITH combined AS (
     COALESCE(NULLIF(o.platform, ''), NULLIF(g.platform, ''), NULLIF(a.platform, ''), '') AS platform,
     o.model AS model,
     o.duration_ms AS duration_ms,
-    NULL::INT AS first_token_ms,
+    o.time_to_first_token_ms AS first_token_ms,
     o.status_code AS status_code,
     o.id AS error_id,
     o.error_phase AS phase,

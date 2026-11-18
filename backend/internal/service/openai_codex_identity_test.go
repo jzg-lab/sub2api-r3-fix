@@ -13,8 +13,7 @@ func requireOpenAICodexProbeHeaders(t *testing.T, h http.Header) {
 	t.Helper()
 	require.Equal(t, codexCLIUserAgent, h.Get("User-Agent"))
 	require.Equal(t, openai.CodexDefaultOriginator, h.Get("Originator"))
-	// 真实 codex 客户端不发 version / openai-beta（2026-09-15 本机 0.151 抓包）：
-	// 合成请求只允许携带真实客户端会携带的头。
+	// Ordinary HTTP probes preserve the locally verified Codex header set.
 	require.Empty(t, h.Get("Version"))
 	require.Empty(t, h.Get("OpenAI-Beta"))
 	require.NotEmpty(t, h.Get("X-Codex-Window-ID"))
@@ -193,8 +192,8 @@ func TestEnforceCodexIdentityHeadersWithAccountOverrideUA(t *testing.T) {
 
 		enforceCodexIdentityHeadersWithUA(h, "codex-tui/0.125.0 (Mac OS X 14.0; arm64) iTerm")
 
-		require.Equal(t, "codex-tui", h.Get("originator"))
-		require.Equal(t, "codex-tui/0.200.1 (Mac OS X 14.0; arm64) iTerm", h.Get("user-agent"))
+		require.Equal(t, openai.CodexCLIOriginator, h.Get("originator"))
+		require.Equal(t, "codex_cli_rs/0.200.1 (Mac OS X 14.0; arm64) iTerm", h.Get("user-agent"))
 		require.Empty(t, h.Get("version"))
 	})
 }
@@ -365,7 +364,7 @@ func TestNormalizeCodexClientVersion(t *testing.T) {
 
 func TestBuildCodexCLIUserAgent(t *testing.T) {
 	require.Equal(t,
-		"codex-tui/0.200.1 (Mac OS 26.3.1; arm64) Apple_Terminal/466 (codex-tui; 0.200.1)",
+		"codex_cli_rs/0.200.1 (Mac OS 26.3.1; arm64) Apple_Terminal/466 (codex_cli_rs; 0.200.1)",
 		buildCodexCLIUserAgent("0.200.1"))
 	// 非法版本号必须回退到内置 UA，不能拼出畸形身份。
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent("bogus version"))

@@ -12,6 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestChannelMonitorV2DateBinOriginIsUTC(t *testing.T) {
+	require.Equal(t, "TIMESTAMPTZ '1970-01-01 00:00:00+00'", channelMonitorV2DateBinOrigin)
+	require.Equal(t, "date_bin($1::interval,m.bucket_start,TIMESTAMPTZ '1970-01-01 00:00:00+00')", channelMonitorV2DateBinExpr("m.bucket_start"))
+
+	for _, query := range []string{
+		channelMonitorV2FixedRollupBoundsSQL,
+		channelMonitorV2MetricsRollupSQL,
+		channelMonitorV2UserMetricsRollupSQL,
+		channelMonitorV2HistogramRollupSQL,
+		channelMonitorV2ErrorRollupSQL,
+	} {
+		require.Contains(t, query, channelMonitorV2DateBinOrigin)
+		require.NotContains(t, query, "TIMESTAMPTZ '1970-01-01'")
+	}
+}
+
 func TestChannelMonitorV2DisplayModelIsPlatformScoped(t *testing.T) {
 	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{
 		{Platform: "openai", Enabled: true, Models: []string{"shared", "gpt-5"}},
@@ -377,8 +393,6 @@ func TestChannelMonitorV2SQLTaxonomyContainsGoNeedles(t *testing.T) {
 		"invalid_request",
 		"model not supported",
 		"billing hard limit",
-		"insufficient account balance",
-		"insufficient_balance",
 		"no healthy upstream account",
 		"rate_limit",
 		"gateway timeout",
@@ -388,8 +402,6 @@ func TestChannelMonitorV2SQLTaxonomyContainsGoNeedles(t *testing.T) {
 	for _, needle := range needles {
 		require.Containsf(t, strings.ToLower(sql), strings.ToLower(needle), "SQL taxonomy missing Go needle %q", needle)
 	}
-	require.Equal(t, 2, service.ChannelMonitorV2TaxonomyVersion)
-	require.Contains(t, sql, "category, $3, COUNT(*)")
 }
 
 func TestApplyIgnoredErrorsAdjustsRatesKeepsAbsoluteVolume(t *testing.T) {
@@ -470,26 +482,4 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	// Group seeding without multi-select uses full config allow-list.
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
-}
-
-func TestModelOutputTPSUsesScopedValidTextRequests(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	defer db.Close()
-	r := &channelMonitorV2Repository{db: db}
-	start := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
-	filter := service.ChannelMonitorV2Filter{Start: start, End: start.Add(time.Hour), RestrictGroups: true, AllowedGroupIDs: []int64{7}}
-	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}}
-	mock.ExpectQuery(`(?s)SELECT m.platform.*NULLIF\(ul.duration_ms::double precision - ul.first_token_ms, 0\).*ul.first_token_ms >= 0.*ul.duration_ms > ul.first_token_ms.*ul.image_count = 0.*NOT IN \('image', 'video', 'audio'\).*m.platform = ANY\(\$3\).*m.group_id = ANY\(\$4\)`).
-		WithArgs(start, filter.End, pq.Array([]string{"openai"}), pq.Array([]int64{7})).
-		WillReturnRows(sqlmock.NewRows([]string{"platform", "group_id", "model", "sum", "count"}).AddRow("openai", 7, "gpt-5", 300.0, 3))
-	rates, err := r.loadModelOutputTPS(context.Background(), filter, cfg)
-	require.NoError(t, err)
-	require.Equal(t, 100.0, rates[channelMonitorV2MatrixKey{platform: "openai", groupID: 7, model: "gpt-5"}])
-	require.NoError(t, mock.ExpectationsWereMet())
-	// Empty permissions never issue a query or return another user's rate.
-	filter.AllowedGroupIDs = nil
-	rates, err = r.loadModelOutputTPS(context.Background(), filter, cfg)
-	require.NoError(t, err)
-	require.Empty(t, rates)
 }

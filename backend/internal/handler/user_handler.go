@@ -130,6 +130,11 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 	response.Success(c, profileResp)
 }
 
+// QualityTestTemplates exposes public question defaults, never admin account data.
+func (h *UserHandler) QualityTestTemplates(c *gin.Context) {
+	response.Success(c, service.DefaultManualQualityTemplates())
+}
+
 // ChangePassword handles changing user password
 // POST /api/v1/users/me/password
 func (h *UserHandler) ChangePassword(c *gin.Context) {
@@ -636,9 +641,4 @@ func buildUserProfileSourceContext(provider string) *userProfileSourceContext {
 		Provider: provider,
 		Source:   provider,
 	}
-}
-
-// QualityTestTemplates exposes public question defaults, never admin account data.
-func (h *UserHandler) QualityTestTemplates(c *gin.Context) {
-	response.Success(c, service.DefaultManualQualityTemplates())
 }

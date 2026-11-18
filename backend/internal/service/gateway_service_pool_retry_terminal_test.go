@@ -89,8 +89,8 @@ func TestGatewayService_TempUnscheduleRetryableError_Pool429UsesFallbackCooldown
 
 	require.Zero(t, repo.setErrorCalls)
 	require.Equal(t, 1, repo.setRateLimitCalls)
-	require.GreaterOrEqual(t, repo.lastReset, before.Add(299*time.Second))
-	require.Less(t, repo.lastReset, before.Add(301*time.Second))
+	require.GreaterOrEqual(t, repo.lastReset, before.Add((defaultRateLimit429CooldownSeconds-1)*time.Second))
+	require.Less(t, repo.lastReset, before.Add((defaultRateLimit429CooldownSeconds+1)*time.Second))
 	require.True(t, openAIGateway.isOpenAIAccountRuntimeBlocked(repo.accountsByID[accountID]))
 }
 

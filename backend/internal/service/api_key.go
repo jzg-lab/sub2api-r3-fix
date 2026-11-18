@@ -32,8 +32,8 @@ type APIKey struct {
 	UserID        int64
 	Key           string
 	Name          string
-	RouteGroupIDs []int64
 	GroupID       *int64
+	RouteGroupIDs []int64
 	Status        string
 	IPWhitelist   []string
 	IPBlacklist   []string

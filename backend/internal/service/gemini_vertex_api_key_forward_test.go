@@ -116,10 +116,6 @@ func (s *geminiVertex429SequenceUpstream) DoWithTLS(req *http.Request, proxyURL 
 	return s.Do(req, proxyURL, accountID, accountConcurrency)
 }
 
-func (s *geminiVertex429SequenceUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return s.Do(req, proxyURL, 0, accountConcurrency)
-}
-
 // Vertex 共享容量不足的 429 在同一账号上退避重试，成功后账号状态不变；绑定显式缓存的请求同样如此。
 func TestGeminiForwardNative_VertexSharedCapacity429RetriesSameAccountWithoutCooldown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -148,7 +144,7 @@ func TestGeminiForwardNative_VertexSharedCapacity429RetriesSameAccountWithoutCoo
 			repo := &geminiBoundCacheRateLimitRepo{}
 			svc := &GeminiMessagesCompatService{
 				httpUpstream:     upstream,
-				cfg:              &config.Config{},
+				cfg:              &config.Config{Gateway: config.GatewayConfig{MaxSameAccountRetriesGemini: 1}},
 				accountRepo:      repo,
 				rateLimitService: NewRateLimitService(repo, nil, &config.Config{}, nil, nil),
 			}
@@ -166,4 +162,8 @@ func TestGeminiForwardNative_VertexSharedCapacity429RetriesSameAccountWithoutCoo
 			require.Empty(t, repo.modelRateLimitCalls)
 		})
 	}
+}
+
+func (s *geminiVertex429SequenceUpstream) DoProbeWithTLS(req *http.Request, proxyURL string, accountConcurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.Do(req, proxyURL, 0, accountConcurrency)
 }

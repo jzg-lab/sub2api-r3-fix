@@ -69,6 +69,29 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundUsesModelRateLimit(t 
 	require.WithinDuration(t, time.Now().Add(upstreamModelNotFoundCooldown), call.resetAt, 5*time.Second)
 }
 
+func TestRateLimitService_HandleUpstreamError_APIKeyModel401UsesModelRateLimit(t *testing.T) {
+	repo := &modelNotFoundAccountRepoStub{}
+	svc := &RateLimitService{accountRepo: repo}
+	account := openAIModelNotFoundTempAccount()
+
+	handled := svc.HandleUpstreamError(
+		context.Background(),
+		account,
+		http.StatusUnauthorized,
+		http.Header{},
+		[]byte(`{"error":{"message":"unknown model definitely-not-real"}}`),
+		"definitely-not-real",
+	)
+
+	require.True(t, handled)
+	require.Zero(t, repo.tempCalls)
+	require.Len(t, repo.modelRateLimitCalls, 1)
+	call := repo.modelRateLimitCalls[0]
+	require.Equal(t, account.ID, call.accountID)
+	require.Equal(t, "definitely-not-real", call.scope)
+	require.Equal(t, upstreamModelNotFound401Reason, call.reason)
+}
+
 func TestRateLimitService_HandleUpstreamError_ModelNotFoundWriteFailureDoesNotTempUnschedule(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{modelRateLimitErr: errors.New("write failed")}
 	svc := &RateLimitService{accountRepo: repo}
@@ -523,17 +546,5 @@ func TestRateLimitService_HandleUpstreamError_ModelNotFoundImageModelStillCoolsD
 
 	require.True(t, handled)
 	require.Len(t, repo.modelRateLimitCalls, 1, "守卫只作用于 codex plan-gated 分支")
-	require.Equal(t, upstreamModelNotFoundReason, repo.modelRateLimitCalls[0].reason)
-}
-
-func TestUnsupportedModelCoolsOnlyCanonicalModel(t *testing.T) {
-	repo := &modelNotFoundAccountRepoStub{}
-	gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
-	account := &Account{ID: 123, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"alias": "upstream-model", "upstream-model": "must-not-remap"}}}
-	handled := gateway.handleOpenAIAccountUpstreamError(context.Background(), account, 404, http.Header{}, []byte(`{"error":{"message":"Model upstream-model is not supported by any configured account in this group"}}`), "upstream-model")
-	require.True(t, handled)
-	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "upstream-model", repo.modelRateLimitCalls[0].scope)
 	require.Equal(t, upstreamModelNotFoundReason, repo.modelRateLimitCalls[0].reason)
 }

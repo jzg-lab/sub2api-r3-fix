@@ -18,14 +18,11 @@ import (
 func TestOpenAIResponsesWebSocketRechecksCyberStoreBetweenTurns(t *testing.T) {
 	for _, tc := range []struct {
 		session string
-		user    bool
 	}{
 		{session: "original-session"},
 		{session: "different-session"},
-		{session: "original-session", user: true},
-		{session: "different-session", user: true},
 	} {
-		t.Run(fmt.Sprintf("%s/user=%t", tc.session, tc.user), func(t *testing.T) {
+		t.Run(tc.session, func(t *testing.T) {
 			upstreamDone := make(chan error, 1)
 			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, err := coderws.Accept(w, r, nil)
@@ -74,15 +71,11 @@ func TestOpenAIResponsesWebSocketRechecksCyberStoreBetweenTurns(t *testing.T) {
 			blockContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 			blockContext.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
 			key := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, blockContext, second)
-			if tc.user {
-				require.Positive(t, harness.apiKey.UserID)
-				key = service.CyberSessionUserExplicitBlockKey(harness.apiKey.UserID, blockContext, second)
-			}
 			require.NotEmpty(t, key)
 			store, ok := harness.gatewayCache.(service.CyberSessionBlockStore)
 			require.True(t, ok)
 			// Simulate another connection recording a block after this one opened.
-			require.NoError(t, store.SetCyberSessionBlocked(ctx, "", []string{key}, time.Minute))
+			require.NoError(t, store.SetCyberSessionBlocked(ctx, service.CyberSessionBlock{Keys: []string{key}}, time.Minute))
 			require.NoError(t, harness.clientConn.Write(ctx, coderws.MessageText, second))
 			_, event, err = harness.clientConn.Read(ctx)
 			require.NoError(t, err)

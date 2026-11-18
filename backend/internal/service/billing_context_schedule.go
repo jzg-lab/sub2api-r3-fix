@@ -294,20 +294,11 @@ func probeContextTier(seg contextSegment, resolved *ResolvedPricing, probe func(
 	if err != nil {
 		return tier, err
 	}
-	if resolved.SupportsCacheBreakdown {
-		tier.CacheWrite1h, err = probeComponentPrice(func(n int) UsageTokens {
-			return UsageTokens{CacheCreationTokens: n, CacheCreation1hTokens: n}
-		}, c, delta, probe)
-		if err != nil {
-			return tier, err
-		}
-		explicit1h := resolved.channelPricing != nil && resolved.channelPricing.CacheWrite1hPrice != nil
-		if iv := FindMatchingInterval(resolved.Intervals, c); iv != nil {
-			explicit1h = explicit1h || iv.CacheWrite1hPrice != nil
-		}
-		tier.CacheWrite1h = contextPricePtr(tier.CacheWrite1h, explicit1h)
-	}
 	// 输出价只随上下文所在档变化：固定上下文 c，对输出 token 数做差商（固定部分相减抵消）。
+	tier.CacheWrite1h, err = probeComponentPrice(func(n int) UsageTokens { return UsageTokens{CacheCreationTokens: n, CacheCreation1hTokens: n} }, c, delta, probe)
+	if err != nil {
+		return tier, err
+	}
 	tier.Output, err = probeComponentPrice(func(n int) UsageTokens { return UsageTokens{InputTokens: c, OutputTokens: n} }, 0, contextProbeDelta, probe)
 	if err != nil {
 		return tier, err
@@ -317,6 +308,7 @@ func probeContextTier(seg contextSegment, resolved *ResolvedPricing, probe func(
 	tier.Input = contextPricePtr(tier.Input, explicit.input)
 	tier.Output = contextPricePtr(tier.Output, explicit.output)
 	tier.CacheWrite = contextPricePtr(tier.CacheWrite, explicit.cacheWrite)
+	tier.CacheWrite1h = contextPricePtr(tier.CacheWrite1h, explicit.cacheWrite1h)
 	tier.CacheRead = contextPricePtr(tier.CacheRead, explicit.cacheRead)
 	return tier, nil
 }
@@ -360,7 +352,7 @@ func roundContextPrice(v float64) float64 {
 }
 
 type explicitContextFields struct {
-	input, output, cacheWrite, cacheRead bool
+	input, output, cacheWrite, cacheWrite1h, cacheRead bool
 }
 
 // explicitContextPricingFields 判断各项是否被分组卡/渠道定价（含命中区间）显式配置。
@@ -374,11 +366,13 @@ func explicitContextPricingFields(resolved *ResolvedPricing, contextTokens int) 
 	out.input = cp.InputPrice != nil
 	out.output = cp.OutputPrice != nil
 	out.cacheWrite = cp.CacheWritePrice != nil
+	out.cacheWrite1h = cp.CacheWrite1hPrice != nil || cp.CacheWritePrice != nil
 	out.cacheRead = cp.CacheReadPrice != nil
 	if iv := FindMatchingInterval(resolved.Intervals, contextTokens); iv != nil {
 		out.input = out.input || iv.InputPrice != nil
 		out.output = out.output || iv.OutputPrice != nil
 		out.cacheWrite = out.cacheWrite || iv.CacheWritePrice != nil
+		out.cacheWrite1h = out.cacheWrite1h || iv.CacheWrite1hPrice != nil || iv.CacheWritePrice != nil
 		out.cacheRead = out.cacheRead || iv.CacheReadPrice != nil
 	}
 	return out

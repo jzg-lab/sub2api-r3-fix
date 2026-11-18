@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,18 +182,30 @@ func (api *OAuthRefreshAPI) RecoverOpenAIError(ctx context.Context, account *Acc
 	if executor == nil {
 		return nil, errors.New("oauth refresh executor is nil")
 	}
-	executor = openAIErrorRecoveryExecutor{executor}
-	return api.refreshIfNeeded(ctx, account, executor, 0, true)
+	return api.refreshIfNeeded(ctx, account, openAIErrorRecoveryExecutor{
+		OAuthRefreshExecutor: executor,
+		expected:             snapshotOAuthRefreshAccount(account),
+	}, 0, true)
 }
 
-type openAIErrorRecoveryExecutor struct{ OAuthRefreshExecutor }
+type openAIErrorRecoveryExecutor struct {
+	OAuthRefreshExecutor
+	expected *Account
+}
 
 func (e openAIErrorRecoveryExecutor) NeedsRefresh(account *Account, _ time.Duration) bool {
-	return openAIAccessTokenExpired(account, time.Now()) && e.OAuthRefreshExecutor.NeedsRefresh(account, 0)
+	return account != nil && e.expected != nil && account.ID == e.expected.ID &&
+		reflect.DeepEqual(account.Credentials, e.expected.Credentials) &&
+		openAIAccessTokenExpired(account, time.Now()) && e.OAuthRefreshExecutor.NeedsRefresh(account, 0)
 }
 
-func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Account, executor OAuthRefreshExecutor,
-	refreshWindow time.Duration, recovery bool) (*OAuthRefreshResult, error) {
+func (api *OAuthRefreshAPI) refreshIfNeeded(
+	ctx context.Context,
+	account *Account,
+	executor OAuthRefreshExecutor,
+	refreshWindow time.Duration,
+	recovery bool,
+) (*OAuthRefreshResult, error) {
 	if api == nil || api.accountRepo == nil {
 		return nil, errors.New("oauth refresh account repository is not configured")
 	}
@@ -214,17 +227,15 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 
 	// 1. 获取分布式锁
 	if api.tokenCache != nil {
-		// Include acquisition latency in the lease budget, on every consumer
-		// path, not just the background refresher.
+		// The provider attempt must finish within the distributed lease.
 		leaseCtx, cancelLease := context.WithTimeout(ctx, clampRefreshAttemptToLockLease(api.lockTTL, api.lockTTL))
 		defer cancelLease()
 		ctx = leaseCtx
-		lease, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
+		lease, acquired, lockErr := acquireGeminiRefreshLock(ctx, api.tokenCache, cacheKey, api.lockTTL)
 		if lockErr != nil {
-			// A process-local lock cannot protect a rotating credential from
-			// another host. Do not consume it without the configured lock.
+			// A process-local mutex cannot protect a rotating credential across hosts.
 			return nil, errOAuthRefreshLockUnavailable
-		} else if lease == "" {
+		} else if !acquired {
 			// 锁被其他 worker 持有
 			return &OAuthRefreshResult{LockHeld: true}, nil
 		} else {
@@ -248,10 +259,6 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 	}
 	if freshAccount.ID != account.ID {
 		return nil, fmt.Errorf("%w: account identity mismatch", errOAuthRefreshAccountRereadFailed)
-	}
-	if recovery && (freshAccount.GetOpenAIRefreshToken() != account.GetOpenAIRefreshToken() ||
-		freshAccount.GetCredential("client_id") != account.GetCredential("client_id")) {
-		return &OAuthRefreshResult{Account: freshAccount}, nil
 	}
 	if recovery && (freshAccount.Platform != PlatformOpenAI || freshAccount.Type != AccountTypeOAuth ||
 		freshAccount.Status != StatusError || freshAccount.IsCredentialShadow() ||
@@ -289,7 +296,7 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 
 	// 4. 执行平台特定刷新逻辑
 	attemptedAccount := snapshotOAuthRefreshAccount(freshAccount)
-	newCredentials, refreshErr := executor.Refresh(ctx, freshAccount)
+	newCredentials, refreshErr := executor.Refresh(ctx, snapshotOAuthRefreshAccount(freshAccount))
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// A provider implementation may ignore cancellation and return late
 		// credentials. Never persist them after the attempt/cycle boundary.
@@ -341,15 +348,17 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 			}
 			if applied && api.tokenCache != nil {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRefreshPostPersistCleanupTimeout)
-				invalidateErr := NewCompositeTokenCacheInvalidator(api.tokenCache).InvalidateToken(cleanupCtx, attemptedAccount)
-				cancel()
-				if invalidateErr != nil {
-					slog.Warn("openai_recovery_token_cache_invalidation_failed", "account_id", attemptedAccount.ID)
+				if invalidateErr := NewCompositeTokenCacheInvalidator(api.tokenCache).InvalidateToken(cleanupCtx, attemptedAccount); invalidateErr != nil {
+					slog.Warn("openai_recovery_token_cache_invalidation_failed", "account_id", attemptedAccount.ID, "error", invalidateErr)
 				}
+				cancel()
 			}
 			current, err := api.accountRepo.GetByID(ctx, freshAccount.ID)
-			if err != nil {
-				return nil, fmt.Errorf("OpenAI recovery durable state unavailable")
+			if err != nil || current == nil {
+				if err != nil {
+					return nil, fmt.Errorf("OpenAI recovery durable state unavailable: %w", err)
+				}
+				return nil, fmt.Errorf("OpenAI recovery durable state unavailable: account not found")
 			}
 			return &OAuthRefreshResult{Refreshed: applied, Account: current}, nil
 		} else if freshAccount.IsGrokOAuth() {
@@ -409,18 +418,14 @@ func (api *OAuthRefreshAPI) refreshIfNeeded(ctx context.Context, account *Accoun
 			// while the provider call was in flight. Return the durable row so
 			// post-refresh cache publication cannot restore that stale snapshot.
 			freshAccount = durableAccount
-		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, attemptedAccount, newCredentials); updateErr != nil {
+		} else if updateErr := persistAccountCredentials(ctx, api.accountRepo, freshAccount, newCredentials); updateErr != nil {
 			slog.Error("oauth_refresh_update_failed",
 				"account_id", freshAccount.ID,
 				"error", updateErr,
 			)
-			// The upstream has already rotated credentials. A CAS miss or local
-			// write failure must not replay the now-consumed refresh token.
 			return nil, &providerCycleContainmentRefreshError{
-				err: fmt.Errorf("%w: %w", errOAuthRefreshCredentialPersist, updateErr),
+				err: errors.Join(errOAuthRefreshCredentialPersist, updateErr),
 			}
-		} else {
-			freshAccount = attemptedAccount
 		}
 	}
 
@@ -444,7 +449,7 @@ func (api *OAuthRefreshAPI) releaseRefreshLock(parent context.Context, cacheKey,
 	}
 	ctx, cancel := context.WithTimeout(cleanupParent, defaultRefreshLockReleaseTimeout)
 	defer cancel()
-	if err := api.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease); err != nil {
+	if err := releaseGeminiRefreshLock(ctx, api.tokenCache, cacheKey, lease); err != nil {
 		slog.Warn("oauth_refresh_lock_release_failed", "cache_key", cacheKey, "error", err)
 	}
 }

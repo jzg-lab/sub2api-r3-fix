@@ -45,6 +45,7 @@ func (r guardianAffinityGroupRepo) GetByIDLite(context.Context, int64) (*Group, 
 
 func guardianAffinityTestContext(t *testing.T, model, subagent, parentHeader, metadata string) context.Context {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
@@ -78,6 +79,7 @@ func TestWithOpenAIGuardianParentAffinity_RequiresUnambiguousReviewLineage(t *te
 	})
 
 	t.Run("websocket envelope metadata", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		c.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/responses", nil)

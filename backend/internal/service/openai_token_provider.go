@@ -209,9 +209,9 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		// Backward-compatible test path when refreshAPI is not injected.
 		p.metrics.refreshRequests.Add(1)
 		p.metrics.touchNow()
-		lease, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
-		if lockErr == nil && lease != "" {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, lease) }()
+		lease, acquired, lockErr := acquireGeminiRefreshLock(ctx, p.tokenCache, cacheKey, 30*time.Second)
+		if lockErr == nil && acquired {
+			defer func() { _ = releaseGeminiRefreshLock(ctx, p.tokenCache, cacheKey, lease) }()
 		} else if lockErr != nil {
 			p.metrics.lockAcquireFailure.Add(1)
 			p.metrics.touchNow()
@@ -239,6 +239,10 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
 		return "", errors.New("access_token not found in credentials")
+	}
+	if !account.IsOpenAIPersonalAccessToken() && strings.TrimSpace(account.GetOpenAIRefreshToken()) != "" &&
+		(expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew) {
+		return "", errors.New("openai access_token is expired or requires refresh")
 	}
 
 	// 3) Populate cache with TTL.

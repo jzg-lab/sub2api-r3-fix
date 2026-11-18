@@ -21,7 +21,7 @@ func (r *freshnessAccountRepo) GetByID(context.Context, int64) (*Account, error)
 type freshnessTokenCache struct {
 	GeminiTokenCache
 	value   string
-	lease   string
+	locked  bool
 	lockErr error
 	sets    int
 }
@@ -36,11 +36,11 @@ func (c *freshnessTokenCache) SetAccessToken(_ context.Context, _ string, value 
 	return nil
 }
 
-func (c *freshnessTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
-	return c.lease, c.lockErr
+func (c *freshnessTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+	return c.locked, c.lockErr
 }
 
-func (c *freshnessTokenCache) ReleaseRefreshLock(context.Context, string, string) error {
+func (c *freshnessTokenCache) ReleaseRefreshLock(context.Context, string) error {
 	return nil
 }
 
@@ -91,7 +91,7 @@ func TestOpenAITokenFreshnessCacheCannotBypassRefresh(t *testing.T) {
 			current := freshnessAccount(time.Now().Add(time.Hour).Format(time.RFC3339))
 			current.Credentials["access_token"] = "fixture-new"
 			repo := &freshnessAccountRepo{account: current}
-			cache := &freshnessTokenCache{value: old.GetOpenAIAccessToken(), lease: "fixture-lease"}
+			cache := &freshnessTokenCache{value: old.GetOpenAIAccessToken(), locked: true}
 			provider := NewOpenAITokenProvider(repo, cache, nil)
 			provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), &freshnessExecutor{})
 			value, err := provider.GetAccessToken(t.Context(), old)
@@ -113,7 +113,7 @@ func TestOpenAITokenFreshnessNeverFallsBackToExpired(t *testing.T) {
 				cache.lockErr = errors.New("fixture unavailable")
 			}
 			if failure == "refresh failed" {
-				cache.lease = "fixture-lease"
+				cache.locked = true
 				executor.err = errors.New("fixture refresh unavailable")
 			}
 			provider := NewOpenAITokenProvider(repo, cache, nil)

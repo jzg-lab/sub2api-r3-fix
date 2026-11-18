@@ -600,7 +600,10 @@ func releaseUpstreamBillingProbeLeaderLock(release func(), releaseAt time.Time) 
 		return
 	}
 	done := beginDeploymentAsync()
-	time.AfterFunc(delay, func() { defer done(); release() })
+	time.AfterFunc(delay, func() {
+		defer done()
+		release()
+	})
 }
 
 func (s *UpstreamBillingProbeService) SetAccountEnabled(ctx context.Context, accountID int64, enabled bool) error {

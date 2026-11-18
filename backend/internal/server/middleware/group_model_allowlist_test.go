@@ -98,22 +98,6 @@ func TestGroupModelAllowlistDisabledDoesNotReadBody(t *testing.T) {
 	}
 }
 
-func TestGroupModelAllowlistDefersOnlySupportedSmartRouteEndpoints(t *testing.T) {
-	key := allowlistAPIKey(true, "allowed")
-	key.RouteGroupIDs = []int64{1, 2}
-	router, _ := newGroupModelAllowlistTestRouter(key, "/v1")
-	for _, path := range []string{"/v1/messages", "/v1/responses", "/v1/chat/completions"} {
-		if rec := doJSON(t, router, http.MethodPost, path, `{"model":"backup-only"}`); rec.Code != http.StatusOK {
-			t.Fatalf("smart route must reach candidate admission: %s: %s", path, rec.Body.String())
-		}
-	}
-	for _, path := range []string{"/v1/embeddings", "/v1/images/edits"} {
-		if rec := doJSON(t, router, http.MethodPost, path, `{"model":"backup-only"}`); rec.Code != http.StatusNotFound {
-			t.Fatalf("non-smart route must enforce primary allowlist: %s: %s", path, rec.Body.String())
-		}
-	}
-}
-
 // 白名单开启但请求不携带模型时同样不应读体之外产生副作用：读体是必要开销，
 // 这里验证读取后请求体被完整回填（handler 可零拷贝重读）。
 func TestGroupModelAllowlistEnabledModelFreeRequestRestoresBody(t *testing.T) {

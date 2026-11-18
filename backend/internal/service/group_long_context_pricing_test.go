@@ -35,10 +35,10 @@ func TestGroupLongContextPricingBoundariesAndExemptions(t *testing.T) {
 	base.LongContextInputThreshold, base.LongContextInputMultiplier, base.LongContextOutputMultiplier = 200000, 2, 1.5
 	r := NewModelPricingResolver(nil, bs)
 	for _, tc := range []struct {
-		name                                  string
-		config                                GroupLongContextPricing
-		tokens                                UsageTokens
-		disabled, accountOptOut, exempt, want bool
+		name                                                string
+		config                                              GroupLongContextPricing
+		tokens                                              UsageTokens
+		disabled, accountOptOut, accountOptIn, exempt, want bool
 	}{
 		{name: "old config", tokens: UsageTokens{InputTokens: 129000}},
 		{name: "old threshold still applies", tokens: UsageTokens{InputTokens: 200001}, want: true},
@@ -50,6 +50,7 @@ func TestGroupLongContextPricingBoundariesAndExemptions(t *testing.T) {
 		{name: "model only", config: GroupLongContextPricing{ModelThresholds: map[string]int{"claude-sonnet-4": 128000}}, tokens: UsageTokens{InputTokens: 128001}, want: true},
 		{name: "other model ignored", config: GroupLongContextPricing{ModelThresholds: map[string]int{"other-model": 128000}}, tokens: UsageTokens{InputTokens: 128001}},
 		{name: "group disabled", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, disabled: true},
+		{name: "account opt in overrides disabled group", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, disabled: true, accountOptIn: true, want: true},
 		{name: "account opt out", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, accountOptOut: true},
 		{name: "subscription exempt", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, exempt: true},
 	} {
@@ -58,6 +59,10 @@ func TestGroupLongContextPricingBoundariesAndExemptions(t *testing.T) {
 			input := CostInput{Ctx: context.Background(), Model: "claude-sonnet-4", Group: group, Tokens: tc.tokens, RateMultiplier: 2.5, Resolver: r, DisableModelLongContextPricing: tc.exempt}
 			if tc.accountOptOut {
 				flag := false
+				input.LongContextBillingEnabled = &flag
+			}
+			if tc.accountOptIn {
+				flag := true
 				input.LongContextBillingEnabled = &flag
 			}
 			cost, err := bs.CalculateCostUnified(input)

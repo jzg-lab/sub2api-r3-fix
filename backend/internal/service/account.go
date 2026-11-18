@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -82,6 +83,19 @@ type Account struct {
 	AccountGroups []AccountGroup
 	GroupIDs      []int64
 	Groups        []*Group
+
+	// model_mapping 热路径缓存（非持久化字段）
+	modelMappingCache       map[string]string
+	modelMappingCacheReady  bool
+	modelMappingCacheRawPtr uintptr
+	modelMappingCacheRawLen int
+	// header_overrides 热路径缓存（非持久化字段，同 model_mapping 缓存先例）
+	headerOverrideCache               map[string]string
+	headerOverrideCacheReady          bool
+	headerOverrideCacheCredentialsPtr uintptr
+	headerOverrideCacheRawPtr         uintptr
+	headerOverrideCacheRawLen         int
+	headerOverrideCacheRawSig         uint64
 }
 
 type OpenAIEndpointCapability string
@@ -204,7 +218,7 @@ func (a *Account) IsSchedulable() bool {
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
 		return false
 	}
-	if a.IsAPIKeyOrBedrock() && a.IsQuotaExceeded() {
+	if a.SupportsAccountQuota() && a.IsQuotaExceeded() {
 		return false
 	}
 	return true
@@ -620,10 +634,37 @@ func stringMappingFromRaw(raw any) map[string]string {
 }
 
 func (a *Account) GetModelMapping() map[string]string {
-	// Account snapshots are shared and copied by value. Keep reads free of
-	// receiver writes; rebuilding is linear, unlike the old sorted signature.
 	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
+	if a.modelMappingCacheReady && a.modelMappingCacheRawPtr == mapPtr(rawMapping) &&
+		a.modelMappingCacheRawLen == len(rawMapping) {
+		return maps.Clone(a.modelMappingCache)
+	}
+	// Unprepared accounts may already be shared or copied; reads must not mutate them.
 	return a.resolveModelMapping(rawMapping)
+}
+
+// PrepareSharedSnapshot 预解析模型映射，并把账号标记为只读共享母本。
+// 母本按值复制出的副本与母本共用 Credentials 及其中 model_mapping 的同一 map：
+// 这些内层 map 在运行期不被原地修改，母本留在缓存期间持有这些 map，其地址不会被复用，
+// 因此副本在指针与长度都匹配时直接复用预解析结果，不计算签名；
+// 副本替换 Credentials 等导致任一项不匹配时直接解析，不修改缓存。
+// 只能由构造该账号的 goroutine 在其发布给其它 goroutine 之前调用，发布后母本不得再被修改。
+func (a *Account) PrepareSharedSnapshot() {
+	if a == nil {
+		return
+	}
+	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
+	a.modelMappingCache = a.resolveModelMapping(rawMapping)
+	a.modelMappingCacheReady = true
+	a.modelMappingCacheRawPtr = mapPtr(rawMapping)
+	a.modelMappingCacheRawLen = len(rawMapping)
+	a.headerOverrideCache = a.GetHeaderOverrides()
+	rawHeaders, _ := a.Credentials[credKeyHeaderOverrides].(map[string]any)
+	a.headerOverrideCacheReady = true
+	a.headerOverrideCacheCredentialsPtr = mapPtr(a.Credentials)
+	a.headerOverrideCacheRawPtr = mapPtr(rawHeaders)
+	a.headerOverrideCacheRawLen = len(rawHeaders)
+	a.headerOverrideCacheRawSig = modelMappingSignature(rawHeaders)
 }
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {
@@ -679,8 +720,67 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 	return nil
 }
 
-// antigravityDefaultPassthroughModels are runtime-injected model aliases that
-// keep saved mappings usable as the upstream catalog gains new Gemini variants.
+func mapPtr(m map[string]any) uintptr {
+	if m == nil {
+		return 0
+	}
+	return reflect.ValueOf(m).Pointer()
+}
+
+const (
+	modelMappingSignatureFNVOffset = 14695981039346656037
+	modelMappingSignatureFNVPrime  = 1099511628211
+)
+
+// modelMappingSignature 计算原始映射内容的进程内校验值，与 map 遍历顺序无关且不分配内存。
+// 每个条目把 key、分隔字节 0 与 value（string 写其字节，其它类型写标记字节 1）
+// 放进同一个 FNV-1a 哈希并经 fmix64 收尾，再对所有条目求和；
+// key 与 value 同在一个条目哈希里，交换两个 key 的 value 会改变结果。
+func modelMappingSignature(rawMapping map[string]any) uint64 {
+	if len(rawMapping) == 0 {
+		return 0
+	}
+	var sum uint64
+	for k, v := range rawMapping {
+		h := uint64(modelMappingSignatureFNVOffset)
+		h = fnv1aString(h, k)
+		h = fnv1aByte(h, 0)
+		if s, ok := v.(string); ok {
+			h = fnv1aString(h, s)
+		} else {
+			h = fnv1aByte(h, 1)
+		}
+		sum += fmix64(h)
+	}
+	return sum
+}
+
+func fnv1aString(h uint64, s string) uint64 {
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= modelMappingSignatureFNVPrime
+	}
+	return h
+}
+
+func fnv1aByte(h uint64, b byte) uint64 {
+	h ^= uint64(b)
+	h *= modelMappingSignatureFNVPrime
+	return h
+}
+
+// fmix64 是 MurmurHash3 的 64 位收尾函数，使条目哈希各位充分混合后再求和。
+func fmix64(h uint64) uint64 {
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return h
+}
+
+// antigravityDefaultPassthroughModels 是 Antigravity 显式 model_mapping 运行时补齐的默认透传条目：
+// 让新模型发布前保存的映射也能调用这些模型。
 var antigravityDefaultPassthroughModels = []string{
 	"gemini-3-flash", "gemini-3.1-pro-high", "gemini-3.1-pro-low",
 	"gemini-3.6-flash", "gemini-3.6-flash-high", "gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-tiered",
@@ -848,6 +948,9 @@ func (a *Account) isModelMappingSupported(requestedModel string) bool {
 	if len(mapping) == 0 {
 		if a.IsOpenAIOAuth() {
 			return isOpenAIOAuthServableModel(requestedModel)
+		}
+		if a.Platform == PlatformDeepseek {
+			return isDeepseekServableModel(requestedModel)
 		}
 		return true // 无映射 = 允许所有
 	}
@@ -1294,9 +1397,24 @@ func (a *Account) IsBedrockAPIKey() bool {
 	return a.IsBedrock() && a.GetCredential("auth_mode") == "apikey"
 }
 
-// IsAPIKeyOrBedrock 返回账号类型是否支持配额和池模式等特性
+// IsAPIKeyOrBedrock 返回账号类型是否支持池模式等特性（账号配额判定见 SupportsAccountQuota）
 func (a *Account) IsAPIKeyOrBedrock() bool {
 	return a.Type == AccountTypeAPIKey || a.Type == AccountTypeBedrock
+}
+
+// AccountTypeSupportsQuota 返回账号类型是否支持账号配额（quota_limit 及日/周额度、quota_used 累加、超限停调度）。
+// 在 apikey/bedrock 之外额外放开 Vertex service_account；池模式等其它特性仍只看 IsAPIKeyOrBedrock。
+func AccountTypeSupportsQuota(accountType string) bool {
+	switch strings.ToLower(accountType) {
+	case AccountTypeAPIKey, AccountTypeBedrock, AccountTypeServiceAccount:
+		return true
+	}
+	return false
+}
+
+// SupportsAccountQuota 返回账号是否支持账号配额，类型集合见 AccountTypeSupportsQuota。
+func (a *Account) SupportsAccountQuota() bool {
+	return AccountTypeSupportsQuota(a.Type)
 }
 
 func (a *Account) IsOpenAI() bool {
@@ -1304,7 +1422,7 @@ func (a *Account) IsOpenAI() bool {
 }
 
 func (a *Account) IsOpenAILongContextBillingEnabled() bool {
-	if a == nil || !a.IsOpenAI() || a.Extra == nil {
+	if a == nil || !a.IsOpenAI() || (a.Type != AccountTypeAPIKey && a.QuotaDimension != QuotaDimensionSpark) || a.Extra == nil {
 		return false
 	}
 	enabled, ok := a.Extra[openAILongContextBillingEnabledKey].(bool)
@@ -1793,6 +1911,12 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 	}
 	switch capability {
 	case OpenAIEndpointCapabilityChatCompletions:
+	case OpenAIEndpointCapabilitySeedance:
+		if a.Platform != PlatformOpenAI || a.Type != AccountTypeAPIKey || strings.TrimSpace(a.GetCredential("base_url")) == "" {
+			return false
+		}
+		configured, found := a.openAIEndpointCapabilitySet()
+		return found && configured[string(capability)]
 	case OpenAIEndpointCapabilityLive:
 		return a.Platform == PlatformOpenAI &&
 			a.Type == AccountTypeOAuth &&
@@ -1864,7 +1988,9 @@ func (a *Account) GrokMediaGenerationEligibility() (bool, string) {
 		return false, "billing_free_tier"
 	}
 	if !grokBillingHasAuthoritativeQuota(billing) {
-		return false, "billing_inconclusive"
+		// An incomplete successful response does not establish that the
+		// account is ineligible; keep it routable for compatibility.
+		return true, "billing_inconclusive"
 	}
 	return true, "eligible"
 }
@@ -1951,6 +2077,8 @@ func (a *Account) SupportsOpenAIImageCapability(capability OpenAIImagesCapabilit
 		return false
 	}
 	switch capability {
+	case OpenAIImagesCapabilityAPIKey:
+		return a.Type == AccountTypeAPIKey
 	case OpenAIImagesCapabilityBasic, OpenAIImagesCapabilityNative:
 		return a.Type == AccountTypeOAuth || a.Type == AccountTypeSetupToken || a.Type == AccountTypeAPIKey
 	default:

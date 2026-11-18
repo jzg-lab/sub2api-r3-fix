@@ -528,6 +528,9 @@ func TestFrontendServer_Middleware(t *testing.T) {
 			"/antigravity/test",
 			"/setup/init",
 			"/health",
+			"/.well-known/oauth-protected-resource",
+			"/.well-known/oauth-protected-resource/api/v1/mcp",
+			"/.well-known/oauth-authorization-server",
 			"/responses",
 			"/responses/compact",
 			"/chat/completions",
@@ -626,9 +629,6 @@ func TestFrontendServer_Middleware(t *testing.T) {
 			"/dashboard",
 			"/users/123",
 			"/settings/profile",
-			"/monitor?range=24h&monitor_view=cards",
-			"/monitor?range=24h&monitor_view=details",
-			"/admin/openai-downgrade",
 		}
 
 		for _, path := range spaPaths {
@@ -830,6 +830,9 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 			"/antigravity/test",
 			"/setup/init",
 			"/health",
+			"/.well-known/oauth-protected-resource",
+			"/.well-known/oauth-protected-resource/api/v1/mcp",
+			"/.well-known/oauth-authorization-server",
 			"/responses",
 			"/responses/compact",
 			"/chat/completions",

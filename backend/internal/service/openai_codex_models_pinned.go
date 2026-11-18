@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
@@ -20,9 +21,19 @@ import (
 // or expired members are skipped, and remaining IDs are no longer bound).
 var ErrNoPinnedCodexModelsAccounts = errors.New("no usable pinned codex models manifest accounts")
 
-// Pinned discovery keeps configuration order, but cannot bypass account cooldowns.
+// isPinnedCodexModelsAccountUsable decides whether a pinned account may fetch
+// the manifest. Deliberately narrower than Account.IsSchedulable(): priority,
+// load factor, rate-limit windows, overload windows and temporary
+// unschedulable cooldowns are ignored, because the pinned mode exists to keep
+// the manifest deterministic regardless of scheduler state.
 func isPinnedCodexModelsAccountUsable(account *Account) bool {
-	return account != nil && account.IsSchedulable()
+	if account == nil || !account.IsActive() || !account.Schedulable {
+		return false
+	}
+	if account.AutoPauseOnExpired && account.ExpiresAt != nil && !account.ExpiresAt.After(time.Now()) {
+		return false
+	}
+	return true
 }
 
 // mergeCodexModelsManifestBodies merges manifest bodies from the pinned
@@ -102,7 +113,7 @@ func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 
 // FetchPinnedCodexModelsManifest fetches the Codex models manifest using only
 // the accounts pinned on the group's codex_models_manifest_config, ignoring
-// scheduler priorities and load factors. Existing availability guards apply. All
+// scheduler priorities, load factors and rate-limit/overload windows. All
 // usable accounts are fetched concurrently; successful bodies are merged by
 // slug with config-order precedence. It returns the merged manifest and the
 // first successful account (in config order) for ops attribution.
@@ -206,13 +217,6 @@ func (s *OpenAIGatewayService) fetchPinnedOpenAIModels(ctx context.Context, grou
 			continue
 		}
 		if !isPinnedCodexModelsAccountUsable(&member) {
-			continue
-		}
-		if _, err := openAIOAuthProxySnapshotURL(member.Proxy, member.ProxyID); err != nil ||
-			s.isOpenAIProxyStreamQuarantined(ctx, &member) ||
-			s.isOpenAIAccountRequestRuntimeBlocked(&member, "") ||
-			s.isOpenAIAccountBlockedBySchedulingThreshold(ctx, &member) ||
-			!parentHealthyForShadow(&member, s.parentAccountLookup(ctx)) {
 			continue
 		}
 		usable = append(usable, member)

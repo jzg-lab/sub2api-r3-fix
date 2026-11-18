@@ -68,7 +68,7 @@ func TestOpenAIRequestView_ApplyPatches(t *testing.T) {
 	view.MarkPatchDelete("previous_response_id")
 	view.MarkPatchSet("reasoning.effort", "none")
 
-	patched, err := view.ApplyPatches()
+	patched, err := view.ApplyPatches(context.Background())
 	require.NoError(t, err)
 	require.JSONEq(t, `{"model":"gpt-5.1","reasoning":{"effort":"none"},"input":[{"type":"message","content":"hi"}]}`, string(patched))
 }
@@ -78,7 +78,7 @@ func TestOpenAIRequestView_RejectsEscapedPatchPath(t *testing.T) {
 	view.MarkPatchSet(`metadata.user\.id`, "new")
 
 	require.False(t, view.HasPatches())
-	_, err := view.ApplyPatches()
+	_, err := view.ApplyPatches(context.Background())
 	require.Error(t, err)
 }
 
@@ -87,7 +87,7 @@ func TestOpenAIRequestView_ApplyPatchesDisabled(t *testing.T) {
 	view.MarkPatchSet("model", "gpt-5.1")
 	view.DisablePatches()
 
-	_, err := view.ApplyPatches()
+	_, err := view.ApplyPatches(context.Background())
 	require.Error(t, err)
 }
 
@@ -103,6 +103,7 @@ func TestOpenAIRequestView_HasPatches(t *testing.T) {
 }
 
 func TestOpenAIGatewayService_Forward_APIKeyMissingInstructionsKeepsLargeInputRaw(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -144,6 +145,7 @@ func TestOpenAIGatewayService_Forward_APIKeyMissingInstructionsKeepsLargeInputRa
 }
 
 func TestOpenAIGatewayService_Forward_DecodedMutationKeepsLaterFieldDeletes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -181,8 +183,9 @@ func TestOpenAIGatewayService_Forward_DecodedMutationKeepsLaterFieldDeletes(t *t
 }
 
 // #4417：/v1/responses 原生转发路径需将 Chat-Completions 风格的 max_tokens 归一化为
-// max_output_tokens；缓存选项只向支持它的新模型透传。
-func TestOpenAIGatewayService_Forward_NormalizesMaxTokensAndGatesPromptCacheOptions(t *testing.T) {
+// max_output_tokens，并移除兼容上游不接受的 prompt_cache_options。
+func TestOpenAIGatewayService_Forward_NormalizesMaxTokensAndStripsPromptCacheOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	runForward := func(t *testing.T, body []byte) []byte {
 		t.Helper()
@@ -219,20 +222,12 @@ func TestOpenAIGatewayService_Forward_NormalizesMaxTokensAndGatesPromptCacheOpti
 		return upstream.lastBody
 	}
 
-	t.Run("旧模型移除 prompt_cache_options", func(t *testing.T) {
+	t.Run("max_tokens 归一化为 max_output_tokens 并移除 prompt_cache_options", func(t *testing.T) {
 		out := runForward(t, []byte(`{"model":"gpt-5.4","stream":false,"max_tokens":256,"prompt_cache_options":{"enabled":true},"input":[{"type":"message","content":"hi"}]}`))
 		require.Equal(t, int64(256), gjson.GetBytes(out, "max_output_tokens").Int())
 		require.False(t, gjson.GetBytes(out, "max_tokens").Exists())
 		require.False(t, gjson.GetBytes(out, "prompt_cache_options").Exists())
 	})
-
-	for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-terra-high", "gpt-5.6-luna", "gpt-6-astra"} {
-		t.Run(model+" 保留 prompt_cache_options", func(t *testing.T) {
-			body := []byte(`{"model":"` + model + `","stream":false,"prompt_cache_options":{"mode":"manual"},"input":[{"type":"message","content":"hi"}]}`)
-			out := runForward(t, body)
-			require.Equal(t, "manual", gjson.GetBytes(out, "prompt_cache_options.mode").String())
-		})
-	}
 
 	t.Run("同时存在时保留 max_output_tokens 丢弃 max_tokens", func(t *testing.T) {
 		out := runForward(t, []byte(`{"model":"gpt-5.4","stream":false,"max_tokens":256,"max_output_tokens":512,"input":[{"type":"message","content":"hi"}]}`))
@@ -242,6 +237,7 @@ func TestOpenAIGatewayService_Forward_NormalizesMaxTokensAndGatesPromptCacheOpti
 }
 
 func TestOpenAIGatewayService_Forward_MappedImageModelUsesImageGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -298,6 +294,7 @@ func TestOpenAIGatewayService_Forward_MappedImageModelUsesImageGate(t *testing.T
 }
 
 func TestOpenAIGatewayService_Forward_TextResponsesSetsBillingModelToMappedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -340,6 +337,7 @@ func TestOpenAIGatewayService_Forward_TextResponsesSetsBillingModelToMappedModel
 }
 
 func TestOpenAIGatewayService_Forward_TextResponsesWithoutMappingKeepsRequestedBillingModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -376,6 +374,7 @@ func TestOpenAIGatewayService_Forward_TextResponsesWithoutMappingKeepsRequestedB
 }
 
 func TestOpenAIGatewayService_Forward_TextResponsesBillingModelMatchesChatCompletions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
 	account := &Account{
@@ -433,6 +432,7 @@ func TestOpenAIGatewayService_Forward_TextResponsesBillingModelMatchesChatComple
 }
 
 func TestOpenAIGatewayService_Forward_TextDataImageDoesNotForceMapMarshal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -468,6 +468,7 @@ func TestOpenAIGatewayService_Forward_TextDataImageDoesNotForceMapMarshal(t *tes
 }
 
 func TestOpenAIGatewayService_Forward_ImageToolBillingDoesNotForceFullDecode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -508,6 +509,7 @@ func TestOpenAIGatewayService_Forward_ImageToolBillingDoesNotForceFullDecode(t *
 }
 
 func TestOpenAIGatewayService_Forward_ImageToolWithImageOnlyModelIsNormalized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -543,6 +545,7 @@ func TestOpenAIGatewayService_Forward_ImageToolWithImageOnlyModelIsNormalized(t 
 }
 
 func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDoesNotDecodeBeforeError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		responses: []*http.Response{
 			{
@@ -588,69 +591,8 @@ func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDoesNotDecodeBeforeError(
 	require.Equal(t, "summary_text", gjson.GetBytes(upstream.bodies[1], "input.0.summary.0.type").String())
 }
 
-func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureRecovery(t *testing.T) {
-	const signatureMessage = "The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed."
-	const history = `[{"type":"reasoning","encrypted_content":"stale","summary":[{"type":"summary_text","text":"keep"}]},{"type":"message","role":"user","content":"hello"},{"type":"function_call_output","call_id":"call_1","output":"result"}]`
-	for _, tc := range []struct {
-		name, code, message, input string
-		status, attempts           int
-		repeatedError              bool
-	}{
-		{"recognized", "thinking_signature_invalid", signatureMessage, history, 400, 2, false},
-		{"bounded once", "thinking_signature_invalid", signatureMessage, history, 400, 2, true},
-		{"unrelated signature", "thinking_signature_invalid", "Invalid signature", history, 400, 1, false},
-		{"wrong code", "invalid_request_error", signatureMessage, history, 400, 1, false},
-		{"wrong status", "thinking_signature_invalid", signatureMessage, history, 403, 1, false},
-		{"protection unavailable", "server_error", "response protection is unavailable", history, 400, 1, false},
-		{"no encrypted history", "thinking_signature_invalid", signatureMessage, `[{"type":"message","role":"user","content":"hello"}]`, 400, 1, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			errorBody, err := json.Marshal(map[string]any{"error": map[string]any{"code": tc.code, "message": tc.message}})
-			require.NoError(t, err)
-			response := func(status int, body string) *http.Response {
-				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
-			}
-			second := response(http.StatusOK, `{"id":"resp_fixture","usage":{"input_tokens":1,"output_tokens":2}}`)
-			if tc.repeatedError {
-				second = response(tc.status, string(errorBody))
-			}
-			upstream := &httpUpstreamRecorder{responses: []*http.Response{response(tc.status, string(errorBody)), second}}
-			cfg := &config.Config{}
-			cfg.Security.URLAllowlist.Enabled = false
-			svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
-			account := &Account{
-				ID: 10, Name: "apikey-fixture", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
-				Credentials: map[string]any{"api_key": t.Name(), "base_url": "https://example.com"},
-				Extra:       map[string]any{"use_responses_api": true},
-			}
-			c, _ := gin.CreateTestContext(httptest.NewRecorder())
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
-			body := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"xhigh"},"stream":false,"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":` + tc.input + `}`)
-			result, err := svc.Forward(context.Background(), c, account, body)
-			if tc.attempts == 2 && !tc.repeatedError {
-				require.NoError(t, err)
-				require.NotNil(t, result)
-			} else {
-				require.Error(t, err)
-			}
-			require.Len(t, upstream.bodies, tc.attempts)
-			if tc.attempts == 2 {
-				got := upstream.bodies[1]
-				require.False(t, gjson.GetBytes(got, "input.0.encrypted_content").Exists())
-				require.Equal(t, "keep", gjson.GetBytes(got, "input.0.summary.0.text").String())
-				require.Equal(t, "hello", gjson.GetBytes(got, "input.1.content").String())
-				require.Equal(t, "result", gjson.GetBytes(got, "input.2.output").String())
-				require.Equal(t, "lookup", gjson.GetBytes(got, "tools.0.name").String())
-				require.Equal(t, "gpt-6-astra", gjson.GetBytes(got, "model").String())
-				require.Equal(t, "xhigh", gjson.GetBytes(got, "reasoning.effort").String())
-				require.Equal(t, upstream.requests[0].URL.String(), upstream.requests[1].URL.String())
-			}
-		})
-	}
-}
-
 func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDropsCompaction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		responses: []*http.Response{
 			{
@@ -760,6 +702,7 @@ func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureDoesNotRetryUnrelated
 }
 
 func TestOpenAIGatewayService_Forward_CodexSparkRejectsEscapedInputImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -796,6 +739,7 @@ func TestOpenAIGatewayService_Forward_CodexSparkRejectsEscapedInputImage(t *test
 }
 
 func TestOpenAIGatewayService_Forward_CodexBridgeInjectionSetsImageBilling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -837,7 +781,8 @@ func TestOpenAIGatewayService_Forward_CodexBridgeInjectionSetsImageBilling(t *te
 	require.Equal(t, "gpt-image-2", result.BillingModel)
 }
 
-func TestOpenAIGatewayService_Forward_HTTPSanitizesPreviousResponseID(t *testing.T) {
+func TestOpenAIGatewayService_Forward_HTTPPreservesPreviousResponseIDForAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
 	account := &Account{
@@ -853,46 +798,38 @@ func TestOpenAIGatewayService_Forward_HTTPSanitizesPreviousResponseID(t *testing
 		Extra: map[string]any{"use_responses_api": true},
 	}
 
-	for _, tc := range []struct {
-		name              string
-		body              []byte
-		wantPreviousID    string
-		wantPreviousIDSet bool
-	}{
-		{name: "empty", body: []byte(`{"model":"gpt-5","stream":false,"previous_response_id":"","input":"hi"}`)},
-		{name: "null", body: []byte(`{"model":"gpt-5","stream":false,"previous_response_id":null,"input":"hi"}`)},
-		{
-			name:              "non_empty",
-			body:              []byte(`{"model":"gpt-5","stream":false,"previous_response_id":"resp_1","input":"hi"}`),
-			wantPreviousID:    "resp_1",
-			wantPreviousIDSet: true,
-		},
+	for _, body := range [][]byte{
+		[]byte(`{"model":"gpt-5","stream":false,"previous_response_id":"resp_previous","input":"hi"}`),
+		[]byte(`{"model":"gpt-5","stream":false,"previous_response_id":"","input":"hi"}`),
+		[]byte(`{"model":"gpt-5","stream":false,"previous_response_id":null,"input":"hi"}`),
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			upstream := &httpUpstreamRecorder{
-				resp: &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"Content-Type": []string{"application/json"}},
-					Body:       io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":2}}`)),
-				},
-			}
-			svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
-			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+		upstream := &httpUpstreamRecorder{
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp_test","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2}}`)),
+			},
+		}
+		svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+		SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 
-			result, err := svc.Forward(context.Background(), c, account, tc.body)
-			require.NoError(t, err)
-			require.NotNil(t, result)
-			previousID := gjson.GetBytes(upstream.lastBody, "previous_response_id")
-			require.Equal(t, tc.wantPreviousIDSet, previousID.Exists())
-			require.Equal(t, tc.wantPreviousID, previousID.String())
-		})
+		result, err := svc.Forward(context.Background(), c, account, body)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		want := gjson.GetBytes(body, "previous_response_id").String()
+		if want == "" {
+			require.False(t, gjson.GetBytes(upstream.lastBody, "previous_response_id").Exists())
+		} else {
+			require.Equal(t, want, gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
+		}
 	}
 }
 
 func TestOpenAIGatewayService_Forward_StripsImageGenerationToolForSparkAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -951,6 +888,7 @@ func TestOpenAIRequestBodyMayContainEmptyBase64InputImageSeesEscapedInputPrefix(
 }
 
 func TestOpenAIGatewayService_Forward_ImageOnlyModelKeepsSupportedVerbosity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -1104,6 +1042,7 @@ func TestGetOpenAIRequestBodyMap_ParseError(t *testing.T) {
 }
 
 func TestGetOpenAIRequestBodyMap_DoesNotWriteContextCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 

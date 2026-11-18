@@ -80,6 +80,23 @@ func (k *openAIWSTurnBillingAPIKeys) forTurn(turn int, conn *service.APIKey) *se
 	return conn
 }
 
+func (k *openAIWSTurnBillingAPIKeys) set(turn int, key *service.APIKey) {
+	if turn <= 0 {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.keys == nil {
+		k.keys = make(map[int]*service.APIKey, 2)
+	}
+	for previous := range k.keys {
+		if previous < turn-1 {
+			delete(k.keys, previous)
+		}
+	}
+	k.keys[turn] = key
+}
+
 func refreshOpenAIWSTurnBillingAPIKey(ctx context.Context, lookup openAIWSTurnAPIKeyLookup, conn *service.APIKey) *service.APIKey {
 	if lookup == nil || conn == nil || conn.Key == "" || conn.GroupID == nil || !service.IsGroupContextValid(conn.Group) {
 		return conn

@@ -82,6 +82,7 @@ func TestExtractOpenAIReasoningEffortModelCandidates(t *testing.T) {
 // normalizeCodexModel 剥掉 effort 后缀，用量元数据的 effort 必须仍能从
 // 原始模型名后缀推导出来。
 func TestOpenAIGatewayServiceForwardOAuthDerivesEffortFromSuffixModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	upstream := &httpUpstreamRecorder{
 		resp: &http.Response{
 			StatusCode: http.StatusOK,
@@ -93,7 +94,6 @@ func TestOpenAIGatewayServiceForwardOAuthDerivesEffortFromSuffixModel(t *testing
 	cfg.Security.URLAllowlist.Enabled = false
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          11,
 		Name:        "openai-oauth-suffix",
 		Platform:    PlatformOpenAI,

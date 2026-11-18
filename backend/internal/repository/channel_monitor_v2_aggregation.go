@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 // Platform is derived from group/account (usage_logs has no provider column on upstream schema).
@@ -145,7 +143,7 @@ func (r *channelMonitorV2Repository) RecomputeRange(ctx context.Context, start, 
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(channelMonitorV2HistogramSQL, channelMonitorV2PlatformSQL, channelMonitorV2ModelSQL, channelMonitorV2HistogramBoundSQL("latency.value_ms")), start, end); err != nil {
 		return fmt.Errorf("aggregate channel monitor v2 histograms: %w", err)
 	}
-	if _, err = tx.ExecContext(ctx, channelMonitorV2ErrorAggregationSQL, start, end, service.ChannelMonitorV2TaxonomyVersion); err != nil {
+	if _, err = tx.ExecContext(ctx, channelMonitorV2ErrorAggregationSQL, start, end); err != nil {
 		return fmt.Errorf("aggregate channel monitor v2 errors: %w", err)
 	}
 	if err = r.recomputeFixedRollups(ctx, tx, start, end); err != nil {
@@ -291,7 +289,7 @@ WITH dedup AS (
     WHEN text LIKE ANY(ARRAY['%failed to deserialize%','%missing required parameter%','%invalid request%','%invalid_request%','%tool_choice%']) THEN 'invalid_request'
     WHEN text LIKE ANY(ARRAY['%does not support the requested model%','%not supported by any configured account%','%model not supported%','%unsupported model%']) THEN 'model_unsupported'
     WHEN text LIKE ANY(ARRAY['%group not allowed%','%group_not_allowed%','%group access%']) THEN 'group_access'
-    WHEN text LIKE ANY(ARRAY['%run out of credits%','%insufficient balance%','%insufficient account balance%','%insufficient_balance%','%insufficient quota%','%subscription%','%quota exceeded%','%billing hard limit%']) THEN 'quota_or_balance'
+    WHEN text LIKE ANY(ARRAY['%run out of credits%','%insufficient balance%','%insufficient quota%','%subscription%','%quota exceeded%','%billing hard limit%']) THEN 'quota_or_balance'
     WHEN text LIKE ANY(ARRAY['%no available accounts%','%no healthy account%','%no healthy upstream account%','%failover budget exhausted%','%account pool%']) THEN 'account_pool_unavailable'
     WHEN status_code = 429 OR upstream_status_code = 429 OR text LIKE ANY(ARRAY['%rate limit%','%rate_limit%','%high demand%','%overloaded%','%concurrency limit%','%capacity%']) THEN 'rate_or_capacity'
     WHEN status_code IN (408,504) OR text LIKE ANY(ARRAY['%timeout%','%deadline exceeded%','%error code: 524%','%gateway time-out%','%gateway timeout%']) THEN 'timeout'
@@ -318,7 +316,7 @@ WITH dedup AS (
   ON CONFLICT (bucket_start, platform, group_id, model, user_id) DO UPDATE SET error_requests = EXCLUDED.error_requests, computed_at = NOW()
 )
 INSERT INTO channel_monitor_v2_error_metrics_1m (bucket_start, platform, group_id, model, error_category, taxonomy_version, error_requests)
-SELECT bucket_start, platform, group_id, model, category, $3, COUNT(*) FROM classified GROUP BY 1,2,3,4,5
+SELECT bucket_start, platform, group_id, model, category, 1, COUNT(*) FROM classified GROUP BY 1,2,3,4,5
 ON CONFLICT (bucket_start, platform, group_id, model, error_category, taxonomy_version)
 DO UPDATE SET error_requests = EXCLUDED.error_requests`
 
@@ -397,11 +395,21 @@ func sameFixedRollupBucket(start, end time.Time, seconds int) bool {
 	return start.Truncate(interval).Equal(end.Add(-time.Nanosecond).Truncate(interval))
 }
 
+// PostgreSQL interprets a TIMESTAMPTZ literal without an explicit offset in
+// the current session timezone. Keep date_bin's origin fixed in UTC so bucket
+// boundaries do not shift when the database session runs in Asia/Shanghai (or
+// any other non-UTC timezone).
+const channelMonitorV2DateBinOrigin = "TIMESTAMPTZ '1970-01-01 00:00:00+00'"
+
+func channelMonitorV2DateBinExpr(column string) string {
+	return "date_bin($1::interval," + column + "," + channelMonitorV2DateBinOrigin + ")"
+}
+
 const channelMonitorV2FixedRollupBoundsSQL = `
 WITH bounds AS (
   SELECT
-    date_bin($1::interval, $3::timestamptz, TIMESTAMPTZ '1970-01-01') AS start_at,
-    date_bin($1::interval, $4::timestamptz - INTERVAL '1 microsecond', TIMESTAMPTZ '1970-01-01') + $1::interval AS end_at
+    date_bin($1::interval, $3::timestamptz, ` + channelMonitorV2DateBinOrigin + `) AS start_at,
+    date_bin($1::interval, $4::timestamptz - INTERVAL '1 microsecond', ` + channelMonitorV2DateBinOrigin + `) + $1::interval AS end_at
 )`
 
 const channelMonitorV2FixedRollupDeleteSQL = channelMonitorV2FixedRollupBoundsSQL + `
@@ -419,7 +427,7 @@ INSERT INTO channel_monitor_v2_metrics_rollup (
   duration_count, computed_at
 )
 ` + channelMonitorV2FixedRollupBoundsSQL + `
-SELECT date_bin($1::interval, m.bucket_start, TIMESTAMPTZ '1970-01-01'), $2::integer,
+SELECT date_bin($1::interval, m.bucket_start, ` + channelMonitorV2DateBinOrigin + `), $2::integer,
        platform, group_id, model, SUM(success_requests), SUM(error_requests),
        SUM(upstream_affected_requests), SUM(upstream_attempt_count), SUM(input_tokens),
        SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens),
@@ -435,7 +443,7 @@ INSERT INTO channel_monitor_v2_user_metrics_rollup (
   ttft_sum_ms, ttft_count, duration_sum_ms, duration_count, computed_at
 )
 ` + channelMonitorV2FixedRollupBoundsSQL + `
-SELECT date_bin($1::interval, m.bucket_start, TIMESTAMPTZ '1970-01-01'), $2::integer,
+SELECT date_bin($1::interval, m.bucket_start, ` + channelMonitorV2DateBinOrigin + `), $2::integer,
        platform, group_id, model, user_id, SUM(success_requests), SUM(error_requests),
        SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens),
        SUM(ttft_sum_ms), SUM(ttft_count), SUM(duration_sum_ms), SUM(duration_count), NOW()
@@ -448,7 +456,7 @@ INSERT INTO channel_monitor_v2_latency_histograms_rollup (
   bucket_start, bucket_seconds, platform, group_id, model, user_id, metric, upper_bound_ms, sample_count
 )
 ` + channelMonitorV2FixedRollupBoundsSQL + `
-SELECT date_bin($1::interval, h.bucket_start, TIMESTAMPTZ '1970-01-01'), $2::integer,
+SELECT date_bin($1::interval, h.bucket_start, ` + channelMonitorV2DateBinOrigin + `), $2::integer,
        platform, group_id, model, user_id, metric, upper_bound_ms, SUM(sample_count)
 FROM channel_monitor_v2_latency_histograms_1m h, bounds
 WHERE h.bucket_start >= bounds.start_at AND h.bucket_start < bounds.end_at
@@ -459,7 +467,7 @@ INSERT INTO channel_monitor_v2_error_metrics_rollup (
   bucket_start, bucket_seconds, platform, group_id, model, error_category, taxonomy_version, error_requests
 )
 ` + channelMonitorV2FixedRollupBoundsSQL + `
-SELECT date_bin($1::interval, e.bucket_start, TIMESTAMPTZ '1970-01-01'), $2::integer,
+SELECT date_bin($1::interval, e.bucket_start, ` + channelMonitorV2DateBinOrigin + `), $2::integer,
        platform, group_id, model, error_category, taxonomy_version, SUM(error_requests)
 FROM channel_monitor_v2_error_metrics_1m e, bounds
 WHERE e.bucket_start >= bounds.start_at AND e.bucket_start < bounds.end_at

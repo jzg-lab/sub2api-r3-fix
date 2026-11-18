@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -592,40 +591,8 @@ func (r *openAIChatStreamReadErrorCloser) Read(p []byte) (int, error) {
 
 func (r *openAIChatStreamReadErrorCloser) Close() error { return nil }
 
-type openAIChatBlockingReadCloser struct {
-	payload      []byte
-	offset       int
-	closed       chan struct{}
-	readDone     chan struct{}
-	closeOnce    sync.Once
-	readDoneOnce sync.Once
-}
-
-func newOpenAIChatBlockingReadCloser(payload []byte) *openAIChatBlockingReadCloser {
-	return &openAIChatBlockingReadCloser{
-		payload:  payload,
-		closed:   make(chan struct{}),
-		readDone: make(chan struct{}),
-	}
-}
-
-func (r *openAIChatBlockingReadCloser) Read(p []byte) (int, error) {
-	if r.offset < len(r.payload) {
-		n := copy(p, r.payload[r.offset:])
-		r.offset += n
-		return n, nil
-	}
-	<-r.closed
-	r.readDoneOnce.Do(func() { close(r.readDone) })
-	return 0, io.EOF
-}
-
-func (r *openAIChatBlockingReadCloser) Close() error {
-	r.closeOnce.Do(func() { close(r.closed) })
-	return nil
-}
-
 func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -663,120 +630,6 @@ func TestHandleChatStreamingResponse_ClassifiesHTTP2ReadError(t *testing.T) {
 	require.Equal(t, "Upstream HTTP/2 stream failed", message)
 	require.NotContains(t, message, "stream ID")
 	require.NotContains(t, message, "INTERNAL_ERROR")
-}
-
-func TestHandleChatStreamingResponse_TimeoutClosesBlockingUpstreamBody(t *testing.T) {
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-
-	body := newOpenAIChatBlockingReadCloser(nil)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       body,
-	}
-	svc := &OpenAIGatewayService{cfg: &config.Config{
-		Gateway: config.GatewayConfig{
-			StreamDataIntervalTimeout: 1,
-			MaxLineSize:               defaultMaxLineSize,
-		},
-	}}
-
-	result, err := svc.handleChatStreamingResponse(
-		resp,
-		c,
-		&Account{ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI},
-		"gpt-5.6-sol",
-		"gpt-5.6-sol",
-		"gpt-5.6-sol",
-		time.Now(),
-		0,
-	)
-
-	require.ErrorContains(t, err, "stream data interval timeout")
-	require.NotNil(t, result)
-	select {
-	case <-body.closed:
-	default:
-		t.Fatal("stream timeout returned without closing the blocking upstream body")
-	}
-	select {
-	case <-body.readDone:
-	case <-time.After(time.Second):
-		t.Fatal("scanner read remained blocked after the streaming handler returned")
-	}
-}
-
-func TestHandleChatStreamingResponse_TerminalEventClosesConcurrentUpstreamReaders(t *testing.T) {
-	const workers = 24
-	upstreamBody := []byte(strings.Join([]string{
-		`data: {"type":"response.created","response":{"id":"resp_pool","model":"gpt-5.6-sol"}}`,
-		"",
-		`data: {"type":"response.output_text.delta","delta":"ok"}`,
-		"",
-		`data: {"type":"response.completed","response":{"id":"resp_pool","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
-		"",
-		"",
-	}, "\n"))
-
-	type callResult struct {
-		result *OpenAIForwardResult
-		err    error
-		body   *openAIChatBlockingReadCloser
-	}
-	results := make(chan callResult, workers)
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-			body := newOpenAIChatBlockingReadCloser(upstreamBody)
-			resp := &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-				Body:       body,
-			}
-			svc := &OpenAIGatewayService{cfg: &config.Config{
-				Gateway: config.GatewayConfig{
-					StreamKeepaliveInterval: 1,
-					MaxLineSize:             defaultMaxLineSize,
-				},
-			}}
-			result, err := svc.handleChatStreamingResponse(
-				resp,
-				c,
-				&Account{ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI},
-				"gpt-5.6-sol",
-				"gpt-5.6-sol",
-				"gpt-5.6-sol",
-				time.Now(),
-				0,
-			)
-			results <- callResult{result: result, err: err, body: body}
-		}()
-	}
-	wg.Wait()
-	close(results)
-
-	for call := range results {
-		require.NoError(t, call.err)
-		require.NotNil(t, call.result)
-		select {
-		case <-call.body.closed:
-		default:
-			t.Fatal("terminal event returned without closing the still-open upstream body")
-		}
-		select {
-		case <-call.body.readDone:
-		case <-time.After(time.Second):
-			t.Fatal("scanner read remained blocked after terminal-event return")
-		}
-	}
 }
 
 func TestNormalizeResponsesRequestServiceTier(t *testing.T) {
@@ -851,6 +704,7 @@ func TestNormalizeResponsesBodyServiceTier(t *testing.T) {
 }
 
 func TestForwardAsChatCompletions_UnknownModelWithoutMessagesDispatchKeepsRequestedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -869,7 +723,6 @@ func TestForwardAsChatCompletions_UnknownModelWithoutMessagesDispatchKeepsReques
 		httpUpstream: upstream,
 	}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -890,6 +743,7 @@ func TestForwardAsChatCompletions_UnknownModelWithoutMessagesDispatchKeepsReques
 }
 
 func TestForwardAsChatCompletions_APIKeyPropagatesPromptCacheKeyInResponsesBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -933,6 +787,7 @@ func TestForwardAsChatCompletions_APIKeyPropagatesPromptCacheKeyInResponsesBody(
 }
 
 func TestForwardAsChatCompletions_APIKeyAutoDerivesStableIsolatedPromptCacheKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	response := func() *http.Response {
 		return &http.Response{
@@ -979,6 +834,7 @@ func TestForwardAsChatCompletions_APIKeyAutoDerivesStableIsolatedPromptCacheKey(
 }
 
 func TestForwardAsChatCompletions_ResponsesShapeDoesNotAutoDerivePromptCacheKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	response := func() *http.Response {
 		return &http.Response{
@@ -1020,6 +876,7 @@ func TestForwardAsChatCompletions_ResponsesShapeDoesNotAutoDerivePromptCacheKey(
 }
 
 func TestForwardAsChatCompletions_OAuthDoesNotInjectDefaultInstructions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1038,7 +895,6 @@ func TestForwardAsChatCompletions_OAuthDoesNotInjectDefaultInstructions(t *testi
 		httpUpstream: upstream,
 	}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          3,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1063,6 +919,7 @@ func TestForwardAsChatCompletions_OAuthDoesNotInjectDefaultInstructions(t *testi
 func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byte {
 	t.Helper()
 
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
@@ -1075,7 +932,6 @@ func forwardOAuthChatCompletionsForUpstreamBody(t *testing.T, body []byte) []byt
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          4,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1134,6 +990,7 @@ func TestForwardAsChatCompletions_OAuthKeepsMixedSystemContentInInput(t *testing
 }
 
 func TestForwardAsChatCompletions_ClientDisconnectDrainsUpstreamUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1160,7 +1017,6 @@ func TestForwardAsChatCompletions_ClientDisconnectDrainsUpstreamUsage(t *testing
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1181,6 +1037,7 @@ func TestForwardAsChatCompletions_ClientDisconnectDrainsUpstreamUsage(t *testing
 }
 
 func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedReturnsErrorWithoutFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1201,7 +1058,6 @@ func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedReturnsErro
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1224,6 +1080,7 @@ func TestForwardAsChatCompletions_BufferedContextWindowResponseFailedReturnsErro
 }
 
 func TestForwardAsChatCompletions_StreamContextWindowResponseFailedReturnsErrorWithoutFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1246,7 +1103,6 @@ func TestForwardAsChatCompletions_StreamContextWindowResponseFailedReturnsErrorW
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1271,6 +1127,7 @@ func TestForwardAsChatCompletions_StreamContextWindowResponseFailedReturnsErrorW
 }
 
 func TestForwardAsChatCompletions_StreamBareErrorAfterOutputDoesNotFailOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1294,7 +1151,6 @@ func TestForwardAsChatCompletions_StreamBareErrorAfterOutputDoesNotFailOver(t *t
 	}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID: 1, Name: "openai-oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
 	}
@@ -1311,6 +1167,7 @@ func TestForwardAsChatCompletions_StreamBareErrorAfterOutputDoesNotFailOver(t *t
 }
 
 func TestForwardAsChatCompletions_StreamCyberPolicyNoFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1333,7 +1190,6 @@ func TestForwardAsChatCompletions_StreamCyberPolicyNoFailover(t *testing.T) {
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1356,6 +1212,7 @@ func TestForwardAsChatCompletions_StreamCyberPolicyNoFailover(t *testing.T) {
 }
 
 func TestForwardAsChatCompletions_StreamsUsageWithoutClientStreamOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1381,7 +1238,6 @@ func TestForwardAsChatCompletions_StreamsUsageWithoutClientStreamOptions(t *test
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1408,6 +1264,7 @@ func TestForwardAsChatCompletions_StreamsUsageWithoutClientStreamOptions(t *test
 }
 
 func TestForwardAsChatCompletions_StreamsTopLevelTerminalUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1433,7 +1290,6 @@ func TestForwardAsChatCompletions_StreamsTopLevelTerminalUsage(t *testing.T) {
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1460,6 +1316,7 @@ func TestForwardAsChatCompletions_StreamsTopLevelTerminalUsage(t *testing.T) {
 }
 
 func TestForwardAsChatCompletions_BufferedTopLevelTerminalUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1481,7 +1338,6 @@ func TestForwardAsChatCompletions_BufferedTopLevelTerminalUsage(t *testing.T) {
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1508,6 +1364,7 @@ func TestForwardAsChatCompletions_BufferedTopLevelTerminalUsage(t *testing.T) {
 }
 
 func TestForwardAsChatCompletions_TerminalUsageWithoutUpstreamCloseReturns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1529,7 +1386,6 @@ func TestForwardAsChatCompletions_TerminalUsageWithoutUpstreamCloseReturns(t *te
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1564,6 +1420,7 @@ func TestForwardAsChatCompletions_TerminalUsageWithoutUpstreamCloseReturns(t *te
 }
 
 func TestForwardAsChatCompletions_EventNamedTerminalWithoutUpstreamCloseReturns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1595,7 +1452,6 @@ func TestForwardAsChatCompletions_EventNamedTerminalWithoutUpstreamCloseReturns(
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1631,6 +1487,7 @@ func TestForwardAsChatCompletions_EventNamedTerminalWithoutUpstreamCloseReturns(
 }
 
 func TestForwardAsChatCompletions_EventTypeDoesNotLeakAcrossFrames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1658,7 +1515,6 @@ func TestForwardAsChatCompletions_EventTypeDoesNotLeakAcrossFrames(t *testing.T)
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1678,6 +1534,7 @@ func TestForwardAsChatCompletions_EventTypeDoesNotLeakAcrossFrames(t *testing.T)
 }
 
 func TestForwardAsChatCompletions_BufferedTerminalWithoutUpstreamCloseReturns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1698,7 +1555,6 @@ func TestForwardAsChatCompletions_BufferedTerminalWithoutUpstreamCloseReturns(t 
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1734,6 +1590,7 @@ func TestForwardAsChatCompletions_BufferedTerminalWithoutUpstreamCloseReturns(t 
 }
 
 func TestForwardAsChatCompletions_DoneSentinelWithoutTerminalReturnsError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1750,7 +1607,6 @@ func TestForwardAsChatCompletions_DoneSentinelWithoutTerminalReturnsError(t *tes
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1771,6 +1627,7 @@ func TestForwardAsChatCompletions_DoneSentinelWithoutTerminalReturnsError(t *tes
 }
 
 func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1794,7 +1651,6 @@ func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.
 
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:          1,
 		Name:        "openai-oauth",
 		Platform:    PlatformOpenAI,
@@ -1810,7 +1666,7 @@ func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
-	require.NoError(t, upstream.requestContextErr, "upstream must remain live during the request")
+	require.NoError(t, upstream.lastReq.Context().Err())
 }
 
 // TestBuildChatStreamErrorSSE verifies F4: the error chunk payload follows the
@@ -1822,4 +1678,200 @@ func TestBuildChatStreamErrorSSE(t *testing.T) {
 	require.Equal(t, "invalid_request_error", gjson.Get(payload, "error.type").String())
 	require.Equal(t, "cyber_policy", gjson.Get(payload, "error.code").String())
 	require.Equal(t, "blocked by policy", gjson.Get(payload, "error.message").String())
+}
+
+func TestGPT6RawChatRejectsReasoningToolCalls(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"public": model}}}
+		svc := &OpenAIGatewayService{}
+		_, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, []byte(`{"model":"public","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`), "")
+		require.ErrorContains(t, err, "requires Responses")
+		require.Equal(t, 400, rec.Code)
+	}
+}
+
+func TestGPT6ReasoningModeAndSamplingCompatibility(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		body := []byte(`{"model":"` + model + `","reasoning":{"mode":"pro","effort":"max"},"temperature":0.7,"top_p":0.9,"top_logprobs":2,"include":["reasoning.encrypted_content","message.output_text.logprobs"],"prompt_cache_options":{"ttl":"30m"}}`)
+		out, changed, err := normalizeOpenAIResponsesReasoningMode(body, "")
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+		require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
+		require.False(t, gjson.GetBytes(out, "temperature").Exists())
+		require.False(t, gjson.GetBytes(out, "top_p").Exists())
+		require.False(t, gjson.GetBytes(out, "top_logprobs").Exists())
+		require.Equal(t, "reasoning.encrypted_content", gjson.GetBytes(out, "include.0").String())
+		require.Equal(t, "30m", gjson.GetBytes(out, "prompt_cache_options.ttl").String())
+		require.Equal(t, "max", normalizeOpenAIReasoningEffortForModel("max", model))
+		d := newConfiguredCodexModelDescriptor(model)
+		require.NotNil(t, d.DefaultReasoningLevel)
+		require.Equal(t, "medium", *d.DefaultReasoningLevel)
+		require.EqualValues(t, 872000, d.MaxContextWindow)
+		require.Len(t, d.SupportedReasoningLevels, 5)
+		require.Len(t, d.ServiceTiers, 1)
+	}
+}
+
+func TestGPT6RawChatNoneToolsAreForwarded(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"` + model + `","reasoning_effort":"none","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chat_1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":300}}}`))}}
+		svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+		account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-key", "base_url": "https://api.openai.com"}}
+		result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Equal(t, "none", gjson.GetBytes(upstream.lastBody, "reasoning_effort").String())
+		require.Len(t, gjson.GetBytes(upstream.lastBody, "tools").Array(), 1)
+		require.Equal(t, 1000, result.Usage.InputTokens)
+		require.Equal(t, 300, result.Usage.CacheCreationInputTokens)
+	}
+}
+
+func TestGPT6UsageHTTPAndWSHaveSameCacheBreakdown(t *testing.T) {
+	response := []byte(`{"model":"gpt-6-sol","usage":{"input_tokens":1000,"output_tokens":10,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":300}}}`)
+	httpUsage, ok := extractOpenAIUsageFromJSONBytes(response)
+	require.True(t, ok)
+	var wsUsage OpenAIUsage
+	parseOpenAIWSResponseUsageFromCompletedEvent(append(append([]byte(`{"type":"response.completed","response":`), response...), '}'), &wsUsage)
+	require.Equal(t, httpUsage, wsUsage)
+	require.Equal(t, 500, httpUsage.InputTokens-httpUsage.CacheReadInputTokens-httpUsage.CacheCreationInputTokens)
+}
+
+func TestGPT6ReasoningModeUsesMappedUpstream(t *testing.T) {
+	body := []byte(`{"model":"public-model","reasoning":{"mode":"pro","effort":"max"},"temperature":0.5}`)
+	out, _, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6-sol")
+	require.NoError(t, err)
+	require.Equal(t, "public-model", gjson.GetBytes(out, "model").String())
+	require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+	require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
+	require.False(t, gjson.GetBytes(out, "temperature").Exists())
+}
+
+func TestGPT6MappedCompatibilityBridgesKeepReasoningAndTools(t *testing.T) {
+	for _, model := range []string{"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"} {
+		for _, messages := range []bool{false, true} {
+			body := []byte(`{"model":"public","reasoning_effort":"max","temperature":0.7,"top_p":0.9,"prompt_cache_options":{"ttl":"30m"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hello"}]}`)
+			if messages {
+				body = []byte(`{"model":"public","max_tokens":1000,"output_config":{"effort":"max"},"temperature":0.7,"top_p":0.9,"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`)
+			}
+			response := `data: {"type":"response.completed","response":{"id":"resp_1","model":"` + model + `","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1000,"output_tokens":10,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":300}}}}` + "\n\n"
+			upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(response))}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-key", "base_url": "https://api.openai.com", "model_mapping": map[string]any{"public": model}}}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			var result *OpenAIForwardResult
+			var err error
+			if messages {
+				result, err = svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+			} else {
+				result, err = svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.NotNil(t, upstream.lastReq)
+			require.Equal(t, "/v1/responses", upstream.lastReq.URL.Path)
+			require.Equal(t, model, gjson.GetBytes(upstream.lastBody, "model").String())
+			require.Equal(t, "max", gjson.GetBytes(upstream.lastBody, "reasoning.effort").String())
+			require.Len(t, gjson.GetBytes(upstream.lastBody, "tools").Array(), 1)
+			require.False(t, gjson.GetBytes(upstream.lastBody, "temperature").Exists())
+			require.False(t, gjson.GetBytes(upstream.lastBody, "top_p").Exists())
+			if !messages {
+				require.Equal(t, "30m", gjson.GetBytes(upstream.lastBody, "prompt_cache_options.ttl").String())
+			}
+			require.Equal(t, 300, result.Usage.CacheCreationInputTokens)
+		}
+	}
+}
+
+func TestGPT61SolRejectsDisabledReasoningBeforeForwarding(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"public","reasoning_effort":"none"}`,
+		`{"model":"public","reasoning":{"effort":"minimal"}}`,
+		`{"model":"public","output_config":{"effort":"none"}}`,
+		`{"model":"public","thinking":{"type":"disabled"}}`,
+		`{"model":"gpt-6.1-sol-minimal"}`,
+	} {
+		require.Error(t, validateGPT61CompatRequest([]byte(body), "gpt-6.1-sol"))
+		require.NoError(t, validateGPT61CompatRequest([]byte(body), "gpt-6-sol"))
+	}
+	for _, field := range []string{`"reasoning_effort":"none"`, `"reasoning_effort":"minimal"`, `"tools":[{"type":"function","function":{"name":"lookup"}}]`} {
+		body := []byte(`{"model":"public",` + field + `,"messages":[{"role":"user","content":"hello"}]}`)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"public": "gpt-6.1-sol"}}}
+		svc := &OpenAIGatewayService{cfg: &config.Config{}}
+		_, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+		require.Error(t, err)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "gpt-6.1-sol")
+	}
+}
+
+func TestGPT61SolMappedReasoningModeAndSampling(t *testing.T) {
+	body := []byte(`{"model":"public","reasoning":{"mode":"pro","effort":"max"},"temperature":0.5,"top_p":0.9,"logprobs":true,"top_logprobs":2,"include":["message.output_text.logprobs","reasoning.encrypted_content"]}`)
+	out, _, err := normalizeOpenAIResponsesReasoningMode(body, "gpt-6.1-sol")
+	require.NoError(t, err)
+	require.Equal(t, "pro", gjson.GetBytes(out, "reasoning.mode").String())
+	require.Equal(t, "max", gjson.GetBytes(out, "reasoning.effort").String())
+	for _, field := range []string{"temperature", "top_p", "logprobs", "top_logprobs"} {
+		require.False(t, gjson.GetBytes(out, field).Exists(), field)
+	}
+	require.Equal(t, "reasoning.encrypted_content", gjson.GetBytes(out, "include.0").String())
+}
+
+func TestGPT61SolMessagesEffortAliasesPreserveIntent(t *testing.T) {
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		req := &apicompat.AnthropicRequest{Model: "openai/gpt-6.1-sol-" + effort}
+		applyOpenAICompatModelNormalization(req)
+		require.Equal(t, "gpt-6.1-sol", req.Model)
+		require.Equal(t, effort, req.OutputConfig.Effort)
+		_, err := apicompat.AnthropicToResponses(req)
+		if effort == "none" || effort == "minimal" {
+			require.Error(t, err)
+		} else {
+			require.NoError(t, err)
+		}
+	}
+}
+
+func TestGPT61SolOnlyChatFallbackRejectsToolsAndDisabledReasoning(t *testing.T) {
+	for _, responses := range []bool{false, true} {
+		bodies := []string{
+			`{"model":"public","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}]}`,
+			`{"model":"public","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`,
+		}
+		if responses {
+			bodies = []string{
+				`{"model":"public","input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`,
+				`{"model":"public","input":"hi","reasoning":{"effort":"none"}}`,
+			}
+		}
+		for _, body := range bodies {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"model_mapping": map[string]any{"public": "gpt-6.1-sol"}}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}}
+			var err error
+			if responses {
+				_, err = svc.forwardResponsesViaRawChatCompletions(context.Background(), c, account, []byte(body), time.Now())
+			} else {
+				_, err = svc.forwardAnthropicViaRawChatCompletions(context.Background(), c, account, []byte(body), "")
+			}
+			require.Error(t, err)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Contains(t, rec.Body.String(), "gpt-6.1-sol")
+		}
+	}
 }

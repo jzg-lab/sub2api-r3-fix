@@ -48,7 +48,34 @@ LOCAL 编号用于索引，不表示对应功能完全由本项目原创。
 当前源码不代表已部署。新增订阅批量任务尚未全部结案时，禁止直接用旧版 worker 回退；具体检查见部署指南。
 批量订阅集成夹具使用真实跨连接事务，结束后按夹具 ID 清理任务、幂等账本及用户/分组，避免污染其它分组查询测试。
 
+## 官方 v0.2.20 适配后的本地保护（已提交分支，未部署）
+
+本次源码和验收进度见[版本清单](upstream-sync-state.md#2026-11-18-新基线验收与依赖修复)，
+与后文历史部署记录分开。恢复的保护包括：受限管理员创建/组编辑参与调用方事务，提交失败回滚、
+外层提交后才唤醒探针；代理切换在锁内重读并原子更新 revision/outbox；智能路由前端表单与
+HTTP `group_ids` 全链路；插件绑定/灰度/暂停及刷新后的权限重检；更新源仍是本项目。
+用量及运维 TPS 均保留首字后口径，前端沿用本地视觉与模型广场实际供给规则。v0.2.20 冲突裁决后，
+账号短期本机冷却在其本地期限结束前不受空数据库快照清除；代理自动回退遇到人工停用的备用节点时停止并保留原绑定。
+
+反绕过检查除源文件外，已恢复 `server/middleware/wire.go` 与 `server/http.go` 的生产注入。
+受管启动在 `repository/ent.go` 只核对迁移，跳过 SIMPLE seed；`service/wire.go` 不在待机时迁移设置
+或清除其他实例槽位，价格服务只加载现有目录。后台工作通过 `beginDeploymentBackground`，
+已接收的有限异步工作及可被调用者取消的 singleflight 通过部署计数保留到退出等待完成。
+官方同步配额与有界通知队列沿各自 worker 生命周期结束，不恢复旧异步配额写入。
+
+新增回归入口：`custom_admin_key_review_test.go`、`api_key_route_write_test.go`、
+`deployment_runtime_test.go`、`simple_mode_startup_test.go`、`channel_monitor_runner_test.go`，
+以及 `.github/release-tools/test_release_matrix.py`。Bedrock 手动质量测试恢复完整题目与结果处理，
+`account_manual_quality_test.go` 覆盖完成、截断和超限；pnpm 11.21.0 与 SheetJS 0.20.3 等本地安全配置保留。源码已修复不等于整体合并验收完成；
+整体验收与发布阻断详见版本记录。
+
 ## 依赖安全与国际化运行时
+
+2026-11-18 整合分支已升级 Vite 7.3.8、Vitest/coverage 4.1.12、Vue 插件 6.0.11，
+保持 pnpm 11.21.0；兼容的间接依赖安全修复由 workspace overrides 和冻结锁文件固定。
+测试覆盖率阈值迁移至新版配置，CSV 导出夹具使用可构造函数；完整 CI 审计现包含开发依赖。
+生产依赖扫描为 0 漏洞；全依赖仍有 picomatch GHSA-fc5q-39xc-vjpf 高危阻断，
+最新已发布 4.0.7 无修复版本，不将依赖更新记为安全验收全部通过。
 
 Vue I18n 和消息编译器统一为 11.4.14，沿用 Composition API、运行时构建及中英文按需加载。
 `runtimeCompatibility.spec.ts` 覆盖两份真实语言包、插值/复数与禁止动态 Function 的 CSP 场景；

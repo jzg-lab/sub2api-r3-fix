@@ -73,6 +73,7 @@ type openAIOAuthImageActualSizeTestRun struct {
 
 func runOpenAIOAuthImageActualSizeTest(t *testing.T, stream bool) openAIOAuthImageActualSizeTestRun {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	body := []byte(fmt.Sprintf(`{"model":"gpt-image-1","prompt":"draw a test chart","size":"3840x2160","quality":"low","output_format":"png","stream":%t}`, stream))
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -101,7 +102,6 @@ func runOpenAIOAuthImageActualSizeTest(t *testing.T, stream bool) openAIOAuthIma
 	require.NoError(t, err)
 
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       1,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,

@@ -113,11 +113,19 @@ func TestUserAvailableChannel_FieldWhitelist(t *testing.T) {
 	}
 
 	// pricing interval 白名单：不应暴露 id / sort_order。
+	inputMultiplier := 2.0
+	outputMultiplier := 1.5
+	cacheWriteMultiplier := 2.0
+	cacheReadMultiplier := 2.0
 	pricing := toUserPricing(&service.ChannelModelPricing{
 		BillingMode:                service.BillingModeToken,
 		ReasoningEffortMultipliers: map[string]float64{"high": 1.5, "max": 3},
 		Intervals: []service.PricingInterval{
-			{ID: 7, MinTokens: 0, MaxTokens: nil, SortOrder: 3},
+			{
+				ID: 7, MinTokens: 0, MaxTokens: nil, SortOrder: 3,
+				InputMultiplier: &inputMultiplier, OutputMultiplier: &outputMultiplier,
+				CacheWriteMultiplier: &cacheWriteMultiplier, CacheReadMultiplier: &cacheReadMultiplier,
+			},
 		},
 	})
 	require.NotNil(t, pricing)
@@ -130,6 +138,14 @@ func TestUserAvailableChannel_FieldWhitelist(t *testing.T) {
 	for _, key := range []string{"id", "pricing_id", "sort_order"} {
 		_, exists := ivDecoded[key]
 		require.Falsef(t, exists, "user pricing interval must not expose %q", key)
+	}
+	for key, want := range map[string]float64{
+		"input_multiplier": inputMultiplier, "output_multiplier": outputMultiplier,
+		"cache_write_multiplier": cacheWriteMultiplier, "cache_read_multiplier": cacheReadMultiplier,
+	} {
+		got, exists := ivDecoded[key]
+		require.Truef(t, exists, "user pricing interval must expose %q", key)
+		require.InDelta(t, want, got.(float64), 1e-12)
 	}
 }
 

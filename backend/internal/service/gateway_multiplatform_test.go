@@ -5,7 +5,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -3166,6 +3165,7 @@ func TestGatewayService_SelectAccountWithLoadAwareness(t *testing.T) {
 
 	t.Run("ClaudeCode限制-回退分组", func(t *testing.T) {
 		groupID := int64(60)
+		ctx := publicFallbackTestContext(ctx, groupID)
 		fallbackID := int64(61)
 
 		repo := &mockAccountRepoForPlatform{
@@ -3211,8 +3211,7 @@ func TestGatewayService_SelectAccountWithLoadAwareness(t *testing.T) {
 			concurrencyService: nil,
 		}
 
-		fallbackCtx := publicFallbackTestContext(ctx, groupID)
-		result, err := svc.SelectAccountWithLoadAwareness(fallbackCtx, &groupID, "", "gemini-2.5-pro", nil, "", int64(0))
+		result, err := svc.SelectAccountWithLoadAwareness(ctx, &groupID, "", "gemini-2.5-pro", nil, "", int64(0))
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.Account)
@@ -3363,8 +3362,8 @@ func TestGatewayService_GroupResolution_ReusesContextGroup(t *testing.T) {
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 0, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 1, groupRepo.getByIDLiteCalls) // require_privacy_set，不走账号计数聚合
 }
 
 func TestGatewayService_GroupResolution_IgnoresInvalidContextGroup(t *testing.T) {
@@ -3406,8 +3405,8 @@ func TestGatewayService_GroupResolution_IgnoresInvalidContextGroup(t *testing.T)
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 1, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 2, groupRepo.getByIDLiteCalls) // 分组解析 + require_privacy_set
 }
 
 func TestGatewayService_GroupContext_OverwritesInvalidContextGroup(t *testing.T) {
@@ -3476,8 +3475,8 @@ func TestGatewayService_GroupResolution_FallbackUsesLiteOnce(t *testing.T) {
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 1, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 2, groupRepo.getByIDLiteCalls) // fallback 解析 + require_privacy_set
 }
 
 func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
@@ -3518,44 +3517,73 @@ func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
 	require.Contains(t, err.Error(), "fallback group cycle")
 }
 
-func TestConversationBusyAccountPolicyGenericScheduler(t *testing.T) {
-	for _, batch := range []bool{false, true} {
-		for _, kind := range []string{AccountTypeOAuth, AccountTypeAPIKey} {
-			for _, freeBackup := range []bool{false, true} {
-				t.Run(fmt.Sprintf("batch=%v/%s/free=%v", batch, kind, freeBackup), func(t *testing.T) {
-					accounts := []Account{
-						{ID: 1, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
-						{ID: 2, Platform: PlatformAnthropic, Type: kind, Status: StatusActive, Schedulable: true, Concurrency: 1},
-					}
-					repo := &mockAccountRepoForPlatform{accounts: accounts, accountsByID: map[int64]*Account{1: &accounts[0], 2: &accounts[1]}}
-					cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"conversation": 1}}
-					cfg := testConfig()
-					cfg.Gateway.Scheduling.LoadBatchEnabled = batch
-					cfg.Gateway.Scheduling.StickySessionMaxWaiting = 2
-					cfg.Gateway.Scheduling.StickySessionWaitTimeout = 45 * time.Second
-					backupLoad := 100
-					if freeBackup {
-						backupLoad = 0
-					}
-					svc := &GatewayService{accountRepo: repo, cache: cache, cfg: cfg, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquireResults: map[int64]bool{1: false, 2: freeBackup}, loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, LoadRate: 100}, 2: {AccountID: 2, LoadRate: backupLoad}}})}
-					selected, err := svc.SelectAccountWithLoadAwareness(context.Background(), nil, "conversation", "", nil, "", 0)
-					require.NoError(t, err)
-					if selected.ReleaseFunc != nil {
-						defer selected.ReleaseFunc()
-					}
-					if kind == AccountTypeAPIKey && freeBackup {
-						require.EqualValues(t, 2, selected.Account.ID)
-						require.Nil(t, selected.WaitPlan)
-						require.EqualValues(t, 2, cache.sessionBindings["conversation"])
-					} else {
-						require.NotNil(t, selected.WaitPlan)
-						if kind == AccountTypeOAuth {
-							require.EqualValues(t, 1, selected.Account.ID)
-							require.Equal(t, 45*time.Second, selected.WaitPlan.Timeout)
-						}
-					}
-				})
-			}
-		}
+func TestModelRoutingAppliesToPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		targetPlatform string
+		groupPlatform  string
+		want           bool
+	}{
+		{"anthropic group", PlatformAnthropic, PlatformAnthropic, true},
+		{"openai group", PlatformOpenAI, PlatformOpenAI, true},
+		{"composite group resolved to anthropic", PlatformAnthropic, PlatformComposite, true},
+		{"composite group resolved to openai", PlatformOpenAI, PlatformComposite, true},
+		{"target platform outside the allowed set", PlatformGemini, PlatformGemini, false},
+		{"composite group resolved outside the allowed set", PlatformGemini, PlatformComposite, false},
+		{"group platform does not match target", PlatformOpenAI, PlatformAnthropic, false},
+		{"empty target platform", "", PlatformOpenAI, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, modelRoutingAppliesToPlatform(tc.targetPlatform, tc.groupPlatform))
+		})
 	}
+}
+
+// Model routing used to be read only for requests resolved to Anthropic, so an
+// OpenAI group's rules were stored and displayed but never honored. Routing an
+// OpenAI request must pick the routed account instead of the group-wide winner.
+func TestGatewayService_SelectAccountForModelWithPlatform_RoutedOpenAIGroup(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(13)
+	requestedModel := "gpt-6-astra"
+
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			// Priority 1 would win any group-wide selection, but it is not routed.
+			{ID: 1, Platform: PlatformOpenAI, Priority: 1, Status: StatusActive, Schedulable: true},
+			{ID: 2, Platform: PlatformOpenAI, Priority: 5, Status: StatusActive, Schedulable: true},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	groupRepo := &mockGroupRepoForGateway{
+		groups: map[int64]*Group{
+			groupID: {
+				ID:                  groupID,
+				Name:                "openai-route-group",
+				Platform:            PlatformOpenAI,
+				Status:              StatusActive,
+				Hydrated:            true,
+				ModelRoutingEnabled: true,
+				ModelRouting: map[string][]int64{
+					requestedModel: {2},
+				},
+			},
+		},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       &mockGatewayCacheForPlatform{},
+		cfg:         testConfig(),
+		groupRepo:   groupRepo,
+	}
+
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, PlatformOpenAI)
+	require.NoError(t, err)
+	require.NotNil(t, acc)
+	require.Equal(t, int64(2), acc.ID, "routed account must win over the higher-priority unrouted one")
 }

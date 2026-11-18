@@ -16,6 +16,7 @@ import (
 
 func newVertexBetaTestContext(t *testing.T, anthropicBeta string) *gin.Context {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)

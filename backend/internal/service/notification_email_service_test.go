@@ -309,23 +309,18 @@ func TestNotificationEmailFallbackClassification(t *testing.T) {
 
 func TestEmailQueueTasksPreserveLocaleHints(t *testing.T) {
 	queue := &EmailQueueService{taskChan: make(chan EmailTask, 2)}
-	before := deploymentAsyncTasks.Load()
-	t.Cleanup(func() {
-		require.Zero(t, queue.Pending())
-		require.Equal(t, before, deploymentAsyncTasks.Load())
-	})
 	require.NoError(t, queue.EnqueueVerifyCode("user@example.com", "Sub2API", "zh-CN"))
-	defer deploymentAsyncTasks.Add(-1)
-	defer queue.pending.Add(-1)
 	require.NoError(t, queue.EnqueuePasswordReset("user@example.com", "Sub2API", "https://example.com/reset", "en-US"))
-	defer deploymentAsyncTasks.Add(-1)
-	defer queue.pending.Add(-1)
 
 	verifyTask := <-queue.taskChan
+	queue.pending.Add(-1)
+	deploymentAsyncTasks.Add(-1)
 	require.Equal(t, TaskTypeVerifyCode, verifyTask.TaskType)
 	require.Equal(t, "zh-CN", verifyTask.Locale)
 
 	resetTask := <-queue.taskChan
+	queue.pending.Add(-1)
+	deploymentAsyncTasks.Add(-1)
 	require.Equal(t, TaskTypePasswordReset, resetTask.TaskType)
 	require.Equal(t, "en-US", resetTask.Locale)
 }

@@ -12,43 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type wsBoundPackageLookup struct {
-	primary     *service.APIKey
-	bound       *service.APIKey
-	err         error
-	requestedID int64
-}
-
-func (s *wsBoundPackageLookup) GetByKey(context.Context, string) (*service.APIKey, error) {
-	return s.primary, nil
-}
-
-func (s *wsBoundPackageLookup) APIKeyForRoute(_ context.Context, _ *service.APIKey, id int64) (*service.APIKey, error) {
-	s.requestedID = id
-	return s.bound, s.err
-}
-
-func TestWSTurnBillingKeepsBoundBackupPackage(t *testing.T) {
-	primaryID, backupID := int64(1), int64(2)
-	conn := &service.APIKey{ID: 7, Key: "key", GroupID: &backupID,
-		Group: &service.Group{ID: backupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 2}}
-	lookup := &wsBoundPackageLookup{
-		primary: &service.APIKey{ID: 7, GroupID: &primaryID, RouteGroupIDs: []int64{primaryID, backupID}},
-		bound: &service.APIKey{ID: 7, GroupID: &backupID,
-			Group: &service.Group{ID: backupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 3}},
-	}
-	got := refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn)
-	require.Equal(t, backupID, lookup.requestedID)
-	require.Equal(t, backupID, *got.GroupID)
-	require.Equal(t, float64(3), got.Group.RateMultiplier)
-	require.Equal(t, float64(2), conn.Group.RateMultiplier)
-	lookup.err = errors.New("group lookup unavailable")
-	require.Same(t, conn, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn))
-	lookup.err = nil
-	lookup.bound.Group.SubscriptionType = service.SubscriptionTypeSubscription
-	require.Same(t, conn, refreshOpenAIWSTurnBillingAPIKey(context.Background(), lookup, conn))
-}
-
 // 分组调价对已打开的 WebSocket 连接生效：同一条连接的两个 turn 之间由管理端
 // 改分组倍率（并按分组失效认证缓存），第二个 turn 必须按新倍率计费、按新售价
 // 过利润门；HTTP 请求每次经认证缓存取快照，本来就是这个行为。
@@ -237,7 +200,7 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 		Key:     "sk-conn",
 		GroupID: &groupID,
 		User:    &service.User{ID: 9},
-		Group:   &service.Group{ID: groupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 3},
 	}
 	latestWith := func(mutate func(k *service.APIKey)) *service.APIKey {
 		gid := groupID
@@ -246,7 +209,7 @@ func TestRefreshOpenAIWSTurnBillingAPIKey(t *testing.T) {
 			Key:     "sk-conn",
 			GroupID: &gid,
 			User:    &service.User{ID: 9, Balance: 123},
-			Group:   &service.Group{ID: groupID, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
+			Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true, SubscriptionType: service.SubscriptionTypeStandard, RateMultiplier: 0.3},
 		}
 		if mutate != nil {
 			mutate(k)
@@ -320,11 +283,11 @@ func TestOpenAIWSTurnBillingAPIKeysKeepPreviousTurnUntilItIsRecorded(t *testing.
 	turn3 := &service.APIKey{ID: 3}
 	var keys openAIWSTurnBillingAPIKeys
 	require.Same(t, conn, keys.forTurn(1, conn), "a turn without BeforeTurn bills with the connection snapshot")
-	keys.begin(context.Background(), nil, 2, turn2)
-	keys.begin(context.Background(), nil, 3, turn3) // turn 3 starts before turn 2's usage is submitted
+	keys.set(2, turn2)
+	keys.set(3, turn3) // turn 3 starts before turn 2's usage is submitted
 	require.Same(t, turn2, keys.forTurn(2, conn))
 	require.Same(t, turn3, keys.forTurn(3, conn))
-	keys.begin(context.Background(), nil, 4, conn)
+	keys.set(4, conn)
 	require.Same(t, conn, keys.forTurn(2, conn), "only the current and previous turn are kept")
 	require.Len(t, keys.keys, 2)
 }

@@ -33,6 +33,7 @@ func TestNormalizeOpenAICompactRequestBodyPreservesServiceTier(t *testing.T) {
 }
 
 func TestOpenAIOAuthCompactHTTPBuildersUsePreservedServiceTierInRoutingHint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	body := []byte(`{
 		"model":"gpt-5.6-sol",
 		"input":[{"type":"message","role":"user","content":"hello"}],
@@ -45,7 +46,6 @@ func TestOpenAIOAuthCompactHTTPBuildersUsePreservedServiceTierInRoutingHint(t *t
 	require.Equal(t, "priority", gjson.GetBytes(normalized, "service_tier").String())
 
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Credentials: map[string]any{

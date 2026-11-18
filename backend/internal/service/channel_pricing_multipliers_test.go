@@ -248,10 +248,8 @@ func TestCalculateTokenCostContextTierEnablement(t *testing.T) {
 
 	t.Run("group enabled uses interval", func(t *testing.T) {
 		resolved.longContextPricingEnabled = true
-		accountDisabled := false
 		cost, err := service.calculateTokenCost(resolved, CostInput{
 			Model: "custom", Tokens: tokens, RateMultiplier: 1, Resolver: resolver,
-			LongContextBillingEnabled: &accountDisabled,
 		})
 		require.NoError(t, err)
 		require.InDelta(t, 400e-6, cost.TotalCost, 1e-12)

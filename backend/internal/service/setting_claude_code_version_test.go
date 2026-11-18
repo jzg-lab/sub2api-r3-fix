@@ -18,11 +18,12 @@ func TestGetClaudeCodeClientVersionPriority(t *testing.T) {
 		synced string
 		want   string
 	}{
-		{name: "manual wins", manual: "2.1.280", synced: "2.1.281", want: "2.1.280"},
-		{name: "manual normalized", manual: " v2.1.280 ", synced: "2.1.281", want: "2.1.280"},
-		{name: "synced fallback", synced: "2.1.281", want: "2.1.281"},
-		{name: "invalid manual falls through", manual: "invalid", synced: "2.1.281", want: "2.1.281"},
-		{name: "invalid synced uses builtin", synced: "2.1.9", want: claude.CLIVersion()},
+		{name: "手动值优先", manual: "2.1.280", synced: "2.1.281", want: "2.1.280"},
+		{name: "归一化手动值", manual: " v2.1.280 ", synced: "2.1.281", want: "2.1.280"},
+		{name: "跟随同步值", synced: "2.1.281", want: "2.1.281"},
+		{name: "无效手动值回退", manual: "invalid", synced: "2.1.281", want: "2.1.281"},
+		{name: "无效同步值回退", synced: "2.1.9", want: claude.CLIVersion()},
+		{name: "未配置时回退", want: claude.CLIVersion()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &authSourceDefaultsRepoStub{values: map[string]string{
@@ -35,13 +36,29 @@ func TestGetClaudeCodeClientVersionPriority(t *testing.T) {
 	}
 }
 
-func TestLatestClaudeCodeStableReleaseVersion(t *testing.T) {
-	releases := []*GitHubRelease{
-		{TagName: "v2.1.279"},
-		{TagName: "v2.1.281"},
-		{TagName: "v2.1.282-beta.1", Prerelease: true},
-		{TagName: "2.1.999"},
-		{TagName: "v2.1.300", Draft: true},
+func TestUpdateSettingsClaudeCodeVersionTakesEffectImmediately(t *testing.T) {
+	ctx := context.Background()
+	repo := &authSourceDefaultsRepoStub{values: map[string]string{
+		SettingKeyClaudeCodeClientVersionSynced: "2.1.281",
+	}}
+	svc := NewSettingService(repo, &config.Config{})
+	resetGatewayForwardingSettingsCacheForTest(t)
+	defer svc.refreshCachedSettings(&SystemSettings{})
+	require.Equal(t, "2.1.281", svc.GetClaudeCodeClientVersion(ctx))
+
+	settings := &SystemSettings{
+		ClaudeCodeClientVersion:          "2.1.280",
+		ClaudeCodeVersionAutoSyncEnabled: true,
 	}
-	require.Equal(t, "2.1.281", latestClaudeCodeStableReleaseVersion(releases))
+	require.NoError(t, svc.UpdateSettings(ctx, settings))
+	require.Equal(t, "2.1.280", svc.GetClaudeCodeClientVersion(ctx), "保存手动版本后应立即生效")
+	require.NotContains(t, repo.updates, SettingKeyClaudeCodeClientVersionSynced)
+	require.Equal(t, "2.1.281", repo.values[SettingKeyClaudeCodeClientVersionSynced])
+
+	// 清空手动值并关闭后续同步时，仍保留并使用已有同步值。
+	settings.ClaudeCodeClientVersion = ""
+	settings.ClaudeCodeVersionAutoSyncEnabled = false
+	require.NoError(t, svc.UpdateSettings(ctx, settings))
+	require.Equal(t, "2.1.281", svc.GetClaudeCodeClientVersion(ctx))
+	require.Equal(t, "false", repo.values[SettingKeyClaudeCodeVersionAutoSyncEnabled])
 }

@@ -162,7 +162,7 @@ func (s *openAIAccountModelTransientState) isBlocked(accountID int64, model stri
 	return !entry.blockUntil.IsZero() && now.Before(entry.blockUntil)
 }
 
-func (s *openAIAccountModelTransientState) blockedUntil(accountID int64, model string, now time.Time) (time.Time, bool) {
+func (s *openAIAccountModelTransientState) blockUntil(accountID int64, model string, now time.Time) (time.Time, bool) {
 	key, ok := openAIAccountModelTransientKey(accountID, model)
 	if s == nil || !ok {
 		return time.Time{}, false
@@ -170,23 +170,21 @@ func (s *openAIAccountModelTransientState) blockedUntil(accountID int64, model s
 	if now.IsZero() {
 		now = time.Now()
 	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, exists := s.entries[key]
 	if !exists {
 		return time.Time{}, false
 	}
-	if !entry.lastFailure.IsZero() &&
-		(now.Sub(entry.lastFailure) > openAIModelTransientStreakTTL || now.Before(entry.lastFailure)) {
+	if !entry.lastFailure.IsZero() && now.Sub(entry.lastFailure) > openAIModelTransientStreakTTL {
 		delete(s.entries, key)
+		return time.Time{}, false
+	}
+	if entry.blockUntil.IsZero() || !now.Before(entry.blockUntil) {
 		return time.Time{}, false
 	}
 	entry.lastTouched = now
 	s.entries[key] = entry
-	if entry.blockUntil.IsZero() || !now.Before(entry.blockUntil) {
-		return time.Time{}, false
-	}
 	return entry.blockUntil, true
 }
 

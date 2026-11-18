@@ -162,6 +162,9 @@ func isAllowedHost(host string, allowlist []string) bool {
 	return false
 }
 
+// IsBlockedHost 报告 host 是否为 localhost、*.localhost，或回环、私网、链路本地、未指定地址的字面量 IP。
+// 只判断字面量，域名的解析结果由 ValidateResolvedIP 校验。
+
 func isBlockedHost(host string) bool {
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
@@ -172,4 +175,8 @@ func isBlockedHost(host string) bool {
 		}
 	}
 	return false
+}
+
+func IsBlockedHost(host string) bool {
+	return isBlockedHost(strings.ToLower(strings.TrimSpace(host)))
 }

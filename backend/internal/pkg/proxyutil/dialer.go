@@ -28,8 +28,7 @@ const (
 	socks5DialKeepAlive = 30 * time.Second
 )
 
-// ConnectError preserves a CONNECT rejection before the target request is sent.
-// The canonical status text avoids reflecting untrusted proxy response text.
+// ConnectError reports a CONNECT rejection without reflecting proxy response text.
 type ConnectError struct {
 	StatusCode int
 }

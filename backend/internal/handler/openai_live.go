@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/wsdrain"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
@@ -234,11 +233,7 @@ func (h *OpenAIGatewayHandler) LiveSideband(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	drainSession := wsdrain.Track(c.Request.Context(), downstream, true)
-	defer func() {
-		_ = downstream.CloseNow()
-		drainSession.Release()
-	}()
+	defer func() { _ = downstream.CloseNow() }()
 	if err := h.gatewayService.ProxyLiveSideband(c.Request.Context(), record, downstream); err != nil {
 		_ = downstream.Close(coderws.StatusInternalError, "live sideband closed")
 		return

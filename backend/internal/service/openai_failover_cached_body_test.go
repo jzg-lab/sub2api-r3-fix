@@ -24,6 +24,7 @@ func (panicOnReadCloser) Read(_ []byte) (int, error) {
 func (panicOnReadCloser) Close() error { return nil }
 
 func TestOpenAIGatewayService_Forward_FailoverReparsesCachedBodyForNextAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name          string
@@ -132,6 +133,7 @@ func TestOpenAIGatewayService_HandleFailoverSideEffects_DoesNotRereadResponseBod
 }
 
 func TestGetOpenAIRequestBodyMap_IgnoresLegacyContextCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -149,7 +151,6 @@ func openAIFailoverCachedBodyTestAccount(id int64, name string, mapping map[stri
 		credentials["model_mapping"] = mapping
 	}
 	return &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:             id,
 		Name:           name,
 		Platform:       PlatformOpenAI,

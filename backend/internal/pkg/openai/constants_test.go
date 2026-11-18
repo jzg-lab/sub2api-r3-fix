@@ -29,6 +29,13 @@ func TestDefaultModelsIncludeGPT6SolLunaAndGPTImage25(t *testing.T) {
 	require.Contains(t, modelIDs, "gpt-image-2.5-sunburst")
 }
 
+func TestDefaultModelsIncludeGPTImage25And26(t *testing.T) {
+	require.Contains(t, DefaultModelIDs(), "gpt-image-2.5-flare")
+	require.Contains(t, DefaultModelIDs(), "gpt-image-2.5-sunburst")
+	require.Contains(t, DefaultModelIDs(), "gpt-image-2.6-flare")
+	require.Contains(t, DefaultModelIDs(), "gpt-image-2.6-sunburst")
+}
+
 func TestDefaultGPT61SolUsesVerifiedReleaseTimestamp(t *testing.T) {
 	for _, model := range DefaultModels {
 		if model.ID == "gpt-6.1-sol" {

@@ -16,13 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type geminiMixedModelsUpstream struct {
+type geminiVertexModelsUpstream struct {
 	service.HTTPUpstream
 	status int
 	body   string
 }
 
-func (u *geminiMixedModelsUpstream) Do(*http.Request, string, int64, int) (*http.Response, error) {
+func (u *geminiVertexModelsUpstream) Do(*http.Request, string, int64, int) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: u.status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -44,11 +44,11 @@ func (geminiVertexModelsTokenCache) DeleteAccessToken(context.Context, string) e
 	return nil
 }
 
-func (geminiVertexModelsTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
-	return "", nil
+func (geminiVertexModelsTokenCache) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
 }
 
-func (geminiVertexModelsTokenCache) ReleaseRefreshLock(context.Context, string, string) error {
+func (geminiVertexModelsTokenCache) ReleaseRefreshLock(context.Context, string) error {
 	return nil
 }
 
@@ -69,7 +69,7 @@ func TestGeminiV1BetaModelsEndpoints_VertexServiceAccountOnlyGroup(t *testing.T)
 			},
 		},
 	}}}}}
-	upstream := &geminiMixedModelsUpstream{status: http.StatusOK, body: `{"publisherModels":[{"name":"publishers/google/models/gemini-3.8-flash"}]}`}
+	upstream := &geminiVertexModelsUpstream{status: http.StatusOK, body: `{"publisherModels":[{"name":"publishers/google/models/gemini-3.8-flash"}]}`}
 	tokenProvider := service.NewGeminiTokenProvider(nil, geminiVertexModelsTokenCache{}, nil)
 	h := &GatewayHandler{geminiCompatService: service.NewGeminiMessagesCompatService(repo, nil, nil, nil, tokenProvider, nil, upstream, nil, &config.Config{})}
 	apiKey := &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformGemini}}

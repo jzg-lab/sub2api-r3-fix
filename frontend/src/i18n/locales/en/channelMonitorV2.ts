@@ -134,6 +134,8 @@ export default {
         criticalTtft: 'TTFT critical ms',
         warningCache: 'Cache rate watch %',
         criticalCache: 'Cache rate critical %',
+minimumSample: 'Minimum samples',
+
       },
       namedModelsEmpty: 'Platform model lists are empty: every real model name will be shown (not folded into “Other”).',
       namedModelsCount: 'Showing {count} named model dimensions; unlisted models fold into per-platform “Other”.',

@@ -37,7 +37,6 @@ func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config
 		interval: interval,
 		batch:    batch,
 		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
 	}
 }
 
@@ -46,8 +45,9 @@ func (s *IdempotencyCleanupService) Start() {
 		return
 	}
 	s.startOnce.Do(func() {
+		s.doneCh = make(chan struct{})
 		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] started interval=%s batch=%d", s.interval, s.batch)
-		go func() { defer close(s.doneCh); s.runLoop() }()
+		go s.runLoop()
 	})
 }
 
@@ -56,15 +56,8 @@ func (s *IdempotencyCleanupService) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
-		if s.stopCh != nil {
-			close(s.stopCh)
-		}
+		close(s.stopCh)
 		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] stopped")
-	})
-	s.startOnce.Do(func() {
-		if s.doneCh != nil {
-			close(s.doneCh)
-		}
 	})
 	if s.doneCh != nil {
 		<-s.doneCh
@@ -72,6 +65,7 @@ func (s *IdempotencyCleanupService) Stop() {
 }
 
 func (s *IdempotencyCleanupService) runLoop() {
+	defer close(s.doneCh)
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 

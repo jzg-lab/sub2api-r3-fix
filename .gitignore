@@ -182,3 +182,14 @@ output/
 # Python test caches
 __pycache__/
 *.pyc
+
+# Official v0.2.20 maintained documentation.
+!docs/agent-resource-safety.md
+!docs/moego-json-batching.md
+!docs/admin-api-keys.md
+!docs/mcp.md
+!docs/channel-monitor-v2-safe-defaults.md
+!docs/codex-credits.md
+!docs/screenshots/codex-referral-dialog.png
+!docs/screenshots/codex-referral-success.png
+issues/

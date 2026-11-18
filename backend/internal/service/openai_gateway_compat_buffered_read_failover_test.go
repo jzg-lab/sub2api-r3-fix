@@ -23,6 +23,7 @@ func (r *openAICompatBufferedReadErrorCloser) Read([]byte) (int, error) { return
 func (r *openAICompatBufferedReadErrorCloser) Close() error             { return nil }
 
 func TestChatCompletionsBufferedResponsesReadErrorReturnsFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	readErrors := []struct {
 		name         string
@@ -63,6 +64,7 @@ func TestChatCompletionsBufferedResponsesReadErrorReturnsFailover(t *testing.T) 
 }
 
 func TestChatCompletionsBufferedResponsesReadErrorDoesNotFailoverAfterClientCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -93,6 +95,7 @@ func TestChatCompletionsBufferedResponsesReadErrorDoesNotFailoverAfterClientCanc
 }
 
 func TestChatCompletionsBufferedResponsesOversizedLineDoesNotFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -120,6 +123,7 @@ func TestChatCompletionsBufferedResponsesOversizedLineDoesNotFailover(t *testing
 }
 
 func TestAnthropicBufferedResponsesReadErrorKeepsExistingBehavior(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

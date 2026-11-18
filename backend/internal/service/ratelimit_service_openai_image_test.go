@@ -29,8 +29,7 @@ func TestIsOpenAIImageRateLimitError(t *testing.T) {
 func TestRateLimitService_HandleOpenAIImageRateLimit_ParsesTryAgainCooldown(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
-	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 201, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{ID: 201, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-image-2-codex (for limit gpt-image) on input-images per min. Please try again in 2s."}}`)
 
 	before := time.Now()
@@ -48,8 +47,7 @@ func TestRateLimitService_HandleOpenAIImageRateLimit_ParsesTryAgainCooldown(t *t
 func TestRateLimitService_HandleOpenAIImageRateLimit_DefaultsToOneMinute(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
-	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 202, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{ID: 202, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-image-2-codex (for limit gpt-image) on input-images per min."}}`)
 
 	before := time.Now()
@@ -66,8 +64,7 @@ func TestRateLimitService_HandleOpenAIImageRateLimit_DefaultsToOneMinute(t *test
 func TestOpenAIGatewayService_HandleOpenAIAccountUpstreamError_ImageRateLimitDoesNotBlockWholeAccount(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
-	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 203, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{ID: 203, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-image-2-codex (for limit gpt-image) on input-images per min. Please try again in 1s."}}`)
 
 	disabled := svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, http.Header{}, body, "gpt-image-2")
@@ -80,6 +77,7 @@ func TestOpenAIGatewayService_HandleOpenAIAccountUpstreamError_ImageRateLimitDoe
 }
 
 func TestOpenAIGatewayServiceForwardImages_ImageRateLimitReturnsFailoverAndCoolsCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	repo := &modelNotFoundAccountRepoStub{}
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
 	errorBody := `{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-image-2-codex (for limit gpt-image) in organization org on input-images per min: Limit 4000, Used 4000. Please try again in 1s."}}`
@@ -103,7 +101,6 @@ func TestOpenAIGatewayServiceForwardImages_ImageRateLimitReturnsFailoverAndCools
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       204,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -129,8 +126,9 @@ func TestOpenAIGatewayServiceForwardImages_ImageRateLimitReturnsFailoverAndCools
 // 回复就会沿号池把每个被重试到的账号依次冷却掉。冷却仍保留给结构化上游证据，见
 // TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapability。
 func TestOpenAIGatewayServiceForwardImages_TextFallbackDoesNotCoolImageCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	repo := &modelNotFoundAccountRepoStub{}
-	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
+	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat"}`)
 	upstreamSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"model\":\"gpt-5.4-mini\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Here's a polished image prompt for your request.\"}]}]}}\n\n"
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
@@ -152,7 +150,6 @@ func TestOpenAIGatewayServiceForwardImages_TextFallbackDoesNotCoolImageCapabilit
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       205,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -162,8 +159,7 @@ func TestOpenAIGatewayServiceForwardImages_TextFallbackDoesNotCoolImageCapabilit
 		},
 	}
 
-	// This fixture exercises the Responses fallback, not direct Images JSON.
-	result, err := svc.ForwardImages(withOpenAIImagesForceResponses(context.Background()), c, account, body, parsed, "")
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
 
 	require.Nil(t, result)
 	require.Error(t, err)
@@ -180,8 +176,9 @@ func TestOpenAIGatewayServiceForwardImages_TextFallbackDoesNotCoolImageCapabilit
 // 对照不变式：上游 error 帧点名 image_generation_unavailable 时仍写冷却，
 // 保证 #6171 的修复没有把这项能力保护整个废掉。
 func TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	repo := &modelNotFoundAccountRepoStub{}
-	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
+	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat"}`)
 	upstreamSSE := "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"error\":" +
 		"{\"type\":\"upstream_error\",\"code\":\"image_generation_unavailable\"," +
 		"\"message\":\"image generation tool is not available for this account\"}}}\n\n"
@@ -205,7 +202,6 @@ func TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapabi
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       206,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -216,7 +212,7 @@ func TestOpenAIGatewayServiceForwardImages_StructuredUnavailableCoolsImageCapabi
 	}
 
 	before := time.Now()
-	result, err := svc.ForwardImages(withOpenAIImagesForceResponses(context.Background()), c, account, body, parsed, "")
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
 
 	require.Nil(t, result)
 	require.Error(t, err)
@@ -238,14 +234,14 @@ func TestOpenAIGatewayService_CoolOpenAIImagesOAuthToolUsesConfiguredCooldown(t 
 	}
 
 	before := time.Now()
-	svc.coolOpenAIImagesOAuthTool(context.Background(), &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 206, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
+	svc.coolOpenAIImagesOAuthTool(context.Background(), &Account{ID: 206, Platform: PlatformOpenAI, Type: AccountTypeOAuth})
 
 	require.Len(t, accountRepo.modelRateLimitCalls, 1)
 	require.WithinDuration(t, before.Add(7*time.Minute), accountRepo.modelRateLimitCalls[0].resetAt, time.Second)
 }
 
 func TestOpenAIGatewayServiceForwardImages_CapabilityLossCoolsImageScope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	repo := &modelNotFoundAccountRepoStub{}
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
 	errorBody := `{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`
@@ -269,7 +265,6 @@ func TestOpenAIGatewayServiceForwardImages_CapabilityLossCoolsImageScope(t *test
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
 	require.NoError(t, err)
 	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(),
 		ID:       205,
 		Name:     "openai-oauth",
 		Platform: PlatformOpenAI,
@@ -295,8 +290,7 @@ func TestOpenAIGatewayServiceForwardImages_CapabilityLossCoolsImageScope(t *test
 func TestOpenAIGatewayServiceHandleUpstreamError_PassthroughCapabilityLossDoesNotCool(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
-	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 206, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{ID: 206, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`)
 
 	disabled := svc.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusBadRequest, http.Header{}, body, "gpt-5.5")
@@ -310,8 +304,7 @@ func TestOpenAIGatewayServiceHandleUpstreamError_PassthroughCapabilityLossDoesNo
 func TestRateLimitServiceHandleOpenAIImageCapabilityLoss_IgnoresGenericBadRequest(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
-	account := &Account{
-		ProxyID: openAITransportTestProxyID(), Proxy: openAITransportTestProxy(), ID: 207, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	account := &Account{ID: 207, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	body := []byte(`{"error":{"message":"Invalid type for input[0].arguments"}}`)
 
 	handled := svc.HandleOpenAIImageCapabilityLoss(context.Background(), account, http.StatusBadRequest, body)

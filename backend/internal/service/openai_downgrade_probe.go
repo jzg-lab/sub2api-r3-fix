@@ -2190,7 +2190,10 @@ func (r *OpenAIDowngradeProbeRunner) probe(
 						return response, err
 					}
 				}
-				return r.httpUpstream.DoProbeWithTLS(request, route, current.Concurrency, probeProfile)
+				if probeUpstream, ok := r.httpUpstream.(HTTPProbeUpstream); ok {
+					return probeUpstream.DoProbeWithTLS(request, route, current.Concurrency, probeProfile)
+				}
+				return r.httpUpstream.DoWithTLS(request, route, current.ID, current.Concurrency, probeProfile)
 			})
 		if requestErr != nil {
 			if resp != nil && resp.Body != nil {

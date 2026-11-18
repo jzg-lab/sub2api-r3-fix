@@ -152,7 +152,8 @@ func TestGatewayOpenAICompatibleHandlersClaudeCodeOnlyFallback(t *testing.T) {
 				}
 				recorder := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(recorder)
-				ctx := context.WithValue(service.WithGatewayGroupAccess(context.Background(), apiKey), ctxkey.Group, primary)
+				ctx := context.WithValue(context.Background(), ctxkey.Group, primary)
+				ctx = service.WithGatewayGroupAccess(ctx, apiKey)
 				req := httptest.NewRequest(http.MethodPost, ep.path, bytes.NewBufferString(ep.body)).WithContext(ctx)
 				req.Header.Set("Content-Type", "application/json")
 				c.Request = req

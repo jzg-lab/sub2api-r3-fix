@@ -71,11 +71,11 @@ func TestOpenAIResponsesTTFTStartsAtCompletedImage(t *testing.T) {
 	}
 }
 
-func TestOpenAINativeMetadataDoesNotDisarmFirstOutputTimeout(t *testing.T) {
+func TestOpenAINativeMetadataAndKeepaliveDoNotDisarmFirstOutputTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		MaxLineSize:                          defaultMaxLineSize,
-		OpenAIFirstOutputTimeoutSeconds:      1,
-		OpenAIOAuthFirstOutputTimeoutSeconds: 1,
+		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds: 1,
 	}}}
 	reader, writer := io.Pipe()
 	writerDone := make(chan struct{})
@@ -84,6 +84,7 @@ func TestOpenAINativeMetadataDoesNotDisarmFirstOutputTimeout(t *testing.T) {
 		defer func() { _ = writer.Close() }()
 		_, _ = io.WriteString(writer, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n")
 		_, _ = io.WriteString(writer, "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"item_test\",\"type\":\"reasoning\",\"summary\":[]}}\n\n")
+		_, _ = io.WriteString(writer, "data: {\"type\":\"keepalive\"}\n\n")
 		time.Sleep(1200 * time.Millisecond)
 	}()
 
@@ -105,7 +106,7 @@ func TestOpenAINativeMetadataDoesNotDisarmFirstOutputTimeout(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesSemanticTTFTIgnoresEmptyStructure(t *testing.T) {
+func TestOpenAIResponsesTTFTDefaultsToSemanticOutput(t *testing.T) {
 	for _, passthrough := range []bool{false, true} {
 		name := "native"
 		if passthrough {
@@ -115,13 +116,14 @@ func TestOpenAIResponsesSemanticTTFTIgnoresEmptyStructure(t *testing.T) {
 			result := runSyntheticVisibleTTFTStream(t, passthrough, 120*time.Millisecond, 0, "",
 				`{"type":"response.output_text.delta","delta":"test output"}`)
 			require.NotNil(t, result.firstTokenMs)
-			require.GreaterOrEqual(t, *result.firstTokenMs, 100)
+			require.GreaterOrEqual(t, *result.firstTokenMs, 100, "empty structural events are not semantic output")
 		})
 	}
 }
 
 func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay time.Duration, timeoutSeconds int, ttftMode string, visibleEvent string) *openaiStreamingResult {
 	t.Helper()
+	gin.SetMode(gin.TestMode)
 	mode := ttftMode
 	if mode == "" {
 		mode = OpenAITTFTModeSemantic
@@ -131,9 +133,8 @@ func runSyntheticVisibleTTFTStream(t *testing.T, passthrough bool, visibleDelay 
 		gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{openAITTFTMode: OpenAITTFTModeSemantic, expiresAt: time.Now().Add(time.Minute).UnixNano()})
 	})
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		MaxLineSize:                          defaultMaxLineSize,
-		OpenAIFirstOutputTimeoutSeconds:      timeoutSeconds,
-		OpenAIOAuthFirstOutputTimeoutSeconds: timeoutSeconds,
+		MaxLineSize:                     defaultMaxLineSize,
+		OpenAIFirstOutputTimeoutSeconds: timeoutSeconds,
 	}}}
 	reader, writer := io.Pipe()
 	writerDone := make(chan struct{})

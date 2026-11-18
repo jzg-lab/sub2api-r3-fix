@@ -267,8 +267,7 @@ type OpenAIWSIngressHooks struct {
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)
 	AfterTurn       func(turn int, result *OpenAIForwardResult, turnErr error)
-	// Unlike accounting observation, this is after the client terminal frame
-	// was successfully written. Lifecycle draining must use this boundary.
+	// Lifecycle draining uses the boundary after the client's terminal frame is written.
 	AfterClientTerminalWrite func(turn int)
 }
 

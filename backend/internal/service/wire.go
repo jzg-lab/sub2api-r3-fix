@@ -75,6 +75,7 @@ func ProvideAuthService(
 	defaultSubAssigner DefaultSubscriptionAssigner,
 	affiliateService *AffiliateService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	mcpOAuthService *MCPOAuthService,
 ) *AuthService {
 	svc := NewAuthService(
 		entClient,
@@ -93,6 +94,9 @@ func ProvideAuthService(
 	)
 	svc.SetTencentCaptchaService(tencentCaptchaService)
 	svc.SetAliyunCaptchaService(aliyunCaptchaService)
+	if mcpOAuthService != nil {
+		svc.SetMCPGrantRevoker(mcpOAuthService)
+	}
 	return svc
 }
 
@@ -128,18 +132,8 @@ func ProvideOpenAIOAuthService(
 	return svc
 }
 
-// ProvideOpenAIAuthBrowserLauncher 授权浏览器直拉（方案A，2026-09-22）：
-// cfg.Gateway.AuthBrowserLauncher 为空 → 返回 nil（功能整体关闭）。
-func ProvideOpenAIAuthBrowserLauncher(
-	cfg *config.Config,
-	proxyRepo ProxyRepository,
-	authPendingIdentityService *AuthPendingIdentityService,
-) *OpenAIAuthBrowserLauncher {
-	return NewOpenAIAuthBrowserLauncher(
-		cfg,
-		NewPendingAuthOpenAIOAuthSessionStore(authPendingIdentityService),
-		proxyRepo,
-	)
+func ProvideOpenAIAuthBrowserLauncher(cfg *config.Config, proxyRepo ProxyRepository, pending *AuthPendingIdentityService) *OpenAIAuthBrowserLauncher {
+	return NewOpenAIAuthBrowserLauncher(cfg, NewPendingAuthOpenAIOAuthSessionStore(pending), proxyRepo)
 }
 
 func ProvideAccountService(accounts AccountRepository, groups GroupRepository, settings *SettingService) *AccountService {
@@ -148,16 +142,7 @@ func ProvideAccountService(accounts AccountRepository, groups GroupRepository, s
 	return svc
 }
 
-func ProvideCRSSyncService(accounts AccountRepository, proxies ProxyRepository, oauth *OAuthService,
-	openai *OpenAIOAuthService, gemini *GeminiOAuthService, cfg *config.Config, settings *SettingService) *CRSSyncService {
-	svc := NewCRSSyncService(accounts, proxies, oauth, openai, gemini, cfg)
-	svc.settings = settings
-	return svc
-}
-
-func ProvideOpenAIOperationsService(repo OpenAIOperationsRepository, accounts AccountRepository,
-	settings *SettingService, profiles *TLSFingerprintProfileService, proxies ProxyRepository,
-	gateway *OpenAIGatewayService, refresh *OAuthRefreshAPI, oauth *OpenAIOAuthService) *OpenAIOperationsService {
+func ProvideOpenAIOperationsService(repo OpenAIOperationsRepository, accounts AccountRepository, settings *SettingService, profiles *TLSFingerprintProfileService, proxies ProxyRepository, gateway *OpenAIGatewayService, refresh *OAuthRefreshAPI, oauth *OpenAIOAuthService) *OpenAIOperationsService {
 	svc := NewOpenAIOperationsService(repo, accounts, settings, profiles, proxies, gateway, refresh, oauth)
 	svc.Start()
 	return svc
@@ -220,6 +205,20 @@ func ProvideOpenAITokenProvider(
 	return p
 }
 
+func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config, hostInfo PluginHostInfo, rateLimitService *RateLimitService, accountRepo AccountRepository, kvStore PluginKVStore, gateway *OpenAIGatewayService, probeStore OpenAIDowngradeProbeStore, httpUpstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService) *PluginManager {
+	manager := NewPluginManager(repo, encryptor, cfg, hostInfo, kvStore)
+	manager.accountHealth, _ = probeStore.(OpenAIProbeHealthLister)
+	manager.SetAccountDirectory(gateway)
+	manager.rateLimitService = rateLimitService
+	if source, ok := accountRepo.(OpenAIRescueTerminatedAccountLister); ok {
+		manager.SetRescueTerminatedAccountSource(source.ListOpenAIRescueTerminatedAccountIDs)
+	}
+	manager.probeControls, _ = probeStore.(OpenAIProbeBatchControlStore)
+	manager.httpUpstream = httpUpstream
+	manager.tlsProfiles = tlsProfiles
+	return manager
+}
+
 // ProvideOpenAIQuotaService wires the OpenAI quota query/reset service.
 // It depends on the OpenAI token provider for refreshed access tokens and the
 // privacy client factory for the impersonated upstream HTTP client.
@@ -228,30 +227,16 @@ func ProvideOpenAIQuotaService(
 	proxyRepo ProxyRepository,
 	tokenProvider *OpenAITokenProvider,
 	privacyClientFactory PrivacyClientFactory,
+	referralClient OpenAIReferralClient,
 	openAIGatewayService *OpenAIGatewayService,
 ) *OpenAIQuotaService {
-	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory)
+	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory, referralClient)
 	service.agentIdentityWS = openAIGatewayService
 	return service
 }
 
-// ProvideOpenAIDowngradeProbeRunner creates and starts the bill-free OpenAI
-// account quality probe scheduler. usageLogRepo backs the real-traffic
-// deferral check: an account with recent genuine inference traffic gets its
-// routine probe postponed instead of injecting a synthetic turn right behind
-// real ones (bounded, see openAIDowngradeMaxTrafficDeferrals).
-func ProvideOpenAIDowngradeProbeRunner(
-	store OpenAIDowngradeProbeStore,
-	accountRepo AccountRepository,
-	proxyRepo ProxyRepository,
-	tokenProvider *OpenAITokenProvider,
-	httpUpstream HTTPUpstream,
-	tlsProfiles *TLSFingerprintProfileService,
-	usageLogRepo UsageLogRepository,
-) *OpenAIDowngradeProbeRunner {
-	runner := NewOpenAIDowngradeProbeRunner(
-		store, accountRepo, proxyRepo, tokenProvider, httpUpstream, tlsProfiles,
-	)
+func ProvideOpenAIDowngradeProbeRunner(store OpenAIDowngradeProbeStore, accountRepo AccountRepository, proxyRepo ProxyRepository, tokenProvider *OpenAITokenProvider, httpUpstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService, usageLogRepo UsageLogRepository) *OpenAIDowngradeProbeRunner {
+	runner := NewOpenAIDowngradeProbeRunner(store, accountRepo, proxyRepo, tokenProvider, httpUpstream, tlsProfiles)
 	if usageLogRepo != nil {
 		runner.SetRecentTrafficChecker(func(ctx context.Context, accountID int64, within time.Duration) bool {
 			logs, _, err := usageLogRepo.ListByAccountAndTimeRange(ctx, accountID, time.Now().Add(-within), time.Now())
@@ -261,60 +246,44 @@ func ProvideOpenAIDowngradeProbeRunner(
 	return runner
 }
 
-// ProvideOpenAIGatewayService wires the shared TLS fingerprint profile
-// resolver into the OpenAI gateway without changing the legacy constructor
-// signature used by focused tests.
-func ProvideOpenAIGatewayService(
-	accountRepo AccountRepository,
-	usageLogRepo UsageLogRepository,
-	usageBillingRepo UsageBillingRepository,
-	userRepo UserRepository,
-	userSubRepo UserSubscriptionRepository,
-	userGroupRateRepo UserGroupRateRepository,
-	cache GatewayCache,
-	cfg *config.Config,
-	schedulerSnapshot *SchedulerSnapshotService,
-	concurrencyService *ConcurrencyService,
-	billingService *BillingService,
-	rateLimitService *RateLimitService,
-	billingCacheService *BillingCacheService,
-	httpUpstream HTTPUpstream,
-	tlsFPProfileService *TLSFingerprintProfileService,
-	deferredService *DeferredService,
-	openAITokenProvider *OpenAITokenProvider,
-	grokTokenProvider *GrokTokenProvider,
-	resolver *ModelPricingResolver,
-	channelService *ChannelService,
-	balanceNotifyService *BalanceNotifyService,
-	settingService *SettingService,
-	userPlatformQuotaRepo UserPlatformQuotaRepository,
-) *OpenAIGatewayService {
-	svc := NewOpenAIGatewayService(
-		accountRepo,
-		usageLogRepo,
-		usageBillingRepo,
-		userRepo,
-		userSubRepo,
-		userGroupRateRepo,
-		cache,
-		cfg,
-		schedulerSnapshot,
-		concurrencyService,
-		billingService,
-		rateLimitService,
-		billingCacheService,
-		httpUpstream,
-		deferredService,
-		openAITokenProvider,
-		grokTokenProvider,
-		resolver,
-		channelService,
-		balanceNotifyService,
-		settingService,
-		userPlatformQuotaRepo,
-	)
+func ProvideOpenAIGatewayService(accountRepo AccountRepository, usageLogRepo UsageLogRepository, usageBillingRepo UsageBillingRepository, userRepo UserRepository, userSubRepo UserSubscriptionRepository, userGroupRateRepo UserGroupRateRepository, cache GatewayCache, cfg *config.Config, schedulerSnapshot *SchedulerSnapshotService, concurrencyService *ConcurrencyService, billingService *BillingService, rateLimitService *RateLimitService, billingCacheService *BillingCacheService, httpUpstream HTTPUpstream, tlsFPProfileService *TLSFingerprintProfileService, deferredService *DeferredService, openAITokenProvider *OpenAITokenProvider, grokTokenProvider *GrokTokenProvider, resolver *ModelPricingResolver, channelService *ChannelService, balanceNotifyService *BalanceNotifyService, settingService *SettingService, userPlatformQuotaRepo UserPlatformQuotaRepository) *OpenAIGatewayService {
+	svc := NewOpenAIGatewayService(accountRepo, usageLogRepo, usageBillingRepo, userRepo, userSubRepo, userGroupRateRepo, cache, cfg, schedulerSnapshot, concurrencyService, billingService, rateLimitService, billingCacheService, httpUpstream, deferredService, openAITokenProvider, grokTokenProvider, resolver, channelService, balanceNotifyService, settingService, userPlatformQuotaRepo)
 	svc.SetTLSFingerprintProfileService(tlsFPProfileService)
 	return svc
+}
+
+func ProvideOpenAIRescueLane(accounts AccountRepository, store OpenAIDowngradeProbeStore, settings *SettingService, tests *AccountTestService, plugin *PluginManager, runner *OpenAIDowngradeProbeRunner, rateLimit *RateLimitService) *OpenAIRescueLane {
+	lane := NewOpenAIRescueLane(accounts, store, func() OpenAIRescueLaneConfig {
+		return ResolveOpenAIRescueLaneConfig(settings.GetOpenAIRescueLaneSettings(context.Background()))
+	}, NewOpenAIRescueLaneSeedAdapter(tests))
+	runner.SetRescueLane(lane)
+	runner.SetPluginBridgeSource(plugin.BridgeStatus)
+	runner.SetPluginRoundTrip(plugin.RoundTripOpenAIOAuth)
+	lane.SetPluginProbePauseSync(plugin.SyncRescueProbePauses)
+	if controls, ok := store.(OpenAIDowngradeProbeControlStore); ok {
+		lane.SetSchedulingGate(controls.CanRunOpenAIDowngradeProbe)
+	}
+	if health, ok := store.(OpenAIProbeHealthLister); ok {
+		lane.SetProbeStateSource(func(ctx context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
+			snapshots, err := health.ListOpenAIProbeHealthSnapshots(ctx, ids)
+			if err != nil {
+				return nil, err
+			}
+			states := make(map[int64]OpenAIProbeHealthSnapshot, len(snapshots))
+			for _, snapshot := range snapshots {
+				states[snapshot.AccountID] = snapshot
+			}
+			return states, nil
+		})
+	}
+	lane.SetBridgeSource(plugin.BridgeStatus)
+	lane.SetNeedleTrigger(runner.ConfirmOpenAIRescueAccount)
+	if writer, ok := store.(OpenAIQuotaCutEventWriter); ok {
+		rateLimit.SetOpenAIQuotaCutEventWriter(writer)
+	}
+	runner.Start()
+	lane.Start()
+	return lane
 }
 
 // ProvideOpenAIQuotaAutoResetService 启动账号级自动用卡队列与补偿扫描。
@@ -371,25 +340,6 @@ func ProvideAccountUsageService(
 	return service
 }
 
-func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config,
-	hostInfo PluginHostInfo, rateLimitService *RateLimitService, accountRepo AccountRepository,
-	kvStore PluginKVStore, gateway *OpenAIGatewayService, probeStore OpenAIDowngradeProbeStore,
-	httpUpstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService,
-) *PluginManager {
-	manager := NewPluginManager(repo, encryptor, cfg, hostInfo)
-	manager.kvStore = kvStore
-	manager.accountHealth, _ = probeStore.(OpenAIProbeHealthLister)
-	manager.SetAccountDirectory(gateway)
-	manager.rateLimitService = rateLimitService
-	if source, ok := accountRepo.(OpenAIRescueTerminatedAccountLister); ok {
-		manager.SetRescueTerminatedAccountSource(source.ListOpenAIRescueTerminatedAccountIDs)
-	}
-	manager.probeControls, _ = probeStore.(OpenAIProbeBatchControlStore)
-	manager.httpUpstream = httpUpstream
-	manager.tlsProfiles = tlsProfiles
-	return manager
-}
-
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
 	geminiTokenProvider *GeminiTokenProvider,
@@ -417,9 +367,6 @@ func ProvideAccountTestService(
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
-	if openAIGatewayService != nil {
-		service.openAITokenProvider = openAIGatewayService.openAITokenProvider
-	}
 	return service
 }
 
@@ -523,8 +470,9 @@ func ProvideGrokTokenProvider(
 }
 
 // ProvideDashboardAggregationService 创建并启动仪表盘聚合服务
-func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *DashboardAggregationService {
+func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config, settingRepo SettingRepository) *DashboardAggregationService {
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
+	svc.settingRepo = settingRepo
 	svc.SetLeaderLock(lockCache, db)
 	svc.Start()
 	return svc
@@ -557,6 +505,7 @@ func ProvideOpenAICodexVersionSyncService(
 }
 
 // ProvideClaudeCodeVersionSyncService creates and starts ClaudeCodeVersionSyncService.
+// 出站 Claude Code 身份的版本号靠它跟随官方发布，无需为了跟版本而发新版本；面板可关闭。
 func ProvideClaudeCodeVersionSyncService(
 	settingRepo SettingRepository,
 	settingService *SettingService,
@@ -652,6 +601,7 @@ func ProvideRateLimitService(
 	openAI403CounterCache OpenAI403CounterCache,
 	settingService *SettingService,
 	tokenCacheInvalidator TokenCacheInvalidator,
+	ollamaCloudUsage *OllamaCloudUsageService,
 ) *RateLimitService {
 	svc := NewRateLimitService(accountRepo, usageRepo, cfg, geminiQuotaService, tempUnschedCache)
 	if healthCache, ok := tempUnschedCache.(OpenAIAPIKeyHealthCache); ok {
@@ -661,6 +611,7 @@ func ProvideRateLimitService(
 	svc.SetOpenAI403CounterCache(openAI403CounterCache)
 	svc.SetSettingService(settingService)
 	svc.SetTokenCacheInvalidator(tokenCacheInvalidator)
+	svc.SetOllamaCloudUsageProbeScheduler(ollamaCloudUsage)
 	return svc
 }
 
@@ -891,7 +842,6 @@ func ProvideOpsService(
 	geminiCompatService *GeminiMessagesCompatService,
 	antigravityGatewayService *AntigravityGatewayService,
 	systemLogSink *OpsSystemLogSink,
-	openAIDowngradeStore OpenAIDowngradeProbeStore,
 	settingService *SettingService,
 	authCacheInvalidationWorker *AuthCacheInvalidationWorker,
 	apiKeyService *APIKeyService,
@@ -909,7 +859,6 @@ func ProvideOpsService(
 		antigravityGatewayService,
 		systemLogSink,
 	)
-	svc.SetOpenAIDowngradeProbeStore(openAIDowngradeStore)
 	if settingService != nil {
 		svc.SetOpenAIQuotaAutoPauseSettingsSink(settingService.SetOpenAIQuotaAutoPauseSettings)
 		// Optional warm-up so the first scheduled request after process start observes
@@ -936,8 +885,9 @@ func ProvideOpsIngressRejectAggregator(opsRepo OpsRepository, opsService *OpsSer
 }
 
 // ProvideSettingService wires SettingService with group reader and proxy repo.
-func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) *SettingService {
+func ProvideSettingService(scopedKeys ScopedAdminKeyRepository, settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) *SettingService {
 	svc := NewSettingService(settingRepo, cfg)
+	svc.scopedAdminKeyRepo = scopedKeys
 	svc.SetDefaultSubscriptionGroupReader(groupRepo)
 	svc.SetProxyRepository(proxyRepo)
 	if err := svc.LoadForwardedClientIPSettings(context.Background()); err != nil {
@@ -960,6 +910,8 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
 	})
+	// Claude CLI 伪装版本号同理：运行期解析（面板手动值 → 后台同步值 → 内置基线），
+	// 解析器内部自带 60s TTL 缓存，热路径不触库。
 	claude.SetCLIVersionResolver(func() string {
 		return svc.GetClaudeCodeClientVersion(context.Background())
 	})
@@ -1007,6 +959,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAuthService,
 	NewPasskeyService,
 	NewUserService,
+	NewMCPOAuthService,
 	ProvideAPIKeyService,
 	ProvideAPIKeyAuthCacheInvalidator,
 	ProvideAuthCacheInvalidationWorker,
@@ -1025,6 +978,7 @@ var ProviderSet = wire.NewSet(
 	NewAdminService,
 	NewGatewayService,
 	ProvideOpenAIGatewayService,
+	ProvidePluginManager,
 	ProvideImageStorageSettingService,
 	ProvideImageTaskService,
 	ProvideBatchImageModelPricingResolver,
@@ -1092,7 +1046,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
 	NewIdentityService,
-	ProvideCRSSyncService,
+	NewCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
@@ -1111,8 +1065,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageCache,
 	NewTotpService,
 	NewErrorPassthroughService,
-	ProvideTLSFingerprintProfileService,
-	ProvidePluginManager,
+	NewTLSFingerprintProfileService,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,
 	ProvideSystemOperationLockService,
@@ -1228,41 +1181,6 @@ func ProvideChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.
 	}
 	aggregator.Start()
 	return aggregator
-}
-
-// Configure all probe/rescue callbacks before either background loop starts.
-func ProvideOpenAIRescueLane(accounts AccountRepository, store OpenAIDowngradeProbeStore, settings *SettingService, tests *AccountTestService, plugin *PluginManager, runner *OpenAIDowngradeProbeRunner, rateLimit *RateLimitService) *OpenAIRescueLane {
-	lane := NewOpenAIRescueLane(accounts, store, func() OpenAIRescueLaneConfig {
-		return ResolveOpenAIRescueLaneConfig(settings.GetOpenAIRescueLaneSettings(context.Background()))
-	}, NewOpenAIRescueLaneSeedAdapter(tests))
-	runner.SetRescueLane(lane)
-	runner.SetPluginBridgeSource(plugin.BridgeStatus)
-	runner.SetPluginRoundTrip(plugin.RoundTripOpenAIOAuth)
-	lane.SetPluginProbePauseSync(plugin.SyncRescueProbePauses)
-	if controls, ok := store.(OpenAIDowngradeProbeControlStore); ok {
-		lane.SetSchedulingGate(controls.CanRunOpenAIDowngradeProbe)
-	}
-	if health, ok := store.(OpenAIProbeHealthLister); ok {
-		lane.SetProbeStateSource(func(ctx context.Context, ids []int64) (map[int64]OpenAIProbeHealthSnapshot, error) {
-			snapshots, err := health.ListOpenAIProbeHealthSnapshots(ctx, ids)
-			if err != nil {
-				return nil, err
-			}
-			states := make(map[int64]OpenAIProbeHealthSnapshot, len(snapshots))
-			for _, snapshot := range snapshots {
-				states[snapshot.AccountID] = snapshot
-			}
-			return states, nil
-		})
-	}
-	lane.SetBridgeSource(plugin.BridgeStatus)
-	lane.SetNeedleTrigger(runner.ConfirmOpenAIRescueAccount)
-	if writer, ok := store.(OpenAIQuotaCutEventWriter); ok {
-		rateLimit.SetOpenAIQuotaCutEventWriter(writer)
-	}
-	runner.Start()
-	lane.Start()
-	return lane
 }
 
 // ProvideClaudeResetCreditService wires the Claude reset query and, with the

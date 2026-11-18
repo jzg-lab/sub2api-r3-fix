@@ -14,11 +14,10 @@ import (
 )
 
 type rateLimitAccountRepoStub struct {
-	rateLimitedCalls  int
-	lastRateLimitedAt time.Time
 	mockAccountRepoForGemini
 	setErrorCalls          int
 	tempCalls              int
+	rateLimitedCalls       int
 	updateCredentialsCalls int
 	updateExtraCalls       int
 	lastCredentials        map[string]any
@@ -27,7 +26,16 @@ type rateLimitAccountRepoStub struct {
 	lastTempReason         string
 	lastErrorID            int64
 	lastTempID             int64
+	lastRateLimitedID      int64
+	lastRateLimitedAt      time.Time
 	tempErr                error
+}
+
+func (r *rateLimitAccountRepoStub) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
+	if change.ErrorMessage != nil {
+		return true, r.SetError(ctx, before.ID, *change.ErrorMessage)
+	}
+	return true, r.SetTempUnschedulable(ctx, before.ID, *change.CooldownUntil, change.CooldownReason)
 }
 
 func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, errorMsg string) error {
@@ -37,24 +45,18 @@ func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, error
 	return nil
 }
 
-func (r *rateLimitAccountRepoStub) ApplyOpenAIAuthStateIfUnchanged(ctx context.Context, before *Account, change OpenAIAuthStateUpdate) (bool, error) {
-	if !matchesAuthFailureTestAccount(r.accountsByID[before.ID], before) {
-		return false, nil
-	}
-	var err error
-	if change.ErrorMessage != nil {
-		err = r.SetError(ctx, before.ID, *change.ErrorMessage)
-	} else if change.CooldownUntil != nil {
-		err = r.SetTempUnschedulable(ctx, before.ID, *change.CooldownUntil, change.CooldownReason)
-	}
-	return err == nil, err
-}
-
 func (r *rateLimitAccountRepoStub) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	r.tempCalls++
 	r.lastTempID = id
 	r.lastTempReason = reason
 	return r.tempErr
+}
+
+func (r *rateLimitAccountRepoStub) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
+	r.rateLimitedCalls++
+	r.lastRateLimitedID = id
+	r.lastRateLimitedAt = resetAt
+	return nil
 }
 
 func (r *rateLimitAccountRepoStub) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
@@ -183,7 +185,6 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		Type:        AccountTypeOAuth,
 		Credentials: map[string]any{"refresh_token": "rt-mother"},
 	}
-	mother.Credentials["access_token"] = "fixture-parent"
 	repo.accountsByID[parentID] = mother
 
 	shadowParent := parentID
@@ -196,7 +197,7 @@ func TestRateLimitService_HandleUpstreamError_SparkShadow401RedirectsToParent(t 
 		// 影子不持凭据:GetCredential("refresh_token") == ""
 	}
 
-	attempt := snapshotOpenAIRequestAccount(context.Background(), shadow, "Bearer "+mother.GetOpenAIAccessToken(), repo)
+	attempt := snapshotOpenAIRequestAccount(context.Background(), shadow, "", repo)
 	shouldDisable := service.HandleUpstreamError(context.Background(), attempt, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
@@ -226,7 +227,6 @@ func TestRateLimitService_HandleUpstreamError_OAuth401InvalidatorError(t *testin
 		},
 	}
 
-	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
@@ -254,6 +254,29 @@ func TestRateLimitService_HandleUpstreamError_NonOAuth401(t *testing.T) {
 	require.Empty(t, invalidator.accounts)
 }
 
+func TestRateLimitService_HandleUpstreamError_NonOAuthModel401StillDisablesCredentials(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       104,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+	}
+
+	shouldDisable := service.HandleUpstreamError(
+		context.Background(),
+		account,
+		http.StatusUnauthorized,
+		http.Header{},
+		[]byte(`{"error":{"message":"invalid or expired credentials"}}`),
+		"definitely-not-real",
+	)
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
+}
+
 // TestRateLimitService_HandleUpstreamError_OAuth401DoesNotOverwriteCredentials
 // 回归测试:确保 401 handler 不再使用请求开始时的 account 快照写回 credentials。
 // 原实现会通过 persistAccountCredentials → UpdateCredentials → SetCredentials
@@ -272,7 +295,6 @@ func TestRateLimitService_HandleUpstreamError_OAuth401DoesNotOverwriteCredential
 		},
 	}
 
-	repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 	require.True(t, shouldDisable)
@@ -300,7 +322,6 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 			},
 		}
 
-		repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
@@ -324,7 +345,6 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 			},
 		}
 
-		repo.accountsByID = map[int64]*Account{account.ID: snapshotOAuthRefreshAccount(account)}
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
@@ -354,10 +374,4 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
 		require.Len(t, invalidator.accounts, 1)
 	})
-}
-
-func (r *rateLimitAccountRepoStub) SetRateLimited(ctx context.Context, id int64, until time.Time) error {
-	r.rateLimitedCalls++
-	r.lastRateLimitedAt = until
-	return r.mockAccountRepoForGemini.SetRateLimited(ctx, id, until)
 }

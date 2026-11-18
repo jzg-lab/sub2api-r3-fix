@@ -21,25 +21,6 @@ func newPlazaService(channels []Channel, groups []Group, pricing *PricingService
 	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaPricingAccounts(channels), pricing, nil, nil)
 }
 
-// Pricing tests supply the models they price. Catalog tests replace this fixture
-// with independent account configurations to exercise missing/unsupported models.
-func plazaPricingAccounts(channels []Channel) *plazaAccountRepository {
-	repo := &plazaAccountRepository{}
-	for _, ch := range channels {
-		if ch.Status != StatusActive {
-			continue
-		}
-		for _, m := range ch.SupportedModels() {
-			mapping := map[string]any{m.Name: m.Name}
-			if target := ch.ModelMapping[m.Platform][m.Name]; target != "" {
-				mapping[target] = target
-			}
-			repo.accounts = append(repo.accounts, plazaAccount(m.Platform, ch.GroupIDs, mapping))
-		}
-	}
-	return repo
-}
-
 func plazaPricedChannel(id int64, name string, groupIDs []int64, platform string, models ...string) Channel {
 	return Channel{
 		ID:       id,
@@ -286,7 +267,8 @@ func TestListPlazaGroups_GroupImagePriceOverridesChannelPricing(t *testing.T) {
 	}}
 	groups := []Group{
 		{ID: 10, Name: "g-media", Platform: "openai", RateMultiplier: 1,
-			ImagePrice1K: &imgPrice, ImageRateIndependent: true, ImageRateMultiplier: 1},
+			ImagePrice1K: &imgPrice, ImageRateIndependent: true, ImageRateMultiplier: 1,
+			VideoRateIndependent: true, VideoRateMultiplier: 0.7},
 		{ID: 20, Name: "g-plain", Platform: "openai", RateMultiplier: 0.1},
 	}
 	svc := newPlazaService(channels, groups, nil)
@@ -300,6 +282,8 @@ func TestListPlazaGroups_GroupImagePriceOverridesChannelPricing(t *testing.T) {
 
 	media := byName["g-media"]
 	require.True(t, media.ImageRateIndependent)
+	require.True(t, media.VideoRateIndependent)
+	require.InDelta(t, 0.7, media.VideoRateMultiplier, 1e-9)
 	require.InDelta(t, 1.0, media.ImageRateMultiplier, 1e-9)
 	require.Len(t, media.Models, 1)
 	p := media.Models[0].Pricing
@@ -316,6 +300,7 @@ func TestListPlazaGroups_GroupImagePriceOverridesChannelPricing(t *testing.T) {
 
 	plain := byName["g-plain"]
 	require.False(t, plain.ImageRateIndependent)
+	require.False(t, plain.VideoRateIndependent)
 	require.Len(t, plain.Models, 1)
 	pp := plain.Models[0].Pricing
 	require.NotNil(t, pp)
@@ -324,6 +309,79 @@ func TestListPlazaGroups_GroupImagePriceOverridesChannelPricing(t *testing.T) {
 
 	// 合成为克隆,渠道原始定价不被修改
 	require.Len(t, channels[0].ModelPricing[0].Intervals, 1)
+}
+
+func TestListPlazaGroups_GroupModelImagePricingWinsOverGroupImageTiers(t *testing.T) {
+	groupImage1K, groupImage2K, groupImage4K := 0.05, 0.055, 0.06
+	model1K, model2K, model4K := 0.05, 0.075, 0.1
+	channels := []Channel{{
+		ID: 1, Name: "img-ch", Status: StatusActive, GroupIDs: []int64{10},
+		ModelPricing: []ChannelModelPricing{{
+			Platform:        "openai",
+			Models:          []string{"yeahzi-image"},
+			BillingMode:     BillingModeImage,
+			PerRequestPrice: testPtrFloat64(0.2),
+		}},
+	}}
+	groups := []Group{{
+		ID: 10, Name: "g", Platform: "openai", RateMultiplier: 1,
+		ImagePrice1K: &groupImage1K, ImagePrice2K: &groupImage2K, ImagePrice4K: &groupImage4K,
+		ModelPricing: []ChannelModelPricing{{
+			Platform:        "openai",
+			Models:          []string{"yeahzi-image"},
+			BillingMode:     BillingModeImage,
+			PerRequestPrice: testPtrFloat64(0.1),
+			Intervals: []PricingInterval{
+				{TierLabel: "1K", PerRequestPrice: &model1K},
+				{TierLabel: "2K", PerRequestPrice: &model2K},
+				{TierLabel: "4K", PerRequestPrice: &model4K},
+			},
+		}},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 1)
+	p := out[0].Models[0].Pricing
+	require.Equal(t, BillingModeImage, p.BillingMode)
+	require.Len(t, p.Intervals, 3)
+	tierPrices := map[string]float64{}
+	for _, iv := range p.Intervals {
+		require.NotNil(t, iv.PerRequestPrice)
+		tierPrices[iv.TierLabel] = *iv.PerRequestPrice
+	}
+	require.InDelta(t, 0.05, tierPrices["1K"], 1e-9)
+	require.InDelta(t, 0.075, tierPrices["2K"], 1e-9)
+	require.InDelta(t, 0.1, tierPrices["4K"], 1e-9)
+}
+
+func TestListPlazaGroups_GroupModelFlatImagePriceWinsOverGroupImageTiers(t *testing.T) {
+	groupPrice := 0.2
+	channels := []Channel{{
+		ID: 1, Name: "img-ch", Status: StatusActive, GroupIDs: []int64{10},
+		ModelPricing: []ChannelModelPricing{{
+			Platform: "openai", Models: []string{"gemini-3.1-flash-lite-image"},
+			BillingMode: BillingModeImage, PerRequestPrice: testPtrFloat64(0.2),
+		}},
+	}}
+	groups := []Group{{
+		ID: 10, Name: "g", Platform: "openai", RateMultiplier: 1,
+		ImagePrice1K: &groupPrice,
+		ModelPricing: []ChannelModelPricing{{
+			Platform: "openai", Models: []string{"gemini-3.1-flash-lite-image"},
+			BillingMode: BillingModeImage, PerRequestPrice: testPtrFloat64(0.1),
+		}},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	p := out[0].Models[0].Pricing
+	require.Equal(t, BillingModeImage, p.BillingMode)
+	require.NotNil(t, p.PerRequestPrice)
+	require.InDelta(t, 0.1, *p.PerRequestPrice, 1e-9)
+	require.Empty(t, p.Intervals, "模型级固定价不应被分组图片档位覆盖")
 }
 
 func TestListPlazaGroups_GroupImagePriceIgnoredForNonImageModes(t *testing.T) {
@@ -370,7 +428,7 @@ func newPlazaServiceWithBilling(channels []Channel, groups []Group, groupPlatfor
 			return groupPlatforms, nil
 		},
 	}
-	cs := NewChannelService(repo, nil, nil, nil)
+	cs := NewChannelService(repo, nil, nil, nil, nil)
 	bs := NewBillingService(&config.Config{}, catalog)
 	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaPricingAccounts(channels), catalog, bs, NewModelPricingResolver(cs, bs))
 }
@@ -525,6 +583,23 @@ func TestListGroups_TimePricingPassthrough(t *testing.T) {
 	require.InDelta(t, 0.5, m.TimePricing.Periods[0].Multiplier, 1e-12)
 	// 展示单价为标准时段价
 	require.InDelta(t, 0.28e-6, *m.Pricing.InputPrice, 1e-15)
+}
+
+func plazaPricingAccounts(channels []Channel) *plazaAccountRepository {
+	repo := &plazaAccountRepository{}
+	for _, ch := range channels {
+		if ch.Status != StatusActive {
+			continue
+		}
+		for _, m := range ch.SupportedModels() {
+			mapping := map[string]any{m.Name: m.Name}
+			if target := ch.ModelMapping[m.Platform][m.Name]; target != "" {
+				mapping[target] = target
+			}
+			repo.accounts = append(repo.accounts, plazaAccount(m.Platform, ch.GroupIDs, mapping))
+		}
+	}
+	return repo
 }
 
 func TestPlazaCurrentRateMatchesBillingPeakAndMediaRules(t *testing.T) {

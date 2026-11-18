@@ -18,8 +18,6 @@ const {
   getAllGroups: vi.fn()
 }))
 
-vi.mock('@/api/admin/manualQuality', () => ({ manualQualityAPI: { summaries: vi.fn().mockResolvedValue([]) } }))
-
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
@@ -134,7 +132,6 @@ const baseAccount = {
 
 describe('admin AccountsView scheduler score column', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     localStorage.clear()
 
     listAccounts.mockReset()
@@ -255,3 +252,5 @@ describe('admin AccountsView scheduler score column', () => {
     expect(emptyCell.text()).toBe('-')
   })
 })
+
+beforeEach(() => setActivePinia(createPinia()))

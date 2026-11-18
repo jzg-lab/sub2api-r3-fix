@@ -627,8 +627,6 @@ func NewContentModerationService(
 	return svc
 }
 
-// Stop runs after request admission is sealed. Accepted audit work is drained,
-// not discarded; unavailable configuration may delay retirement.
 func (s *ContentModerationService) Stop() {
 	if s == nil {
 		return
@@ -959,30 +957,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"configured_models", cfg.ModelFilter.Models)
 		return allow, nil
 	}
-	content := ExtractContentModerationInput(input.Protocol, input.Body)
-	if content.IsEmpty() {
-		slog.Info("content_moderation.skip_empty_input",
-			"user_id", input.UserID,
-			"api_key_id", input.APIKeyID,
-			"group_id", contentModerationLogGroupID(input.GroupID),
-			"endpoint", input.Endpoint,
-			"protocol", input.Protocol,
-			"body_bytes", len(input.Body))
-		return allow, nil
-	}
-	content.Normalize()
-	slog.Info("content_moderation.input_extracted",
-		"user_id", input.UserID,
-		"api_key_id", input.APIKeyID,
-		"group_id", contentModerationLogGroupID(input.GroupID),
-		"endpoint", input.Endpoint,
-		"protocol", input.Protocol,
-		"text_runes", len([]rune(content.Text)),
-		"image_count", len(content.Images))
-	hashText := content.Hash()
 	if cfg.Mode == ContentModerationModePreBlock {
 		if cfg.KeywordBlockingMode != ContentModerationKeywordModeAPIOnly && len(cfg.BlockedKeywords) > 0 {
-			keywordText := content.Text
+			keywordText := extractContentModerationKeywordText(input.Protocol, input.Body)
 			if keyword, hit := runtimeSnapshot.matchBlockedKeyword(keywordText); hit {
 				metricAction := ContentModerationActionKeywordBlock
 				if input.riskControlLogOnly {
@@ -998,9 +975,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 					"keyword_blocking_mode", cfg.KeywordBlockingMode,
 					"keyword", keyword)
 				scores := map[string]float64{contentModerationKeywordCategory: 1.0}
-				log := s.buildLog(input, cfg, ContentModerationActionKeywordBlock, true, contentModerationKeywordCategory, 1.0, scores, content.ExcerptText(), nil, nil, "")
+				log := s.buildLog(input, cfg, ContentModerationActionKeywordBlock, true, contentModerationKeywordCategory, 1.0, scores, keywordText, nil, nil, "")
 				log.MatchedKeyword = keyword
-				s.enqueueRecord(input, cfg, log, hashText, false, true)
+				s.enqueueRecord(input, cfg, log, (ContentModerationInput{Text: keywordText}).Hash(), false, true)
 				return &ContentModerationDecision{
 					Allowed:         false,
 					Blocked:         true,
@@ -1025,6 +1002,27 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			return allow, nil
 		}
 	}
+	content := ExtractContentModerationInput(input.Protocol, input.Body)
+	if content.IsEmpty() {
+		slog.Info("content_moderation.skip_empty_input",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"group_id", contentModerationLogGroupID(input.GroupID),
+			"endpoint", input.Endpoint,
+			"protocol", input.Protocol,
+			"body_bytes", len(input.Body))
+		return allow, nil
+	}
+	content.Normalize()
+	slog.Info("content_moderation.input_extracted",
+		"user_id", input.UserID,
+		"api_key_id", input.APIKeyID,
+		"group_id", contentModerationLogGroupID(input.GroupID),
+		"endpoint", input.Endpoint,
+		"protocol", input.Protocol,
+		"text_runes", len([]rune(content.Text)),
+		"image_count", len(content.Images))
+	hashText := content.Hash()
 	if cfg.PreHashCheckEnabled && s.hashCache != nil {
 		matched, err := s.hashCache.HasFlaggedInputHash(ctx, hashText)
 		if err != nil {
@@ -1542,9 +1540,9 @@ func (s *ContentModerationService) cleanupWorker() {
 		case <-s.cleanupStop:
 			return
 		case <-timer.C:
+			s.runCleanupOnce()
+			timer.Reset(contentModerationCleanupInterval)
 		}
-		s.runCleanupOnce()
-		timer.Reset(contentModerationCleanupInterval)
 	}
 }
 

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 	probeEnabled *bool,
 	rateSyncEnabled *bool,
 	rateMultiplier *float64,
-	concurrency *int,
+	concurrency ...*int,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -42,11 +41,6 @@ func (r *accountBillingSettingsAdminRepo) UpdateWithAccountBillingSettings(
 		return ErrAccountNotFound
 	}
 	updated := *account
-	updated.Concurrency = current.Concurrency
-	if concurrency != nil {
-		updated.Concurrency = *concurrency
-	}
-	account.Concurrency = updated.Concurrency
 	updated.Credentials = mergeMap(nil, account.Credentials)
 	updated.Extra = mergeMap(nil, account.Extra)
 	if updated.Extra == nil {
@@ -185,7 +179,7 @@ func TestUpdateAccountPreservesManagedUpstreamBillingProbeStateForUnrelatedEdit(
 		},
 	}}
 
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
 		Extra: map[string]any{"custom": "value"},
 	})
@@ -395,7 +389,7 @@ func TestUpdateAccountAcceptsProbeEnabledAndRejectsInjectedSnapshot(t *testing.T
 		},
 	}}
 
-	svc := &adminServiceImpl{accountRepo: repo}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
 	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
 		Extra: map[string]any{
 			UpstreamBillingProbeEnabledExtraKey:    true,
@@ -649,52 +643,6 @@ func TestBulkUpdateAccountsDropsManagedUpstreamBillingProbeState(t *testing.T) {
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingProbeEnabledExtraKey)
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingRateSyncEnabledExtraKey)
 	require.NotContains(t, repo.bulkUpdates[0].Extra, UpstreamBillingProbeExtraKey)
-}
-
-func TestAdminAccountPartialEditsRejectManagedSchedulingState(t *testing.T) {
-	for _, managedValue := range []any{nil, false, true, map[string]any{"stale": "limit"}} {
-		t.Run(fmt.Sprintf("%T/%v", managedValue, managedValue), func(t *testing.T) {
-			input := map[string]any{
-				modelRateLimitsKey:                   managedValue,
-				OpenAIDowngradeSolFallbackExtraKey:   managedValue,
-				OpenAIDowngradeQualificationExtraKey: managedValue,
-				"custom":                             "edited",
-			}
-			accountID := int64(153)
-			repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{
-				accountID: {ID: accountID, Extra: map[string]any{
-					modelRateLimitsKey:                   map[string]any{"current": "limit"},
-					OpenAIDowngradeQualificationExtraKey: true,
-				}},
-			}}
-			svc := &adminServiceImpl{accountRepo: repo}
-
-			require.NoError(t, svc.UpdateAccountExtra(context.Background(), accountID, input))
-			require.Equal(t, map[string]any{
-				modelRateLimitsKey:                   map[string]any{"current": "limit"},
-				OpenAIDowngradeQualificationExtraKey: true,
-				"custom":                             "edited",
-			}, repo.accounts[accountID].Extra)
-
-			result, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{
-				AccountIDs: []int64{accountID}, Extra: input,
-			})
-			require.NoError(t, err)
-			require.Equal(t, 1, result.Success)
-			require.Len(t, repo.bulkUpdates, 1)
-			require.Equal(t, map[string]any{"custom": "edited"}, repo.bulkUpdates[0].Extra)
-			require.Len(t, input, 4, "sanitizing must not change the caller's map")
-		})
-	}
-}
-
-func TestUpdateAccountExtraOnlyManagedSchedulingStateIsNoOp(t *testing.T) {
-	svc := &adminServiceImpl{}
-	require.NoError(t, svc.UpdateAccountExtra(context.Background(), 153, map[string]any{
-		modelRateLimitsKey:                   nil,
-		OpenAIDowngradeSolFallbackExtraKey:   true,
-		OpenAIDowngradeQualificationExtraKey: false,
-	}))
 }
 
 func TestBulkUpdateAccountsAcceptsDedicatedUpstreamBillingProbeSetting(t *testing.T) {

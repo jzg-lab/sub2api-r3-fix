@@ -16,6 +16,10 @@ import (
 const OpenAIOAuthLoginExitIPExtraKey = "openai_oauth_login_exit_ip"
 
 var (
+	ErrOAuthReauthorizationStale = infraerrors.Conflict(
+		"OPENAI_OAUTH_REAUTH_STALE",
+		"account credentials or settings changed during reauthorization; restart the flow",
+	)
 	ErrOpenAIOAuthReauthorizationUnavailable = infraerrors.New(
 		http.StatusServiceUnavailable, "OPENAI_OAUTH_REAUTH_ACCOUNT_UNAVAILABLE",
 		"account state cannot be verified; retry starting authorization when the service recovers",
@@ -37,6 +41,10 @@ var (
 		"original authorization exit cannot be verified; reauthorization has stopped",
 	)
 )
+
+type OAuthReauthorizationRepository interface {
+	ApplyOAuthCredentials(context.Context, int64, time.Time, string, map[string]any, map[string]any) (*Account, error)
+}
 
 func (s *OpenAIOAuthService) SetReauthorizationAccountLookup(lookup func(context.Context, int64) (*Account, error)) {
 	s.reauthorizationAccountLookup = lookup

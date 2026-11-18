@@ -45,6 +45,7 @@ func (s *GatewayService) handleUpstreamTransportError(ctx context.Context, c *gi
 	}
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
 	setOpsUpstreamError(c, 0, safeErr, "")
+	event.ProxyID, event.ProxyName = opsUpstreamProxyAttribution(account)
 	event.Platform = account.Platform
 	event.AccountID = account.ID
 	event.AccountName = account.Name

@@ -71,15 +71,14 @@ func TestAccountRepositoryUpdatePreservesConcurrency(t *testing.T) {
 	for _, failure := range []string{"none", "outbox", "commit"} {
 		t.Run(failure, func(t *testing.T) {
 			repo, mock := atomicCreateRepository(t)
-			seen := assertConcurrencyMutation(t, repo, 1)
 			account := atomicCreateAccount()
 			account.ID = 71
 			mock.ExpectBegin()
 			expectNonBrowserOpenAIOAuthPATAccountLock(mock, account.ID)
 			mock.ExpectQuery(`(?s)SELECT.*FOR NO KEY UPDATE`).
 				WithArgs(int64(71), service.PlatformOpenAI, service.AccountTypeOAuth, `{"auth_mode":"personalAccessToken"}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity", "group", "proxy", "probe", "sync", "snapshot", "session", "auto", "usage", "opencode_identity", "opencode_auto", "opencode_snapshot", "sol_fallback", "qualification", "model_rate_limits", "allow_overages", "extra"}).
-					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil))
+				WillReturnRows(sqlmock.NewRows(openCodeGoMergeMockColumns()).
+					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, nil, nil))
 			mock.ExpectExec(`UPDATE "accounts"`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(`(?s)SELECT .* FROM "accounts" WHERE "id" = \$1`).
 				WithArgs(int64(71)).
@@ -98,7 +97,6 @@ func TestAccountRepositoryUpdatePreservesConcurrency(t *testing.T) {
 			}
 
 			err := repo.UpdateWithAccountBillingSettings(t.Context(), account, nil, nil, nil, &account.Concurrency)
-			require.True(t, *seen)
 			if failure == "none" {
 				require.NoError(t, err)
 				require.Equal(t, 1, account.Concurrency)

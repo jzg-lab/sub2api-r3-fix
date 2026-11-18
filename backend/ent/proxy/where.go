@@ -913,12 +913,35 @@ func HasAccountsWith(preds ...predicate.Account) predicate.Proxy {
 	})
 }
 
+// HasPrimaryProxies applies the HasEdge predicate on the "primary_proxies" edge.
+func HasPrimaryProxies() predicate.Proxy {
+	return predicate.Proxy(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, true, PrimaryProxiesTable, PrimaryProxiesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasPrimaryProxiesWith applies the HasEdge predicate on the "primary_proxies" edge with a given conditions (other predicates).
+func HasPrimaryProxiesWith(preds ...predicate.Proxy) predicate.Proxy {
+	return predicate.Proxy(func(s *sql.Selector) {
+		step := newPrimaryProxiesStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // HasBackupProxy applies the HasEdge predicate on the "backup_proxy" edge.
 func HasBackupProxy() predicate.Proxy {
 	return predicate.Proxy(func(s *sql.Selector) {
 		step := sqlgraph.NewStep(
 			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.M2O, true, BackupProxyTable, BackupProxyColumn),
+			sqlgraph.Edge(sqlgraph.M2O, false, BackupProxyTable, BackupProxyColumn),
 		)
 		sqlgraph.HasNeighbors(s, step)
 	})
@@ -928,29 +951,6 @@ func HasBackupProxy() predicate.Proxy {
 func HasBackupProxyWith(preds ...predicate.Proxy) predicate.Proxy {
 	return predicate.Proxy(func(s *sql.Selector) {
 		step := newBackupProxyStep()
-		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
-			for _, p := range preds {
-				p(s)
-			}
-		})
-	})
-}
-
-// HasBackupDependents applies the HasEdge predicate on the "backup_dependents" edge.
-func HasBackupDependents() predicate.Proxy {
-	return predicate.Proxy(func(s *sql.Selector) {
-		step := sqlgraph.NewStep(
-			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, BackupDependentsTable, BackupDependentsColumn),
-		)
-		sqlgraph.HasNeighbors(s, step)
-	})
-}
-
-// HasBackupDependentsWith applies the HasEdge predicate on the "backup_dependents" edge with a given conditions (other predicates).
-func HasBackupDependentsWith(preds ...predicate.Proxy) predicate.Proxy {
-	return predicate.Proxy(func(s *sql.Selector) {
-		step := newBackupDependentsStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

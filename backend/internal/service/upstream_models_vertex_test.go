@@ -33,11 +33,11 @@ func (c *vertexModelsTokenCacheStub) DeleteAccessToken(context.Context, string) 
 	return nil
 }
 
-func (c *vertexModelsTokenCacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (string, error) {
-	return "", nil
+func (c *vertexModelsTokenCacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
 }
 
-func (c *vertexModelsTokenCacheStub) ReleaseRefreshLock(context.Context, string, string) error {
+func (c *vertexModelsTokenCacheStub) ReleaseRefreshLock(context.Context, string) error {
 	return nil
 }
 

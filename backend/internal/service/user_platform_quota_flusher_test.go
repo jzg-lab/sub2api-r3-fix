@@ -71,7 +71,7 @@ func flusherPtrTime(t time.Time) *time.Time { return &t }
 
 func makeEntry(daily, weekly, monthly float64) *UserPlatformQuotaCacheEntry {
 	now := time.Now().UTC()
-	return &UserPlatformQuotaCacheEntry{QuotaID: 73,
+	return &UserPlatformQuotaCacheEntry{
 		DailyUsageUSD:      daily,
 		WeeklyUsageUSD:     weekly,
 		MonthlyUsageUSD:    monthly,
@@ -120,11 +120,6 @@ func TestFlusher_PopSnapshotUpsert(t *testing.T) {
 
 	if len(writer.receivedSnaps) != 2 {
 		t.Fatalf("expected 2 snaps, got %d", len(writer.receivedSnaps))
-	}
-	for _, snapshot := range writer.receivedSnaps {
-		if snapshot.QuotaID != 73 {
-			t.Errorf("quota identity = %d, want 73", snapshot.QuotaID)
-		}
 	}
 	if f.metrics.FlushBatchSizeTotal.Load() != 2 {
 		t.Errorf("FlushBatchSizeTotal = %d, want 2", f.metrics.FlushBatchSizeTotal.Load())

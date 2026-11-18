@@ -9,8 +9,6 @@ import (
 	"os"
 	"syscall"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 // TestClassifyUpstreamTransportError pins which transport-level upstream failures
@@ -28,7 +26,6 @@ func TestClassifyUpstreamTransportError(t *testing.T) {
 		// Durable — config/credential/routing problems. Retrying same proxy won't help.
 		{"socks5 proxy credential rejected", errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": socks connect tcp 85.255.176.68:12324->chatgpt.com:443: username/password authentication failed`), true},
 		{"proxy connection refused", errors.New(`proxyconnect tcp: dial tcp 1.2.3.4:1080: connect: connection refused`), true},
-		{"proxy chain CONNECT 502", errors.New(`proxyconnect tcp: dial tcp 127.0.0.1:7896: 502 Bad Gateway`), true},
 		{"no route to host", errors.New(`dial tcp 1.2.3.4:443: connect: no route to host`), true},
 		{"dns resolution failure", errors.New(`dial tcp: lookup proxy.example.com: no such host`), true},
 		{"network unreachable", errors.New(`dial tcp 1.2.3.4:443: connect: network is unreachable`), true},
@@ -85,21 +82,6 @@ func TestClassifyUpstreamTransportError(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestIsOpenAIProxyChainTransportError(t *testing.T) {
-	require.True(t, isOpenAIProxyChainTransportError(errors.New(
-		`proxyconnect tcp: dial tcp 127.0.0.1:7896: 502 Bad Gateway`,
-	)))
-	require.True(t, isOpenAIProxyChainTransportError(errors.New(
-		`proxyconnect tcp: dial tcp 127.0.0.1:7896: 503 Service Unavailable`,
-	)))
-	require.False(t, isOpenAIProxyChainTransportError(errors.New(
-		`Post "https://chatgpt.com/": context deadline exceeded`,
-	)))
-	require.False(t, isOpenAIProxyChainTransportError(errors.New(
-		`upstream returned 502 Bad Gateway`,
-	)))
 }
 
 func errString(err error) string {
