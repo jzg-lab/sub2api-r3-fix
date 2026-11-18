@@ -60,7 +60,10 @@ jobs:
         run: |
           pnpm audit --audit-level=high --json > audit.json || true
       - name: Check audit exceptions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python tools/check_pnpm_audit_exceptions.py \
             --audit frontend/audit.json \
-            --exceptions .github/audit-exceptions.yml
+            --exceptions .github/audit-exceptions.yml \
+            --verify-withdrawals

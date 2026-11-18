@@ -2,8 +2,11 @@
 from __future__ import annotations
 import argparse
 import json
+import os
+import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
+from urllib.request import Request, urlopen
 
 
 HIGH_SEVERITIES = {"high", "critical"}
@@ -140,10 +143,47 @@ def parse_date(value: str) -> date | None:
         return None
 
 
+
+def advisory_withdrawn(package: str, advisory_id: str) -> bool:
+    """Verify a withdrawal at the advisory authority; unavailable evidence never passes."""
+    match = re.fullmatch(r"(?:https://github\.com/advisories/)?(GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4})", str(advisory_id), re.IGNORECASE)
+    if not match:
+        return False
+    ghsa = match[1].upper()
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "sub2api-audit"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + token
+    request = Request("https://api.github.com/advisories/" + ghsa, headers=headers)
+    try:
+        with urlopen(request, timeout=20) as response:
+            # Do not accept redirected evidence from another authority.
+            if response.url != request.full_url or response.status != 200:
+                return False
+            data = json.load(response)
+        if data.get("ghsa_id", "").upper() != ghsa or not any(
+            v.get("package") == {"ecosystem": "npm", "name": package}
+            for v in data.get("vulnerabilities", [])
+        ):
+            return False
+        withdrawn = data.get("withdrawn_at")
+        if not isinstance(withdrawn, str):
+            return False
+        timestamp = datetime.fromisoformat(withdrawn.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp > datetime.now(timezone.utc):
+            return False
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        print(f"Cannot verify advisory withdrawal for {ghsa}: {type(error).__name__}", file=sys.stderr)
+        return False
+    print(f"Verified withdrawn advisory: {package} {ghsa} at {withdrawn}")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audit", required=True)
     parser.add_argument("--exceptions", required=True)
+    parser.add_argument("--verify-withdrawals", action="store_true",
+                        help="Check GitHub for withdrawn advisories; lookup failures remain blocked")
     args = parser.parse_args()
 
     with open(args.audit, "r", encoding="utf-8") as handle:
@@ -212,6 +252,8 @@ def main() -> int:
         if key in seen:
             continue
         seen.add(key)
+        if args.verify_withdrawals and advisory_withdrawn(name, advisory_id):
+            continue
         exc = exception_index.get(key)
         if exc is None:
             missing_exceptions.append((name, sev, advisory_id, title))
