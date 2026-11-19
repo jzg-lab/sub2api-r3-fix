@@ -2,6 +2,9 @@
 
 ## 官方 v0.2.20 发布准备（2026-11-19，未切流）
 
+**准备阶段验证已完成；生产 SQL、工具安装、正式 `PREPARED` 和切流留到部署阶段。**
+用户已完成 GitHub 登录，并明确要求准备阶段不修改生产业务数据。
+
 用户授权修复阻断并完成发布准备。安全检查增加 GitHub 权威撤回核实（失败仍阻断、不增加豁免），
 macOS 使用 Intel runner；首轮修复 CI 44358551565 完整成功。随后 CI 44359483496 发现支付配置测试
 异步加载晚于环境销毁，修复仅涉及测试 mock/等待/提示断言；完整前端 430 文件/3516 项、类型和定向
@@ -27,18 +30,45 @@ Go 1.27.4 linux/amd64 构建镜像已下载验证，固定 index digest
 非目标账号/分组字段保持一致，新增表/列/索引验证通过。恢复容器禁外网、独立卷、2 CPU/4 GiB；
 容器和卷均已清理，未恢复或迁移生产库。原始回执为 `before-migration/restore-v020-status.json`。
 
-尚未达到后台 `PREPARED`：用户已完成 GitHub 登录，专项候选手动登记及最终镜像、旧/新应用、插件、
-交接/回退往返验收继续进行。用户明确选择准备阶段不改生产业务数据，迁移 268–273 留到正式部署时执行。
-迁移 272 在旧版上可能立即改变客户费用，迁移 268 也改变生图权限。现有 prepare 要求目标迁移已执行；
-本轮停在最终镜像隔离验收完成，不能以隔离演练替代生产迁移或将状态写成 `PREPARED`。
-备份有效期为 7200 秒，真正执行迁移/准备时必须重新核对，过期重做。此次未切流、停服务或启用采集插件。
+09:53 手动运行 main 并勾选 `publish_special`；
+[专项 CI 44440300284](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44440300284)
+全部检查及 `Register candidate (never deploy)` 成功，10:11 完成。登记提交为
+`d0e084894dc96dab59611c6c72fde85dedbbd7cb`，候选 `r17-12` / `v0.2.20+r17.12`，
+永久标签 `deployment-candidate/r17.12` 指向 `b20457721a24006f3b2144bab479a3cbf2a6cffd`。
+候选父提交为上述已审查源码 `8a664cfb386a4d555832c08ccc0e315ae41ee280`，仅 VERSION 不同；
+清单、标签、官方基线、生产基线及 CI 链接均已核对。
 
-后续沿用上述私有目录继续：手动运行 main 的 CI 并勾选 `publish_special`；
-核对登记步骤、永久标签、清单及固定源码均一致，再保存真实候选并执行已暂存的最终镜像隔离验证。
-正式部署时先刷新过期备份和生产快照，按固定摘要执行 268–273，
-再完成必要工具/构建配置安装及 `prepare-special`。这些生产步骤不在本轮准备阶段执行。
+服务器独立任务 `sub2api-v020-isolate-r17-12` 于 **10:32:11** 完成，状态 `PASSED`，
+systemd `Result=success` / `ExecMainStatus=0`。最终镜像为
+`sub2api:fast-b20457721a24006f3b2144bab479a3cbf2a6cffd-1795054498440940376`，
+image ID `sha256:865c65b72ca1696d8b3c45ebbf756c2d3b24f1ceb075278cd7d475c7053a252c`，
+程序 SHA-256 `64e02a1d775d1cd27c4081915cd51f8904aa0c72dd3b5f029ae4d8143d7b701f`。
+保留原运行镜像层，采用固定 Node/Go 输入及 2 CPU/6 GiB 构建限制；最终镜像断网运行
+`internal/server`、`internal/service`、`internal/web` 和 `cmd/server` 四个包的回归成功。
+真实隔离验收通过：268–273 迁移及旧版新结构启动、
+UID 1000/相对和绝对路径、原签名 Cookie Pin 及原配置、PostgreSQL/Redis/插件故障就绪、
+共享数据库的协议 3 双向交接、后台单活与本体先接流量。测试不挂载生产数据，网络为 internal，
+无业务账号；测试容器、卷及网络均已清理。回执在 `isolate-final/release/` 与 `isolate-final/lab/`。
+
+**10:34:32** 最终只读核对：生产仍为原 r17.11，337 条迁移账本、插件、配置、数据库/Redis 身份及
+线上控制器输入均未改变；无 retiring/core_only/pending 状态，本机/公网 ready，guard 为正常开放。
+镜像身份未变，生产迁移未启动。完整回执为私有目录中的 `final-preparation-readonly.json`。
+本轮未切流、暂停生产服务、安装线上控制器工具或启用采集插件；未做付费供应商调用及压力测试。
+
+正式部署时先核对实际生产仍匹配上述基线，并刷新备份；01:38 的备份现已超出 7200 秒有效期，
+不能用于执行迁移。已暂存 `backup-for-deployment.py`，新备份写入 `before-deployment-migration/`，
+保留原完整恢复证据；`migrate-deployment.py --execute-reviewed-migrations` 只接受该新备份及
+真实候选/最终镜像验收，替代尚未执行的旧 `migrate.py`。两个新脚本仅完成路径差异核对和语法检查，
+尚未运行生产写操作。迁移后核对账本与旧服务，再按 `controller-install-plan.json` 安装两份已测试
+工具 `build_fast_release.py` / `verify_fast_release.py` 及固定 Go/验收清单配置，最后执行
+`prepare-special --candidate r17-12`。原工具和配置副本已保存于 `controller-before-install/`。
+正式准备仍须重验当时上下文，不能手改本次隔离回执冒充生产迁移已完成。
+迁移 272 在旧版上可能立即改变客户费用，268 也改变生图权限；部署时安排好迁移与切流顺序。
+应用回退不撤销这些数据变化，回退仍遵守候选记录中的条件。本轮没有创建后台 `PREPARED` 任务。
 
 ## 当前主分支上线准入核验（2026-11-19，未部署）
+
+以下保留初次推送时的失败记录；后续修复、候选登记及镜像验收结果见本页顶部的发布准备记录。
 
 用户要求推送本地新提交、运行 CI/CD 并判断上线条件。远端代码已推送并固定为
 `e75501e2e01997460735e5ad44df3f824eddf9c1`，含官方 v0.2.20、分组长上下文计费修复和采集宿主补齐。
