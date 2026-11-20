@@ -40,6 +40,7 @@
   也不将审计失败记作通过。当前检查可用 `--verify-withdrawals` 实时向 GitHub 核对 GHSA、npm 包名和有效撤回时间；网络/身份/格式不匹配继续阻断，其他有效漏洞仍逐条检查。CI job 因 hosted runner 容量不足取消时，核对 check annotations 和
   是否实际执行步骤；可按相同工具版本本地补跑，但须与远端结果分别记录。
 - 使用项目固定工具版本：Go 在 backend 模块内核对，Python 工具使用 CI 的 3.12，pnpm 按本项目 packageManager 固定为 11.21.0，CI 同步读取；不得用官方的 9 覆盖本地已选工具链。
+  登记前的 Go lint 还要复用当前 CI 工作流里的 `--new-from-rev`。只和本轮适配前的 main 比较会漏报 CI 固定基线覆盖的问题。
   网络失败/不可用扫描不得计为通过，失败扫描输入必须拒绝；现有 node_modules 通过不替代冻结锁安装验收。
 - 源码合并阶段不手动占用/复用 r17 发布序号。测试二进制可显式标记 integration-check；
   VERSION 占位、实际同步目标、冻结结果 SHA、候选号和生产身份分别记录。
