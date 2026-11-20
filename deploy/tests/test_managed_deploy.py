@@ -754,7 +754,7 @@ class FixtureIsolationTests(unittest.TestCase):
                 fixture.cleanup()
                 command.assert_not_called()
 
-    def test_disabled_installations_remain_in_approval_contract(self):
+    def test_production_plugin_versions_are_independent_of_signed_fixture(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "manifest.json"
             enabled = {"state": "enabled", "id": 1, "artifact_sha256": "approved"}
@@ -766,25 +766,26 @@ class FixtureIsolationTests(unittest.TestCase):
             host = Mock(c={"pause_services": [], "public_urls": [], "guard_checks": []})
             host.plugins.return_value = plugins
             host.nginx_hash.return_value = "nginx"
-            with patch.object(d, "plugin_contract", side_effect=lambda values: values), patch.object(d, "digest", return_value="approved"), patch.object(v, "caller_inventory", return_value="inventory"):
+            with patch.object(d, "digest", return_value="approved"), patch.object(v, "caller_inventory", return_value="inventory"):
                 self.assertEqual(v.approved_inputs({"verification_manifest": str(path)}, host)[1], plugins)
                 disabled["artifact_sha256"] = "changed"
-                with self.assertRaisesRegex(RuntimeError, "drifted"):
-                    v.approved_inputs({"verification_manifest": str(path)}, host)
+                self.assertEqual(v.approved_inputs({"verification_manifest": str(path)}, host)[1], plugins)
+                enabled["artifact_sha256"] = "other"
+                self.assertEqual(v.approved_inputs({"verification_manifest": str(path)}, host)[1], plugins)
+                enabled["artifact_sha256"] = "approved"
                 disabled["state"] = "starting"
-                with self.assertRaisesRegex(RuntimeError, "stable disabled"):
+                with self.assertRaisesRegex(RuntimeError, "unstable production plugin"):
                     v.approved_inputs({"verification_manifest": str(path)}, host)
                 disabled["state"] = "enabled"
-                with self.assertRaisesRegex(RuntimeError, "one enabled"):
-                    v.approved_inputs({"verification_manifest": str(path)}, host)
+                self.assertEqual(v.approved_inputs({"verification_manifest": str(path)}, host)[1], plugins)
 
-    def test_changed_plugin_fixture_rejected_before_creation(self):
+    def test_missing_fixture_input_rejected_before_creation(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "manifest.json"
             d.save(path, {"production_plugins": []})
             host = Mock()
             host.plugins.return_value = [{"state": "enabled", "id": 1}]
-            with patch.object(v, "Fixture") as fixture, self.assertRaises(RuntimeError):
+            with patch.object(v, "Fixture") as fixture, self.assertRaises(KeyError):
                 v.verify(Path(root), {"verification_manifest": str(path)}, host)
             fixture.assert_not_called()
 
