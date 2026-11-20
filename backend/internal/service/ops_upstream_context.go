@@ -74,6 +74,22 @@ const OpsUpstreamErrorKindPluginUnavailable = "plugin_unavailable"
 
 func MarkResponseCommitted(c *gin.Context) { c.Set(ResponseCommittedKey, true) }
 
+const gatewayStreamHeartbeatBytesKey = "gateway_stream_heartbeat_bytes"
+
+func RecordGatewayStreamHeartbeat(c *gin.Context, written int) {
+	if c != nil && written > 0 {
+		c.Set(gatewayStreamHeartbeatBytesKey, c.GetInt(gatewayStreamHeartbeatBytesKey)+written)
+	}
+}
+
+func GatewayStreamHasOnlyHeartbeats(c *gin.Context) bool {
+	if c == nil || c.Writer == nil {
+		return false
+	}
+	written := c.GetInt(gatewayStreamHeartbeatBytesKey)
+	return written > 0 && written == c.Writer.Size()
+}
+
 func IsResponseCommitted(c *gin.Context) bool {
 	v, ok := c.Get(ResponseCommittedKey)
 	if !ok {

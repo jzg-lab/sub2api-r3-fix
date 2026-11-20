@@ -312,6 +312,13 @@ func (m *mockGatewayCacheForGemini) RefreshSessionTTL(ctx context.Context, group
 	return nil
 }
 
+func (m *mockGatewayCacheForGemini) DeleteSessionAccountIDIfMatches(ctx context.Context, groupID int64, sessionHash string, accountID int64) (bool, error) {
+	if bound, ok := m.sessionBindings[sessionHash]; !ok || bound != accountID {
+		return false, nil
+	}
+	return true, m.DeleteSessionAccountID(ctx, groupID, sessionHash)
+}
+
 func (m *mockGatewayCacheForGemini) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	if m.sessionBindings == nil {
 		return nil

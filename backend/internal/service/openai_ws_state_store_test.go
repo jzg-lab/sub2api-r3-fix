@@ -206,6 +206,10 @@ func (c *openAIWSStateStoreTimeoutProbeCache) RefreshSessionTTL(context.Context,
 	return nil
 }
 
+func (c *openAIWSStateStoreTimeoutProbeCache) DeleteSessionAccountIDIfMatches(context.Context, int64, string, int64) (bool, error) {
+	panic("unexpected conditional sticky-session release")
+}
+
 func (c *openAIWSStateStoreTimeoutProbeCache) DeleteSessionAccountID(ctx context.Context, _ int64, _ string) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		c.deleteHasDeadline = true

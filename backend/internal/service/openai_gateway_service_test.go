@@ -785,6 +785,13 @@ func (c *stubGatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64,
 	return nil
 }
 
+func (c *stubGatewayCache) DeleteSessionAccountIDIfMatches(ctx context.Context, groupID int64, sessionHash string, accountID int64) (bool, error) {
+	if bound, ok := c.sessionBindings[sessionHash]; !ok || bound != accountID {
+		return false, nil
+	}
+	return true, c.DeleteSessionAccountID(ctx, groupID, sessionHash)
+}
+
 func (c *stubGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	if c.sessionBindings == nil {
 		return nil

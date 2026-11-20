@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,43 @@ func TestAntigravityCompatEmptyStreamBeforeKeepaliveStaysFailover(t *testing.T) 
 	var failoverErr *UpstreamFailoverError
 	require.True(t, errors.As(err, &failoverErr), "got %v", err)
 	require.False(t, IsAntigravityCompatCommittedNoContent(err))
+}
+
+func TestAntigravityCompatNoContentAfterQueueHeartbeat(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		adapter func() antigravityCompatStreamAdapter
+		frame   string
+	}{
+		{"responses", func() antigravityCompatStreamAdapter {
+			return newAntigravityResponsesStreamAdapter("gemini-4-argon-high")
+		}, "event: error"},
+		{"chat", func() antigravityCompatStreamAdapter {
+			return newAntigravityChatStreamAdapter("gemini-4-argon-high", false)
+		}, `"upstream_error"`},
+	} {
+		for _, reason := range []string{"empty_stream", "stream_timeout"} {
+			t.Run(tc.name+"/"+reason, func(t *testing.T) {
+				svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+				c, out := newAntigravityCompatContext(http.MethodPost, "/", nil)
+				n, err := c.Writer.Write([]byte("data: {\"type\": \"ping\"}\n\n"))
+				require.NoError(t, err)
+				RecordGatewayStreamHeartbeat(c, n)
+				c.Writer.Flush()
+				now := time.Now()
+				streamStart := now
+				if reason == "stream_timeout" {
+					streamStart = now.Add(-2 * time.Minute)
+				}
+				resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}
+				_, err = svc.handleAntigravityCompatStreamWithTiming(c, resp, streamStart, streamStart,
+					"gemini-4-argon-high", tc.adapter(), "test", time.Hour, time.Minute)
+				require.True(t, IsAntigravityCompatCommittedNoContent(err), "%v", err)
+				require.Contains(t, out.Body.String(), tc.frame)
+				require.Contains(t, out.Body.String(), reason)
+			})
+		}
+	}
 }
 
 func TestReleaseStickySessionAfterCommittedNoContent(t *testing.T) {

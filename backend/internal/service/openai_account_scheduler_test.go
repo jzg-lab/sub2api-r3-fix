@@ -194,6 +194,13 @@ func (c *schedulerTestGatewayCache) RefreshSessionTTL(ctx context.Context, group
 	return nil
 }
 
+func (c *schedulerTestGatewayCache) DeleteSessionAccountIDIfMatches(ctx context.Context, groupID int64, sessionHash string, accountID int64) (bool, error) {
+	if bound, ok := c.sessionBindings[sessionHash]; !ok || bound != accountID {
+		return false, nil
+	}
+	return true, c.DeleteSessionAccountID(ctx, groupID, sessionHash)
+}
+
 func (c *schedulerTestGatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	if c.sessionBindings == nil {
 		return nil

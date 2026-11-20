@@ -202,7 +202,7 @@ func TestResponsesFailoverExhaustedAfterForwardedTerminalMarksOpsWithoutDuplicat
 	heartbeat := ": keepalive\n\n"
 	written, err := heartbeatRecorder.Write([]byte(heartbeat))
 	require.NoError(t, err)
-	recordGatewayStreamHeartbeat(heartbeatContext, written)
+	service.RecordGatewayStreamHeartbeat(heartbeatContext, written)
 	(&GatewayHandler{}).handleResponsesFailoverExhausted(heartbeatContext, &service.UpstreamFailoverError{
 		StatusCode: http.StatusBadGateway,
 	}, true)

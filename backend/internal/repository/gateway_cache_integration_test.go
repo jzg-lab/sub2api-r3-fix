@@ -106,3 +106,32 @@ func (s *GatewayCacheSuite) TestGetSessionAccountID_CorruptedValue() {
 func TestGatewayCacheSuite(t *testing.T) {
 	suite.Run(t, new(GatewayCacheSuite))
 }
+
+func (s *GatewayCacheSuite) TestDeleteSessionAccountIDIfMatches() {
+	t := s.T()
+	const group, session = 10, "conditional-release"
+	set := func(account int64) error {
+		return s.cache.SetSessionAccountID(s.ctx, group, session, account, time.Minute)
+	}
+	release := func(account int64) (bool, error) {
+		return s.cache.DeleteSessionAccountIDIfMatches(s.ctx, group, session, account)
+	}
+	require.NoError(t, set(5))
+	done := make(chan error, 1)
+	go func() { done <- set(6) }()
+	_, err := release(5)
+	require.NoError(t, <-done)
+	require.NoError(t, err)
+	removed, err := release(5)
+	require.NoError(t, err)
+	require.False(t, removed)
+	bound, err := s.cache.GetSessionAccountID(s.ctx, group, session)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, bound)
+	removed, err = release(6)
+	require.NoError(t, err)
+	require.True(t, removed)
+	removed, err = release(6)
+	require.NoError(t, err)
+	require.False(t, removed)
+}

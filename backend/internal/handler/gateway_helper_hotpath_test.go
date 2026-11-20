@@ -439,6 +439,7 @@ func TestWaitForSlotWithPingTimeout_TimeoutAndStreamPing(t *testing.T) {
 		require.True(t, cErr.IsTimeout)
 		require.True(t, streamStarted)
 		require.Contains(t, rec.Body.String(), ":\n\n")
+		require.True(t, service.GatewayStreamHasOnlyHeartbeats(c))
 	})
 }
 

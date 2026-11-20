@@ -343,7 +343,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithTiming(
 		c.Status(http.StatusOK)
 	}
 	session := newAntigravityCompatStreamSession(originalModel, startTime, adapter, writer)
-	session.preContentKeepaliveSent = IsResponseCommitted(c) && c.Writer.Written()
+	session.preContentKeepaliveSent = GatewayStreamHasOnlyHeartbeats(c) || (IsResponseCommitted(c) && c.Writer.Written())
 	session.preContentKeepaliveInterval = interval
 	session.context = c
 	events, stopScanner, maxLineSize, queueBudget := s.startAntigravityCompatScanner(resp.Body)

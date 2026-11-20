@@ -434,7 +434,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		// official terminal bytes exist, preserve them without appending a second
 		// generic response.failed.
 		service.MarkOpsStreamError(c, code, message, status)
-		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || gatewayStreamHasOnlyHeartbeats(c)) {
+		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || service.GatewayStreamHasOnlyHeartbeats(c)) {
 			writeResponsesFailedSSE(c, code, "", message)
 		}
 		return

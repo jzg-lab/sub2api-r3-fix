@@ -272,6 +272,13 @@ func (m *mockGatewayCacheForPlatform) RefreshSessionTTL(ctx context.Context, gro
 	return nil
 }
 
+func (m *mockGatewayCacheForPlatform) DeleteSessionAccountIDIfMatches(ctx context.Context, groupID int64, sessionHash string, accountID int64) (bool, error) {
+	if bound, ok := m.sessionBindings[sessionHash]; !ok || bound != accountID {
+		return false, nil
+	}
+	return true, m.DeleteSessionAccountID(ctx, groupID, sessionHash)
+}
+
 func (m *mockGatewayCacheForPlatform) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	if m.sessionBindings == nil {
 		return nil

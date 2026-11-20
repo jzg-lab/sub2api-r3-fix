@@ -16,34 +16,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const gatewayStreamHeartbeatBytesKey = "gateway_stream_heartbeat_bytes"
-
 func openAIChannelForwardModel(mapping service.ChannelMappingResult, requested string) string {
 	if mapping.Mapped && strings.TrimSpace(mapping.MappedModel) != "" {
 		return strings.TrimSpace(mapping.MappedModel)
 	}
 	return requested
-}
-
-func recordGatewayStreamHeartbeat(c *gin.Context, written int) {
-	if c == nil || written <= 0 {
-		return
-	}
-	total, _ := c.Get(gatewayStreamHeartbeatBytesKey)
-	bytes, _ := total.(int)
-	c.Set(gatewayStreamHeartbeatBytesKey, bytes+written)
-}
-
-func gatewayStreamHasOnlyHeartbeats(c *gin.Context) bool {
-	if c == nil || c.Writer == nil {
-		return false
-	}
-	value, ok := c.Get(gatewayStreamHeartbeatBytesKey)
-	if !ok {
-		return false
-	}
-	heartbeatBytes, _ := value.(int)
-	return heartbeatBytes > 0 && c.Writer.Size() == heartbeatBytes
 }
 
 // claudeCodeValidator is a singleton validator for Claude Code client detection
@@ -434,7 +411,7 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 			if err != nil {
 				return nil, err
 			}
-			recordGatewayStreamHeartbeat(c, written)
+			service.RecordGatewayStreamHeartbeat(c, written)
 			flusher.Flush()
 
 		case <-timer.C:
