@@ -85,11 +85,11 @@ type Account struct {
 	Groups        []*Group
 
 	// model_mapping 热路径缓存（非持久化字段）
-	modelMappingCache       map[string]string
-	modelMappingCacheReady  bool
+	modelMappingCache               map[string]string
+	modelMappingCacheReady          bool
 	modelMappingCacheRuntimeVersion uint64
-	modelMappingCacheRawPtr uintptr
-	modelMappingCacheRawLen int
+	modelMappingCacheRawPtr         uintptr
+	modelMappingCacheRawLen         int
 	// header_overrides 热路径缓存（非持久化字段，同 model_mapping 缓存先例）
 	headerOverrideCache               map[string]string
 	headerOverrideCacheReady          bool
