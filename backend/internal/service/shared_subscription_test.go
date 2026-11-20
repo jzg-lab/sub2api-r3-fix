@@ -67,14 +67,14 @@ func sharedSubscriptionFixture(t *testing.T) (*SubscriptionService, *sharedSubsc
 	svc := NewSubscriptionService(nil, repo, nil, nil, nil)
 	svc.now = func() time.Time { return now }
 	t.Cleanup(svc.Stop)
-	return svc, repo, &User{ID: 7, Balance: 100}, &Group{ID: 22, RateMultiplier: 2}
+	return svc, repo, &User{ID: 7, Balance: 100}, &Group{ID: 22, SubscriptionType: SubscriptionTypeSubscription, RateMultiplier: 2}
 }
 
 func TestSharedSubscriptionPreservesLegacyEntitlementAcrossGroups(t *testing.T) {
 	svc, repo, user, group := sharedSubscriptionFixture(t)
 	original := repo.subs[0]
-	for _, kind := range []string{SubscriptionTypeStandard, SubscriptionTypeSubscription} {
-		group.SubscriptionType = kind
+	for _, platform := range []string{PlatformOpenAI, PlatformAnthropic, PlatformGemini} {
+		group.Platform = platform
 		sub, err := svc.ResolveBillingSubscription(context.Background(), user, group)
 		require.NoError(t, err)
 		require.Equal(t, original, *sub, "conversion must not reset or merge stored allowances")
@@ -158,7 +158,7 @@ func TestSharedSubscriptionFiltersInactiveOrForeignAllowances(t *testing.T) {
 		svc, repo, user, group := sharedSubscriptionFixture(t)
 		mutate(&repo.subs[0], svc.now())
 		sub, err := svc.ResolveBillingSubscription(t.Context(), user, group)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, ErrSubscriptionNotFound)
 		require.Nil(t, sub)
 	}
 }
@@ -205,10 +205,16 @@ func TestSharedSubscriptionKeepsPrivateGroupPermissions(t *testing.T) {
 
 func TestSharedSubscriptionRejectsLookupFailureAndPreservesBalanceOnlyUsers(t *testing.T) {
 	svc, repo, user, group := sharedSubscriptionFixture(t)
-	repo.subs = nil
+	group.SubscriptionType = SubscriptionTypeStandard
+	repo.subs[0].WeeklyUsageUSD = 50
+	repo.err = errors.New("wallet routes must not query subscriptions")
 	sub, err := svc.ResolveBillingSubscription(context.Background(), user, group)
 	require.NoError(t, err)
 	require.Nil(t, sub)
+	sub, err = svc.ResolveBillingSubscriptionForCost(t.Context(), user, group, 10)
+	require.NoError(t, err)
+	require.Nil(t, sub)
+	repo.err, repo.subs = nil, nil
 	group.SubscriptionType = SubscriptionTypeSubscription
 	_, err = svc.ResolveBillingSubscription(context.Background(), user, group)
 	require.ErrorIs(t, err, ErrSubscriptionNotFound)
@@ -217,7 +223,7 @@ func TestSharedSubscriptionRejectsLookupFailureAndPreservesBalanceOnlyUsers(t *t
 	require.ErrorIs(t, err, ErrBillingServiceUnavailable)
 }
 
-func TestSharedSubscriptionFixedChargeUsesSourceQuotaOnBalanceGroup(t *testing.T) {
+func TestSharedSubscriptionFixedChargeUsesSourceQuotaOnSubscriptionGroup(t *testing.T) {
 	svc, repo, user, group := sharedSubscriptionFixture(t)
 	cache := &fixedChargeCacheStub{balance: 0, sub: &SubscriptionCacheData{Status: SubscriptionStatusActive}}
 	billing := NewBillingCacheService(cache, nil, repo, nil, nil, nil, &config.Config{}, nil)

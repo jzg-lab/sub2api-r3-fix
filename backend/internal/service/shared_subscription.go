@@ -46,7 +46,13 @@ func (s *SubscriptionService) ResolveSubscriptionForUsage(ctx context.Context, u
 }
 
 func (s *SubscriptionService) resolveSharedSubscription(ctx context.Context, user *User, requestGroup *Group, maintain bool, cost float64) (*UserSubscription, error) {
-	if user == nil || requestGroup == nil || s.userSubRepo == nil {
+	if user == nil || requestGroup == nil {
+		return nil, ErrBillingServiceUnavailable
+	}
+	if !requestGroup.IsSubscriptionType() {
+		return nil, nil
+	}
+	if s == nil || s.userSubRepo == nil {
 		return nil, ErrBillingServiceUnavailable
 	}
 	subs, err := s.userSubRepo.ListActiveByUserID(ctx, user.ID)
@@ -63,7 +69,7 @@ func (s *SubscriptionService) resolveSharedSubscription(ctx context.Context, use
 			groups[sub.GroupID] = true
 		}
 	}
-	if requestGroup.IsSubscriptionType() && !canBindSubscriptionGroup(user, requestGroup, groups) {
+	if !canBindSubscriptionGroup(user, requestGroup, groups) {
 		if len(active) == 0 {
 			return nil, ErrSubscriptionNotFound
 		}

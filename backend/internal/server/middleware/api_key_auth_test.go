@@ -61,49 +61,58 @@ func TestBatchImageManagementRemainsAvailableAfterQuotaExhaustion(t *testing.T) 
 	require.False(t, isBatchImageJobManagement(http.MethodGet, "/v1/images/batches_other"))
 }
 
-func TestUniversalSubscriptionAuthOnStandardDestination(t *testing.T) {
+func TestUniversalSubscriptionAuthByGroupType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, google := range []bool{false, true} {
-		for _, state := range []string{"available", "exhausted", "unavailable"} {
-			cfg := &config.Config{RunMode: config.RunModeStandard}
-			group := &service.Group{ID: 22, Status: service.StatusActive, Hydrated: true, Platform: service.PlatformGemini, SubscriptionType: service.SubscriptionTypeStandard}
-			user := &service.User{ID: 7, Status: service.StatusActive}
-			key := &service.APIKey{ID: 100, Key: "universal", UserID: user.ID, User: user, GroupID: &group.ID, Group: group, Status: service.StatusActive}
-			keys := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) { return key, nil }}
-			limit := 10.0
-			source := &service.Group{ID: 11, SubscriptionType: service.SubscriptionTypeSubscription, DailyLimitUSD: &limit}
-			now := time.Now()
-			sub := service.UserSubscription{ID: 31, UserID: user.ID, GroupID: source.ID, Group: source, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
-			if state == "exhausted" {
-				sub.DailyUsageUSD = 10
-			}
-			subs := &stubUserSubscriptionRepo{listActive: func(context.Context, int64) ([]service.UserSubscription, error) {
-				if state == "unavailable" {
-					return nil, errors.New("private database error")
+	for _, kind := range []string{service.SubscriptionTypeStandard, service.SubscriptionTypeSubscription} {
+		for _, google := range []bool{false, true} {
+			for _, state := range []string{"available", "exhausted", "unavailable"} {
+				cfg := &config.Config{RunMode: config.RunModeStandard}
+				group := &service.Group{ID: 22, Status: service.StatusActive, Hydrated: true, Platform: service.PlatformGemini, SubscriptionType: kind}
+				user := &service.User{ID: 7, Balance: 20, Status: service.StatusActive}
+				key := &service.APIKey{ID: 100, Key: "universal", UserID: user.ID, User: user, GroupID: &group.ID, Group: group, Status: service.StatusActive}
+				keys := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) { return key, nil }}
+				limit := 10.0
+				source := &service.Group{ID: 11, SubscriptionType: service.SubscriptionTypeSubscription, DailyLimitUSD: &limit}
+				now := time.Now()
+				sub := service.UserSubscription{ID: 31, UserID: user.ID, GroupID: source.ID, Group: source, Status: service.SubscriptionStatusActive, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}
+				if state == "exhausted" {
+					sub.DailyUsageUSD = 10
 				}
-				return []service.UserSubscription{sub}, nil
-			}}
-			subscriptions := service.NewSubscriptionService(nil, subs, nil, nil, cfg)
-			t.Cleanup(subscriptions.Stop)
-			keyService := service.NewAPIKeyService(keys, nil, nil, nil, nil, nil, cfg)
-			router := gin.New()
-			if google {
-				router.Use(gin.HandlerFunc(APIKeyAuthWithSubscriptionGoogle(keyService, subscriptions, cfg)))
-			} else {
-				router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(keyService, subscriptions, cfg)))
+				subs := &stubUserSubscriptionRepo{listActive: func(context.Context, int64) ([]service.UserSubscription, error) {
+					if state == "unavailable" {
+						return nil, errors.New("private database error")
+					}
+					return []service.UserSubscription{sub}, nil
+				}}
+				subscriptions := service.NewSubscriptionService(nil, subs, nil, nil, cfg)
+				t.Cleanup(subscriptions.Stop)
+				keyService := service.NewAPIKeyService(keys, nil, nil, nil, nil, nil, cfg)
+				router := gin.New()
+				if google {
+					router.Use(gin.HandlerFunc(APIKeyAuthWithSubscriptionGoogle(keyService, subscriptions, cfg)))
+				} else {
+					router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(keyService, subscriptions, cfg)))
+				}
+				router.GET("/t", func(c *gin.Context) {
+					selected, ok := GetSubscriptionFromContext(c)
+					if kind == service.SubscriptionTypeSubscription {
+						require.True(t, ok)
+						require.Equal(t, sub.ID, selected.ID)
+					} else {
+						require.False(t, ok)
+					}
+					c.Status(http.StatusOK)
+				})
+				req, response := httptest.NewRequest(http.MethodGet, "/t", nil), httptest.NewRecorder()
+				req.Header.Set("x-api-key", key.Key)
+				router.ServeHTTP(response, req)
+				expected := map[string]int{"available": 200, "exhausted": 429, "unavailable": 503}[state]
+				if kind == service.SubscriptionTypeStandard {
+					expected = http.StatusOK
+				}
+				require.Equal(t, expected, response.Code, "google=%t state=%s: %s", google, state, response.Body.String())
+				require.NotContains(t, response.Body.String(), "private database error")
 			}
-			router.GET("/t", func(c *gin.Context) {
-				selected, ok := GetSubscriptionFromContext(c)
-				require.True(t, ok)
-				require.Equal(t, sub.ID, selected.ID)
-				c.Status(http.StatusOK)
-			})
-			req, response := httptest.NewRequest(http.MethodGet, "/t", nil), httptest.NewRecorder()
-			req.Header.Set("x-api-key", key.Key)
-			router.ServeHTTP(response, req)
-			expected := map[string]int{"available": 200, "exhausted": 429, "unavailable": 503}[state]
-			require.Equal(t, expected, response.Code, "google=%t state=%s: %s", google, state, response.Body.String())
-			require.NotContains(t, response.Body.String(), "private database error")
 		}
 	}
 }
