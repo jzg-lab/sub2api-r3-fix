@@ -1,8 +1,6 @@
 import type { PlazaModel, ModelPlazaGroup } from '@/api/modelPlaza'
 import type { UserPricingInterval } from '@/api/channels'
 
-export type PlazaCurrency = 'CNY' | 'USD'
-export const USD_TO_CNY = 6.70
 export const TOKEN_UNIT = 1_000_000
 export type PriceField = 'input_price' | 'output_price' | 'cache_read_price' | 'cache_write_price'
 export const priceFields: PriceField[] = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price']
@@ -24,28 +22,24 @@ export function catalogue(groups: ModelPlazaGroup[]): PlazaEntry[] {
   return [...entries.values()]
 }
 export function billingMode(model: PlazaModel) { return model.pricing?.billing_mode || 'token' }
-export function displayPrice(value: number | null | undefined, offer: PlazaOffer, currency: PlazaCurrency, conversion?: number, original = false): number | null {
+export function displayPrice(value: number | null | undefined, offer: PlazaOffer, beforeMultiplier: boolean): number | null {
   if (value == null || !Number.isFinite(value)) return null
-  if (original) return value * (currency === 'CNY' ? USD_TO_CNY : 1)
+  if (beforeMultiplier) return value
   const rate = offer.model.current_rate_multiplier
   // Older/unavailable backends must not silently display a guessed billing price.
   if (rate == null || !Number.isFinite(rate)) return null
-  const charge = value * rate
-  if (currency === 'USD') return charge
-  return conversion != null && Number.isFinite(conversion) && conversion > 0 ? charge / conversion : null
+  return value * rate
 }
-export function formatPrice(value: number | null | undefined, unit = 1, currency: PlazaCurrency = 'USD'): string {
+export function formatPrice(value: number | null | undefined, unit = 1): string {
   if (value == null || !Number.isFinite(value)) return '—'
-  return `${currency === 'CNY' ? '¥' : '$'}${new Intl.NumberFormat('en-US', { maximumSignificantDigits: 6 }).format(value * unit)}`
+  return `$${new Intl.NumberFormat('en-US', { maximumSignificantDigits: 6 }).format(value * unit)}`
 }
-export function pricingRows(model: PlazaModel, original = false): Array<Partial<UserPricingInterval>> {
-  // Official token prices cannot be compared with per-request/image/video charges.
-  if (original && billingMode(model) !== 'token') return []
-  const p = original ? model.official_pricing : model.pricing
+export function pricingRows(model: PlazaModel): Array<Partial<UserPricingInterval>> {
+  const p = model.pricing
   if (!p) return []
   return p.intervals?.length ? p.intervals : [p]
 }
-export function primaryPrice(offer: PlazaOffer, original = false) {
-  const p = pricingRows(offer.model, original)[0]
+export function primaryPrice(offer: PlazaOffer) {
+  const p = pricingRows(offer.model)[0]
   return billingMode(offer.model) === 'token' ? p?.input_price : p?.per_request_price
 }

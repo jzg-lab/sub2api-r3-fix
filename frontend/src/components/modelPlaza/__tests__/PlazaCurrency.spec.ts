@@ -13,8 +13,8 @@ vi.mock('vue-i18n', async () => {
 })
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 
-describe('model plaza currency explanations', () => {
-  it.each(['zh', 'en'] as const)('distinguishes account charges, CNY conversion and official USD in %s', async locale => {
+describe('model plaza price display', () => {
+  it.each(['zh', 'en'] as const)('shows both prices in account USD without recharge conversion in %s', async locale => {
     const i18n = createI18n({ legacy: false, locale, messages: { zh, en }, missingWarn: false, fallbackWarn: false })
     const labels = (locale === 'zh' ? zh : en).modelPlaza.catalog
     const data = plazaFixture()
@@ -25,39 +25,26 @@ describe('model plaza currency explanations', () => {
         stubs: { BaseDialog: { props: ['show'], template: '<section v-if="show" class="test-dialog"><slot /></section>' } },
       },
     })
-    const buttons = () => wrapper.find('.plaza-toolbar-actions .plaza-segmented').findAll('button')
-    const notice = () => wrapper.find('.plaza-notice').text()
-    expect(buttons()[1].text()).toBe(labels.usd)
-    expect(notice()).toBe(i18n.global.t('modelPlaza.catalog.conversion', { rate: 10 }))
-    expect(notice()).toContain('$10')
-    expect(wrapper.find('.plaza-notice').element.compareDocumentPosition(wrapper.find('.plaza-model-grid').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('¥0.15')
-
-    await buttons()[1].trigger('click')
+    const [before, after] = wrapper.findAll('.plaza-price-switch button')
+    expect(before.text()).toBe(labels.beforeMultiplier)
+    expect(after.text()).toBe(labels.afterMultiplier)
+    expect(after.attributes('aria-pressed')).toBe('true')
     expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
     expect(wrapper.find('.plaza-catalog-meta').text()).toContain(labels.usd)
-    expect(wrapper.find('.plaza-pricing-type').text()).toContain(labels.usd)
-    await wrapper.find('.plaza-original-toggle').trigger('click')
-    expect(buttons()[1].text()).toBe(labels.officialUsd)
-    expect(wrapper.find('.plaza-pricing-type').text()).toContain(labels.officialUsd)
-    expect(notice()).toBe(i18n.global.t('modelPlaza.catalog.referenceHint', { fx: '6.70' }))
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$5')
-    await wrapper.find('.plaza-card-price-detail').trigger('click')
-    expect(wrapper.find('.test-dialog').text()).toContain(labels.officialUsd)
-    await wrapper.find('.plaza-original-toggle').trigger('click')
-    expect(wrapper.find('.test-dialog').text()).toContain(labels.usd)
-    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$1.5')
-
     await wrapper.setProps({ response: { ...data, balance_recharge_multiplier: 20 } })
-    expect(notice()).toContain('$20')
     expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
-    await buttons()[0].trigger('click')
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('¥0.075')
+
+    await before.trigger('click')
+    expect(wrapper.find('.plaza-pricing-type').text()).toContain(labels.beforeMultiplier)
+    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$3')
+    await wrapper.find('.plaza-card-price-detail').trigger('click')
+    expect(wrapper.find('.test-dialog').text()).toContain(labels.beforeMultiplier)
     await wrapper.setProps({ response: { ...data, balance_recharge_multiplier: undefined } })
-    expect(notice()).toBe(labels.conversionUnavailable)
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('—')
-    await buttons()[1].trigger('click')
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$3')
+    await after.trigger('click')
+    expect(wrapper.find('.test-dialog').text()).toContain(labels.afterMultiplier)
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$1.5')
+    expect(wrapper.text()).not.toMatch(/¥|CNY/)
     wrapper.unmount()
   })
 })
