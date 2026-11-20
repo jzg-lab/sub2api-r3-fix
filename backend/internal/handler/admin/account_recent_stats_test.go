@@ -41,7 +41,8 @@ func TestAccountBatchStatsIncludesRecentSamplesAndUnavailableState(t *testing.T)
 	gin.SetMode(gin.TestMode)
 	usage := service.NewAccountUsageService(nil, recentAccountUsageRepo{}, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	for i, fail := range []bool{false, true} {
-		h := &AccountHandler{accountUsageService: usage, recentStatsCache: &recentAccountAdminCache{fail: fail}}
+		h := ProvideAccountHandler(nil, nil, nil, nil, nil, nil, nil, nil, usage,
+			nil, nil, nil, nil, nil, nil, nil, &recentAccountAdminCache{fail: fail})
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
 		id := 987100 + i*2
