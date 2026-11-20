@@ -173,5 +173,19 @@
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44440300284",
     "reason": "Manually dispatch main CI with publish_special=true; register only after all fixed-candidate tests and security gates pass. Build using reviewed Go1.27.4 digest and original runtime image; strict reviewed-file hashes include only six exact new SQL files and reviewed dependencies/protocol docs. In isolation verify all268-273 changes, unchanged history/settings/plugin contracts, old image startup and original signed Cookie Pin RPC/readiness plus natural shared-database handoff. Include full backup restore/roles validation and capture signed-process regression. Preserve disabled capture installation and all bindings/configuration. For this preparation, stop after the registered fixed-candidate image passes isolation; do not execute production SQL, install live controller changes or claim PREPARED. User explicitly deferred migrations268-273 until deployment. At deployment time, refresh live checks and backup, apply the exact reviewed SQL with bounded locks, install required reviewed tools/configuration, then prepare-special. No activation or new plugin enable in this task.",
     "rollback_plan": "Keep added tables/columns/index and all data; never restore a stale whole database over new usage. Old r17.11 can ignore additive schema only after isolated startup verification. Migrated account true flags and Gemini image enablement remain; reverting application does not undo these changes. Old version lacks group-only pricing and scoped admin/MCP handling, so rollback is conditional, not behavior-equivalent: freeze affected new features and verify accounting and permission behavior before old worker ownership. Preserve Cookie Pin signed package/configuration and disabled capture package/archive. Keep old slot available and do not kill in-flight requests."
+  },
+  {
+    "id": "r17-13",
+    "source": "2f107e634418f3374196e41e85b3b18f5f09b0f2",
+    "previous_source": "b20457721a24006f3b2144bab479a3cbf2a6cffd",
+    "version": "v0.2.20+r17.13",
+    "channel": "ordinary",
+    "summary": "恢复已登录用户的智商检测页面 /quality-test。",
+    "review": "Runtime diff limited to restoring the original authenticated Vue route. The adjacent view regression resolves the real router and loads QualityTestView. Previous verification passed 72 targeted tests, type checking and production build. No backend, SQL, dependency, plugin, configuration or runtime changes. Full candidate CI required before registration.",
+    "reviewed_by": "Codex, reviewed fixed r17.12 to route fix, user requested catalog registration for manual activation.",
+    "input_source": "22f9470998923ab477e1e5478c069479ce959a32",
+    "official_version": "0.2.20",
+    "official_source": "dab829a4e9b7d1cc307189aea8b0319eb29e29d0",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44655262319"
   }
 ]
