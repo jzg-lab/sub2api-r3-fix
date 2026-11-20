@@ -85,7 +85,7 @@ func TestOpenAIGatewayServiceRecordUsage_GPT61SolSubscriptionLongContext(t *test
 								APIKey: apiKey, User: &User{ID: 2}, Account: account,
 							})
 							require.NoError(t, err)
-							wantLong := accountType == AccountTypeAPIKey && groupMode != "分组关闭"
+							wantLong := accountType == AccountTypeAPIKey && (accountEnabled || groupMode == "分组开启")
 							inputFactor, outputFactor, tierFactor := 1.0, 1.0, 1.0
 							if wantLong {
 								inputFactor, outputFactor = 2, 1.5
@@ -160,7 +160,7 @@ func TestCalculateCostUnified_ModelLongContextExemptionPreservesCustomIntervals(
 	service := NewBillingService(nil, nil)
 	for _, withResolver := range []bool{false, true} {
 		input := CostInput{Model: "gpt-6.1-sol", Tokens: UsageTokens{InputTokens: 300000}, RateMultiplier: 1,
-			DisableModelLongContextPricing: true}
+			LongContextBillingEnabled: boolPtr(true), DisableModelLongContextPricing: true}
 		if withResolver {
 			input.Ctx = context.Background()
 			input.Resolver = NewModelPricingResolver(nil, service)

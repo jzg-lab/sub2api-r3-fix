@@ -19,7 +19,7 @@ func TestBillingCacheService_CheckRPM_NegativeCacheSkipsDBLookup(t *testing.T) {
 	repo := &rpmOverrideRepoStub{override: nil}
 	svc := newBillingServiceForRPM(t, cache, repo)
 
-	user := &User{ID: 1, RPMLimit: 0, UserGroupRPMOverrideChecked: true} // 负缓存命中
+	user := &User{ID: 1, RPMLimit: 0, UserGroupRPMOverrideGroupID: 10, UserGroupRPMOverrideChecked: true} // 负缓存命中
 	group := &Group{ID: 10, RPMLimit: 5}
 
 	for i := 0; i < 3; i++ {
@@ -52,7 +52,7 @@ func TestBillingCacheService_CheckRPM_OverrideStillWinsWithFlagSet(t *testing.T)
 	repo := &rpmOverrideRepoStub{override: &override}
 	svc := newBillingServiceForRPM(t, cache, repo)
 
-	user := &User{ID: 1, RPMLimit: 100, UserGroupRPMOverride: &override, UserGroupRPMOverrideChecked: true}
+	user := &User{ID: 1, RPMLimit: 100, UserGroupRPMOverride: &override, UserGroupRPMOverrideGroupID: 10, UserGroupRPMOverrideChecked: true}
 	group := &Group{ID: 10, RPMLimit: 100}
 
 	require.NoError(t, svc.checkRPM(context.Background(), user, group))

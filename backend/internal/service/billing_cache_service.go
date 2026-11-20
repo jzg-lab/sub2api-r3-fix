@@ -858,10 +858,8 @@ func (s *BillingCacheService) checkRPM(ctx context.Context, user *User, group *G
 		// snapshot 带 checked 标记（负缓存）时，nil 就是"已确认无 override"，
 		// 不再每请求回源；只有 unmarked 的 nil（snapshot 构建时查询失败/未查）才走 DB。
 		var override *int
-		if user.UserGroupRPMOverride != nil && (user.UserGroupRPMOverrideGroupID == 0 || user.UserGroupRPMOverrideGroupID == group.ID) {
+		if user.UserGroupRPMOverrideGroupID == group.ID {
 			override = user.UserGroupRPMOverride
-		} else if user.UserGroupRPMOverrideChecked && (user.UserGroupRPMOverrideGroupID == 0 || user.UserGroupRPMOverrideGroupID == group.ID) {
-			// 负缓存命中：snapshot 构建时已确认无 override。
 		} else if s.userGroupRateRepo != nil {
 			dbOverride, err := s.userGroupRateRepo.GetRPMOverrideByUserAndGroup(ctx, user.ID, group.ID)
 			if err != nil {

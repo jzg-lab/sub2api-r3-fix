@@ -74,6 +74,9 @@ func (r openAIAccountPoolFallbackAccountRepo) ListModelAvailabilityCandidates(
 	if groupID == nil {
 		return nil, nil
 	}
+	if err := r.errByGroup[*groupID]; err != nil {
+		return nil, err
+	}
 	allowedPlatforms := make(map[string]struct{}, len(platforms))
 	for _, platform := range platforms {
 		allowedPlatforms[platform] = struct{}{}

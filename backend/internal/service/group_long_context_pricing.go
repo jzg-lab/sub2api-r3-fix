@@ -34,26 +34,3 @@ func normalizeGroupLongContextPricing(config GroupLongContextPricing) (GroupLong
 	}
 	return out, nil
 }
-
-func applyGroupLongContextThreshold(group *Group, model string, resolved *ResolvedPricing) {
-	if group == nil || !group.LongContextPricingEnabled || resolved == nil ||
-		(resolved.Mode != "" && resolved.Mode != BillingModeToken) || len(resolved.Intervals) > 0 {
-		return
-	}
-	pricing := resolved.BasePricing
-	// Explicit channel tiers and models without a surcharge retain their existing rules.
-	if pricing == nil || pricing.LongContextInputThreshold <= 0 ||
-		(pricing.LongContextInputMultiplier <= 1 && pricing.LongContextOutputMultiplier <= 1) {
-		return
-	}
-	threshold := group.LongContextPricing.ThresholdTokens
-	if override, ok := group.LongContextPricing.ModelThresholds[normalizeChannelPricingModelName(model)]; ok {
-		threshold = override
-	}
-	if threshold <= 0 {
-		return
-	}
-	cloned := *pricing
-	cloned.LongContextInputThreshold = threshold
-	resolved.BasePricing = &cloned
-}

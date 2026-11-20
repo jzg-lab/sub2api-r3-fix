@@ -25,6 +25,8 @@
   outbox 原子性、revision/CAS 与并发回退；suite 子测试排除使用完整父/子正则，且排除项不计作通过。
 - 集成测试的 Docker 不可用路径可能记录“skipping integration tests”后仍以成功退出；需检查运行日志确认实际执行的 suite，
   或按测试 harness 使用隔离 PostgreSQL/Redis Unix socket，不能只凭 `go test` 的退出码记为数据库验证通过。
+- 分组汇总并发测试会派生带独立 schema 和时区的连接池。派生时用 URL 查询参数保留原 DSN 的
+  socket、数据库名和其他参数，设置 `search_path` 与 `TimeZone`，避免子连接落回默认数据库。
 - 历史 SQL/checksum 不覆盖；新增 SQL 先核对本地编号，再验证新装和升级。历史显式 false/空值与新默认分别审查。
 - 发布工作流要核对所有 `needs`、matrix、脚本和配置，防止把新版某个 job 片段插进旧流程。
   simple 模式仍保留五平台包、校验和与草稿；正式源码版本必须匹配冻结标签，构建不得 tidy 或掩盖依赖漂移。

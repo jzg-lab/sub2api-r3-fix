@@ -648,7 +648,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if existing != nil {
 			existingExtra = existing.Extra
 		}
-		extra, err = mergeCRSOpenAILongContextBillingExtra(AccountTypeOAuth, existingExtra, extra)
+		extra, err = mergeCRSOpenAILongContextBillingExtra(existingExtra, extra)
 		if err != nil {
 			item.Action = "failed"
 			item.Error = err.Error()
@@ -799,7 +799,7 @@ func (s *CRSSyncService) SyncFromCRS(ctx context.Context, input SyncFromCRSInput
 		if existing != nil {
 			existingExtra = existing.Extra
 		}
-		extra, err = mergeCRSOpenAILongContextBillingExtra(AccountTypeAPIKey, existingExtra, extra)
+		extra, err = mergeCRSOpenAILongContextBillingExtra(existingExtra, extra)
 		if err != nil {
 			item.Action = "failed"
 			item.Error = err.Error()
@@ -1203,8 +1203,8 @@ func reconcileCRSUpstreamBillingProbeExtra(
 	}
 }
 
-func mergeCRSOpenAILongContextBillingExtra(accountType string, existing, updates map[string]any) (map[string]any, error) {
-	return normalizeOpenAILongContextBillingExtra(PlatformOpenAI, accountType, mergeMap(existing, updates))
+func mergeCRSOpenAILongContextBillingExtra(existing, updates map[string]any) (map[string]any, error) {
+	return normalizeOpenAILongContextBillingExtra(PlatformOpenAI, mergeMap(existing, updates))
 }
 
 func (s *CRSSyncService) mapOrCreateProxy(ctx context.Context, enabled bool, cached *[]Proxy, src *crsProxy, defaultName string) (*int64, error) {

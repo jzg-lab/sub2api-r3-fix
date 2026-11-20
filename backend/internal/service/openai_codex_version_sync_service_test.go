@@ -165,7 +165,7 @@ func TestClientVersionSyncReadFailurePreservesPolicyAndVersion(t *testing.T) {
 				newCodexVersionSyncService(r, g).runOnce()
 			}},
 		{"claude", SettingKeyClaudeCodeVersionAutoSyncEnabled, SettingKeyClaudeCodeClientVersionSynced,
-			"v2.1.280", "2.1.281", "2.1.280", func(r SettingRepository, g GitHubReleaseClient) {
+			"v2.1.322", "2.1.323", "2.1.322", func(r SettingRepository, g GitHubReleaseClient) {
 				NewClaudeCodeVersionSyncService(r, nil, g, time.Hour).runOnce()
 			}},
 	} {

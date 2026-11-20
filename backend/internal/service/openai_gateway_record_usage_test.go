@@ -476,6 +476,8 @@ func TestOpenAIGatewayServiceRecordUsage_PeakRateAffectsTokenModeImageOutputToke
 		},
 		User:    &User{ID: 2004},
 		Account: &Account{ID: 3004},
+		// The peak window excludes 23:59, so do not depend on the wall clock.
+		PricingAt: time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
 	})
 
 	require.NoError(t, err)
@@ -1299,7 +1301,7 @@ func TestOpenAIGatewayServiceRecordUsage_Gpt54LongContextBillingEnabledByGroup(t
 	require.True(t, usageRepo.lastLog.LongContextBillingApplied)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_LongContextFollowsGroupOnly(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_LongContextFollowsGroupOrAccount(t *testing.T) {
 	tokens := OpenAIUsage{InputTokens: 300000, OutputTokens: 2000}
 	baseInput := 300000 * 2.5e-6
 	baseOutput := 2000 * 15e-6
@@ -1334,9 +1336,9 @@ func TestOpenAIGatewayServiceRecordUsage_LongContextFollowsGroupOnly(t *testing.
 			},
 		})
 		require.NoError(t, err)
-		require.False(t, usageRepo.lastLog.LongContextBillingApplied)
-		require.InDelta(t, baseInput, usageRepo.lastLog.InputCost, 1e-10)
-		require.InDelta(t, baseOutput, usageRepo.lastLog.OutputCost, 1e-10)
+		require.True(t, usageRepo.lastLog.LongContextBillingApplied)
+		require.InDelta(t, baseInput*2, usageRepo.lastLog.InputCost, 1e-10)
+		require.InDelta(t, baseOutput*1.5, usageRepo.lastLog.OutputCost, 1e-10)
 	})
 
 	t.Run("group on account on", func(t *testing.T) {
@@ -1428,13 +1430,13 @@ func TestOpenAIGatewayServiceRecordUsage_GrokLongContextFollowsGroupToggleOnly(t
 	})
 }
 
-func TestOpenAIGatewayServiceRecordUsage_SparkShadowCannotOverrideGroupBilling(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_SparkShadowInheritsParentBilling(t *testing.T) {
 	tests := []struct {
 		name          string
 		parentEnabled bool
 	}{
 		{name: "parent opt out keeps group disabled", parentEnabled: false},
-		{name: "parent opt in cannot enable group", parentEnabled: true},
+		{name: "parent opt in enables tier", parentEnabled: true},
 	}
 
 	for _, tt := range tests {
@@ -1479,7 +1481,7 @@ func TestOpenAIGatewayServiceRecordUsage_SparkShadowCannotOverrideGroupBilling(t
 
 			require.NoError(t, err)
 			require.Equal(t, 1, accountRepo.calls)
-			require.False(t, usageRepo.lastLog.LongContextBillingApplied)
+			require.Equal(t, tt.parentEnabled, usageRepo.lastLog.LongContextBillingApplied)
 		})
 	}
 }
@@ -3285,6 +3287,18 @@ func TestGroupBillsOpenAIFastAtStandardRequiresOpenAIAccount(t *testing.T) {
 		apiKey,
 		&Account{Platform: PlatformGrok, Type: AccountTypeAPIKey},
 		"priority",
+	))
+}
+
+// "免费 Fast" 只把 priority 降到 Standard 价；Ultrafast 是独立的更高档位，
+// 分组强制 Ultrafast 时仍按 Ultrafast 计费。
+func TestGroupBillsOpenAIFastAtStandardExcludesUltrafast(t *testing.T) {
+	apiKey := &APIKey{Group: &Group{Platform: PlatformOpenAI, FreeOpenAIFast: true, ForceOpenAIUltrafast: true}}
+
+	require.False(t, groupBillsOpenAIFastAtStandard(
+		apiKey,
+		&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		OpenAIFastTierUltrafast,
 	))
 }
 

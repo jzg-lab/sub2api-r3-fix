@@ -387,7 +387,7 @@ describe('GroupsView duplicate action', () => {
     wrapper.unmount()
   })
 
-  it('loads, validates, edits and clears group context thresholds through the real form', async () => {
+  it('preserves stored legacy thresholds when saving the group tier switch', async () => {
     const group = { ...sourceGroup, long_context_pricing_enabled: true,
       long_context_pricing: { threshold_tokens: 128000, model_thresholds: { 'model-a': 256000 } } }
     listGroups.mockResolvedValue({ items: [group], total: 1, page: 1, page_size: 20, pages: 1 })
@@ -396,57 +396,29 @@ describe('GroupsView duplicate action', () => {
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === 'common.edit')!.trigger('click')
     await flushPromises()
-    expect(wrapper.get<HTMLInputElement>('[data-testid="long-context-default"]').element.value).toBe('128')
-    expect(wrapper.get<HTMLInputElement>('[data-testid="long-context-model-threshold"]').element.value).toBe('256')
-    await wrapper.get('[data-testid="long-context-default"]').setValue('-1')
-    await wrapper.get('#edit-group-form').trigger('submit')
-    expect(updateGroup).not.toHaveBeenCalled()
-    expect(showError).toHaveBeenCalledWith('admin.groups.modelPricing.invalidThreshold')
-    await wrapper.get('[data-testid="long-context-default"]').setValue('200')
-    await wrapper.get('[data-testid="long-context-model-threshold"]').setValue('300')
-    await wrapper.get('#edit-group-form').trigger('submit')
-    await flushPromises()
-    expect(updateGroup).toHaveBeenCalledWith(42, expect.objectContaining({
-      long_context_pricing: { threshold_tokens: 200000, model_thresholds: { 'model-a': 300000 } }
-    }))
-    await wrapper.findAll('button').find(button => button.text() === 'common.edit')!.trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="long-context-default"]').setValue('')
-    await wrapper.get('[data-testid="long-context-model"]').element.closest('div')!.querySelector('button')!.click()
-    await wrapper.vm.$nextTick()
-    await wrapper.get('#edit-group-form').trigger('submit')
-    await flushPromises()
-    expect(updateGroup).toHaveBeenLastCalledWith(42, expect.objectContaining({
-      long_context_pricing: { threshold_tokens: 0, model_thresholds: {} }
-    }))
-    await wrapper.findAll('button').find(button => button.text() === 'common.edit')!.trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="long-context-default"]').setValue('-1')
+    expect(wrapper.find('[data-testid="long-context-default"]').exists()).toBe(false)
     await wrapper.get('[data-testid="long-context-enabled"]').setValue(false)
     await wrapper.get('#edit-group-form').trigger('submit')
     await flushPromises()
     expect(updateGroup).toHaveBeenLastCalledWith(42, expect.objectContaining({
-      long_context_pricing_enabled: false, long_context_pricing: {}
+      long_context_pricing_enabled: false
     }))
+    expect(updateGroup.mock.calls.at(-1)?.[1]).not.toHaveProperty('long_context_pricing')
     wrapper.unmount()
   })
 
-  it('creates a group with default and model thresholds', async () => {
+  it('creates a group using catalog thresholds', async () => {
     createGroup.mockResolvedValue({ ...sourceGroup, id: 50 })
     const wrapper = mountView()
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text().includes('admin.groups.createGroup'))!.trigger('click')
     await flushPromises()
     await wrapper.get('#create-group-form input[type="text"]').setValue('Custom context')
-    await wrapper.get('[data-testid="long-context-default"]').setValue('128')
-    await wrapper.get('[data-testid="long-context-add"]').trigger('click')
-    await wrapper.get('[data-testid="long-context-model"]').setValue('model-a')
-    await wrapper.get('[data-testid="long-context-model-threshold"]').setValue('256')
+    expect(wrapper.find('[data-testid="long-context-default"]').exists()).toBe(false)
     await wrapper.get('#create-group-form').trigger('submit')
     await flushPromises()
-    expect(createGroup).toHaveBeenCalledWith(expect.objectContaining({
-      long_context_pricing: { threshold_tokens: 128000, model_thresholds: { 'model-a': 256000 } }
-    }))
+    expect(createGroup).toHaveBeenCalledWith(expect.objectContaining({ long_context_pricing_enabled: true }))
+    expect(createGroup.mock.calls[0][0]).not.toHaveProperty('long_context_pricing')
     wrapper.unmount()
   })
 

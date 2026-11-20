@@ -44,10 +44,10 @@ func TestGroupLongContextPricingBoundariesAndExemptions(t *testing.T) {
 		{name: "old threshold still applies", tokens: UsageTokens{InputTokens: 200001}, want: true},
 		{name: "before", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 127999}},
 		{name: "equal", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 128000, OutputTokens: 50000}},
-		{name: "after", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 128001}, want: true},
-		{name: "cache counts", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 100000, CacheReadTokens: 20000, CacheCreationTokens: 8001, OutputTokens: 1000}, want: true},
-		{name: "model override", config: GroupLongContextPricing{ThresholdTokens: 128000, ModelThresholds: map[string]int{"claude-sonnet-4": 256000}}, tokens: UsageTokens{InputTokens: 200001}},
-		{name: "model only", config: GroupLongContextPricing{ModelThresholds: map[string]int{"claude-sonnet-4": 128000}}, tokens: UsageTokens{InputTokens: 128001}, want: true},
+		{name: "after", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 128001}},
+		{name: "cache counts", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 100000, CacheReadTokens: 20000, CacheCreationTokens: 80001, OutputTokens: 1000}, want: true},
+		{name: "model override", config: GroupLongContextPricing{ThresholdTokens: 128000, ModelThresholds: map[string]int{"claude-sonnet-4": 256000}}, tokens: UsageTokens{InputTokens: 200001}, want: true},
+		{name: "model only", config: GroupLongContextPricing{ModelThresholds: map[string]int{"claude-sonnet-4": 128000}}, tokens: UsageTokens{InputTokens: 128001}},
 		{name: "other model ignored", config: GroupLongContextPricing{ModelThresholds: map[string]int{"other-model": 128000}}, tokens: UsageTokens{InputTokens: 128001}},
 		{name: "group disabled", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, disabled: true},
 		{name: "subscription exempt", config: GroupLongContextPricing{ThresholdTokens: 128000}, tokens: UsageTokens{InputTokens: 300000}, exempt: true},
@@ -72,7 +72,7 @@ func TestGroupLongContextPricingBoundariesAndExemptions(t *testing.T) {
 	}
 	base.LongContextThresholdInclusive = true
 	group := &Group{LongContextPricingEnabled: true, LongContextPricing: GroupLongContextPricing{ThresholdTokens: 128000}}
-	cost, err := bs.CalculateCostUnified(CostInput{Model: "claude-sonnet-4", Group: group, Tokens: UsageTokens{InputTokens: 128000}, RateMultiplier: 1, Resolver: r})
+	cost, err := bs.CalculateCostUnified(CostInput{Model: "claude-sonnet-4", Group: group, Tokens: UsageTokens{InputTokens: 200000}, RateMultiplier: 1, Resolver: r})
 	require.NoError(t, err)
 	require.True(t, cost.LongContextBillingApplied, "inclusive model boundary is preserved")
 }
@@ -87,7 +87,7 @@ func TestGroupLongContextPricingResolverAndSchedule(t *testing.T) {
 	schedule, err := bs.ResolveContextPricingSchedule(context.Background(), r, ContextPricingScheduleInput{Model: "claude-sonnet-4", Group: group})
 	require.NoError(t, err)
 	require.Len(t, schedule.Tiers, 2)
-	require.Equal(t, 128000, *schedule.Tiers[0].MaxTokens)
+	require.Equal(t, 200000, *schedule.Tiers[0].MaxTokens)
 	require.InDelta(t, 1e-6, *schedule.Tiers[0].Input, 1e-12)
 	require.InDelta(t, 2e-6, *schedule.Tiers[1].Input, 1e-12)
 	require.InDelta(t, 22.5e-6, *schedule.Tiers[1].Output, 1e-12)
@@ -95,23 +95,6 @@ func TestGroupLongContextPricingResolverAndSchedule(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 200000, *reference.Tiers[0].MaxTokens, "reference catalog is not affected")
 
-	for _, tc := range []struct {
-		name      string
-		pricing   ModelPricing
-		intervals []PricingInterval
-		mode      BillingMode
-	}{
-		{name: "no threshold", pricing: ModelPricing{LongContextInputMultiplier: 2}},
-		{name: "no surcharge", pricing: ModelPricing{LongContextInputThreshold: 200000, LongContextInputMultiplier: 1, LongContextOutputMultiplier: 1}},
-		{name: "channel tiers", pricing: *base, intervals: []PricingInterval{{MinTokens: 0, InputPrice: testPtrFloat64(5e-6)}}},
-		{name: "per request", pricing: *base, mode: BillingModePerRequest},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			resolved := &ResolvedPricing{BasePricing: &tc.pricing, Mode: tc.mode, Intervals: tc.intervals}
-			applyGroupLongContextThreshold(group, "claude-sonnet-4", resolved)
-			require.Equal(t, tc.pricing, *resolved.BasePricing)
-		})
-	}
 	base.LongContextInputThreshold = 0
 	group.ModelPricing = nil
 	flat, err := bs.ResolveContextPricingSchedule(context.Background(), r, ContextPricingScheduleInput{Model: "claude-sonnet-4", Group: group})
@@ -161,7 +144,7 @@ func TestGroupLongContextPricingChannelPrecedence(t *testing.T) {
 		if withIntervals {
 			require.InDelta(t, .516, cost.InputCost, 1e-12, "explicit channel interval is preserved without a second surcharge")
 		} else {
-			require.InDelta(t, .258, cost.InputCost, 1e-12, "flat channel rate uses the group's model threshold")
+			require.InDelta(t, .129, cost.InputCost, 1e-12, "flat channel rate follows the catalog threshold")
 		}
 	}
 }

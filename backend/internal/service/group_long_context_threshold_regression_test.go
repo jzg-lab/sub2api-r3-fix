@@ -25,8 +25,8 @@ func TestGroupLongContextThresholdJSONConfig(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Logf("input=129000 output=1000 group_threshold=128000 model_threshold=200000 input_cost=%.6f output_cost=%.6f surcharge=%t", cost.InputCost, cost.OutputCost, cost.LongContextBillingApplied)
-	require.True(t, cost.LongContextBillingApplied)
-	require.InDelta(t, .774, cost.InputCost, 1e-12)
-	require.InDelta(t, .0225, cost.OutputCost, 1e-12)
+	require.False(t, cost.LongContextBillingApplied)
+	require.InDelta(t, .387, cost.InputCost, 1e-12)
+	require.InDelta(t, .015, cost.OutputCost, 1e-12)
 	require.Equal(t, 200000, base.LongContextInputThreshold, "shared catalog must remain unchanged")
 }

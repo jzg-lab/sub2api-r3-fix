@@ -207,7 +207,7 @@ func TestCalculateTokenCostForRequest_BuiltInPricingUsesUnifiedPath(t *testing.T
 	require.True(t, got.LongContextBillingApplied)
 }
 
-func TestCalculateTokenCostForRequest_NoResolverPreservesGroupPolicy(t *testing.T) {
+func TestCalculateTokenCostForRequest_NoResolverUsesCatalogThreshold(t *testing.T) {
 	bs := NewBillingService(nil, nil)
 	for _, tc := range []struct {
 		name     string
@@ -217,11 +217,11 @@ func TestCalculateTokenCostForRequest_NoResolverPreservesGroupPolicy(t *testing.
 		wantCost float64
 		wantLong bool
 	}{
-		{name: "disabled", input: 300000, wantCost: 0.6},
+		{name: "disabled", input: 300000, wantCost: 1.2, wantLong: true},
 		{name: "default boundary", enabled: true, input: 272000, wantCost: 0.544},
 		{name: "default exceeded", enabled: true, input: 300000, wantCost: 1.2, wantLong: true},
 		{name: "custom boundary", enabled: true, config: GroupLongContextPricing{ThresholdTokens: 128000}, input: 128000, wantCost: 0.256},
-		{name: "custom exceeded", enabled: true, config: GroupLongContextPricing{ThresholdTokens: 128000}, input: 200000, wantCost: 0.8, wantLong: true},
+		{name: "custom exceeded", enabled: true, config: GroupLongContextPricing{ThresholdTokens: 128000}, input: 200000, wantCost: 0.4},
 		{name: "model override", enabled: true, config: GroupLongContextPricing{ThresholdTokens: 128000, ModelThresholds: map[string]int{"gpt-6.1-sol": 272000}}, input: 200000, wantCost: 0.4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

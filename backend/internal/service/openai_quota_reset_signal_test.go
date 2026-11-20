@@ -157,10 +157,13 @@ func TestQuotaResetSignal_ExpiredOrUnavailableUsageDoesNotClear429(t *testing.T)
 	svc := &AccountUsageService{usageLogRepo: statsRepo}
 	usage, err := svc.getOpenAIUsage(context.Background(), account, false)
 	require.NoError(t, err)
-	require.Nil(t, usage.FiveHour)
-	require.Nil(t, usage.SevenDay)
+	for _, window := range []*UsageProgress{usage.FiveHour, usage.SevenDay} {
+		require.NotNil(t, window)
+		require.True(t, window.UtilizationUnknown)
+		require.NotNil(t, window.WindowStats)
+	}
 	require.Equal(t, until, *account.RateLimitResetAt)
-	require.Zero(t, statsRepo.calls, "local counts must not manufacture zero-percent quota")
+	require.Equal(t, 2, statsRepo.calls)
 }
 
 type quotaResetSignalStatsRepo struct {

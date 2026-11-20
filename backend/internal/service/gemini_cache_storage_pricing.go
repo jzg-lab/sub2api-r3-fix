@@ -3,9 +3,6 @@ package service
 import (
 	"slices"
 	"strings"
-	"time"
-
-	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 )
 
 // Gemini 显式上下文缓存存储的内置官方单价（USD / token / 小时，Standard 档）。
@@ -50,10 +47,6 @@ var geminiCacheStorageModelPrices = []struct {
 // Pro 系列取 geminiProCacheStoragePrice，Flash 与 Flash-Lite 系列取 geminiFlashCacheStoragePrice（标准价，
 // 不套用优惠价）。其他 Gemini 模型与非 Gemini 模型返回 0。
 func builtinGeminiCacheStoragePrice(model string) float64 {
-	return builtinGeminiCacheStoragePriceAt(model, timezone.Now())
-}
-
-func builtinGeminiCacheStoragePriceAt(model string, at time.Time) float64 {
 	name := lastSegment(strings.ToLower(strings.TrimSpace(model)))
 	if !strings.HasPrefix(name, "gemini-") {
 		return 0
@@ -61,16 +54,12 @@ func builtinGeminiCacheStoragePriceAt(model string, at time.Time) float64 {
 	parts := strings.Split(name, "-")
 	lite := slices.Contains(parts, "lite")
 	for _, entry := range geminiCacheStorageModelPrices {
-		price := entry.price
-		if strings.Contains(entry.prefix, "-3.8-flash") && at.UTC().Year() >= 2027 {
-			price = geminiFlashCacheStoragePrice
-		}
 		// Flash-Lite 变体只匹配 Flash-Lite 条目：gemini-3.8-flash-lite 不能落到 3.8 Flash 的优惠价。
 		if lite != strings.HasSuffix(entry.prefix, "-lite") {
 			continue
 		}
 		if name == entry.prefix || strings.HasPrefix(name, entry.prefix+"-") {
-			return price
+			return entry.price
 		}
 	}
 	switch {

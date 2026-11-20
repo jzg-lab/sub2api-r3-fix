@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIRecordUsageLongContextControlledOnlyByGroup(t *testing.T) {
+func TestOpenAIRecordUsageLongContextUsesOfficialTier(t *testing.T) {
 	for _, resolverPresent := range []bool{false, true} {
 		for _, enabled := range []bool{false, true} {
 			for _, legacy := range []any{nil, false, true} {
@@ -19,14 +19,7 @@ func TestOpenAIRecordUsageLongContextControlledOnlyByGroup(t *testing.T) {
 					{}, {ThresholdTokens: 128000},
 					{ThresholdTokens: 128000, ModelThresholds: map[string]int{"gpt-6.1-sol": 272000}},
 				} {
-					threshold := 272000
-					if config.ThresholdTokens != 0 {
-						threshold = config.ThresholdTokens
-					}
-					if modelThreshold, ok := config.ModelThresholds["gpt-6.1-sol"]; ok {
-						threshold = modelThreshold
-					}
-					for _, totalInput := range []int{threshold, threshold + 1, 388359} {
+					for _, totalInput := range []int{128001, 272000, 272001, 388359} {
 						name := fmt.Sprintf("resolver=%t/group=%t/legacy=%v/config=%v/input=%d", resolverPresent, enabled, legacy, config, totalInput)
 						t.Run(name, func(t *testing.T) {
 							usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
@@ -54,7 +47,7 @@ func TestOpenAIRecordUsageLongContextControlledOnlyByGroup(t *testing.T) {
 							require.NoError(t, err)
 							log := usageRepo.lastLog
 							require.NotNil(t, log)
-							wantLong := enabled && totalInput > threshold
+							wantLong := (resolverPresent && enabled || legacy == true) && totalInput > 272000
 							inFactor, outFactor := 1.0, 1.0
 							if wantLong {
 								inFactor, outFactor = 2, 1.5

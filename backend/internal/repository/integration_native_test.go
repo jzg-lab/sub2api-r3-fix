@@ -67,7 +67,8 @@ func runNativeIntegration(m *testing.M) (exitCode int) {
 		}
 	}()
 	dsn.Path = "/" + runDatabase
-	integrationDB, err = openSQLWithRetry(ctx, dsn.String(), 5*time.Second)
+	integrationDSN = dsn.String()
+	integrationDB, err = openSQLWithRetry(ctx, integrationDSN, 5*time.Second)
 	if err != nil {
 		log.Print("native integration disposable database connection failed")
 		return 1

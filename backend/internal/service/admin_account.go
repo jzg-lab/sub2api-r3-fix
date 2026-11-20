@@ -328,7 +328,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		SkipDefaultGroupBind:  true,
 		SkipMixedChannelCheck: true,
 	}
-	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Type, input.Extra)
+	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("normalize duplicate account extra: %w", err)
 	}
@@ -403,7 +403,7 @@ func ValidateOpenAILongContextBillingExtra(platform string, extra map[string]any
 	return nil
 }
 
-func normalizeOpenAILongContextBillingExtra(platform, accountType string, extra map[string]any) (map[string]any, error) {
+func normalizeOpenAILongContextBillingExtra(platform string, extra map[string]any) (map[string]any, error) {
 	if platform != PlatformOpenAI {
 		return extra, nil
 	}
@@ -417,13 +417,13 @@ func normalizeOpenAILongContextBillingExtra(platform, accountType string, extra 
 	}
 	_, exists := normalized[openAILongContextBillingEnabledKey]
 	if !exists {
-		normalized[openAILongContextBillingEnabledKey] = accountType == AccountTypeAPIKey
+		normalized[openAILongContextBillingEnabledKey] = false
 	}
 	return normalized, nil
 }
 
 func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *UpdateAccountInput) (map[string]any, error) {
-	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, account.Type, input.Extra)
+	normalized, err := normalizeOpenAILongContextBillingExtra(account.Platform, input.Extra)
 	if err != nil || account.Platform != PlatformOpenAI {
 		return normalized, err
 	}
@@ -608,7 +608,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		!hasOpenAIOAuthCredentialMaterial(input.Credentials) {
 		return nil, ErrOpenAIOAuthProvenanceRequired
 	}
-	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Type, input.Extra)
+	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
 	}
