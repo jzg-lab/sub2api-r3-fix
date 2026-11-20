@@ -38,6 +38,15 @@ beforeEach(async () => {
 })
 
 describe('QualityTestView', () => {
+  it('opens the quality test from its signed-in user route', async () => {
+    const { default: router } = await import('@/router')
+    const route = router.resolve('/quality-test')
+    expect(route.name).toBe('QualityTest')
+    expect(route.meta).toMatchObject({ requiresAuth: true, requiresAdmin: false })
+    const loadPage = route.matched[0].components?.default as () => Promise<typeof import('../QualityTestView.vue')>
+    expect((await loadPage()).default).toBe(QualityTestView)
+  })
+
   it('uses the key creation group colors in the selection and searchable options without exposing keys', async () => {
     api.keys.mockResolvedValue({ items: [
       { id: 2, name: 'My key', key: 'sk-own', group: { name: 'OpenAI plan', platform: 'openai', subscription_type: 'standard', rate_multiplier: 2 } },
