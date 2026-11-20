@@ -26,6 +26,14 @@
 在该基线上，相关前端 9 文件 85 项测试、定向 ESLint、类型检查、生产构建及
 `go test -tags=embed ./internal/web` 均通过。未运行本地全量回归或执行部署。
 
+2026-11-21 用户确认只登记候选，生产部署另行安排。专项候选 `v0.2.23+r17.16`
+在 r17.15 基础上纳入 OpenAI 降智管理员路由 `f49ef7340` 和上述模型广场价格显示。
+标签 `deployment-candidate/r17.16` 固定于 `25792a26aceada81bcdd5553bc747d4f5356efa4`，
+与审核源码 `111836d0141a457c0a03a81b7d1cb39d8aeabf49` 仅差 VERSION。
+本轮定向回归 23 项及[专项 CI #70](https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44785608439)
+全部通过，远端登记提交为 `43fce17d738d7959af925df996f421f0d9173e4c`。
+生产只读核验为蓝槽 r17.14，历史迁移按既有别名与校验和匹配。274–278 留待部署，本轮未切流。
+
 ## 官方 v0.2.23 本地整合（2026-11-20）
 
 用户指定 [官方 Releases](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.23)，固定源码
