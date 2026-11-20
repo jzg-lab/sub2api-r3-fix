@@ -1,7 +1,7 @@
 {
   "status": "approved",
   "channel": "special",
-  "source": "27036dcc900e62f70aa066e75cfdba750f8e9e21",
+  "source": "a58d50d3a0bec0facaafa6608b0b0c40c07c7281",
   "previous_source": "801c64ae6f61ce828a6b2e3ca60e372ff802ae71",
   "official_version": "0.2.23",
   "official_source": "5af9afb588c4b014b3df9db7d4073af1f8ae01b6",
@@ -9,7 +9,7 @@
   "official_evidence": "See docs/upstream-sync-state.md, official v0.2.23 integration and subsequent Antigravity review. The maintainer chose official pricing with shared subscriptions, official parent cache keys and SSE errors after an Antigravity heartbeat.",
   "reviewed_by": "Codex reviewed the active r17.14 to fixed source diff and verified the production baseline using the Nginx upstream, matching ready instances and blue image source. The maintainer requested push and candidate registration.",
   "summary": "整合官方 v0.2.23 的模型、计费和网关更新，保留跨组订阅抵扣。修复 Antigravity 排队心跳后的空流错误处理及并发换绑。",
-  "evidence": "Compared active r17.14 and the reviewed source. New migrations 274-278 add usage cost index, OpenAI cache TTL billing, group Ultrafast, rollup locking and channel tier multiplier. Earlier SQL is unchanged. Verified isolated 273-to-278 upgrade, migration rerun, full integration and unit tests on integration, 3575 frontend cases, embedded rebuild and lint. Follow-up verified both compatibility protocols and concurrent release in isolated Redis. The backend Dockerfile pins Go 1.27.4 and jsonschema-go moves from indirect to direct at its existing version. No plugin protocol or package changes. Production data clone, live provider calls and mixed-version handoff for this source have not been tested.",
+  "evidence": "Compared active r17.14 and the reviewed source. New migrations 274-278 add usage cost index, OpenAI cache TTL billing, group Ultrafast, rollup locking and channel tier multiplier. Earlier SQL is unchanged. Verified isolated 273-to-278 upgrade, migration rerun, full integration and unit tests on integration, 3575 frontend cases and embedded rebuild. Follow-up verified both compatibility protocols and concurrent release in isolated Redis. Push CI run 44712253571 exposed two lint findings. The reviewed source removes the unused helper and reapplies gofmt. Account-cost tests and golangci-lint v2.14.0 with the CI baseline passed locally. The backend Dockerfile pins Go 1.27.4 and jsonschema-go moves from indirect to direct at its existing version. No plugin protocol or package changes. Production data clone, live provider calls and mixed-version handoff for this source have not been tested.",
   "compatibility": {
     "data": "reviewed_change",
     "config": "reviewed_change",
