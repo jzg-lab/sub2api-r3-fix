@@ -217,5 +217,21 @@
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44713843662",
     "reason": "登记后由维护者另行发起部署。部署时核对实际生产基线、完整备份和恢复演练，在生产副本验收 274–278、旧分组和订阅账目、并发索引与汇总锁，再按迁移执行器的事务模式应用。核对 Go 构建镜像、请求体预算和排队心跳配置，验证新旧实例共库和插件交接。候选登记阶段仅执行 GitHub 检查。",
     "rollback_plan": "保留旧镜像、数据库新增列及索引、迁移账本和已结算账目。回退前暂停新档位和 TTL 特有计费写入，核对在途请求、订阅及批量图片结算，先验证 r17.14 在升级后结构上的读写和后台单活，再切回旧实例。回退应用不会撤销已生成的账单。"
+  },
+  {
+    "id": "r17-16",
+    "source": "25792a26aceada81bcdd5553bc747d4f5356efa4",
+    "previous_source": "801c64ae6f61ce828a6b2e3ca60e372ff802ae71",
+    "version": "v0.2.23+r17.16",
+    "channel": "special",
+    "summary": "整合官方 v0.2.23，补上 OpenAI 降智管理页入口，模型广场可切换分组计费基价与生效倍率后的价格。",
+    "review": "The full r17.14 upgrade includes the v0.2.23 integration previously reviewed and tested by CI #66, including migrations 274–278. Compared the r17.15 candidate to this revision: f49ef7340 registers the authenticated administrator route and 00da3ff60 updates model plaza price presentation and embedded frontend assets. Plaza uses site dollars and shows the selected group's base or effective rate-adjusted price. Neither increment changes backend billing, SQL, dependencies, or plugin contracts. All 23 focused router and plaza tests passed on the combined source. The blue slot matched the previous_source image and returned HTTP 200 on /readyz. Fresh candidate CI and production-specific migration, restore and handoff validation are distinct steps.",
+    "reviewed_by": "Codex reviewed both frontend changes since r17.15 and reconfirmed the active r17.14 source on the production blue slot. The maintainer requested candidate registration.",
+    "input_source": "111836d0141a457c0a03a81b7d1cb39d8aeabf49",
+    "official_version": "0.2.23",
+    "official_source": "5af9afb588c4b014b3df9db7d4073af1f8ae01b6",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44785608439",
+    "reason": "登记后由维护者另行发起部署。部署时核对实际生产基线、完整备份和恢复演练，在生产副本验收 274–278、旧分组和订阅账目、并发索引与汇总锁，再按迁移执行器的事务模式应用。核对 Go 构建镜像、请求体预算和排队心跳配置，验证新旧实例共库和插件交接。候选登记阶段仅执行 GitHub 检查。",
+    "rollback_plan": "保留旧镜像、数据库新增列及索引、迁移账本和已结算账目。回退前暂停新档位和 TTL 特有计费写入，核对在途请求、订阅及批量图片结算，先验证 r17.14 在升级后结构上的读写和后台单活，再切回旧实例。回退应用不会撤销已生成的账单。"
   }
 ]
