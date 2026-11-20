@@ -1,20 +1,22 @@
 {
   "status": "approved",
-  "channel": "ordinary",
-  "source": "9de32e60d2b3be4e61ded7b1143243a78b592b81",
-  "previous_source": "b20457721a24006f3b2144bab479a3cbf2a6cffd",
-  "official_version": "0.2.20",
-  "official_source": "dab829a4e9b7d1cc307189aea8b0319eb29e29d0",
-  "integration_source": "ad5cc1912449950cd55d0b60fb8514ca9b687e89",
-  "official_evidence": "docs/upstream-sync-state.md records the fixed official source and accepted behavior choices. Account cooldown, stopped proxy fallback and actual model supply remain local. Later explicit group-only pricing supersedes the earlier account override decision.",
-  "reviewed_by": "Codex reviewed the production r17.12 to source diff. Maintainer requested main push and candidate registration for manual activation.",
-  "summary": "恢复账号列表的近期表现 · 10 分钟统计，以及已登录用户的智商检测页面 /quality-test。",
-  "evidence": "Confirmed Nginx points to port 8082 running r17.12 b2045772. The r17.13 authenticated route fix passed CI 44655262319. Additional application changes inject the existing GatewayCache into the admin account handler and regenerate Wire. The batch endpoint regression now constructs the handler through the production provider and passed for populated stats, absent samples and Redis failure. No changes to collection, scheduling, migrations, Redis layout, dependencies, configuration or plugin contracts. Full frozen candidate CI required before registration.",
+  "channel": "special",
+  "source": "27036dcc900e62f70aa066e75cfdba750f8e9e21",
+  "previous_source": "801c64ae6f61ce828a6b2e3ca60e372ff802ae71",
+  "official_version": "0.2.23",
+  "official_source": "5af9afb588c4b014b3df9db7d4073af1f8ae01b6",
+  "integration_source": "fc257e1d94e2d76b167ab85776e8676edf7ef3d8",
+  "official_evidence": "See docs/upstream-sync-state.md, official v0.2.23 integration and subsequent Antigravity review. The maintainer chose official pricing with shared subscriptions, official parent cache keys and SSE errors after an Antigravity heartbeat.",
+  "reviewed_by": "Codex reviewed the active r17.14 to fixed source diff and verified the production baseline using the Nginx upstream, matching ready instances and blue image source. The maintainer requested push and candidate registration.",
+  "summary": "整合官方 v0.2.23 的模型、计费和网关更新，保留跨组订阅抵扣。修复 Antigravity 排队心跳后的空流错误处理及并发换绑。",
+  "evidence": "Compared active r17.14 and the reviewed source. New migrations 274-278 add usage cost index, OpenAI cache TTL billing, group Ultrafast, rollup locking and channel tier multiplier. Earlier SQL is unchanged. Verified isolated 273-to-278 upgrade, migration rerun, full integration and unit tests on integration, 3575 frontend cases, embedded rebuild and lint. Follow-up verified both compatibility protocols and concurrent release in isolated Redis. The backend Dockerfile pins Go 1.27.4 and jsonschema-go moves from indirect to direct at its existing version. No plugin protocol or package changes. Production data clone, live provider calls and mixed-version handoff for this source have not been tested.",
   "compatibility": {
-    "data": "unchanged",
-    "config": "unchanged",
+    "data": "reviewed_change",
+    "config": "reviewed_change",
     "plugins": "unchanged",
-    "runtime": "unchanged",
-    "rollback": "compatible"
-  }
+    "runtime": "reviewed_change",
+    "rollback": "conditional"
+  },
+  "special_plan": "登记后由维护者另行发起部署。部署时核对实际生产基线、完整备份和恢复演练，在生产副本验收 274–278、旧分组和订阅账目、并发索引与汇总锁，再按迁移执行器的事务模式应用。核对 Go 构建镜像、请求体预算和排队心跳配置，验证新旧实例共库和插件交接。候选登记阶段仅执行 GitHub 检查。",
+  "rollback_plan": "保留旧镜像、数据库新增列及索引、迁移账本和已结算账目。回退前暂停新档位和 TTL 特有计费写入，核对在途请求、订阅及批量图片结算，先验证 r17.14 在升级后结构上的读写和后台单活，再切回旧实例。回退应用不会撤销已生成的账单。"
 }
