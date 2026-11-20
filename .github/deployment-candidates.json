@@ -187,5 +187,19 @@
     "official_version": "0.2.20",
     "official_source": "dab829a4e9b7d1cc307189aea8b0319eb29e29d0",
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44655262319"
+  },
+  {
+    "id": "r17-14",
+    "source": "801c64ae6f61ce828a6b2e3ca60e372ff802ae71",
+    "previous_source": "b20457721a24006f3b2144bab479a3cbf2a6cffd",
+    "version": "v0.2.20+r17.14",
+    "channel": "ordinary",
+    "summary": "恢复账号列表的近期表现 · 10 分钟统计，以及已登录用户的智商检测页面 /quality-test。",
+    "review": "Confirmed Nginx points to port 8082 running r17.12 b2045772. The r17.13 authenticated route fix passed CI 44655262319. Additional application changes inject the existing GatewayCache into the admin account handler and regenerate Wire. The batch endpoint regression now constructs the handler through the production provider and passed for populated stats, absent samples and Redis failure. No changes to collection, scheduling, migrations, Redis layout, dependencies, configuration or plugin contracts. Full frozen candidate CI required before registration.",
+    "reviewed_by": "Codex reviewed the production r17.12 to source diff. Maintainer requested main push and candidate registration for manual activation.",
+    "input_source": "9de32e60d2b3be4e61ded7b1143243a78b592b81",
+    "official_version": "0.2.20",
+    "official_source": "dab829a4e9b7d1cc307189aea8b0319eb29e29d0",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44658957293"
   }
 ]
