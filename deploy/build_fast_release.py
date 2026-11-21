@@ -22,6 +22,15 @@ REVIEWED_MIGRATIONS = {
     '271_mcp_oauth.sql': '751a1dcee6108afcecbd580b6e3140cca3480853fecd2174861b02f3a71e54a1',
     '272_default_openai_api_key_long_context_billing.sql': 'cfdc704c27c2ed38c164a9799201bfec4160fe7200daa96a0665f2777a51cdc5',
     '273_affiliate_ledger_operation_id.sql': '3823bfea5f64feb58f5fcebc341c6877eaefc97834b4cd652c8e83ad08ed78da',
+    "274_add_usage_logs_api_key_cost_index_notx.sql": "94f124c3e50405f7b75746885111a4f662c331985a697de46fe946a17ff1f7d9",
+    "275_openai_cache_write_ttl.sql": "532551ce7aee86b2ee0a78d397d422424ceed4051e31d5f542277c80c21b8b98",
+    "276_group_force_openai_ultrafast.sql": "d78e605d4fc2038c57f620dff398022823a850ea8994b129b50774ac49e20af1",
+    "277_group_usage_rollup_nonblocking_build.sql": "5b6e9b57f9b354a96c6870185c034db8adc7def944efcddf654e39cd97770718",
+    "278_channel_pricing_ultrafast_multiplier.sql": "458752b3523254ee60ab4a821261ab64df9216a6f208c1960e7b816f8c7cfd1d",
+}
+REVIEWED_RUNNER_FILES = {
+    "backend/internal/repository/migrations_runner.go": "3d9dcfc98b5feecc6d78ba9f6f07162250f0cd37dd2f30280709bed5d8e90754",
+    "backend/internal/repository/migrations_runner_api_key_cost_index_test.go": "1636b9df280e09943a9ff49064f943a0f57845d099ebed5f3c9b2a16b70a1494",
 }
 ROLLBACK_CHECK = "backend/migrations/rollback/266_batch_image_subscription_billing_check.sql"
 CAPTURE_PROTOCOL_FILES = {
@@ -60,7 +69,7 @@ def check_contract(repo, previous, commit, review=None):
             "special build review requires reviewer and evidence")
     if "reviewed_files" in review:
         # This maintenance path builds reviewed inputs; prepare still requires every SQL checksum applied.
-        allowed = {"Dockerfile", "backend/go.mod", "backend/go.sum", ROLLBACK_CHECK} | CAPTURE_PROTOCOL_FILES | {
+        allowed = {"Dockerfile", "backend/go.mod", "backend/go.sum", ROLLBACK_CHECK} | CAPTURE_PROTOCOL_FILES | set(REVIEWED_RUNNER_FILES) | {
             "backend/migrations/" + name for name in REVIEWED_MIGRATIONS}
         files = review["reviewed_files"]
         require(isinstance(files, dict) and set(files) == set(blocked) and set(blocked) <= allowed,
@@ -68,6 +77,8 @@ def check_contract(repo, previous, commit, review=None):
         for path in blocked:
             content = run("git", "-C", str(repo), "show", commit + ":" + path)
             require(files[path] == hashlib.sha256(content).hexdigest(), "reviewed file checksum differs: " + path)
+            if path in REVIEWED_RUNNER_FILES:
+                require(files[path] == REVIEWED_RUNNER_FILES[path], "unreviewed migration runner content: " + path)
             if path.startswith("backend/migrations/"):
                 expected = ("6288f716ceace7816f76015b38f743c927fd678f97cdd3d99801f661953a9630"
                             if path == ROLLBACK_CHECK else REVIEWED_MIGRATIONS.get(Path(path).name))

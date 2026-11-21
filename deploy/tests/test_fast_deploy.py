@@ -403,10 +403,10 @@ class UtilityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 b.check_contract("repo", "old", "new", review)
 
-    def test_v020_migrations_require_exact_new_sql_and_reject_history_changes(self):
+    def test_v020_and_v023_migrations_require_exact_new_sql_and_reject_history_changes(self):
         root = Path(__file__).resolve().parents[2]
-        paths = ["backend/migrations/" + name for name in b.REVIEWED_MIGRATIONS if 268 <= int(name[:3]) <= 273]
-        self.assertEqual(len(paths), 6)
+        paths = ["backend/migrations/" + name for name in b.REVIEWED_MIGRATIONS if 268 <= int(name[:3]) <= 278]
+        self.assertEqual(len(paths), 11)
         for path in paths:
             content = (root / path).read_bytes()
             review = {"status": "approved", "source": "new", "previous_source": "old",
@@ -422,6 +422,21 @@ class UtilityTests(unittest.TestCase):
         self.assertFalse(b.protected("backend/migrations/example_test.go"))
         self.assertTrue(b.protected("backend/migrations/example.go"))
         self.assertTrue(b.protected("backend/migrations/274_unreviewed.sql"))
+
+    def test_reviewed_runner_rejects_other_content_even_with_matching_review(self):
+        content = b"reviewed migration runner"
+        for path in list(b.REVIEWED_RUNNER_FILES):
+            expected = {path: hashlib.sha256(content).hexdigest()}
+            for data in (content, content + b"\n// changed\n"):
+                review = {"status": "approved", "source": "new", "previous_source": "old",
+                          "changed_paths": [path], "reviewed_by": "fixture", "evidence": "review",
+                          "reviewed_files": {path: hashlib.sha256(data).hexdigest()}}
+                with self.subTest(path=path), patch.dict(b.REVIEWED_RUNNER_FILES, expected), patch.object(b, "git", return_value=path), patch.object(b, "run", return_value=data):
+                    if data == content:
+                        b.check_contract("repo", "old", "new", review)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "runner content"):
+                            b.check_contract("repo", "old", "new", review)
 
     def test_app_facts_ignores_volatile_version_log_timestamp(self):
         config = d.read(Path(d.__file__).with_name("fast-deploy.example.json"))

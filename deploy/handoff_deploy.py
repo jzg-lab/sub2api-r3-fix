@@ -353,6 +353,8 @@ class Switch(d.Switch):
         reviewed = (self.p["candidate"].get("special_review") or {}).get("reviewed_files", {})
         d.require("backend/migrations/266_batch_image_subscription_billing.sql" not in reviewed,
                   "subscription billing rollback requires manual admission freeze, settlement and ledger checks")
+        d.require("backend/migrations/275_openai_cache_write_ttl.sql" not in reviewed,
+                  "tier and cache TTL billing rollback requires manual admission freeze and settlement checks")
 
     def finish(self, phase, slot, target):
         state = self.h.runtime(slot, target)
@@ -469,7 +471,7 @@ class Switch(d.Switch):
             d.require(self.h.pending.read_text() == str(self.attempt), "recovery ownership unresolved")
             self.h.unchanged(self.p, recovering=True)
             old = self.h.runtime(self.old, self.original)
-            if self.s["mode"] == "activate" and old["phase"] != "active":
+            if self.s["mode"] == "activate" and (old["phase"] != "active" or self.h.selected() != self.old):
                 self.require_automatic_billing_rollback()
             # A standby build failure must not close healthy customer traffic.
             if old["phase"] == "active" and self.h.selected() == self.old:

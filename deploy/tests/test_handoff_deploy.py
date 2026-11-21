@@ -226,6 +226,18 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("blue:serve", self.host.events)
         self.assertEqual(self.host.states["green"], "active")
 
+    def test_cache_billing_requires_manual_rollback_after_ingress_moves(self):
+        self.switch.p["candidate"]["special_review"] = {"reviewed_files": {
+            "backend/migrations/275_openai_cache_write_ttl.sql": "reviewed"}}
+        self.host.selected_slot = "green"
+        self.host.states = {"blue": "active", "green": "serving_paused"}
+        self.switch.state("RECOVERING", touched=True)
+        d.atomic(self.host.pending, str(self.attempt).encode())
+        with self.assertRaisesRegex(RuntimeError, "settlement checks"):
+            self.switch.recover()
+        self.assertEqual(self.switch.s["phase"], "NEEDS_ATTENTION")
+        self.assertNotIn("blue:serve", self.host.events)
+
     def test_rollback_reverses_slot_names(self):
         path = self.root / "rollback"
         path.mkdir()
