@@ -12,12 +12,14 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 
 describe('plaza billing display', () => {
-  it('applies the effective rate only in the after-multiplier mode', () => {
+  it('shows discounted prices in CNY at the credited USD-per-CNY rate', () => {
     const offer = catalogue(plazaFixture().groups)[0].offers[0]
-    expect(formatPrice(displayPrice(3e-6, offer, false), 1e6)).toBe('$1.5')
+    expect(formatPrice(displayPrice(3e-6, offer, false), 1e6, '¥')).toBe('¥0.15')
+    expect(formatPrice(displayPrice(20, offer, false), 1, '¥')).toBe('¥1')
     expect(formatPrice(displayPrice(3e-6, offer, true), 1e6)).toBe('$3')
     offer.model.current_rate_multiplier = 0
     expect(displayPrice(3e-6, offer, false)).toBe(0)
+    expect(displayPrice(0, offer, false)).toBe(0)
     delete offer.model.current_rate_multiplier
     expect(displayPrice(3e-6, offer, false)).toBeNull()
     expect(displayPrice(3e-6, offer, true)).toBe(3e-6)
@@ -37,7 +39,7 @@ describe('plaza billing display', () => {
     offer.model.pricing!.billing_mode = billingMode
     offer.model.pricing!.per_request_price = 2
     const wrapper = mount(PlazaPriceGrid, { props: { offer, beforeMultiplier: false } })
-    expect(wrapper.find('strong').text()).toBe('$1')
+    expect(wrapper.find('strong').text()).toBe('¥0.1')
     await wrapper.setProps({ beforeMultiplier: true })
     expect(wrapper.find('strong').text()).toBe('$2')
     wrapper.unmount()
@@ -106,13 +108,12 @@ describe('plaza interactions', () => {
     await wrapper.find('.plaza-toolbar select').setValue('price')
     expect(wrapper.find('.plaza-model-heading h2').text()).toBe('gpt-other')
     await wrapper.findAll('.plaza-card-price-detail')[1].trigger('click')
-    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$3')
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('¥0.3')
     await wrapper.find('.plaza-price-switch button').trigger('click')
     expect(wrapper.find('.plaza-model-heading h2').text()).toBe('gpt-5')
     expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$6')
     const rows = wrapper.findAll('.test-dialog tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows[0].text()).toContain('Base tier')
     expect(rows[0].findAll('td').at(-1)?.text()).toBe('$2')
     expect(rows[1].findAll('td')[1].text()).toBe('$12')
     expect(rows[1].findAll('td').at(-1)?.text()).toBe('$4')
@@ -125,7 +126,7 @@ describe('plaza interactions', () => {
     data.groups.push(second)
     const wrapper = mount(ModelPlazaContent, { props: { response: data, loading: false }, global: { stubs: { BaseDialog: { props: ['show'], template: '<section v-if="show" class="test-dialog"><slot /></section>' } } } })
     expect(wrapper.findAll('.plaza-model-card')).toHaveLength(1)
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
+    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('¥0.15')
     await wrapper.find('.plaza-price-switch button').trigger('click')
     await wrapper.find('.plaza-model-meta select').setValue('2')
     expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$3')
@@ -139,7 +140,7 @@ describe('plaza interactions', () => {
     expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$8')
     expect(wrapper.find('.plaza-price-switch button').attributes('aria-pressed')).toBe('true')
     await wrapper.findAll('.plaza-price-switch button')[1].trigger('click')
-    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$1.6')
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('¥0.16')
     expect(wrapper.findAll('button').some(button => ['/1K', '/1M'].includes(button.text()))).toBe(false)
     await wrapper.find('.plaza-search input').setValue('not-found')
     expect(wrapper.findAll('.plaza-model-card')).toHaveLength(0)

@@ -14,7 +14,7 @@ vi.mock('vue-i18n', async () => {
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
 
 describe('model plaza price display', () => {
-  it.each(['zh', 'en'] as const)('shows both prices in account USD without recharge conversion in %s', async locale => {
+  it.each(['zh', 'en'] as const)('labels original USD and after-multiplier CNY pricing in %s', async locale => {
     const i18n = createI18n({ legacy: false, locale, messages: { zh, en }, missingWarn: false, fallbackWarn: false })
     const labels = (locale === 'zh' ? zh : en).modelPlaza.catalog
     const data = plazaFixture()
@@ -29,10 +29,10 @@ describe('model plaza price display', () => {
     expect(before.text()).toBe(labels.beforeMultiplier)
     expect(after.text()).toBe(labels.afterMultiplier)
     expect(after.attributes('aria-pressed')).toBe('true')
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
-    expect(wrapper.find('.plaza-catalog-meta').text()).toContain(labels.usd)
+    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('¥0.15')
+    expect(wrapper.find('.plaza-catalog-meta').text()).toContain(labels.cny)
     await wrapper.setProps({ response: { ...data, balance_recharge_multiplier: 20 } })
-    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('$1.5')
+    expect(wrapper.find('.plaza-price-grid strong').text()).toBe('¥0.15')
 
     await before.trigger('click')
     expect(wrapper.find('.plaza-pricing-type').text()).toContain(labels.beforeMultiplier)
@@ -43,8 +43,9 @@ describe('model plaza price display', () => {
     expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$3')
     await after.trigger('click')
     expect(wrapper.find('.test-dialog').text()).toContain(labels.afterMultiplier)
-    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('$1.5')
-    expect(wrapper.text()).not.toMatch(/¥|CNY/)
+    expect(wrapper.find('.test-dialog .plaza-price-grid strong').text()).toBe('¥0.15')
+    expect(wrapper.find('.plaza-catalog-meta').text()).toContain(labels.cny)
+    expect(wrapper.find('.test-dialog').text()).not.toMatch(/official|参考价/i)
     wrapper.unmount()
   })
 })

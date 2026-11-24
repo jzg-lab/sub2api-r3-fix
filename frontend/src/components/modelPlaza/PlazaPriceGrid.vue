@@ -2,7 +2,7 @@
   <div class="plaza-price-grid" :class="{ 'per-request': !tokenMode }">
     <div v-for="field in fields" :key="field" class="plaza-price-cell">
       <span>{{ t(`modelPlaza.catalog.${field}`) }}</span>
-      <strong>{{ formatPrice(displayPrice(prices?.[field], offer, beforeMultiplier), tokenMode ? TOKEN_UNIT : 1) }}</strong>
+      <strong>{{ formatPrice(displayPrice(prices?.[field], offer, beforeMultiplier), tokenMode ? TOKEN_UNIT : 1, beforeMultiplier ? '$' : '¥') }}</strong>
     </div>
   </div>
 </template>

@@ -2,6 +2,7 @@ import type { PlazaModel, ModelPlazaGroup } from '@/api/modelPlaza'
 import type { UserPricingInterval } from '@/api/channels'
 
 export const TOKEN_UNIT = 1_000_000
+const BALANCE_USD_PER_CNY = 10
 export type PriceField = 'input_price' | 'output_price' | 'cache_read_price' | 'cache_write_price'
 export const priceFields: PriceField[] = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price']
 export interface PlazaOffer { group: ModelPlazaGroup; model: PlazaModel }
@@ -28,11 +29,11 @@ export function displayPrice(value: number | null | undefined, offer: PlazaOffer
   const rate = offer.model.current_rate_multiplier
   // Older/unavailable backends must not silently display a guessed billing price.
   if (rate == null || !Number.isFinite(rate)) return null
-  return value * rate
+  return value / BALANCE_USD_PER_CNY * rate
 }
-export function formatPrice(value: number | null | undefined, unit = 1): string {
+export function formatPrice(value: number | null | undefined, unit = 1, currency: '$' | '¥' = '$'): string {
   if (value == null || !Number.isFinite(value)) return '—'
-  return `$${new Intl.NumberFormat('en-US', { maximumSignificantDigits: 6 }).format(value * unit)}`
+  return `${currency}${new Intl.NumberFormat('en-US', { maximumSignificantDigits: 6 }).format(value * unit)}`
 }
 export function pricingRows(model: PlazaModel): Array<Partial<UserPricingInterval>> {
   const p = model.pricing

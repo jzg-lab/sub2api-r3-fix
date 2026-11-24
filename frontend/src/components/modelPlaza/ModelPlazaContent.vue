@@ -51,7 +51,7 @@
         </div>
       </div>
       <div class="plaza-catalog-meta">
-        <span>{{ t('modelPlaza.catalog.usd') }} · {{ unitLabel }}</span>
+        <span>{{ t(beforeMultiplier ? 'modelPlaza.catalog.usd' : 'modelPlaza.catalog.cny') }} · {{ unitLabel }}</span>
         <span v-if="error" class="plaza-stale" role="status">{{ t('modelPlaza.catalog.stale') }} <button @click="$emit('retry')">{{ t('modelPlaza.catalog.retry') }}</button></span>
         <span v-else :title="updatedAt?.toLocaleTimeString()" class="plaza-live"><i></i>{{ t('modelPlaza.catalog.live') }}</span>
       </div>
@@ -211,7 +211,7 @@ const entries = computed(() => {
 })
 const detailEntry = computed(() => allEntries.value.find(entry => entry.key === detailKey.value))
 const allDetailOffers = computed(() => detailEntry.value?.offers ?? [])
-function formattedPrice(value: number | null | undefined, item: PlazaOffer, scale: number) { return formatPrice(displayPrice(value, item, beforeMultiplier.value), scale) }
+function formattedPrice(value: number | null | undefined, item: PlazaOffer, scale: number) { return formatPrice(displayPrice(value, item, beforeMultiplier.value), scale, beforeMultiplier.value ? '$' : '¥') }
 function openDetail(key: string, tab: 'pricing' | 'status') {
   const entry = entries.value.find(item => item.key === key)
   if (entry) chosenGroups[key] = offer(entry).group.id
