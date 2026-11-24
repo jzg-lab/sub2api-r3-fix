@@ -233,5 +233,21 @@
     "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/44785608439",
     "reason": "登记后由维护者另行发起部署。部署时核对实际生产基线、完整备份和恢复演练，在生产副本验收 274–278、旧分组和订阅账目、并发索引与汇总锁，再按迁移执行器的事务模式应用。核对 Go 构建镜像、请求体预算和排队心跳配置，验证新旧实例共库和插件交接。候选登记阶段仅执行 GitHub 检查。",
     "rollback_plan": "保留旧镜像、数据库新增列及索引、迁移账本和已结算账目。回退前暂停新档位和 TTL 特有计费写入，核对在途请求、订阅及批量图片结算，先验证 r17.14 在升级后结构上的读写和后台单活，再切回旧实例。回退应用不会撤销已生成的账单。"
+  },
+  {
+    "id": "r17-17",
+    "source": "c83b2baca355145368314ac031cf2dd9a4cb7880",
+    "previous_source": "25792a26aceada81bcdd5553bc747d4f5356efa4",
+    "version": "v0.2.23+r17.17",
+    "channel": "special",
+    "summary": "模型广场显示人民币折扣价，升级 Gorilla WebSocket 修复 GO-2026-6278。",
+    "review": "相对已记录的生产 r17.16，应用差异为广场价格展示、翻译、回归测试和 WebSocket 模块 d67f41855da4。其他差异为历史发布元数据、文档，以及已有的构建审核和热交接工具与测试，包括 274–278 校验和、迁移执行器文件校验及回退保护。没有新增迁移或计费逻辑。广场 66 项专项测试通过。Go 1.27.4 本机依赖自身两个代理测试报 unexpected EOF，旧版 v1.5.3 的相同用例也报相同错误。固定候选的项目测试和安全扫描由专项 CI 执行。",
+    "reviewed_by": "维护者授权模型广场展示及 Gorilla WebSocket 最小安全修复、完整测试与候选登记。Codex 核对 r17.16 至本次源码的完整差异。",
+    "input_source": "5c0b84695c422ff428c4762a1eb26851ea529d2e",
+    "official_version": "0.2.23",
+    "official_source": "5af9afb588c4b014b3df9db7d4073af1f8ae01b6",
+    "ci_run": "https://github.com/jzg-lab/sub2api-r3-fix/actions/runs/45356113622",
+    "reason": "本次仅登记。后续部署另行核对实际生产基线、部署工具及依赖摘要，验证最终镜像和 SSE/WebSocket 交接。",
+    "rollback_plan": "若后续部署需要回退，核对已封存的 r17.16 制品及共库和单活交接条件，保留在途连接和账目。回退应用会重新引入旧 WebSocket 依赖。"
   }
 ]
