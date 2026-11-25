@@ -33,7 +33,7 @@ func TestCaptureClaudeHTTPEntryPoints(t *testing.T) {
 				svc := &GatewayService{cfg: captureForwardConfig(), httpUpstream: upstream, rateLimitService: &RateLimitService{}, deferredService: &DeferredService{}}
 				svc.cfg.Security.URLAllowlist.AllowInsecureHTTP = true
 				svc.SetPluginManager(manager)
-				account := &Account{ID: 10, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "test", "base_url": "http://upstream.test"}}
+				account := &Account{ID: 10, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-upstream-key", "base_url": "http://upstream.test"}}
 				if entry == "messages-passthrough" {
 					account.Extra = map[string]any{"anthropic_passthrough": true}
 				}
@@ -85,7 +85,7 @@ func TestCaptureOpenAIChatHTTPEntryPoint(t *testing.T) {
 				upstream := &captureForwardUpstream{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(raw))}}
 				svc := &OpenAIGatewayService{cfg: captureForwardConfig(), httpUpstream: upstream}
 				svc.SetPluginManager(manager)
-				account := &Account{ID: 101, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "test", "base_url": "http://upstream.test"}}
+				account := &Account{ID: 101, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-upstream-key", "base_url": "http://upstream.test"}}
 				account.Extra = map[string]any{"openai_responses_supported": false}
 				body, _ := json.Marshal(map[string]any{"model": "gpt-4", "stream": stream, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
 				if entry == "responses" {
@@ -182,7 +182,7 @@ func TestCaptureOpenAIResponsesAndPassthrough(t *testing.T) {
 				upstream := &captureForwardUpstream{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(raw))}}
 				svc := &OpenAIGatewayService{cfg: captureForwardConfig(), httpUpstream: upstream}
 				svc.SetPluginManager(manager)
-				account := &Account{ID: 101, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "test", "base_url": "http://upstream.test"}, Extra: map[string]any{"openai_responses_supported": true, "openai_passthrough": passthrough}}
+				account := &Account{ID: 101, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-upstream-key", "base_url": "http://upstream.test"}, Extra: map[string]any{"openai_responses_supported": true, "openai_passthrough": passthrough}}
 				body, _ := json.Marshal(map[string]any{"model": "gpt-4", "stream": stream, "input": "hello"})
 				c := captureForwardContext("/v1/responses", body)
 				_, err := svc.Forward(context.Background(), c, account, body)
@@ -203,7 +203,7 @@ func TestCaptureOpenAIResponsesAndPassthrough(t *testing.T) {
 type captureFailingWriter struct{ gin.ResponseWriter }
 
 func (w captureFailingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
-func TestCaptureDiscardsDownstreamWriteFailure(t *testing.T) {
+func TestCaptureKeepsUpstreamOnDownstreamFailure(t *testing.T) {
 	m := NewPluginManager(nil, nil, nil, PluginHostInfo{})
 	m.captureRuntime.Store(&pluginRuntime{})
 	c := captureForwardContext("/v1/responses", nil)
@@ -218,6 +218,9 @@ func TestCaptureDiscardsDownstreamWriteFailure(t *testing.T) {
 	_, err = c.Writer.Write([]byte("client is gone"))
 	require.Error(t, err)
 	finish(true)
-	require.Empty(t, m.captureQueue)
+	require.Len(t, m.captureQueue, 1)
+	item := <-m.captureQueue
+	defer item.release()
+	require.Contains(t, string(item.request.RecordJson), `"response_complete":true`)
 	require.Equal(t, original, c.Writer)
 }

@@ -342,6 +342,18 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 
+	var rawCapture *openAIWSCapture
+	var captureComplete bool
+	if session := captureSessionFromContext(ctx); session != nil {
+		// wsjson.Write uses Encoder.Encode, including its trailing newline.
+		var raw bytes.Buffer
+		if err := json.NewEncoder(&raw).Encode(payload); err == nil && raw.Len() <= captureRecordMaxBytes {
+			rawCapture = newOpenAIWSCapture(session)
+			defer func() {
+				emitOpenAIWSCapture(session, raw.Bytes(), rawCapture, "websocket", 0, captureComplete, []string{token}, originalModel)
+			}()
+		}
+	}
 	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
@@ -541,6 +553,7 @@ readLoop:
 			}
 			message, readErr = lease.ReadMessageWithContextTimeout(upstreamReadCtx, currentReadTimeout)
 			if readErr == nil {
+				rawCapture.add(message)
 				if documents, repaired := splitOpenAIConcatenatedJSONDocuments(message); repaired {
 					logOpenAIWSModeInfo(
 						"concatenated_json_repaired account_id=%d conn_id=%s documents=%d bytes=%d",
@@ -629,6 +642,7 @@ readLoop:
 			tokenEventCount++
 		}
 		isTerminalEvent := isOpenAIWSTerminalEvent(eventType)
+		captureComplete = isTerminalEvent || eventType == "error"
 		if isTerminalEvent {
 			terminalEventCount++
 		}

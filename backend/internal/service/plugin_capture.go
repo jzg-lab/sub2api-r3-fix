@@ -15,11 +15,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
-	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -42,19 +40,24 @@ type captureSession struct {
 	request        []byte
 	response       *captureReadCloser
 	finished       bool
+	clientSecrets  []string
 }
 type captureContextKey struct{}
 
 type captureReadCloser struct {
 	budgetCtx context.Context
 	io.ReadCloser
-	mu          sync.Mutex
-	buffer      bytes.Buffer
-	complete    bool
-	readFailed  bool
-	tooLarge    bool
-	contentType string
-	stopped     bool
+	mu             sync.Mutex
+	buffer         bytes.Buffer
+	complete       bool
+	readFailed     bool
+	tooLarge       bool
+	contentType    string
+	stopped        bool
+	statusCode     int
+	transport      string
+	requestSecrets []string
+	attemptError   bool
 }
 
 func (r *captureReadCloser) Read(p []byte) (int, error) {
@@ -102,7 +105,7 @@ func (r *captureReadCloser) Read(p []byte) (int, error) {
 func (m *PluginManager) beginCapture(ctx context.Context, c *gin.Context, account *Account) (context.Context, func(bool)) {
 	noop := func(bool) {}
 	if m == nil || account == nil || (account.Platform != PlatformAnthropic && account.Platform != PlatformOpenAI) ||
-		isCaptureProbeTraffic(ctx) || GetOpenAIClientTransport(c) == OpenAIClientTransportWS || ctx.Value(captureContextKey{}) != nil {
+		isCaptureProbeTraffic(ctx) || ctx.Value(captureContextKey{}) != nil {
 		return ctx, noop
 	}
 	runtime := m.captureRuntime.Load()
@@ -115,26 +118,24 @@ func (m *PluginManager) beginCapture(ctx context.Context, c *gin.Context, accoun
 		return ctx, noop
 	}
 	budgetCtx, releaseBudget := pkghttputil.WithRequestBodyMemoryBudget(ctx, m.captureMemory)
-	var writer *captureResponseWriter
-	if c != nil && c.Writer != nil {
-		writer = &captureResponseWriter{ResponseWriter: c.Writer}
-		c.Writer = writer
-	}
 	session := &captureSession{ctx: budgetCtx, manager: m, runtime: runtime, accountID: account.ID, provider: account.Platform}
 	// Snapshot routing and the client model before mappings or later forwarding attempts mutate them.
 	session.groupID = getOpenAIGroupIDFromContext(c)
 	if c != nil && c.Request != nil {
 		session.requestedModel, _ = c.Request.Context().Value(ctxkey.Model).(string)
+		session.clientSecrets = captureHeaderSecrets(c.Request.Header)
+		if key, ok := c.Get("api_key"); ok {
+			if apiKey, ok := key.(*APIKey); ok && apiKey != nil && apiKey.Key != "" {
+				session.clientSecrets = append(session.clientSecrets, apiKey.Key)
+			}
+		}
 	}
 	return context.WithValue(ctx, captureContextKey{}, session), func(success bool) {
 		defer func() {
 			<-m.captureSlots
 			releaseBudget()
-			if writer != nil && c.Writer == writer {
-				c.Writer = writer.ResponseWriter
-			}
 		}()
-		session.finish(success && (writer == nil || !writer.failed.Load()) && ctx.Err() == nil && (c == nil || c.Request == nil || c.Request.Context().Err() == nil))
+		session.finish(success)
 	}
 }
 
@@ -173,39 +174,44 @@ func captureHTTPResponse(req *http.Request, resp *http.Response, err error) {
 	if session.finished {
 		return
 	}
-	if old := session.response; old != nil {
-		old.mu.Lock()
-		old.stopped = true
-		old.buffer = bytes.Buffer{}
-		old.mu.Unlock()
+	if session.response != nil {
+		session.emitAttemptLocked(session.response)
 	}
 	session.response, session.request = nil, nil
 	if session.releaseBudget != nil {
 		session.releaseBudget()
 		session.releaseBudget = nil
 	}
-	if err != nil || resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || req.GetBody == nil {
-		return
-	}
-	body, readErr := req.GetBody()
-	if readErr != nil {
-		return
-	}
 	session.budgetCtx, session.releaseBudget = pkghttputil.WithRequestBodyMemoryScope(session.ctx)
-	requestReader := &captureReadCloser{ReadCloser: body, budgetCtx: session.budgetCtx}
-	_, readErr = io.Copy(io.Discard, requestReader)
-	_ = body.Close()
-	if readErr != nil || requestReader.tooLarge {
-		session.releaseBudget()
-		session.releaseBudget = nil
+	var request []byte
+	if req.GetBody != nil {
+		body, readErr := req.GetBody()
+		if readErr == nil {
+			requestReader := &captureReadCloser{ReadCloser: body, budgetCtx: session.budgetCtx}
+			_, readErr = io.Copy(io.Discard, requestReader)
+			_ = body.Close()
+			if readErr == nil && !requestReader.tooLarge {
+				request = requestReader.buffer.Bytes()
+			}
+		}
+	}
+	secrets := captureHeaderSecrets(req.Header)
+	if resp == nil || resp.Body == nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		session.emitRawAttempt(request, nil, nil, "http", status, false, secrets)
 		return
 	}
-	session.request = requestReader.buffer.Bytes()
-	session.response = &captureReadCloser{ReadCloser: resp.Body, budgetCtx: session.budgetCtx, contentType: resp.Header.Get("Content-Type")}
-
+	session.request = request
+	session.response = &captureReadCloser{ReadCloser: resp.Body, budgetCtx: session.budgetCtx, contentType: resp.Header.Get("Content-Type"), statusCode: resp.StatusCode, transport: "http", requestSecrets: secrets, attemptError: err != nil}
+	if strings.Contains(strings.ToLower(session.response.contentType), "text/event-stream") {
+		session.response.transport = "sse"
+	}
 	resp.Body = session.response
 }
-func (s *captureSession) finish(success bool) {
+func (s *captureSession) finish(_ bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.finished = true
@@ -213,52 +219,29 @@ func (s *captureSession) finish(success bool) {
 		if s.releaseBudget != nil {
 			s.releaseBudget()
 		}
-		s.ctx = nil
 		s.budgetCtx = nil
 	}()
-	r := s.response
+	if s.response != nil {
+		s.emitAttemptLocked(s.response)
+	}
+}
+
+func (s *captureSession) emitAttemptLocked(r *captureReadCloser) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	defer func() { r.stopped = true; r.buffer = bytes.Buffer{}; s.request = nil }()
-	if !success || r.tooLarge || r.readFailed || s.manager.captureRuntime.Load() != s.runtime || len(s.request) == 0 {
+	if r.tooLarge {
 		return
 	}
-	// Reserve encoding/parsing workspace before making contiguous copies. Exhaustion only drops capture.
-	if pkghttputil.ReserveRequestBodyMemory(s.budgetCtx, int64(16*(len(s.request)+r.buffer.Len())+4096)) != nil {
-		return
+	complete := r.complete && !r.readFailed && !r.attemptError
+	if r.transport == "sse" {
+		complete = !r.readFailed && !r.attemptError && captureResponseComplete(r.contentType, r.buffer.Bytes(), r.complete)
 	}
-	if !captureResponseComplete(r.contentType, r.buffer.Bytes(), r.complete) {
-		return
-	}
-	completedAt := time.Now().UTC()
-	record, err := json.Marshal(struct {
-		SchemaVersion  int       `json:"schema_version"`
-		CompletedAt    time.Time `json:"completed_at"`
-		Provider       string    `json:"provider"`
-		AccountID      int64     `json:"account_id"`
-		GroupID        int64     `json:"group_id"`
-		RequestedModel string    `json:"requested_model"`
-		Model          string    `json:"model"`
-		Request        string    `json:"request"`
-		Response       string    `json:"response"`
-	}{1, completedAt, s.provider, s.accountID, s.groupID, s.requestedModel, gjson.GetBytes(s.request, "model").String(), string(s.request), r.buffer.String()})
-	if err != nil || len(record) > captureRecordMaxBytes {
-		return
-	}
-	_, releaseRecord, err := pkghttputil.DetachRequestBodyMemory(s.budgetCtx, int64(len(record)))
-	if err != nil {
-		return
-	}
-	if !s.manager.enqueueCapture(s.runtime, &pluginv1.CaptureRecordRequest{
-		RecordId: uuid.NewString(), InstanceId: "gateway", CompletedAtUnixNano: completedAt.UnixNano(), RecordJson: record,
-	}, releaseRecord) {
-		releaseRecord()
-	}
+	s.emitRawAttempt(s.request, r.buffer.Bytes(), nil, r.transport, r.statusCode, complete, r.requestSecrets)
 }
-
 func captureResponseComplete(contentType string, body []byte, eof bool) bool {
 	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		if !eof || !json.Valid(body) {
@@ -338,9 +321,10 @@ func (s *GatewayService) SetPluginManager(manager *PluginManager) {
 }
 
 type queuedCapture struct {
-	release func()
-	runtime *pluginRuntime
-	request *pluginv1.CaptureRecordRequest
+	release         func()
+	runtime         *pluginRuntime
+	request         *pluginv1.CaptureRecordRequest
+	filterModelHash [32]byte
 }
 
 func hasEnabledCaptureBinding(bindings []PluginBinding) bool {
@@ -352,7 +336,7 @@ func hasEnabledCaptureBinding(bindings []PluginBinding) bool {
 	return false
 }
 
-func (m *PluginManager) enqueueCapture(runtime *pluginRuntime, request *pluginv1.CaptureRecordRequest, release func()) bool {
+func (m *PluginManager) enqueueCapture(runtime *pluginRuntime, request *pluginv1.CaptureRecordRequest, release func(), filterModelHash [32]byte) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if runtime == nil || runtime.draining.Load() || m.captureRuntime.Load() != runtime || len(request.GetRecordJson()) > captureRecordMaxBytes {
@@ -370,7 +354,7 @@ func (m *PluginManager) enqueueCapture(runtime *pluginRuntime, request *pluginv1
 	}
 	// Ownership transfers to the queue; no request/context/account pointers survive.
 	select {
-	case m.captureQueue <- queuedCapture{runtime: runtime, request: request, release: release}:
+	case m.captureQueue <- queuedCapture{runtime: runtime, request: request, release: release, filterModelHash: filterModelHash}:
 		return true
 	default:
 		m.captureQueuedBytes.Add(-size)
@@ -475,6 +459,7 @@ func (m *PluginManager) captureLoop(ctx context.Context, done chan struct{}) {
 				continue
 			}
 			rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			rpcCtx = metadata.AppendToOutgoingContext(rpcCtx, "capture-filter-model-bin", string(item.filterModelHash[:]))
 			response, err := runtime.api.CaptureRecord(rpcCtx, request)
 			cancel()
 			runtime.finishRequest()
@@ -586,36 +571,6 @@ func isCaptureProbeTraffic(ctx context.Context) bool {
 	outgoing, _ := metadata.FromOutgoingContext(ctx)
 	return pluginv1.IsProbeTraffic(metadata.NewIncomingContext(ctx, outgoing))
 }
-
-// Observe downstream failures without retaining a writer in asynchronous work.
-type captureResponseWriter struct {
-	gin.ResponseWriter
-	failed atomic.Bool
-}
-
-func (w *captureResponseWriter) Write(p []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(p)
-	if err != nil || n != len(p) {
-		w.failed.Store(true)
-	}
-	return n, err
-}
-func (w *captureResponseWriter) WriteString(s string) (int, error) {
-	n, err := w.ResponseWriter.WriteString(s)
-	if err != nil || n != len(s) {
-		w.failed.Store(true)
-	}
-	return n, err
-}
-func (w *captureResponseWriter) FlushError() error {
-	err := http.NewResponseController(w.ResponseWriter).Flush()
-	if err != nil {
-		w.failed.Store(true)
-	}
-	return err
-}
-func (w *captureResponseWriter) Flush()                      { _ = w.FlushError() }
-func (w *captureResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func captureHasError(value gjson.Result) bool {
 	err := value.Get("error")

@@ -149,6 +149,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			// 首轮准入由握手路径完成；后续 response.create 会在写入上游前
 			// 依次回调 BeforeRequest 和 BeforeTurn，并在终止或失败时回调
 			// AfterTurn，从而覆盖 turn 级利润复核、定价冻结和并发槽位释放。
+			ctx, finishCapture := s.pluginManager.beginCapture(ctx, c, account)
+			defer finishCapture(false)
 			return s.proxyResponsesWebSocketV2Passthrough(
 				ctx,
 				c,
@@ -173,6 +175,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	if !forceHTTPBridge && wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return fmt.Errorf("websocket ingress requires ws_v2 transport, got=%s", wsDecision.Transport)
+	}
+	if !forceHTTPBridge {
+		var finishCapture func(bool)
+		ctx, finishCapture = s.pluginManager.beginCapture(ctx, c, account)
+		defer finishCapture(false)
 	}
 	dedicatedMode := modeRouterV2Enabled && ingressMode == OpenAIWSIngressModeDedicated
 
@@ -977,6 +984,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
+		var observation *openAIWSCapture
+		var observedComplete bool
+		if session := captureSessionFromContext(ctx); session != nil {
+			if raw, err := json.Marshal(json.RawMessage(payload)); err == nil && len(raw) < captureRecordMaxBytes {
+				observation = newOpenAIWSCapture(session)
+				defer func() {
+					emitOpenAIWSCapture(session, append(raw, '\n'), observation, "websocket", 0, observedComplete, []string{token}, originalModel)
+				}()
+			}
+		}
 		turnStart := time.Now()
 		wroteDownstream := false
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
@@ -1028,6 +1045,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		for {
 			upstreamMessage, readErr := lease.ReadMessageWithContextTimeout(ctx, s.openAIWSReadTimeout())
+			if readErr == nil {
+				observation.add(upstreamMessage)
+				kind := gjson.GetBytes(upstreamMessage, "type").String()
+				observedComplete = isOpenAIWSTerminalEvent(kind) || kind == "error"
+			}
 			if readErr != nil {
 				lease.MarkBroken()
 				return nil, wrapOpenAIWSIngressTurnError(

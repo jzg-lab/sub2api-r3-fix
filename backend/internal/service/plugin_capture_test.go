@@ -43,17 +43,17 @@ func (r *failingReadCloser) Read(p []byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
-func TestCaptureRequiresSuccessfulCompleteResponse(t *testing.T) {
+func TestCaptureArchivesObservedResponse(t *testing.T) {
 	for _, tc := range []struct {
-		name, contentType, body string
-		success, eof, want      bool
+		name, contentType, body    string
+		success, eof, wantComplete bool
 	}{
 		{"json", "application/json", `{"output":"ok"}`, true, true, true},
 		{"json-error-null", "application/json", `{"error":null,"status":"completed","output":[]}`, true, true, true},
 		{"json-truncated", "application/json", `{"output":`, true, true, false},
-		{"json-error", "application/json", `{"error":{"message":"no"}}`, true, true, false},
+		{"json-error", "application/json", `{"error":{"message":"no"}}`, true, true, true},
 		{"json-no-eof", "application/json", `{"output":"ok"}`, true, false, false},
-		{"forward-failed", "application/json", `{"output":"ok"}`, false, true, false},
+		{"forward-failed", "application/json", `{"output":"ok"}`, false, true, true},
 		{"claude", "text/event-stream", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", true, false, true},
 		{"responses", "text/event-stream", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", true, false, true},
 		{"chat", "text/event-stream", "data: [DONE]\n\n", true, false, true},
@@ -78,17 +78,46 @@ func TestCaptureRequiresSuccessfulCompleteResponse(t *testing.T) {
 			}
 			require.NoError(t, err)
 			finish(tc.success)
-			require.Equal(t, tc.want, len(m.captureQueue) == 1)
-			if tc.want {
-				item := <-m.captureQueue
-				defer item.release()
-				var record map[string]any
-				require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
-				require.Equal(t, tc.body, record["response"])
-				require.Equal(t, `{ "model":"upstream-model" }`, record["request"])
-				require.NotContains(t, string(item.request.RecordJson), "must-not-save")
+			if tc.name == "json-truncated" {
+				require.Empty(t, m.captureQueue)
+				return
 			}
+			require.Len(t, m.captureQueue, 1)
+			item := <-m.captureQueue
+			defer item.release()
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(item.request.RecordJson, &record))
+			require.Equal(t, tc.wantComplete, record["response_complete"])
+			require.Equal(t, tc.body, record["response"])
+			require.Equal(t, `{ "model":"upstream-model" }`, record["request"])
+			require.NotContains(t, string(item.request.RecordJson), "must-not-save")
+			require.Equal(t, float64(2), record["schema_version"])
 		})
+	}
+}
+
+func TestCaptureEmitsEveryHTTPAttempt(t *testing.T) {
+	m := NewPluginManager(nil, nil, nil, PluginHostInfo{})
+	runtime := &pluginRuntime{}
+	m.captureRuntime.Store(runtime)
+	ctx, finish := m.beginCapture(context.Background(), nil, &Account{ID: 7, Platform: PlatformOpenAI})
+	first, err := http.NewRequestWithContext(ctx, "POST", "http://example.test/v1/responses", strings.NewReader(`{"model":"first"}`))
+	require.NoError(t, err)
+	first.Header.Set("Authorization", "Bearer upstream-secret-one")
+	captureHTTPResponse(first, nil, io.ErrUnexpectedEOF)
+	second, err := http.NewRequestWithContext(ctx, "POST", "http://example.test/v1/responses", strings.NewReader(`{"model":"second"}`))
+	require.NoError(t, err)
+	second.Header.Set("X-Api-Key", "upstream-secret-two")
+	resp := &http.Response{StatusCode: 503, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"upstream unavailable"}`))}
+	captureHTTPResponse(second, resp, nil)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	finish(false)
+	require.Len(t, m.captureQueue, 2)
+	for range 2 {
+		item := <-m.captureQueue
+		defer item.release()
+		require.NotContains(t, string(item.request.RecordJson), "upstream-secret")
 	}
 }
 
@@ -166,7 +195,12 @@ func TestCaptureSkipsCancelledProbeAndBudgetExhaustion(t *testing.T) {
 				m.captureRuntime.Store(nil)
 			}
 			finish(true)
-			require.Empty(t, m.captureQueue)
+			if name == "cancelled" || name == "failed-status" {
+				require.Len(t, m.captureQueue, 1)
+				(<-m.captureQueue).release()
+			} else {
+				require.Empty(t, m.captureQueue)
+			}
 			require.Empty(t, m.captureSlots)
 		})
 	}
@@ -178,9 +212,9 @@ func TestCaptureWorkerShutdownAndQueueBounds(t *testing.T) {
 	m.captureRuntime.Store(runtime)
 	released := 0
 	for i := 0; i < 128; i++ {
-		require.True(t, m.enqueueCapture(runtime, &pluginv1.CaptureRecordRequest{RecordJson: []byte(`{}`)}, func() { released++ }))
+		require.True(t, m.enqueueCapture(runtime, &pluginv1.CaptureRecordRequest{RecordJson: []byte(`{}`)}, func() { released++ }, [32]byte{}))
 	}
-	require.False(t, m.enqueueCapture(runtime, &pluginv1.CaptureRecordRequest{RecordJson: []byte(`{}`)}, func() { t.Error("rejected record release belongs to caller") }))
+	require.False(t, m.enqueueCapture(runtime, &pluginv1.CaptureRecordRequest{RecordJson: []byte(`{}`)}, func() { t.Error("rejected record release belongs to caller") }, [32]byte{}))
 	require.EqualValues(t, 256, m.captureQueuedBytes.Load())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

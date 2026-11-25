@@ -924,6 +924,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	if session := captureSessionFromContext(ctx); session != nil {
+		collector := &captureWSRelay{FrameConn: upstreamFrameConn, session: session, secrets: captureHeaderSecrets(headers), model: func() string { requested, _ := usageMeta.turnModels(initialRequestModel); return requested }}
+		defer collector.finish()
+		upstreamFrameConn = collector
+	}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
