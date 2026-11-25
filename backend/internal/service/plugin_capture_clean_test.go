@@ -64,3 +64,18 @@ func TestCleanCapturePayloadRejectsMalformedStructuredInput(t *testing.T) {
 		t.Fatal("malformed JSON was accepted")
 	}
 }
+
+func TestCaptureEscapedURLCredentials(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"https://sample.invalid/%7e/fi%78ture%2Dneedle/%2f?q=a+b#frag", "https://sample.invalid/%7e/[REDACTED]/%2f?q=a+b#frag"},
+		{"/v1?keep=%2f&%61pi%5fkey=other%26value&keep=%2F#frag", "/v1?keep=%2f&%61pi%5fkey=[REDACTED]&keep=%2F#frag"},
+		{"https://sample.invalid/%7e?q=a%26b%3Dc&keep=a+b#fixture", "https://sample.invalid/%7e?q=a%26b%3Dc&keep=a+b#fixture"},
+	} {
+		input := `{ "link": "` + tc.input + `" }`
+		want := `{ "link": "` + tc.want + `" }`
+		req, resp, ok := cleanCapturePayload([]byte(input), []byte(input), nil, "http", []string{"fixture-needle"})
+		if !ok || req != want || resp != want {
+			t.Errorf("unexpected archive bytes for %q: request %q, response %q", tc.input, req, resp)
+		}
+	}
+}

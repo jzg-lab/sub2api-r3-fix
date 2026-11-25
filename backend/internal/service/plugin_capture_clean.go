@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -15,9 +16,13 @@ var (
 	captureCredentialField = regexp.MustCompile(`(?i)(\b(?:(?:x[-_])?api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|password|secret|token)|[?&]key)(["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&;,}"'#]+)`)
 	captureBearer          = regexp.MustCompile(`(?i)\b(Bearer[ \t]+)([^\s,;"'&}]+)`)
 	captureCredentialToken = regexp.MustCompile(`\b(?:sk-|gh[pousr]_|xox[baprs]-|AIza)[A-Za-z0-9_-]{12,}`)
+	captureQueryPair       = regexp.MustCompile(`[?&]([^?&=;#\s"'<>]+)=([^&#;\s"'<>]*)`)
 )
 
 func cleanCaptureText(text string, secrets []string) string {
+	if strings.Contains(text, "%") {
+		text = cleanCaptureEscapedURL(text, secrets)
+	}
 	// A single pass through known values avoids masking a shorter key and leaving
 	// part of a longer one. The caller orders needles longest first.
 	for _, key := range secrets {
@@ -37,6 +42,73 @@ func cleanCaptureText(text string, secrets []string) string {
 	})
 	text = captureCredentialToken.ReplaceAllString(text, captureRedaction)
 	return captureBrandMatcher.ReplaceAllString(text, "中转")
+}
+
+// Inspect raw separators before decoding: a %26 inside a value is data.
+// Keep the spelling of the parameter name and all unrelated URL components.
+func cleanCaptureEscapedURL(text string, secrets []string) string {
+	text = captureQueryPair.ReplaceAllStringFunc(text, func(pair string) string {
+		name, _, _ := strings.Cut(pair[1:], "=")
+		if !strings.Contains(name, "%") {
+			return pair
+		}
+		decoded, err := url.QueryUnescape(name)
+		if err == nil && (captureCredentialName.MatchString(decoded) || strings.EqualFold(decoded, "key")) {
+			return pair[:len(name)+2] + captureRedaction
+		}
+		return pair
+	})
+	if len(secrets) == 0 {
+		return text
+	}
+	// Match in the decoded view, but copy untouched bytes from the original.
+	// An unrelated malformed escape must not suppress a valid match later.
+	var decoded strings.Builder
+	decoded.Grow(len(text))
+	for i := 0; i < len(text); {
+		b, width := captureURLByte(text[i:])
+		decoded.WriteByte(b)
+		i += width
+	}
+	view := decoded.String()
+	var out strings.Builder
+	raw, last := 0, 0
+	for i := 0; i < len(view); {
+		width := 0
+		for _, key := range secrets {
+			if len(key) > width && strings.HasPrefix(view[i:], key) {
+				width = len(key)
+			}
+		}
+		if width == 0 {
+			_, n := captureURLByte(text[raw:])
+			raw += n
+			i++
+			continue
+		}
+		out.WriteString(text[last:raw])
+		out.WriteString(captureRedaction)
+		for range width {
+			_, n := captureURLByte(text[raw:])
+			raw += n
+		}
+		i += width
+		last = raw
+	}
+	if last == 0 {
+		return text
+	}
+	out.WriteString(text[last:])
+	return out.String()
+}
+
+func captureURLByte(raw string) (byte, int) {
+	if raw[0] == '%' && len(raw) >= 3 {
+		if decoded, err := url.PathUnescape(raw[:3]); err == nil {
+			return decoded[0], 3
+		}
+	}
+	return raw[0], 1
 }
 
 func cleanCapturePayload(request, response []byte, frames []string, transport string, secrets []string) (string, any, bool) {
